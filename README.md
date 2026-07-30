@@ -1,6 +1,6 @@
 # ACP Gateway
 
-ACP Gateway는 하나의 Main 에이전트가 Claude, Grok, Codex Worker를 로컬에서 실행하고 관리할 수 있게 해주는 미들웨어입니다.
+ACP Gateway는 하나의 Main 에이전트가 로컬에 설치된 AI Worker를 ACP로 실행하고 관리할 수 있게 해주는 미들웨어입니다.
 
 - ACP 세션과 provider 프로세스를 daemon이 계속 유지합니다.
 - MCP가 재시작되어도 Worker 세션을 복구할 수 있습니다.
@@ -28,19 +28,20 @@ Gateway daemon은 Unix socket, ACP 연결, 세션, 이벤트, permission 요청�
 ## 설치
 
 ```bash
-cd ACP
-npm install
+git clone https://github.com/nesto-ai/agent_gateway.git
+cd agent_gateway
+npm ci
 npm link
-acp-gateway-bootstrap --install-all
+acp-gateway-bootstrap --install-all --refresh-registry
 ```
 
 `--install-all`은 다음 작업을 수행합니다.
 
-- 설치된 Claude·Grok·Codex 탐지
-- 필요한 ACP adapter 설치
+- PATH, 일반 CLI 경로, 전역 npm 패키지에서 설치된 AI 자동 탐지
+- ACP 공식 registry와 대조해 현재 버전의 ACP agent/adapter 설치
 - Main 전용 `agent-acp` Control MCP 등록
 - 읽기 전용 `agent-acp-guide` 등록
-- Main에 `agent-delegator` skill 설치
+- 발견된 AI 각각의 사용자 skill 경로에 `agent-delegator` 설치
 - daemon 실행과 인증 상태 확인
 
 기본 설치에서는 Codex를 Main으로 우선 선택합니다. Claude도 Main으로 사용하려면 다음과 같이 설치합니다.
@@ -62,13 +63,21 @@ acp-gateway-bootstrap --install-all --dry-run
 | `--install-all` | Adapter, Control, Guide, skill 전체 설치 |
 | `--install-control` | Main Control MCP만 설치 |
 | `--install-guide` | 읽기 전용 Guide MCP만 설치 |
-| `--install-skill` | `agent-delegator` skill만 설치 |
+| `--install-skill` | 발견된 모든 AI에 `agent-delegator` skill 설치 |
+| `--discover-agents` | 설치된 AI를 ACP 공식 registry와 대조 |
+| `--registry-agent ID` | 발견 여부와 무관하게 registry agent 하나를 선택 설치 |
+| `--refresh-registry` | 24시간 cache를 무시하고 공식 registry 갱신 |
+| `--offline` | 저장된 registry cache만 사용 |
 | `--target codex\|claude\|all` | 설치 대상 선택 |
 | `--dry-run` | 실제 변경 없이 계획만 출력 |
 | `--rotate-token` | Control token과 Main ID 교체 |
 | `--force` | installer가 관리하지 않던 같은 이름의 항목 교체 |
 
 Control token과 Main ID는 `~/.acp-gateway/install.json`에 권한 `0600`으로 저장되며 반복 설치에서도 재사용됩니다.
+
+Skill은 Codex `~/.codex/skills`, Claude `~/.claude/skills`, Grok `~/.grok/skills`, Auggie `~/.augment/skills`에 설치합니다. 별도 경로가 알려지지 않은 registry provider는 공용 `~/.agents/skills`를 사용합니다. 같은 공용 경로를 사용하는 provider가 여러 개면 skill 파일은 한 번만 복사하고 installer 상태에는 각 provider를 모두 기록합니다.
+
+공식 registry 원본은 `https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json`이며 `~/.acp-gateway/registry.json`에 24시간 캐시합니다. 발견된 provider 실행 정의는 `~/.acp-gateway/providers.json`에 저장됩니다. `npx`·`uvx` 배포는 registry에 고정된 버전을 설치하고, binary 배포는 이미 설치된 실행 파일을 사용합니다. registry에 등록되지 않은 임의의 AI는 ACP 실행 계약을 안전하게 추론할 수 없으므로 자동 등록하지 않습니다.
 
 ## 사용 흐름
 
@@ -111,6 +120,8 @@ Control token, Main ID와 Gateway socket 경로는 ACP Worker 환경에서 제�
 | `ACP_GATEWAY_SOCKET` | Gateway Unix socket 경로 |
 | `ACP_GATEWAY_STATE` | session checkpoint 파일 경로 |
 | `ACP_GATEWAY_INSTALL_STATE` | installer 상태 파일 경로 |
+| `ACP_GATEWAY_REGISTRY_CACHE` | ACP 공식 registry cache 경로 |
+| `ACP_GATEWAY_PROVIDERS` | 동적으로 등록된 provider 정의 파일 |
 | `ACP_GATEWAY_MAX_EVENTS` | 세션별 최근 이벤트 수 |
 | `ACP_GATEWAY_MAX_TEXT_BYTES` | 세션별 결과·thought 최대 크기 |
 | `CLAUDE_CODE_EXECUTABLE` | Claude Code 실행 경로 |
@@ -129,4 +140,4 @@ npm run smoke:subagents
 - `npm run smoke`: 실제 Claude·Grok 연결 테스트
 - `npm run smoke:subagents`: 각 provider의 built-in child subagent 호출 테스트
 
-현재 자동화 테스트는 55개입니다. 상세 시나리오는 [test_scinario.md](./test_scinario.md)를 참고하세요.
+현재 자동화 테스트는 61개입니다. 상세 시나리오는 [test_scinario.md](./test_scinario.md)를 참고하세요.

@@ -13,7 +13,6 @@ import {
 import { controlToken, rootId } from "./config.js";
 import { GatewayRpcClient } from "./socket-rpc.js";
 import { PERMISSION_POLICIES } from "./acp-client.js";
-import { PROVIDERS } from "./providers.js";
 
 const rpc = new GatewayRpcClient({ token: controlToken(), rootId: rootId() });
 const tools = controlTools();
@@ -101,7 +100,7 @@ function controlTools() {
       description: "Inspect and start a configured ACP provider through the persistent Gateway.",
       inputSchema: {
         type: "object",
-        properties: { provider: { type: "string", enum: PROVIDERS } }
+        properties: { provider: { type: "string", minLength: 1 } }
       }
     },
     {
@@ -110,7 +109,7 @@ function controlTools() {
       inputSchema: {
         type: "object",
         properties: {
-          provider: { type: "string", enum: PROVIDERS },
+          provider: { type: "string", minLength: 1 },
           cwd: { type: "string" },
           model: { type: "string", minLength: 1, description: "Worker model selected by Main. Uses the provider default when omitted." },
           permissionPolicy: { type: "string", enum: PERMISSION_POLICIES },
@@ -128,7 +127,7 @@ function controlTools() {
       inputSchema: {
         type: "object",
         properties: {
-          provider: { type: "string", enum: PROVIDERS },
+          provider: { type: "string", minLength: 1 },
           acpSessionId: { type: "string" },
           cwd: { type: "string" },
           model: { type: "string", minLength: 1, description: "Worker model selected by Main. Reuses the stored model when omitted." },

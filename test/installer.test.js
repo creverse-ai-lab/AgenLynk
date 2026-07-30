@@ -10,6 +10,11 @@ const providers = [
   { id: "codex", agentInstalled: true, adapterInstalled: true, install: null },
   { id: "claude", agentInstalled: false, adapterInstalled: true, install: null }
 ];
+const emptyRegistryLoader = async () => ({
+  registry: { version: "1.0.0", agents: [] },
+  source: "network",
+  stale: false
+});
 
 test("installer parses a complete targeted installation", () => {
   const options = parseInstallerArgs(["--install-all", "--target", "codex", "--skip-health-check"]);
@@ -82,7 +87,8 @@ test("installer dry-run does not create state or execute commands", async () => 
       statePath,
       runtime,
       runCommand: async () => { commandCalls += 1; return { code: 0, stdout: "", stderr: "" }; },
-      detectProviders: async () => providers
+      detectProviders: async () => providers,
+      registryLoader: emptyRegistryLoader
     });
     assert.equal(result.dryRun, true);
     assert.deepEqual(result.targets, { control: ["codex"], guide: ["codex"], skill: ["codex"] });
@@ -101,11 +107,13 @@ test("install-all defaults Control to one Main while Guide can target every dete
     const result = await runInstaller(parseInstallerArgs(["--install-all", "--dry-run"]), {
       statePath,
       runtime,
-      detectProviders: async () => allProviders
+      detectProviders: async () => allProviders,
+      registryLoader: emptyRegistryLoader
     });
-    assert.deepEqual(result.targets, { control: ["codex"], guide: ["codex", "claude"], skill: ["codex"] });
+    assert.deepEqual(result.targets, { control: ["codex"], guide: ["codex", "claude"], skill: ["codex", "claude"] });
     assert.equal(result.actions.filter((action) => action.name === "agent-acp").length, 1);
     assert.equal(result.actions.filter((action) => action.name === "agent-acp-guide").length, 2);
+    assert.equal(result.actions.filter((action) => action.type === "skill").length, 2);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -167,6 +175,103 @@ test("installer health check authenticates through the Gateway client", async ()
     assert.ok(rpcConfig.token.length >= 24);
     assert.match(rpcConfig.rootId, /^main-/);
     assert.deepEqual(rpcCall, { method: "session", args: { action: "list" } });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("installer downloads and registers an explicitly selected official ACP agent", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-installer-registry-"));
+  const statePath = join(directory, "install.json");
+  const providerRegistryPath = join(directory, "providers.json");
+  const calls = [];
+  const officialRegistry = {
+    version: "1.0.0",
+    agents: [{
+      id: "gemini",
+      name: "Gemini CLI",
+      version: "0.53.0",
+      distribution: { npx: { package: "@google/gemini-cli@0.53.0", args: ["--acp"] } }
+    }]
+  };
+  try {
+    const result = await runInstaller(
+      parseInstallerArgs(["--registry-agent", "gemini", "--skip-health-check"]),
+      {
+        statePath,
+        providerRegistryPath,
+        runtime: { ...runtime, arch: "arm64" },
+        detectProviders: async () => providers,
+        registryLoader: async () => ({ registry: officialRegistry, source: "network", stale: false }),
+        registryDiscover: async () => [],
+        runCommand: async (command, args) => {
+          calls.push([command, ...args]);
+          if (args.includes("--json")) return { code: 0, stdout: "{\"dependencies\":{}}", stderr: "" };
+          return { code: 0, stdout: "", stderr: "" };
+        }
+      }
+    );
+    assert.deepEqual(result.registry.configured, ["gemini"]);
+    assert.ok(calls.some((call) => call.join(" ") === "npm install --global @google/gemini-cli@0.53.0"));
+    const saved = JSON.parse(await readFile(providerRegistryPath, "utf8"));
+    assert.deepEqual(saved.providers.gemini.args, ["--yes", "@google/gemini-cli@0.53.0", "--acp"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("installer plans the delegation skill for every discovered agent and deduplicates shared roots", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-installer-all-skills-"));
+  const statePath = join(directory, "install.json");
+  const sharedRoot = join(directory, "shared-skills");
+  const discovered = [
+    {
+      id: "auggie",
+      registryId: "auggie",
+      name: "Auggie",
+      version: "1.0.0",
+      distribution: { type: "npx", package: "auggie@1.0.0", args: ["--acp"], env: {} },
+      foundCommand: "auggie",
+      packageInstalled: true
+    },
+    {
+      id: "other-agent",
+      registryId: "other-agent",
+      name: "Other Agent",
+      version: "1.0.0",
+      distribution: { type: "npx", package: "other-agent@1.0.0", args: [], env: {} },
+      foundCommand: "other-agent",
+      packageInstalled: true
+    },
+    {
+      id: "second-agent",
+      registryId: "second-agent",
+      name: "Second Agent",
+      version: "1.0.0",
+      distribution: { type: "npx", package: "second-agent@1.0.0", args: [], env: {} },
+      foundCommand: "second-agent",
+      packageInstalled: true
+    }
+  ];
+  try {
+    const result = await runInstaller(parseInstallerArgs(["--install-skill", "--target", "all", "--dry-run"]), {
+      statePath,
+      runtime,
+      detectProviders: async () => providers,
+      registryLoader: async () => ({ registry: { version: "1.0.0", agents: [] }, source: "network", stale: false }),
+      registryDiscover: async () => discovered,
+      skillRoots: {
+        codex: join(directory, "codex-skills"),
+        auggie: join(directory, "augment-skills"),
+        default: sharedRoot
+      }
+    });
+    assert.deepEqual(result.targets.skill, ["auggie", "other-agent", "second-agent", "codex"]);
+    const skills = result.actions.filter((action) => action.type === "skill");
+    assert.equal(skills.length, 4);
+    assert.equal(skills.find((item) => item.agent === "auggie").destination, join(directory, "augment-skills", "agent-delegator"));
+    assert.equal(skills.find((item) => item.agent === "second-agent").status, "shared");
+    assert.equal(skills.find((item) => item.agent === "second-agent").sharedWith, "other-agent");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

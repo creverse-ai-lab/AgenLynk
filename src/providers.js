@@ -2,7 +2,8 @@ import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { access } from "node:fs/promises";
-import { constants } from "node:fs";
+import { constants, readFileSync } from "node:fs";
+import { defaultProviderRegistryPath } from "./acp-registry.js";
 
 const GROK_BIN = process.env.GROK_BIN || join(homedir(), ".grok/bin/grok");
 
@@ -33,6 +34,19 @@ export const PROVIDER_MANIFESTS = {
 };
 
 export function providerConfig(provider, { model } = {}) {
+  const configured = configuredProviders()[provider];
+  if (configured) {
+    return {
+      provider,
+      command: configured.command,
+      args: [...configured.args],
+      env: { ...configured.env },
+      permissionPolicy: configured.permissionPolicy ?? "ask",
+      expectedModel: optionalModel(model),
+      modelScope: configured.modelScope ?? "session"
+    };
+  }
+
   if (provider === "grok") {
     const selectedModel = optionalModel(model) ?? "grok-4.5";
     return {
@@ -88,11 +102,11 @@ export function providerConfig(provider, { model } = {}) {
     };
   }
 
-  throw new Error(`provider must be one of: ${PROVIDERS.join(", ")}`);
+  throw new Error(`provider must be one of: ${providerIds().join(", ")}`);
 }
 
 export async function detectProviders() {
-  return Promise.all(
+  const builtins = await Promise.all(
     Object.values(PROVIDER_MANIFESTS).map(async (manifest) => ({
       ...manifest,
       agentInstalled: await executableExists(manifest.agentCommand),
@@ -102,6 +116,55 @@ export async function detectProviders() {
           : await executableExists(manifest.adapter)
     }))
   );
+  const dynamic = await Promise.all(Object.values(configuredProviders()).map(async (definition) => ({
+    id: definition.id,
+    displayName: definition.displayName ?? definition.id,
+    agentCommand: definition.command,
+    adapter: definition.registryId ?? "registry",
+    install: null,
+    registryId: definition.registryId,
+    registryVersion: definition.registryVersion,
+    agentInstalled: await executableExists(definition.command),
+    adapterInstalled: await executableExists(definition.command)
+  })));
+  const configuredById = new Map(dynamic.map((item) => [item.id, item]));
+  return [
+    ...builtins.map((item) => {
+      const configured = configuredById.get(item.id);
+      return configured
+        ? {
+            ...item,
+            adapter: configured.adapter,
+            adapterInstalled: configured.adapterInstalled,
+            registryId: configured.registryId,
+            registryVersion: configured.registryVersion
+          }
+        : item;
+    }),
+    ...dynamic.filter((item) => !PROVIDERS.includes(item.id))
+  ];
+}
+
+export function providerIds() {
+  return [...new Set([...PROVIDERS, ...Object.keys(configuredProviders())])];
+}
+
+function configuredProviders() {
+  const path = defaultProviderRegistryPath();
+  try {
+    const document = JSON.parse(readFileSync(path, "utf8"));
+    if (document?.version !== 1 || !document.providers || typeof document.providers !== "object") return {};
+    const result = {};
+    for (const [id, value] of Object.entries(document.providers)) {
+      if (!/^[a-z0-9][a-z0-9._-]*$/.test(id) || !value || typeof value !== "object") continue;
+      if (typeof value.command !== "string" || !value.command || !Array.isArray(value.args) || value.args.some((item) => typeof item !== "string")) continue;
+      if (value.env != null && (typeof value.env !== "object" || Array.isArray(value.env) || Object.values(value.env).some((item) => typeof item !== "string"))) continue;
+      result[id] = { ...value, id, args: [...value.args], env: { ...(value.env ?? {}) } };
+    }
+    return result;
+  } catch {
+    return {};
+  }
 }
 
 async function executableExists(command) {

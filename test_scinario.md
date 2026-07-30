@@ -259,6 +259,18 @@ ASCII와 emoji가 섞인 agent message/thought를 작은 `maxTextBytes`로 누�
 
 현재 상태: `실제 provider smoke 통과` — `npm run smoke:subagents`로 검증한다.
 
+### SC-26 Official registry discovery and dynamic provider
+
+1. installer가 ACP 공식 registry를 읽고 PATH, 일반 사용자 CLI 경로, 전역 npm package를 대조한다.
+2. 발견된 npx/uvx agent는 registry에 고정된 package version을 설치하고 동적 provider 정의를 저장한다.
+3. 발견된 각 agent의 사용자 skill 경로에 `agent-delegator`를 설치한다. 경로가 알려지지 않은 provider는 공용 Agent Skills 경로를 공유한다.
+4. registry 접속 실패 시 24시간 cache로 fallback하고, offline mode에서는 network를 사용하지 않는다.
+5. 저장된 동적 provider로 Gateway session을 열 수 있는지 확인한다.
+
+기대 결과: registry에 없는 임의 실행 파일이나 binary wrapper가 아닌 유사 이름은 등록하지 않는다. HTTPS가 아닌 binary archive와 잘못된 manifest는 거부한다. `--dry-run`은 cache, provider 파일, package를 변경하지 않는다.
+
+현재 상태: `자동화됨` — registry validation/discovery/cache fallback, explicit agent download, provider 정의 병합과 Gateway config 해석, 발견된 전체 agent의 skill 대상 계산과 공용 경로 중복 제거를 검증했다. 실제 공식 registry dry-run에서는 38개 항목 중 로컬 Auggie, Claude, Codex, Grok을 탐지하고 네 agent 모두의 skill 설치 경로를 생성했다.
+
 ## 권장 자동화 순서
 
 1. SC-06~SC-10 terminal lifecycle과 격리
@@ -269,6 +281,7 @@ ASCII와 emoji가 섞인 agent message/thought를 작은 `maxTextBytes`로 누�
 6. SC-19~SC-20 실제 provider 장시간 smoke test
 7. SC-21~SC-24 model 및 concurrency 회귀 테스트
 8. SC-25 실제 provider nested subagent round-trip
+9. SC-26 공식 registry 자동 발견과 동적 provider
 
 ## 기본 실행 명령
 
@@ -281,7 +294,7 @@ npm run smoke
 
 ## Latest baseline
 
-- 2026-07-30 `npm test`: 55/55 통과. Main model 선택, provider initialize/task/daemon 경쟁 조건, 복수 permission, cancel/close inbox, reconnect event 순서, subscription error/backpressure, reconnect lease, UTF-8 byte limit·분할 surrogate, 상태 디렉터리 재생성, symlink parent 경계와 installer identity 재사용·충돌 차단·dry-run·Main/Worker 대상 분리·skill 원자적 갱신·health check를 포함한다.
+- 2026-07-30 `npm test`: 61/61 통과. Main model 선택, provider initialize/task/daemon 경쟁 조건, 복수 permission, cancel/close inbox, reconnect event 순서, subscription error/backpressure, reconnect lease, UTF-8 byte limit·분할 surrogate, 상태 디렉터리 재생성, symlink parent 경계와 installer identity 재사용·충돌 차단·dry-run·Main/Worker 대상 분리·skill 원자적 갱신·전체 발견 agent skill 배포·health check, 공식 registry 검증·탐지·cache fallback·동적 provider 등록을 포함한다.
 - 2026-07-30 `npm run smoke`: Main이 지정한 Grok `grok-4.5`, Claude `sonnet`이 session 응답에 반영됐고 각각 `GROK_MCP_ACP_OK`, `CLAUDE_MCP_ACP_OK`, `idle`로 완료했다.
 - 2026-07-30 `npm run smoke:subagents`: Claude `sonnet`의 `Task` child와 Grok `grok-4.5`의 `spawn_subagent` child가 각각 `task.txt`를 처리했다. parent가 child 결과 `CHILD_SUM_42`를 회수해 Main에 provider별 marker를 반환했고 두 session 모두 `idle`로 완료했다.
 - 2026-07-30 Claude coding scenario: 격리된 임시 디렉터리에 `sum.js`, `sum.test.js` 두 파일만 생성하고 `node --test sum.test.js` 3/3 통과. Codex가 파일 수·내용·테스트를 독립 검증한 뒤 임시 디렉터리를 삭제했다. ACP adapter는 실제 Claude model ID를 반환하지 않았다.

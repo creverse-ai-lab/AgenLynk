@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { stat } from "node:fs/promises";
 import { AcpClient, PERMISSION_POLICIES, requirePermissionPolicy } from "./acp-client.js";
-import { currentModelId, detectProviders, providerConfig, PROVIDERS } from "./providers.js";
+import { currentModelId, detectProviders, providerConfig } from "./providers.js";
 import { publicSession, SessionStore } from "./sessions.js";
 
 const ACTIVE_STATUSES = new Set(["running", "waiting_permission", "waiting_input", "cancelling", "restoring"]);
@@ -241,7 +241,7 @@ export class GatewayService {
 
   async setup({ provider } = {}) {
     const detected = await detectProviders();
-    const names = provider ? [requireProvider(provider)] : PROVIDERS;
+    const names = provider ? [requireProvider(provider)] : [];
     return {
       ok: true,
       gatewayVersion: "0.2.0",
@@ -251,7 +251,7 @@ export class GatewayService {
         liveSessions: this.store.list().filter((session) => session.client?.alive).length
       },
       detected,
-      providers: await Promise.all(
+      providers: provider ? await Promise.all(
         names.map(async (name) => {
           try {
             const client = await this.getClient(name);
@@ -268,7 +268,11 @@ export class GatewayService {
             return { provider: name, ok: false, error: error?.message ?? String(error) };
           }
         })
-      )
+      ) : detected.map((item) => ({
+        provider: item.id,
+        ok: item.agentInstalled && item.adapterInstalled,
+        started: false
+      }))
     };
   }
 
@@ -1241,7 +1245,8 @@ function publicInboxItem(item) {
 }
 
 function requireProvider(provider) {
-  if (!PROVIDERS.includes(provider)) throw new Error(`provider must be one of: ${PROVIDERS.join(", ")}`);
+  if (typeof provider !== "string" || !provider.trim()) throw new Error("provider is required");
+  providerConfig(provider);
   return provider;
 }
 

@@ -6,6 +6,15 @@ import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { detectProviders } from "./providers.js";
+import {
+  defaultProviderRegistryPath,
+  discoverRegistryAgents,
+  installedGlobalNpmPackages,
+  loadOfficialRegistry,
+  mergeProviderDefinitions,
+  providerDefinition,
+  selectDistribution
+} from "./acp-registry.js";
 import { GatewayRpcClient } from "./socket-rpc.js";
 
 const CONTROL_NAME = "agent-acp";
@@ -25,11 +34,16 @@ export function parseInstallerArgs(argv) {
     installControl: false,
     installGuide: false,
     installSkill: false,
+    discoverAgents: false,
+    registryAgents: [],
+    offline: false,
+    refreshRegistry: false,
     rotateToken: false,
     dryRun: false,
     force: false,
     healthCheck: true,
     showSecrets: false,
+    allTargets: false,
     targets: []
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -39,10 +53,29 @@ export function parseInstallerArgs(argv) {
       options.installControl = true;
       options.installGuide = true;
       options.installSkill = true;
-    } else if (arg === "--install-adapters") options.installAdapters = true;
-    else if (arg === "--install-control") options.installControl = true;
+      options.discoverAgents = true;
+    } else if (arg === "--install-adapters") {
+      options.installAdapters = true;
+      options.discoverAgents = true;
+    } else if (arg === "--discover-agents") options.discoverAgents = true;
+    else if (arg === "--offline") options.offline = true;
+    else if (arg === "--refresh-registry") options.refreshRegistry = true;
+    else if (arg === "--registry-agent") {
+      const id = argv[++index];
+      if (!id) throw new Error("--registry-agent requires an ACP registry agent id");
+      options.registryAgents.push(id);
+      options.discoverAgents = true;
+      options.installAdapters = true;
+    } else if (arg.startsWith("--registry-agent=")) {
+      options.registryAgents.push(arg.slice("--registry-agent=".length));
+      options.discoverAgents = true;
+      options.installAdapters = true;
+    } else if (arg === "--install-control") options.installControl = true;
     else if (arg === "--install-guide") options.installGuide = true;
-    else if (arg === "--install-skill") options.installSkill = true;
+    else if (arg === "--install-skill") {
+      options.installSkill = true;
+      options.discoverAgents = true;
+    }
     else if (arg === "--rotate-token") {
       options.rotateToken = true;
       options.installControl = true;
@@ -58,8 +91,15 @@ export function parseInstallerArgs(argv) {
     else if (arg === "--help" || arg === "-h") options.help = true;
     else throw new Error(`Unknown installer option: ${arg}`);
   }
-  if (options.targets.includes("all")) options.targets = ["codex", "claude"];
+  if (options.targets.includes("all")) {
+    options.allTargets = true;
+    options.targets = ["codex", "claude"];
+  }
   options.targets = [...new Set(options.targets)];
+  options.registryAgents = [...new Set(options.registryAgents)];
+  for (const id of options.registryAgents) {
+    if (!/^[a-z0-9][a-z0-9._-]*$/.test(id)) throw new Error(`Invalid ACP registry agent id: ${id || "<empty>"}`);
+  }
   for (const target of options.targets) {
     if (!SUPPORTED_TARGETS.has(target)) throw new Error(`Unsupported installer target: ${target}`);
   }
@@ -72,9 +112,15 @@ export async function runInstaller(options, dependencies = {}) {
   const run = dependencies.runCommand ?? runCommand;
   const makeRpc = dependencies.rpcFactory ?? ((config) => new GatewayRpcClient(config));
   const skillSource = dependencies.skillSource ?? bundledSkillSource;
+  const registryLoader = dependencies.registryLoader ?? loadOfficialRegistry;
+  const registryDiscover = dependencies.registryDiscover ?? discoverRegistryAgents;
+  const providerRegistryPath = dependencies.providerRegistryPath ?? defaultProviderRegistryPath();
   const skillRoots = dependencies.skillRoots ?? {
     codex: join(process.env.CODEX_HOME || join(homedir(), ".codex"), "skills"),
-    claude: join(process.env.CLAUDE_HOME || join(homedir(), ".claude"), "skills")
+    claude: join(process.env.CLAUDE_HOME || join(homedir(), ".claude"), "skills"),
+    grok: join(process.env.GROK_HOME || join(homedir(), ".grok"), "skills"),
+    auggie: join(process.env.AUGMENT_HOME || join(homedir(), ".augment"), "skills"),
+    default: join(homedir(), ".agents", "skills")
   };
   const runtime = dependencies.runtime ?? { nodeVersion: process.versions.node, platform: process.platform };
   preflight(runtime);
@@ -83,9 +129,84 @@ export async function runInstaller(options, dependencies = {}) {
   const actions = [];
   const warnings = [];
   let state = await readInstallState(statePath);
+  let registry = { checked: false, source: null, available: 0, discovered: [], configured: [] };
+
+  if (options.discoverAgents) {
+    try {
+      const loaded = await registryLoader({
+        offline: options.offline,
+        refresh: options.refreshRegistry,
+        persist: !options.dryRun
+      });
+      const installedPackages = options.dryRun ? new Set() : await installedGlobalNpmPackages(run);
+      const discovered = await registryDiscover(loaded.registry, {
+        platform: runtime.platform,
+        arch: runtime.arch ?? process.arch,
+        installedPackages
+      });
+      const selected = new Map(discovered.map((item) => [item.registryId, item]));
+      for (const id of options.registryAgents) {
+        const agent = loaded.registry.agents.find((item) => item.id === id);
+        if (!agent) throw new Error(`ACP registry agent not found: ${id}`);
+        if (selected.has(id)) continue;
+        const distribution = selectDistribution(agent);
+        if (!distribution) throw new Error(`${id} has no distribution for this platform`);
+        if (distribution.type === "binary") throw new Error(`${id} is binary-only and was not found locally; install its official binary first`);
+        selected.set(id, {
+          id: id === "claude-acp" ? "claude" : id === "codex-acp" ? "codex" : id === "grok-build" ? "grok" : id,
+          registryId: id,
+          name: agent.name,
+          version: agent.version,
+          distribution,
+          foundCommand: null,
+          packageInstalled: false
+        });
+      }
+      const matches = [...selected.values()];
+      const definitions = matches.map(providerDefinition);
+      for (const match of matches) {
+        const definition = definitions.find((item) => item.registryId === match.registryId);
+        actions.push({
+          type: "registry-provider",
+          provider: definition.id,
+          registryId: definition.registryId,
+          version: definition.registryVersion,
+          distribution: match.distribution.type,
+          command: definition.command,
+          args: definition.args
+        });
+        if (options.installAdapters && ["npx", "uvx"].includes(match.distribution.type)) {
+          const command = match.distribution.type === "npx" ? "npm" : "uv";
+          const args = match.distribution.type === "npx"
+            ? ["install", "--global", match.distribution.package]
+            : ["tool", "install", "--force", match.distribution.package];
+          actions.push({ type: "registry-download", provider: definition.id, command, args });
+          if (!options.dryRun) {
+            await requireSuccess(run, command, args, `download ${match.registryId} from the ACP registry distribution`);
+          }
+        }
+      }
+      if (!options.dryRun && definitions.length) await mergeProviderDefinitions(providerRegistryPath, definitions);
+      if (loaded.warning) warnings.push(loaded.warning);
+      registry = {
+        checked: true,
+        source: loaded.source,
+        stale: loaded.stale,
+        available: loaded.registry.agents.length,
+        discovered: matches.map((item) => item.registryId),
+        configured: definitions.map((item) => item.id),
+        providerRegistryPath
+      };
+    } catch (error) {
+      if (options.registryAgents.length) throw error;
+      warnings.push(error.message);
+      registry = { ...registry, checked: true, error: error.message };
+    }
+  }
 
   if (options.installAdapters) {
     for (const provider of initialProviders) {
+      if (registry.configured.includes(provider.id)) continue;
       if (!provider.agentInstalled || provider.adapterInstalled || !provider.install) continue;
       const args = provider.install.split(/\s+/).slice(1);
       actions.push({ type: "adapter", provider: provider.id, command: "npm", args });
@@ -104,8 +225,12 @@ export async function runInstaller(options, dependencies = {}) {
     ? (options.targets.length ? requestedTargets : [availableTargets.includes("codex") ? "codex" : availableTargets[0]].filter(Boolean))
     : [];
   const guideTargets = options.installGuide ? requestedTargets : [];
+  const installedProviderIds = new Set([
+    ...registry.configured,
+    ...providers.filter((provider) => provider.agentInstalled).map((provider) => provider.id)
+  ]);
   const skillTargets = options.installSkill
-    ? (options.targets.length ? requestedTargets : [availableTargets.includes("codex") ? "codex" : availableTargets[0]].filter(Boolean))
+    ? (options.targets.length && !options.allTargets ? requestedTargets : [...installedProviderIds])
     : [];
 
   let identity = state?.identity ?? null;
@@ -120,28 +245,57 @@ export async function runInstaller(options, dependencies = {}) {
     if (!options.dryRun) await writeInstallState(statePath, state);
   }
 
+  const installedSkillDestinations = new Map();
   for (const target of new Set([...controlTargets, ...guideTargets, ...skillTargets])) {
     const provider = providers.find((item) => item.id === target);
-    if (!provider?.agentInstalled) {
+    const needsMcp = controlTargets.includes(target) || guideTargets.includes(target);
+    if (needsMcp && !provider?.agentInstalled) {
       warnings.push(`${target} is not installed; MCP registration skipped`);
-      continue;
-    }
-    if (controlTargets.includes(target)) {
+    } else if (controlTargets.includes(target)) {
       const spec = mcpSpec(target, "control", identity);
       await installMcp(spec, { options, state, run, actions });
     }
-    if (guideTargets.includes(target)) {
+    if (guideTargets.includes(target) && provider?.agentInstalled) {
       const spec = mcpSpec(target, "guide", identity);
       await installMcp(spec, { options, state, run, actions });
     }
-    if (skillTargets.includes(target)) {
+    if (skillTargets.includes(target) && installedProviderIds.has(target)) {
+      const destinationRoot = skillRoots[target] ?? skillRoots.default;
+      if (!destinationRoot) throw new Error(`No skill installation path is configured for ${target}`);
+      const destination = join(destinationRoot, DELEGATOR_SKILL_NAME);
+      const sharedWith = installedSkillDestinations.get(destination);
+      if (sharedWith) {
+        actions.push({
+          type: "skill",
+          agent: target,
+          name: DELEGATOR_SKILL_NAME,
+          source: skillSource,
+          destination,
+          status: "shared",
+          sharedWith
+        });
+        if (!options.dryRun) {
+          state.managedSkills ??= {};
+          state.managedSkills[`${target}:${DELEGATOR_SKILL_NAME}`] = {
+            agent: target,
+            name: DELEGATOR_SKILL_NAME,
+            path: destination,
+            sharedWith,
+            installedAt: new Date().toISOString()
+          };
+        }
+        continue;
+      }
+      installedSkillDestinations.set(destination, target);
       await installBundledSkill(target, {
         source: skillSource,
-        destinationRoot: skillRoots[target],
+        destinationRoot,
         options,
         state,
         actions
       });
+    } else if (skillTargets.includes(target)) {
+      warnings.push(`${target} is not installed; skill installation skipped`);
     }
   }
 
@@ -171,6 +325,7 @@ export async function runInstaller(options, dependencies = {}) {
     actions,
     health,
     warnings,
+    registry,
     identity: identity
       ? {
           rootId: identity.rootId,
@@ -188,9 +343,13 @@ export function installerHelp() {
     "",
     "  --install-all          Install adapters, Control, Guide, and agent-delegator",
     "  --install-adapters     Install missing ACP adapters",
+    "  --discover-agents      Match installed AI CLIs with the official ACP registry",
+    "  --registry-agent <id>  Install/configure one official registry agent (repeatable)",
+    "  --refresh-registry     Refresh the cached official ACP registry",
+    "  --offline              Use only the cached ACP registry",
     "  --install-control      Register the Main-only Control MCP",
     "  --install-guide        Register the read-only Guide MCP",
-    "  --install-skill        Install the agent-delegator skill for the Main agent",
+    "  --install-skill        Install agent-delegator for every discovered agent",
     "  --target <agent>       codex, claude, or all (repeatable)",
     "  --rotate-token         Rotate credentials and update Control MCP entries",
     "  --dry-run              Print planned changes without modifying the system",
@@ -231,7 +390,8 @@ async function installBundledSkill(agent, { source, destinationRoot, options, st
   const exists = await pathExists(destination);
   actions.push({ type: "skill", agent, name: DELEGATOR_SKILL_NAME, source, destination });
   if (options.dryRun) return;
-  if (exists && !state?.managedSkills?.[key] && !options.force) {
+  const managedDestination = Object.values(state?.managedSkills ?? {}).some((item) => item?.path === destination);
+  if (exists && !state?.managedSkills?.[key] && !managedDestination && !options.force) {
     throw new Error(`${key} already exists and is not managed by this installer; rerun with --force to replace it`);
   }
 
