@@ -1,0 +1,46 @@
+# Dependencies and package-manager caches
+node_modules/
+.npm/
+.yarn/
+.pnpm-store/
+
+# Logs and runtime diagnostics
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.pid
+*.pid.lock
+
+# ACP Gateway runtime state
+.acp-gateway/
+*.sock
+*.sock.lock
+state.json
+state.json.*.tmp
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Test, coverage, and build output
+coverage/
+.nyc_output/
+test-results/
+dist/
+build/
+.cache/
+tmp/
+temp/
+*.tgz
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
