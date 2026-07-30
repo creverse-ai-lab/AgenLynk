@@ -1,6 +1,16 @@
 # ACP Gateway
 
-ACP Gateway는 하나의 Main 에이전트가 로컬에 설치된 AI Worker를 ACP로 실행하고 관리할 수 있게 해주는 미들웨어입니다.
+혹시 여러 AI 에이전트를 쓰고 계신가요?
+
+Claude에게 물어봤다가, Codex로 코드를 고치고, Grok에게 다시 리뷰를 맡기느라 터미널과 대화를 계속 돌려막고 계신가요?
+
+“내가 이 에이전트들을 일일이 지휘하지 말고, 한 에이전트가 다른 에이전트를 알아서 활용하면 좋을 텐데…”라고 생각해 본 적이 있으신가요?
+
+그런 당신을 위해 준비했습니다.
+
+**한 명에게 말하면, 나머지는 알아서 회의시키는 로컬 AI 에이전트 관제실 — ACP Gateway입니다.**
+
+ACP Gateway는 하나의 Main 에이전트가 로컬에 설치된 여러 AI Worker를 발견하고, ACP로 실행하며, 장기 작업과 권한 요청부터 최종 결과 회수까지 관리할 수 있게 해주는 미들웨어입니다.
 
 - ACP 세션과 provider 프로세스를 daemon이 계속 유지합니다.
 - MCP가 재시작되어도 Worker 세션을 복구할 수 있습니다.
@@ -9,6 +19,22 @@ ACP Gateway는 하나의 Main 에이전트가 로컬에 설치된 AI Worker를 A
 - 로컬 단일 사용자·단일 머신 사용을 기준으로 합니다.
 
 Node.js 22 이상과 macOS 또는 Linux가 필요합니다.
+
+## ACP란?
+
+[ACP(Agent Client Protocol)](https://agentclientprotocol.com/)는 코드 에디터·IDE와 AI 코딩 에이전트 사이의 통신을 표준화하는 프로토콜입니다. 에디터마다 Claude, Codex, Grok 같은 에이전트를 별도로 통합하는 대신, ACP라는 공통 규격으로 세션 생성, prompt 전달, tool 호출, 권한 요청, 진행 이벤트와 결과를 주고받습니다. 언어 도구 연결을 LSP가 표준화했다면, ACP는 코딩 에이전트 연결을 표준화하는 역할에 가깝습니다.
+
+로컬 ACP agent는 일반적으로 JSON-RPC over stdio로 실행되며, 원격 agent는 HTTP 또는 WebSocket 연결을 사용할 수 있습니다. 이 프로젝트는 ACP 위에 세션 유지, 재연결, permission·질문 전달, 취소, worker 재호출과 수명주기 관리를 추가합니다.
+
+## ACP와 MCP는 어떻게 다른가요?
+
+- **ACP**는 에이전트 자체를 실행하고 대화하며 작업 상태를 관리하는 규격입니다.
+- **MCP(Model Context Protocol)**는 AI가 외부 도구, 데이터, 애플리케이션과 연결되는 공통 인터페이스입니다.
+- **ACP Gateway**는 내부에서 ACP로 Worker를 관리하고, Main 에이전트에는 MCP 도구로 그 제어 기능을 제공합니다.
+
+즉, MCP와 ACP 중 하나를 고르는 구조가 아닙니다. MCP는 Main이 Gateway를 조작하는 입구이고, ACP는 Gateway가 다른 AI 에이전트와 실제로 작업하는 통신로입니다.
+
+이 프로젝트는 현재 최신 명세인 [MCP 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28)의 방향을 반영합니다. 특히 장시간 작업을 단일 요청 시간에 묶지 않고 task handle로 시작한 뒤 상태와 결과를 다시 조회하는 **MCP Tasks** 흐름을 지원합니다. MCP 2026-07-28은 stateless core, 버전이 지정된 공식 extensions, Tasks 정식화와 인증 강화를 포함한 다섯 번째 MCP 명세 릴리스입니다. 자세한 변경 사항은 [MCP 공식 명세](https://modelcontextprotocol.io/specification/2026-07-28)와 [Anthropic의 MCP 2026-07-28 소개](https://claude.com/blog/bringing-mcp-2026-07-28-to-claude)를 참고하세요.
 
 ## 구조
 
