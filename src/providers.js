@@ -150,6 +150,7 @@ export function providerIds() {
 }
 
 function configuredProviders() {
+  if (process.env.ACP_GATEWAY_DISABLE_DYNAMIC_PROVIDERS === "1" && !process.env.ACP_GATEWAY_PROVIDERS) return {};
   const path = defaultProviderRegistryPath();
   try {
     const document = JSON.parse(readFileSync(path, "utf8"));

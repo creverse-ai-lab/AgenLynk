@@ -1,6 +1,6 @@
 ---
 name: agent-delegator
-description: Delegate, monitor, resume, and control bounded work through the local ACP Gateway. Use from an interactive Main agent when a user asks to send work to Claude, Grok, or Codex workers; select a worker model or permission policy; continue a persistent worker session; handle worker permission or structured input requests; or collect delegated results through agent_acp_* MCP tools.
+description: Delegate, monitor, resume, and control bounded work through the local ACP Gateway. Use from an interactive Main agent when a user asks to send work to an installed ACP worker; select a worker model or permission policy; continue a persistent worker session; handle worker permission or structured input requests; or collect delegated results through agent_acp_* MCP tools.
 ---
 
 # Agent Delegator
@@ -9,9 +9,9 @@ Use the Main-only `agent-acp` MCP. Do not inject that Control MCP into worker se
 
 ## Delegate work
 
-1. Call `agent_acp_setup` with one explicit provider. Do not omit the provider because setup without one may initialize every provider.
+1. Call `agent_acp_setup` without a provider to inspect installed providers without starting them. Then call it with one explicit provider when that worker must be initialized.
 2. Open a session with `agent_acp_session_open`. Always provide:
-   - `provider`: `claude`, `grok`, or `codex`.
+   - `provider`: one installed provider ID returned by setup, such as `claude`, `grok`, `codex`, or `auggie`.
    - `cwd`: the narrowest working directory needed.
    - `model`: the model requested by Main when known.
    - `permissionPolicy`: `read_only` for analysis/review, `ask` for approval-gated changes, or `auto_approve` only when the user authorized unrestricted changes within the session roots.

@@ -20,7 +20,8 @@ import { GatewayRpcClient } from "./socket-rpc.js";
 const CONTROL_NAME = "agent-acp";
 const GUIDE_NAME = "agent-acp-guide";
 const DELEGATOR_SKILL_NAME = "agent-delegator";
-const SUPPORTED_TARGETS = new Set(["codex", "claude"]);
+const MCP_TARGETS = ["codex", "claude", "grok", "auggie"];
+const SUPPORTED_TARGETS = new Set(MCP_TARGETS);
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const bundledSkillSource = join(dirname(sourceDirectory), "skills", DELEGATOR_SKILL_NAME);
 
@@ -85,7 +86,7 @@ export function parseInstallerArgs(argv) {
     else if (arg === "--show-secrets") options.showSecrets = true;
     else if (arg === "--target") {
       const target = argv[++index];
-      if (!target) throw new Error("--target requires codex, claude, or all");
+      if (!target) throw new Error("--target requires codex, claude, grok, auggie, or all");
       options.targets.push(target);
     } else if (arg.startsWith("--target=")) options.targets.push(arg.slice("--target=".length));
     else if (arg === "--help" || arg === "-h") options.help = true;
@@ -93,7 +94,7 @@ export function parseInstallerArgs(argv) {
   }
   if (options.targets.includes("all")) {
     options.allTargets = true;
-    options.targets = ["codex", "claude"];
+    options.targets = [...MCP_TARGETS];
   }
   options.targets = [...new Set(options.targets)];
   options.registryAgents = [...new Set(options.registryAgents)];
@@ -215,8 +216,9 @@ export async function runInstaller(options, dependencies = {}) {
   }
 
   const providers = options.installAdapters && !options.dryRun ? await detect() : initialProviders;
-  const availableTargets = ["codex", "claude"].filter(
-    (target) => providers.some((provider) => provider.id === target && provider.agentInstalled)
+  const availableTargets = MCP_TARGETS.filter(
+    (target) => registry.configured.includes(target)
+      || providers.some((provider) => provider.id === target && provider.agentInstalled)
   );
   const requestedTargets = options.targets.length
     ? options.targets
@@ -248,14 +250,15 @@ export async function runInstaller(options, dependencies = {}) {
   const installedSkillDestinations = new Map();
   for (const target of new Set([...controlTargets, ...guideTargets, ...skillTargets])) {
     const provider = providers.find((item) => item.id === target);
+    const providerInstalled = provider?.agentInstalled || registry.configured.includes(target);
     const needsMcp = controlTargets.includes(target) || guideTargets.includes(target);
-    if (needsMcp && !provider?.agentInstalled) {
+    if (needsMcp && !providerInstalled) {
       warnings.push(`${target} is not installed; MCP registration skipped`);
     } else if (controlTargets.includes(target)) {
       const spec = mcpSpec(target, "control", identity);
       await installMcp(spec, { options, state, run, actions });
     }
-    if (guideTargets.includes(target) && provider?.agentInstalled) {
+    if (guideTargets.includes(target) && providerInstalled) {
       const spec = mcpSpec(target, "guide", identity);
       await installMcp(spec, { options, state, run, actions });
     }
@@ -350,7 +353,7 @@ export function installerHelp() {
     "  --install-control      Register the Main-only Control MCP",
     "  --install-guide        Register the read-only Guide MCP",
     "  --install-skill        Install agent-delegator for every discovered agent",
-    "  --target <agent>       codex, claude, or all (repeatable)",
+    "  --target <agent>       codex, claude, grok, auggie, or all (repeatable)",
     "  --rotate-token         Rotate credentials and update Control MCP entries",
     "  --dry-run              Print planned changes without modifying the system",
     "  --force                Replace same-name MCP entries not managed by this installer",
@@ -366,8 +369,8 @@ async function installMcp(spec, { options, state, run, actions }) {
   if (options.dryRun) return;
 
   const existing = await run(spec.command, spec.getArgs);
-  const exists = existing.code === 0;
-  if (!exists && !/no mcp server|not found|does not exist/i.test(`${existing.stdout}\n${existing.stderr}`)) {
+  const exists = inspectMcpExists(spec, existing);
+  if (!exists && spec.inspectMode !== "list-json" && !/no mcp server|not found|does not exist/i.test(`${existing.stdout}\n${existing.stderr}`)) {
     throw commandError(spec.command, spec.getArgs, existing, `inspect ${key}`);
   }
   if (exists && !state?.managedMcp?.[key] && !options.force) {
@@ -434,6 +437,30 @@ function mcpSpec(agent, kind, identity) {
       args: ["mcp", "add", ...envArgs, name, "--", serverCommand, ...serverArgs]
     };
   }
+  if (agent === "grok") {
+    const envArgs = isControl
+      ? ["--env", `ACP_GATEWAY_CONTROL_TOKEN=${identity.token}`, "--env", `ACP_GATEWAY_ROOT_ID=${identity.rootId}`]
+      : [];
+    return {
+      agent, kind, name, command: "grok", inspectMode: "list-json",
+      getArgs: ["mcp", "list", "--json"],
+      removeArgs: ["mcp", "remove", name],
+      args: ["mcp", "add", "--scope", "user", ...envArgs, name, "--", serverCommand, ...serverArgs]
+    };
+  }
+  if (agent === "auggie") {
+    const env = isControl
+      ? { ACP_GATEWAY_CONTROL_TOKEN: identity.token, ACP_GATEWAY_ROOT_ID: identity.rootId }
+      : {};
+    const config = { type: "stdio", command: serverCommand, args: serverArgs, env };
+    return {
+      agent, kind, name, command: "auggie", inspectMode: "list-json",
+      getArgs: ["mcp", "list", "--json"],
+      removeArgs: ["mcp", "remove", name],
+      args: ["mcp", "add-json", name, JSON.stringify(config), "--replace"]
+    };
+  }
+  if (agent !== "claude") throw new Error(`MCP registration is not supported for ${agent}`);
   const envArgs = isControl
     ? ["-e", `ACP_GATEWAY_CONTROL_TOKEN=${identity.token}`, "-e", `ACP_GATEWAY_ROOT_ID=${identity.rootId}`]
     : [];
@@ -443,6 +470,19 @@ function mcpSpec(agent, kind, identity) {
     removeArgs: ["mcp", "remove", "--scope", "user", name],
     args: ["mcp", "add", "--scope", "user", ...envArgs, name, "--", serverCommand, ...serverArgs]
   };
+}
+
+function inspectMcpExists(spec, result) {
+  if (spec.inspectMode !== "list-json") return result.code === 0;
+  if (result.code !== 0) throw commandError(spec.command, spec.getArgs, result, `inspect ${spec.agent}:${spec.name}`);
+  try {
+    const parsed = JSON.parse(result.stdout);
+    const servers = Array.isArray(parsed) ? parsed : parsed?.servers;
+    if (!Array.isArray(servers)) throw new Error("server list is missing");
+    return servers.some((item) => item?.name === spec.name);
+  } catch (error) {
+    throw new Error(`inspect ${spec.agent}:${spec.name} returned invalid JSON: ${error.message}`);
+  }
 }
 
 function stableNodeCommand() {
@@ -517,7 +557,9 @@ function commandError(command, args, result, operation) {
 }
 
 function redactArgs(args) {
-  return args.map((arg) => String(arg).replace(/^(ACP_GATEWAY_CONTROL_TOKEN=).+$/, "$1<redacted>"));
+  return args.map((arg) => String(arg)
+    .replace(/^(ACP_GATEWAY_CONTROL_TOKEN=).+$/, "$1<redacted>")
+    .replace(/("ACP_GATEWAY_CONTROL_TOKEN"\s*:\s*")[^"]+("\s*[,}])/g, "$1<redacted>$2"));
 }
 
 export function runCommand(command, args) {

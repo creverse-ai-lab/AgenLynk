@@ -27,6 +27,9 @@ state.json.*.tmp
 !.env.example
 
 # Test, coverage, and build output
+/test/
+/test_scinario.md
+/test_scenario.md
 coverage/
 .nyc_output/
 test-results/
