@@ -1,4 +1,4 @@
-# ACP Gateway
+# ACP Gateway v1.0
 
 혹시 여러 AI 에이전트를 쓰고 계신가요?
 
@@ -59,10 +59,22 @@ acp-gateway-bootstrap --install-all --target auggie
 acp-gateway-bootstrap --install-all --dry-run
 ```
 
+새 버전으로 갱신할 때는 저장소를 업데이트한 뒤 다음 명령을 실행합니다.
+
+```bash
+git pull
+npm ci
+acp-gateway-bootstrap --update --dry-run
+acp-gateway-bootstrap --update
+```
+
+`--update`는 ACP registry와 adapter, MCP 등록, 발견된 AI의 skill을 갱신하고 실행 중인 Gateway daemon을 새 버전으로 다시 시작합니다. 설치 상태와 Control identity는 유지되며, 마지막에 실제 daemon 버전까지 확인합니다. 소스와 직접 연결되는 `npm link`는 최초 설치 후 다시 할 필요가 없습니다.
+
 주요 installer 옵션:
 
 | 옵션 | 설명 |
 |---|---|
+| `--update` | Adapter, MCP, skill을 갱신하고 daemon을 새 버전으로 재시작 |
 | `--install-all` | Adapter, Control, Guide, skill 전체 설치 |
 | `--install-control` | 오케스트레이터용 Control MCP만 설치 |
 | `--install-guide` | 읽기 전용 Guide MCP만 설치 |
@@ -88,6 +100,8 @@ Control·Guide MCP 등록은 Codex, Claude, Grok, Auggie를 지원합니다. 기
 
 Installer는 발견된 AI에 `agent-delegator` skill을 함께 설치합니다. 이 skill은 사용자의 요청에서 Worker, 모델과 권한 범위를 파악하고, Gateway 세션 생성부터 작업 전달, 진행 확인, 질문·권한 처리와 결과 회수까지 안내합니다. 설치 후에는 MCP 도구 이름을 외울 필요 없이 오케스트레이터에게 자연어로 작업을 요청하면 됩니다.
 
+기본 제공되는 `agent-delegator`는 범용 사용을 위한 시작점입니다. 자주 사용하는 Worker, 기본 모델, 권한 정책, 리뷰 순서나 결과 형식이 있다면 설치된 skill을 사용자 작업 방식에 맞게 수정해 사용할 수 있습니다. 단, `acp-gateway-bootstrap --update`를 실행하면 installer가 관리하는 skill이 최신 기본본으로 다시 설치되므로, 지속적으로 유지할 변경은 저장소의 `skills/agent-delegator/SKILL.md`에 반영하거나 별도 이름의 개인 skill로 복사해 관리하세요.
+
 예를 들어 사용자가 대화 중인 오케스트레이터 AI에 다음처럼 요청할 수 있습니다.
 
 ```text
@@ -106,6 +120,8 @@ Grok 4.5에게 현재 설계의 보안 취약점을 red-team 검토시키고, pe
 6. 완료 후 세션을 재사용하거나 `agent_acp_session`으로 종료
 
 중간 poll에서는 `includeResult: false`를 사용하면 누적 결과의 반복 전송을 줄일 수 있습니다. 최종 상태에서만 `includeResult: true`로 전체 결과를 받으면 됩니다.
+
+결과나 terminal 출력이 인라인 상한을 넘으면 Gateway가 전체 내용을 `~/.acp-gateway/artifacts`의 파일로 넘겨 저장하고, poll 결과에 파일 경로·바이트 수·완료 여부를 돌려줍니다. 인라인에는 최신 부분만 유지하므로 RAM 사용량이 결과 크기에 따라 계속 늘어나지 않습니다. Artifact는 파일당 100MB·전체 512MB이고, 동시 미응답 권한·질문 요청은 세션당 64개의 안전 상한을 따릅니다. 큰 설명 chunk는 32MB protocol frame 상한 안에서 그대로 처리합니다.
 
 ### 권한 정책
 
@@ -127,6 +143,7 @@ Control token, 오케스트레이터 식별자(Main ID)와 Gateway socket 경로
 - session resume checkpoint는 기본 7일 보존
 - 장시간 유지가 필요한 세션은 `pin` 사용
 - 응답 본문, thought, 전체 이벤트 이력은 상태 파일에 영구 저장하지 않음
+- 인라인 상한을 넘은 결과와 terminal 출력은 `~/.acp-gateway/artifacts`에 임시 저장 후 결과 보존 기간에 맞춰 정리
 
 ## ACP와 MCP란?
 
@@ -188,3 +205,7 @@ flowchart LR
 4. **ACP 작업 전달** — prompt, 파일 작업, tool event와 중간 결과가 ACP를 통해 오갑니다.
 5. **권한·질문 처리** — Worker의 permission 요청이나 질문은 Gateway Inbox를 거쳐 오케스트레이터에게 전달되고, 그 응답이 다시 Worker로 돌아갑니다.
 6. **결과 회수·재사용** — 오케스트레이터는 MCP Task 또는 poll로 상태와 결과를 받고, 필요하면 같은 세션을 다시 호출하거나 복구합니다.
+
+---
+
+Dev by 윤치영

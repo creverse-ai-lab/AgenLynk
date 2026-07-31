@@ -13,11 +13,12 @@ import {
 import { controlToken, rootId } from "./config.js";
 import { GatewayRpcClient } from "./socket-rpc.js";
 import { PERMISSION_POLICIES } from "./acp-client.js";
+import { GATEWAY_VERSION } from "./version.js";
 
 const rpc = new GatewayRpcClient({ token: controlToken(), rootId: rootId() });
 const tools = controlTools();
 const server = new Server(
-  { name: "acp-gateway-control", version: "0.2.0" },
+  { name: "acp-gateway-control", version: GATEWAY_VERSION },
   {
     capabilities: {
       tools: {},

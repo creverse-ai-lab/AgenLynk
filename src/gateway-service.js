@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { stat } from "node:fs/promises";
 import { AcpClient, PERMISSION_POLICIES, requirePermissionPolicy } from "./acp-client.js";
+import { ArtifactStore, defaultArtifactRoot } from "./artifacts.js";
 import { currentModelId, detectProviders, providerConfig } from "./providers.js";
 import { publicSession, SessionStore } from "./sessions.js";
+import { GATEWAY_VERSION } from "./version.js";
 
 const ACTIVE_STATUSES = new Set(["running", "waiting_permission", "waiting_input", "cancelling", "restoring"]);
 const CLOSED_STATUSES = new Set(["closed"]);
@@ -22,6 +24,13 @@ export class GatewayService {
     statePath,
     maxEvents = 200,
     maxTextBytes = 1_000_000,
+    maxArtifactBytes = 100 * 1024 * 1024,
+    maxArtifactTotalBytes = 512 * 1024 * 1024,
+    maxTerminalsPerSession = 16,
+    maxPendingRequestsPerSession = 64,
+    maxFrameBytes = 32 * 1024 * 1024,
+    artifactRoot = statePath ? join(dirname(statePath), "artifacts") : defaultArtifactRoot(),
+    artifactStore = null,
     createClient = null,
     gcIntervalMs = 5 * 60_000,
     idleUnloadMs = 30 * 60_000,
@@ -44,11 +53,26 @@ export class GatewayService {
     this.rootPresence = new Map();
     this.createClient = createClient;
     this.now = now;
+    this.artifactStore = artifactStore ?? new ArtifactStore({
+      root: artifactRoot,
+      maxFileBytes: maxArtifactBytes,
+      maxTotalBytes: maxArtifactTotalBytes
+    });
+    this.resourceLimits = {
+      maxEvents,
+      maxTextBytes,
+      maxArtifactBytes,
+      maxArtifactTotalBytes,
+      maxTerminalsPerSession,
+      maxPendingRequestsPerSession,
+      maxFrameBytes
+    };
     this.lifecycle = { gcIntervalMs, idleUnloadMs, orphanGraceMs, resultRetentionMs, inboxRetentionMs, sessionRetentionMs };
     this.maintenanceRunning = null;
     this.store = new SessionStore({
       maxEvents,
       maxTextBytes,
+      artifactStore: this.artifactStore,
       onChange: (_session, event) => {
         if (!event || DURABLE_EVENT_TYPES.has(event.type)) this.schedulePersist();
       },
@@ -244,12 +268,13 @@ export class GatewayService {
     const names = provider ? [requireProvider(provider)] : [];
     return {
       ok: true,
-      gatewayVersion: "0.2.0",
+      gatewayVersion: GATEWAY_VERSION,
       persistence: { healthy: this.persistError == null, error: this.persistError },
       lifecycle: {
         ...this.lifecycle,
         liveSessions: this.store.list().filter((session) => session.client?.alive).length
       },
+      resourceLimits: this.resourceLimits,
       detected,
       providers: provider ? await Promise.all(
         names.map(async (name) => {
@@ -467,6 +492,7 @@ export class GatewayService {
         session.stopReason = session.cancelRequested ? "cancelled" : result?.stopReason ?? "end_turn";
         session.completedAt = new Date(this.now()).toISOString();
         session.cancelRequested = false;
+        this.store.finalizeResult(session);
         this.store.push(session, { type: "turn_end", stopReason: session.stopReason });
         this.finishTaskForSession(session);
       })
@@ -474,6 +500,7 @@ export class GatewayService {
         session.status = session.client?.alive ? "error" : "disconnected";
         session.error = error?.message ?? String(error);
         session.completedAt = new Date(this.now()).toISOString();
+        this.store.finalizeResult(session);
         this.store.push(session, { type: "error", text: session.error });
         this.finishTaskForSession(session);
       });
@@ -590,6 +617,7 @@ export class GatewayService {
       ...(args.includeResult === false ? {} : {
         result: {
           text: session.resultText,
+          artifact: session.resultArtifact ?? null,
           thought: args.includeThoughts === true ? session.thoughtText : undefined,
           stopReason: session.stopReason
         }
@@ -781,6 +809,10 @@ export class GatewayService {
 
   async #startClient(provider, clientKey, config) {
     const options = {
+      artifactStore: this.artifactStore,
+      maxTerminalsPerSession: this.resourceLimits.maxTerminalsPerSession,
+      maxPendingRequestsPerSession: this.resourceLimits.maxPendingRequestsPerSession,
+      maxFrameBytes: this.resourceLimits.maxFrameBytes,
       onExit: (error) => {
         for (const session of this.store.list().filter((item) => item.client === client)) {
           session.client = null;
@@ -869,7 +901,7 @@ export class GatewayService {
       sessionId: session.id,
       turnId: session.turnId,
       status: session.status,
-      result: { text: session.resultText, stopReason: session.stopReason },
+      result: { text: session.resultText, artifact: session.resultArtifact ?? null, stopReason: session.stopReason },
       ...(session.error ? { error: session.error } : {})
     });
   }
@@ -989,6 +1021,7 @@ export class GatewayService {
 
   async #runMaintenance(now) {
     let changed = this.pruneTasks();
+    if (this.artifactStore.prune(this.lifecycle.resultRetentionMs, now) > 0) changed = true;
 
     for (const [id, item] of this.inbox) {
       if (item.status === "pending") continue;
@@ -1023,6 +1056,7 @@ export class GatewayService {
         && isExpired(session.completedAt, this.lifecycle.resultRetentionMs, now)) {
         session.resultText = "";
         session.thoughtText = "";
+        session.resultArtifact = null;
         session.events = [];
         session.transientClearedAt = new Date(now).toISOString();
         changed = true;

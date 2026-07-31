@@ -3,16 +3,19 @@
 import { timingSafeEqual } from "node:crypto";
 import { chmod, open, readFile, unlink } from "node:fs/promises";
 import { createConnection, createServer } from "node:net";
-import { createInterface } from "node:readline";
 import { controlToken, gatewayLifecycleConfig, gatewaySocketPath, gatewayStatePath } from "./config.js";
 import { GatewayService } from "./gateway-service.js";
+import { readNdjson } from "./ndjson.js";
 import { createSocketSender } from "./socket-flow.js";
+import { GATEWAY_VERSION } from "./version.js";
 
 const socketPath = gatewaySocketPath();
 const expectedToken = controlToken();
 const expectedRootId = process.env.ACP_GATEWAY_ROOT_ID || null;
-const service = new GatewayService({ statePath: gatewayStatePath(), ...gatewayLifecycleConfig() });
+const gatewayConfig = gatewayLifecycleConfig();
+const service = new GatewayService({ statePath: gatewayStatePath(), ...gatewayConfig });
 const clients = new Set();
+let shutdownPromise = null;
 const daemonLock = await acquireDaemonLock(socketPath);
 try {
   await service.init();
@@ -25,7 +28,6 @@ try {
 const server = createServer((socket) => {
   clients.add(socket);
   socket.once("close", () => clients.delete(socket));
-  const lines = createInterface({ input: socket });
   const subscriptions = new Set();
   let boundRootId = null;
   const sender = createSocketSender(socket, {
@@ -33,39 +35,48 @@ const server = createServer((socket) => {
     removeSubscription: (subscriptionId) => subscriptions.delete(subscriptionId)
   });
   const { send, sendEvent } = sender;
-  lines.on("line", async (line) => {
-    let request;
-    try {
-      request = JSON.parse(line);
-      const isGuide = request.method === "guide";
-      if (!isGuide) {
-        if (!tokenMatches(request.token, expectedToken)) throw new Error("Control access denied");
-        if (typeof request.rootId !== "string" || !request.rootId) throw new Error("rootId is required");
-        if (expectedRootId && request.rootId !== expectedRootId) throw new Error("Control root identity mismatch");
-        if (boundRootId && request.rootId !== boundRootId) throw new Error("Socket is already bound to another Main");
-        if (!boundRootId) {
-          boundRootId = request.rootId;
-          service.attachRoot(boundRootId);
+  readNdjson(socket, {
+    maxLineBytes: gatewayConfig.maxFrameBytes,
+    onOverflow: () => socket.destroy(),
+    onLine: async (line) => {
+      let request;
+      try {
+        request = JSON.parse(line);
+        const isGuide = request.method === "guide";
+        if (!isGuide) {
+          if (!tokenMatches(request.token, expectedToken)) throw new Error("Control access denied");
+          if (typeof request.rootId !== "string" || !request.rootId) throw new Error("rootId is required");
+          if (expectedRootId && request.rootId !== expectedRootId) throw new Error("Control root identity mismatch");
+          if (boundRootId && request.rootId !== boundRootId) throw new Error("Socket is already bound to another Main");
+          if (!boundRootId) {
+            boundRootId = request.rootId;
+            service.attachRoot(boundRootId);
+          }
         }
-      }
-      if (request.method === "subscribe") {
-        const result = service.subscribe(request.args, { rootId: request.rootId }, (event) => {
-          sendEvent(result.subscriptionId, event);
-        });
-        subscriptions.add(result.subscriptionId);
+        if (request.method === "daemon_shutdown") {
+          send({ id: request.id, ok: true, result: { ok: true, pid: process.pid, version: GATEWAY_VERSION } });
+          setImmediate(() => void shutdown().finally(() => process.exit(0)));
+          return;
+        }
+        if (request.method === "subscribe") {
+          const result = service.subscribe(request.args, { rootId: request.rootId }, (event) => {
+            sendEvent(result.subscriptionId, event);
+          });
+          subscriptions.add(result.subscriptionId);
+          send({ id: request.id, ok: true, result });
+          return;
+        }
+        if (request.method === "unsubscribe") {
+          const result = service.unsubscribe(request.args?.subscriptionId, { rootId: request.rootId });
+          subscriptions.delete(request.args?.subscriptionId);
+          send({ id: request.id, ok: true, result });
+          return;
+        }
+        const result = isGuide ? await service.guide() : await service.call(request.method, request.args, { rootId: request.rootId });
         send({ id: request.id, ok: true, result });
-        return;
+      } catch (error) {
+        if (!socket.destroyed) send({ id: request?.id ?? null, ok: false, error: error?.message ?? String(error) });
       }
-      if (request.method === "unsubscribe") {
-        const result = service.unsubscribe(request.args?.subscriptionId, { rootId: request.rootId });
-        subscriptions.delete(request.args?.subscriptionId);
-        send({ id: request.id, ok: true, result });
-        return;
-      }
-      const result = isGuide ? await service.guide() : await service.call(request.method, request.args, { rootId: request.rootId });
-      send({ id: request.id, ok: true, result });
-    } catch (error) {
-      if (!socket.destroyed) send({ id: request?.id ?? null, ok: false, error: error?.message ?? String(error) });
     }
   });
   socket.once("close", () => {
@@ -86,11 +97,15 @@ try {
 }
 
 async function shutdown() {
-  for (const socket of clients) socket.destroy();
-  server.close();
-  await service.shutdown();
-  await unlink(socketPath).catch(() => {});
-  await releaseDaemonLock(daemonLock);
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    for (const socket of clients) socket.destroy();
+    await new Promise((resolve) => server.close(resolve));
+    await service.shutdown();
+    await unlink(socketPath).catch(() => {});
+    await releaseDaemonLock(daemonLock);
+  })();
+  return shutdownPromise;
 }
 
 process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));

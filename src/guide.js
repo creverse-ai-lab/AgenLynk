@@ -4,6 +4,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { GatewayRpcClient } from "./socket-rpc.js";
+import { GATEWAY_VERSION } from "./version.js";
 
 const rpc = new GatewayRpcClient({ autoStart: false });
 const tool = {
@@ -12,7 +13,7 @@ const tool = {
   inputSchema: { type: "object", properties: {} }
 };
 const server = new Server(
-  { name: "acp-gateway-guide", version: "0.2.0" },
+  { name: "acp-gateway-guide", version: GATEWAY_VERSION },
   { capabilities: { tools: {} } }
 );
 

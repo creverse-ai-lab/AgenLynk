@@ -22,6 +22,13 @@ Use the Main-only `agent-acp` MCP. Do not inject that Control MCP into worker se
    - Request `includeResult: true` when the turn becomes `idle`, `error`, or `cancelled`.
 5. Review the result and any artifacts yourself before accepting delegated work.
 
+## Handle large results
+
+- When a result is likely to be large and the permission policy allows writes, ask the Worker to write the complete deliverable inside the task `cwd` and return a concise summary plus its absolute path. Do not request a file write in `read_only` mode.
+- Keep intermediate polls on `includeResult: false`. At a terminal status, inspect `result.artifact` or `resultArtifact` as well as the inline tail.
+- The Gateway spills an oversized result or terminal output to a Gateway-owned artifact file. Use the returned `path`, `bytes`, `complete`, `truncated`, and optional `error` metadata; accept the file only when `complete` is true, `path` is present, and `truncated` is false. Otherwise disclose the incomplete result.
+- Read only the needed portions of a large artifact when reviewing it. A protocol frame that exceeds the hard frame limit is rejected rather than written as an artifact.
+
 ## Handle Main input
 
 - On `waiting_permission`, inspect the request through poll events or `agent_acp_inbox`, then answer with `agent_acp_permission`. Main owns the decision; never let the worker self-approve an `ask` request.

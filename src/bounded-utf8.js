@@ -2,8 +2,9 @@
 // new/evicted chunks, not the full accumulated size. A string is materialized
 // only when read.
 export class BoundedUtf8Text {
-  constructor(maxBytes) {
+  constructor(maxBytes, { onTrim = null } = {}) {
     this.maxBytes = maxBytes;
+    this.onTrim = onTrim;
     this.chunks = [];
     this.head = 0;
     this.totalBytes = 0;
@@ -55,6 +56,7 @@ export class BoundedUtf8Text {
       const front = this.chunks[this.head];
       const excess = this.totalBytes + this.pendingBytes - this.maxBytes;
       if (front.length <= excess) {
+        this.onTrim?.(front);
         this.totalBytes -= front.length;
         this.trimmedBytes += front.length;
         this.head += 1;
@@ -62,6 +64,7 @@ export class BoundedUtf8Text {
       }
       let start = excess;
       while (start < front.length && (front[start] & 0xc0) === 0x80) start += 1;
+      this.onTrim?.(front.subarray(0, start));
       this.totalBytes -= start;
       this.trimmedBytes += start;
       this.chunks[this.head] = front.subarray(start);
@@ -71,6 +74,7 @@ export class BoundedUtf8Text {
       this.head = 0;
     }
     if (this.totalBytes + this.pendingBytes > this.maxBytes) {
+      if (this.pendingHighSurrogate) this.onTrim?.(Buffer.from(this.pendingHighSurrogate, "utf8"));
       this.trimmedBytes += this.pendingBytes;
       this.pendingHighSurrogate = "";
       this.pendingBytes = 0;

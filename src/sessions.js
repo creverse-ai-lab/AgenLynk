@@ -4,10 +4,11 @@ import { BoundedUtf8Text } from "./bounded-utf8.js";
 const textAccumulators = new WeakMap();
 
 export class SessionStore {
-  constructor({ maxEvents = 200, maxTextBytes = 1_000_000, onChange = null, onEvent = null } = {}) {
+  constructor({ maxEvents = 200, maxTextBytes = 1_000_000, artifactStore = null, onChange = null, onEvent = null } = {}) {
     this.sessions = new Map();
     this.maxEvents = maxEvents;
     this.maxTextBytes = maxTextBytes;
+    this.artifactStore = artifactStore;
     this.onChange = onChange;
     this.onEvent = onEvent;
   }
@@ -27,17 +28,33 @@ export class SessionStore {
       eventSequence: 0,
       ...rest
     };
-    const resultBuffer = new BoundedUtf8Text(this.maxTextBytes);
+    let resultWriter = null;
+    const resultBuffer = new BoundedUtf8Text(this.maxTextBytes, {
+      onTrim: (buffer) => {
+        resultWriter ??= this.artifactStore?.create(session.id, "result") ?? null;
+        resultWriter?.append(buffer);
+        session.resultArtifact = resultWriter?.metadata() ?? null;
+      }
+    });
     const thoughtBuffer = new BoundedUtf8Text(this.maxTextBytes);
     if (initialResultText) resultBuffer.append(initialResultText);
     if (initialThoughtText) thoughtBuffer.append(initialThoughtText);
-    textAccumulators.set(session, { resultBuffer, thoughtBuffer });
+    textAccumulators.set(session, {
+      resultBuffer,
+      thoughtBuffer,
+      get resultWriter() { return resultWriter; }
+    });
     Object.defineProperties(session, {
       resultText: {
         enumerable: true,
         configurable: true,
         get: () => resultBuffer.toString(),
-        set: (value) => resultBuffer.reset(value)
+        set: (value) => {
+          if (resultWriter?.started && !resultWriter.complete) resultWriter.finalize(resultBuffer.toString());
+          resultWriter = null;
+          session.resultArtifact = null;
+          resultBuffer.reset(value);
+        }
       },
       thoughtText: {
         enumerable: true,
@@ -57,6 +74,15 @@ export class SessionStore {
 
   appendResultText(session, text) {
     textAccumulators.get(session)?.resultBuffer.append(text);
+  }
+
+  finalizeResult(session) {
+    const state = textAccumulators.get(session);
+    const writer = state?.resultWriter;
+    if (!writer?.active) return null;
+    writer.finalize(state.resultBuffer.toString());
+    session.resultArtifact = writer.metadata();
+    return session.resultArtifact;
   }
 
   appendThoughtText(session, text) {
@@ -155,6 +181,7 @@ export function publicSession(session) {
     error: session.error,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
-    eventCount: session.events.length
+    eventCount: session.events.length,
+    resultArtifact: session.resultArtifact ?? null
   };
 }

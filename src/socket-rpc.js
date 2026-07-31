@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
-import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { gatewaySocketPath } from "./config.js";
+import { gatewayLifecycleConfig, gatewaySocketPath } from "./config.js";
+import { readNdjson } from "./ndjson.js";
 
 export class GatewayRpcClient {
   constructor({ socketPath = gatewaySocketPath(), token = null, rootId = null, autoStart = true } = {}) {
@@ -21,6 +21,7 @@ export class GatewayRpcClient {
     this.reconnectTimer = null;
     this.reconnectAttempt = 0;
     this.closed = false;
+    this.maxFrameBytes = gatewayLifecycleConfig().maxFrameBytes;
   }
 
   async call(method, args = {}, timeoutMs = 30_000) {
@@ -105,8 +106,11 @@ export class GatewayRpcClient {
         socket.off("error", onError);
         socket.on("error", (error) => this.#disconnect(error, socket));
         socket.on("close", () => this.#disconnect(new Error("Gateway socket closed"), socket));
-        const lines = createInterface({ input: socket });
-        lines.on("line", (line) => this.#onLine(line));
+        readNdjson(socket, {
+          maxLineBytes: this.maxFrameBytes,
+          onLine: (line) => this.#onLine(line),
+          onOverflow: (overflowError) => socket.destroy(overflowError)
+        });
         this.socket = socket;
         resolve();
       });

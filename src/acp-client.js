@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
 import { readFile, realpath, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
 import { BoundedUtf8Text } from "./bounded-utf8.js";
+import { readNdjson } from "./ndjson.js";
+import { GATEWAY_VERSION } from "./version.js";
 
 export const PERMISSION_POLICIES = ["ask", "read_only", "auto_approve"];
 const READ_ONLY_TOOL_KINDS = new Set(["read", "search", "think", "fetch"]);
@@ -13,6 +14,10 @@ export class AcpClient {
     this.config = config;
     this.permissionPolicy = options.permissionPolicy ?? config.permissionPolicy;
     this.onExit = options.onExit;
+    this.artifactStore = options.artifactStore ?? null;
+    this.maxTerminalsPerSession = options.maxTerminalsPerSession ?? 16;
+    this.maxPendingRequestsPerSession = options.maxPendingRequestsPerSession ?? 64;
+    this.maxFrameBytes = options.maxFrameBytes ?? 32 * 1024 * 1024;
     this.proc = null;
     this.rl = null;
     this.nextId = 1;
@@ -50,14 +55,20 @@ export class AcpClient {
     this.proc.stderr.on("data", (chunk) => {
       this.stderr = (this.stderr + chunk).slice(-100_000);
     });
-    this.rl = createInterface({ input: this.proc.stdout });
-    this.rl.on("line", (line) => this.#onLine(line));
+    this.rl = readNdjson(this.proc.stdout, {
+      maxLineBytes: this.maxFrameBytes,
+      onLine: (line) => this.#onLine(line),
+      onOverflow: (error) => {
+        this.proc?.kill("SIGTERM");
+        this.#fail(error);
+      }
+    });
 
     this.initResult = await this.request(
       "initialize",
       {
         protocolVersion: 1,
-        clientInfo: { name: "acp-mcp-bridge", version: "0.1.0" },
+        clientInfo: { name: "acp-gateway", version: GATEWAY_VERSION },
         clientCapabilities: {
           fs: { readTextFile: true, writeTextFile: true },
           terminal: true,
@@ -303,6 +314,7 @@ export class AcpClient {
         const decision = this.#automaticPermission(params);
         if (decision) this.#respond(id, decision);
         else {
+          this.#requirePendingInputCapacity(params.sessionId);
           this.pendingPermissions.set(id, { rpcId: id, params });
           this.sessionHandlers.get(params.sessionId)?.({
             sessionUpdate: "permission_request",
@@ -316,6 +328,7 @@ export class AcpClient {
       if (method === "elicitation/create") {
         if (!params.sessionId) throw new Error("Only session-scoped elicitation is supported");
         if (params.mode !== "form") throw new Error(`Unsupported elicitation mode: ${params.mode}`);
+        this.#requirePendingInputCapacity(params.sessionId);
         this.pendingElicitations.set(id, { rpcId: id, params });
         this.sessionHandlers.get(params.sessionId)?.({
           sessionUpdate: "elicitation_request",
@@ -395,6 +408,10 @@ export class AcpClient {
     const cwd = await realpath(resolve(params.cwd ?? roots[0] ?? process.cwd()));
     if (!roots.some((root) => isWithin(root, cwd))) throw new Error(`Terminal cwd is outside ACP session roots: ${cwd}`);
     if (typeof params.command !== "string" || !params.command) throw new Error("Terminal command is required");
+    const activeForSession = [...this.terminals.values()].filter((item) => item.sessionId === params.sessionId).length;
+    if (activeForSession >= this.maxTerminalsPerSession) {
+      throw new Error(`ACP session terminal limit exceeded: ${this.maxTerminalsPerSession}`);
+    }
     const terminalId = `terminal-${this.nextId++}`;
     const limit = Math.min(Math.max(Number(params.outputByteLimit ?? 1_000_000), 1), 10_000_000);
     const env = { ...process.env, ...Object.fromEntries((params.env ?? []).map(({ name, value }) => [name, value])) };
@@ -407,8 +424,19 @@ export class AcpClient {
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32"
     });
-    const outputBuffer = new BoundedUtf8Text(limit);
-    const terminal = { child, sessionId: params.sessionId, outputBuffer, limit, truncated: false, exitStatus: null, exited: null };
+    const artifactWriter = this.artifactStore?.create(params.sessionId, "terminal") ?? null;
+    const outputBuffer = new BoundedUtf8Text(limit, { onTrim: (buffer) => artifactWriter?.append(buffer) });
+    const terminal = {
+      child,
+      sessionId: params.sessionId,
+      outputBuffer,
+      artifactWriter,
+      artifact: null,
+      limit,
+      truncated: false,
+      exitStatus: null,
+      exited: null
+    };
     const stdoutDecoder = new StringDecoder("utf8");
     const stderrDecoder = new StringDecoder("utf8");
     terminal.exited = new Promise((done) => {
@@ -422,10 +450,18 @@ export class AcpClient {
       child.once("close", (exitCode, signal) => {
         append(stdoutDecoder.end());
         append(stderrDecoder.end());
+        if (artifactWriter?.active) {
+          artifactWriter.finalize(outputBuffer.toString());
+          terminal.artifact = artifactWriter.metadata();
+        }
         finish(exitCode, signal);
       });
       child.once("error", (error) => {
         append(`\n${error.message}\n`);
+        if (artifactWriter?.active) {
+          artifactWriter.finalize(outputBuffer.toString());
+          terminal.artifact = artifactWriter.metadata();
+        }
         finish(null, null);
       });
     });
@@ -441,7 +477,12 @@ export class AcpClient {
 
   #terminalOutput(params) {
     const terminal = this.#terminal(params.sessionId, params.terminalId);
-    return { output: terminal.outputBuffer.toString(), truncated: terminal.truncated, exitStatus: terminal.exitStatus };
+    return {
+      output: terminal.outputBuffer.toString(),
+      artifact: terminal.artifact ?? terminal.artifactWriter?.metadata() ?? null,
+      truncated: terminal.truncated,
+      exitStatus: terminal.exitStatus
+    };
   }
 
   #releaseTerminal(params) {
@@ -502,6 +543,7 @@ export class AcpClient {
       { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
       { optionId: "reject-once", name: "Reject", kind: "reject_once" }
     ];
+    this.#requirePendingInputCapacity(params.sessionId);
     await new Promise((done) => {
       this.pendingOperations.set(id, {
         sessionId: params.sessionId,
@@ -536,6 +578,13 @@ export class AcpClient {
       this.sessionOperationGrants.set(sessionId, grants);
     }
     grants.set(operationKind, (grants.get(operationKind) ?? 0) + 1);
+  }
+
+  #requirePendingInputCapacity(sessionId) {
+    const pending = this.pendingSessionInput(sessionId);
+    if (pending.permissions + pending.elicitations >= this.maxPendingRequestsPerSession) {
+      throw new Error(`ACP session pending request limit exceeded: ${this.maxPendingRequestsPerSession}`);
+    }
   }
 
   #rejectSessionOperations(sessionId, error) {

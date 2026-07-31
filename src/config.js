@@ -32,7 +32,12 @@ export function gatewayLifecycleConfig() {
     inboxRetentionMs: numberEnv("ACP_GATEWAY_INBOX_RETENTION_MS", 24 * 60 * 60_000, 0),
     sessionRetentionMs: numberEnv("ACP_GATEWAY_SESSION_RETENTION_MS", 7 * 24 * 60 * 60_000, 0),
     maxEvents: numberEnv("ACP_GATEWAY_MAX_EVENTS", 200, 1),
-    maxTextBytes: numberEnv("ACP_GATEWAY_MAX_TEXT_BYTES", 1_000_000, 1)
+    maxTextBytes: numberEnv("ACP_GATEWAY_MAX_TEXT_BYTES", 1_000_000, 1),
+    maxArtifactBytes: numberEnv("ACP_GATEWAY_MAX_ARTIFACT_BYTES", 100 * 1024 * 1024, 1),
+    maxArtifactTotalBytes: numberEnv("ACP_GATEWAY_MAX_ARTIFACT_TOTAL_BYTES", 512 * 1024 * 1024, 1),
+    maxTerminalsPerSession: numberEnv("ACP_GATEWAY_MAX_TERMINALS_PER_SESSION", 16, 1),
+    maxPendingRequestsPerSession: numberEnv("ACP_GATEWAY_MAX_PENDING_REQUESTS_PER_SESSION", 64, 1),
+    maxFrameBytes: numberEnv("ACP_GATEWAY_MAX_FRAME_BYTES", 32 * 1024 * 1024, 1024)
   };
 }
 

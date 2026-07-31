@@ -16,6 +16,8 @@ import {
   selectDistribution
 } from "./acp-registry.js";
 import { GatewayRpcClient } from "./socket-rpc.js";
+import { gatewaySocketPath } from "./config.js";
+import { GATEWAY_VERSION } from "./version.js";
 
 const CONTROL_NAME = "agent-acp";
 const GUIDE_NAME = "agent-acp-guide";
@@ -44,12 +46,23 @@ export function parseInstallerArgs(argv) {
     force: false,
     healthCheck: true,
     showSecrets: false,
+    update: false,
+    restartDaemon: false,
     allTargets: false,
     targets: []
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--install-all") {
+      options.installAdapters = true;
+      options.installControl = true;
+      options.installGuide = true;
+      options.installSkill = true;
+      options.discoverAgents = true;
+    } else if (arg === "--update") {
+      options.update = true;
+      options.restartDaemon = true;
+      options.refreshRegistry = true;
       options.installAdapters = true;
       options.installControl = true;
       options.installGuide = true;
@@ -112,6 +125,7 @@ export async function runInstaller(options, dependencies = {}) {
   const detect = dependencies.detectProviders ?? detectProviders;
   const run = dependencies.runCommand ?? runCommand;
   const makeRpc = dependencies.rpcFactory ?? ((config) => new GatewayRpcClient(config));
+  const restartGateway = dependencies.restartGateway ?? restartGatewayDaemon;
   const skillSource = dependencies.skillSource ?? bundledSkillSource;
   const registryLoader = dependencies.registryLoader ?? loadOfficialRegistry;
   const registryDiscover = dependencies.registryDiscover ?? discoverRegistryAgents;
@@ -307,12 +321,23 @@ export async function runInstaller(options, dependencies = {}) {
     await writeInstallState(statePath, state);
   }
 
+  let restart = { requested: options.restartDaemon, performed: false, wasRunning: false };
+  if (options.restartDaemon) {
+    actions.push({ type: "daemon-restart" });
+    if (!options.dryRun) {
+      restart = {
+        requested: true,
+        ...await restartGateway({ identity, makeRpc, socketPath: gatewaySocketPath() })
+      };
+    }
+  }
+
   let health = { checked: false };
   if (options.installControl && options.healthCheck && !options.dryRun) {
     const rpc = makeRpc({ token: identity.token, rootId: identity.rootId });
     try {
-      const result = await rpc.call("session", { action: "list" }, 10_000);
-      health = { checked: true, ok: result?.ok === true };
+      const result = await rpc.call("setup", {}, 10_000);
+      health = { checked: true, ok: result?.ok === true && result?.gatewayVersion === GATEWAY_VERSION, version: result?.gatewayVersion };
       if (!health.ok) throw new Error("Gateway health check returned an invalid response");
     } finally {
       rpc.close();
@@ -327,6 +352,7 @@ export async function runInstaller(options, dependencies = {}) {
     targets: { control: controlTargets, guide: guideTargets, skill: skillTargets },
     actions,
     health,
+    restart,
     warnings,
     registry,
     identity: identity
@@ -344,6 +370,7 @@ export function installerHelp() {
   return [
     "Usage: acp-gateway-bootstrap [options]",
     "",
+    "  --update               Refresh adapters, MCPs, skill, and restart the daemon",
     "  --install-all          Install adapters, Control, Guide, and agent-delegator",
     "  --install-adapters     Install missing ACP adapters",
     "  --discover-agents      Match installed AI CLIs with the official ACP registry",
@@ -572,4 +599,48 @@ export function runCommand(command, args) {
     child.once("error", reject);
     child.once("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
   });
+}
+
+async function restartGatewayDaemon({ identity, makeRpc, socketPath }) {
+  if (!identity) throw new Error("Cannot restart Gateway without a stored Control identity");
+  const rpc = makeRpc({ token: identity.token, rootId: identity.rootId, autoStart: false });
+  let wasRunning = true;
+  let graceful = true;
+  try {
+    await rpc.call("daemon_shutdown", {}, 5_000);
+    await waitForDaemonExit(socketPath);
+  } catch (error) {
+    if (["ENOENT", "ECONNREFUSED"].includes(error?.code)) {
+      wasRunning = false;
+    } else if (/Unknown gateway method: daemon_shutdown/.test(error?.message ?? "")) {
+      const pid = Number((await readFile(`${socketPath}.lock`, "utf8")).trim());
+      if (!Number.isInteger(pid) || pid <= 1) throw new Error("Gateway daemon lock contains an invalid pid");
+      process.kill(pid, "SIGTERM");
+      await waitForDaemonExit(socketPath);
+      graceful = false;
+    } else {
+      throw error;
+    }
+  } finally {
+    rpc.close();
+  }
+
+  const starter = makeRpc({ token: identity.token, rootId: identity.rootId, autoStart: true });
+  try {
+    const setup = await starter.call("setup", {}, 10_000);
+    if (setup?.ok !== true || setup?.gatewayVersion !== GATEWAY_VERSION) {
+      throw new Error(`Updated Gateway version mismatch: expected ${GATEWAY_VERSION}, received ${setup?.gatewayVersion ?? "unknown"}`);
+    }
+    return { performed: true, wasRunning, graceful, version: setup.gatewayVersion };
+  } finally {
+    starter.close();
+  }
+}
+
+async function waitForDaemonExit(socketPath) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (!(await pathExists(socketPath)) && !(await pathExists(`${socketPath}.lock`))) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("Gateway daemon did not stop within 5 seconds");
 }
