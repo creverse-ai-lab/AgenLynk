@@ -66,7 +66,6 @@ export function parseInstallerArgs(argv) {
       options.installAdapters = true;
       options.installControl = true;
       options.installGuide = true;
-      options.installSkill = true;
       options.discoverAgents = true;
     } else if (arg === "--install-adapters") {
       options.installAdapters = true;
@@ -370,7 +369,8 @@ export function installerHelp() {
   return [
     "Usage: acp-gateway-bootstrap [options]",
     "",
-    "  --update               Refresh adapters, MCPs, skill, and restart the daemon",
+    "  --version, -V          Print the installed ACP Gateway version",
+    "  --update               Pull source, preview, update adapters/MCPs, and restart",
     "  --install-all          Install adapters, Control, Guide, and agent-delegator",
     "  --install-adapters     Install missing ACP adapters",
     "  --discover-agents      Match installed AI CLIs with the official ACP registry",

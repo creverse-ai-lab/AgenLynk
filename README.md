@@ -59,22 +59,20 @@ acp-gateway-bootstrap --install-all --target auggie
 acp-gateway-bootstrap --install-all --dry-run
 ```
 
-새 버전으로 갱신할 때는 저장소를 업데이트한 뒤 다음 명령을 실행합니다.
+새 버전으로 갱신할 때는 다음 명령 하나만 실행합니다.
 
 ```bash
-git pull
-npm ci
-acp-gateway-bootstrap --update --dry-run
 acp-gateway-bootstrap --update
 ```
 
-`--update`는 ACP registry와 adapter, MCP 등록, 발견된 AI의 skill을 갱신하고 실행 중인 Gateway daemon을 새 버전으로 다시 시작합니다. 설치 상태와 Control identity는 유지되며, 마지막에 실제 daemon 버전까지 확인합니다. 소스와 직접 연결되는 `npm link`는 최초 설치 후 다시 할 필요가 없습니다.
+`--update`는 `git pull --ff-only`와 `npm ci`를 실행하고, 내부 dry-run 계획을 출력한 뒤 ACP registry와 adapter, MCP 등록을 갱신합니다. 마지막으로 실행 중인 Gateway daemon을 새 버전으로 다시 시작하고 실제 버전까지 확인합니다. 설치 상태와 Control identity는 그대로 유지됩니다. 사용자가 수정한 `agent-delegator`를 보호하기 위해 skill은 최초 `--install-all`에서만 설치하며 `--update`에서는 건드리지 않습니다. 기본 skill을 다시 설치하고 싶을 때만 `--install-skill`을 별도로 실행하세요. 로컬 소스 변경을 보호하기 위해 Git 작업 트리가 깨끗하지 않으면 update를 중단하므로 먼저 변경 사항을 commit하거나 stash해야 합니다. 소스와 직접 연결되는 `npm link`는 최초 설치 후 다시 할 필요가 없습니다.
 
 주요 installer 옵션:
 
 | 옵션 | 설명 |
 |---|---|
-| `--update` | Adapter, MCP, skill을 갱신하고 daemon을 새 버전으로 재시작 |
+| `--version`, `-V` | 현재 설치된 ACP Gateway 버전 확인 |
+| `--update` | 소스 pull과 내부 dry-run 후 Adapter, MCP, daemon 갱신—사용자 skill 유지 |
 | `--install-all` | Adapter, Control, Guide, skill 전체 설치 |
 | `--install-control` | 오케스트레이터용 Control MCP만 설치 |
 | `--install-guide` | 읽기 전용 Guide MCP만 설치 |
