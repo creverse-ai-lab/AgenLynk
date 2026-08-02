@@ -9,7 +9,7 @@ Use the Main-only `agent-acp` MCP. Do not inject that Control MCP into worker se
 
 ## Delegate work
 
-1. Call `agent_acp_setup` without a provider to inspect installed providers without starting them. Always surface every non-empty `alerts` entry to the user before delegating. Use `refreshAgentUpdates: true` when the user requests a fresh health or ACP version check. Then call setup with one explicit provider when that worker must be initialized.
+1. Call `agent_acp_setup` without a provider to inspect installed providers without starting them. Always surface every non-empty `alerts` entry, including Gateway `main` version notifications, to the user before delegating. Use `refreshAgentUpdates: true` when the user requests a fresh health or version check. Then call setup with one explicit provider when that worker must be initialized.
 2. Open a session with `agent_acp_session_open`. Always provide:
    - `provider`: one installed provider ID returned by setup, such as `claude`, `grok`, `codex`, or `auggie`.
    - `cwd`: the narrowest working directory needed.

@@ -17,6 +17,7 @@ export class AgentUpdateManager {
     registryLoader = loadOfficialRegistry,
     detect = detectProviders,
     applyUpdates = defaultApplyUpdates,
+    sourceChecker = null,
     now = () => Date.now()
   } = {}) {
     this.enabled = enabled;
@@ -25,6 +26,7 @@ export class AgentUpdateManager {
     this.registryLoader = registryLoader;
     this.detect = detect;
     this.applyUpdates = applyUpdates;
+    this.sourceChecker = sourceChecker;
     this.now = now;
     this.timer = null;
     this.running = null;
@@ -37,7 +39,8 @@ export class AgentUpdateManager {
       available: [],
       lastApplied: [],
       appliedAt: null,
-      error: null
+      error: null,
+      gatewaySource: null
     };
   }
 
@@ -91,6 +94,13 @@ export class AgentUpdateManager {
           message: `ACP agent updates still require attention: ${formatUpdates(this.state.available)}`
         });
       }
+      if (this.state.gatewaySource?.updateAvailable) {
+        alerts.push({
+          level: "info",
+          code: "gateway_source_update_available",
+          message: `ACP Gateway ${this.state.gatewaySource.mainVersion} is available on main. Run acp-gateway-bootstrap --update when ready.`
+        });
+      }
     }
     return {
       enabled: this.enabled,
@@ -103,6 +113,19 @@ export class AgentUpdateManager {
   async #refresh() {
     this.state.status = "checking";
     this.state.error = null;
+    if (this.sourceChecker) {
+      try {
+        this.state.gatewaySource = await this.sourceChecker();
+      } catch (error) {
+        this.state.gatewaySource = {
+          status: "error",
+          currentVersion: null,
+          mainVersion: null,
+          updateAvailable: false,
+          error: error?.message ?? String(error)
+        };
+      }
+    }
     try {
       const loaded = await this.registryLoader({ refresh: true });
       this.state.source = loaded.source;

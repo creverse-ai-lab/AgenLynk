@@ -107,7 +107,7 @@ function controlTools() {
         type: "object",
         properties: {
           provider: { type: "string", minLength: 1 },
-          refreshAgentUpdates: { type: "boolean", description: "Wait for a fresh ACP registry check and apply enabled automatic adapter updates." }
+          refreshAgentUpdates: { type: "boolean", description: "Wait for a fresh ACP registry and Gateway main-version check, applying enabled automatic adapter updates." }
         }
       }
     },

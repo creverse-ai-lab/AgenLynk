@@ -120,6 +120,8 @@ v1.1.0부터 daemon은 시작 시점과 이후 24시간마다 ACP 공식 registr
 
 `agent_acp_setup` health 응답의 `agentUpdates`에는 확인 시각, 적용된 버전, 남은 수동 업데이트와 오류가 포함됩니다. 알림이 켜져 있으면 같은 응답의 `alerts`에 사용자에게 보여줄 메시지가 들어갑니다. 즉 Gateway가 임의로 화면에 push하는 방식은 아니며, 오케스트레이터가 health check 결과를 받을 때 알림을 사용자에게 전달합니다. 즉시 다시 확인하려면 `refreshAgentUpdates: true`로 setup을 호출합니다.
 
+Gateway 자체 소스는 자동으로 pull하거나 설치하지 않습니다. 같은 주기에서 현재 Git 저장소의 원격 `main`에 게시된 `package.json` 버전만 확인하며, 더 높은 버전이 있으면 health의 `gatewayUpdate`와 `gateway_source_update_available` 알림으로 `acp-gateway-bootstrap --update` 실행을 안내합니다. 따라서 로컬 source, 설치 상태와 사용자 정의 skill은 사용자가 명시적으로 업데이트하기 전까지 변경되지 않습니다.
+
 자동 업데이트와 알림은 기본으로 켜집니다. 설치 후 다음처럼 각각 끄거나 다시 켤 수 있으며, 사용자 정의 skill은 변경하지 않습니다.
 
 ```bash

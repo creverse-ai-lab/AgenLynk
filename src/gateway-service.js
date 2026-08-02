@@ -281,6 +281,7 @@ export class GatewayService {
       },
       resourceLimits: this.resourceLimits,
       agentUpdates,
+      gatewayUpdate: agentUpdates?.gatewaySource ?? null,
       alerts: agentUpdates?.alerts ?? [],
       detected,
       providers: provider ? await Promise.all(
