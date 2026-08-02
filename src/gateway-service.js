@@ -38,6 +38,7 @@ export class GatewayService {
     resultRetentionMs = 24 * 60 * 60_000,
     inboxRetentionMs = 24 * 60 * 60_000,
     sessionRetentionMs = 7 * 24 * 60 * 60_000,
+    agentUpdateManager = null,
     now = () => Date.now()
   } = {}) {
     this.statePath = statePath;
@@ -52,6 +53,7 @@ export class GatewayService {
     this.subscriptions = new Map();
     this.rootPresence = new Map();
     this.createClient = createClient;
+    this.agentUpdateManager = agentUpdateManager;
     this.now = now;
     this.artifactStore = artifactStore ?? new ArtifactStore({
       root: artifactRoot,
@@ -87,6 +89,7 @@ export class GatewayService {
   }
 
   async init() {
+    this.agentUpdateManager?.start();
     if (!this.statePath) return;
     try {
       const parsed = JSON.parse(await readFile(this.statePath, "utf8"));
@@ -263,9 +266,11 @@ export class GatewayService {
     };
   }
 
-  async setup({ provider } = {}) {
+  async setup({ provider, refreshAgentUpdates = false } = {}) {
+    if (refreshAgentUpdates && this.agentUpdateManager) await this.agentUpdateManager.refresh();
     const detected = await detectProviders();
     const names = provider ? [requireProvider(provider)] : [];
+    const agentUpdates = this.agentUpdateManager?.snapshot() ?? null;
     return {
       ok: true,
       gatewayVersion: GATEWAY_VERSION,
@@ -275,6 +280,8 @@ export class GatewayService {
         liveSessions: this.store.list().filter((session) => session.client?.alive).length
       },
       resourceLimits: this.resourceLimits,
+      agentUpdates,
+      alerts: agentUpdates?.alerts ?? [],
       detected,
       providers: provider ? await Promise.all(
         names.map(async (name) => {
@@ -1164,6 +1171,7 @@ export class GatewayService {
   }
 
   async shutdown() {
+    await this.agentUpdateManager?.stop();
     if (this.gcTimer) clearInterval(this.gcTimer);
     this.gcTimer = null;
     if (this.persistTimer) clearTimeout(this.persistTimer);

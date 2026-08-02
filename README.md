@@ -1,4 +1,4 @@
-# ACP Gateway v1.0
+# ACP Gateway v1.1.0
 
 혹시 여러 AI 에이전트를 쓰고 계신가요?
 
@@ -44,7 +44,7 @@ acp-gateway-bootstrap --install-all --refresh-registry
 - 발견된 AI 각각의 사용자 skill 경로에 `agent-delegator` 설치
 - daemon 실행과 인증 상태 확인
 
-기존 0.x 환경에서 1.0으로 설치할 때 이전 daemon이 남아 있으면 installer가 health 응답의 버전을 비교해 자동으로 교체한 뒤 다시 검사합니다. 따라서 `git pull`, `npm ci` 후 `--install-all --refresh-registry`를 실행하는 수동 업그레이드도 지원합니다.
+이전 버전의 daemon이 남아 있으면 installer가 health 응답의 버전을 비교해 자동으로 교체한 뒤 다시 검사합니다. 따라서 `git pull`, `npm ci` 후 `--install-all --refresh-registry`를 실행하는 수동 업그레이드도 지원합니다.
 
 기본 설치에서는 Codex를 오케스트레이터로 우선 선택하고, 발견된 다른 agent에는 읽기 전용 Guide MCP를 등록합니다. 다른 agent를 오케스트레이터로 선택하려면 해당 target을 지정하세요.
 
@@ -87,6 +87,8 @@ acp-gateway-bootstrap --update
 | `--dry-run` | 실제 변경 없이 계획만 출력 |
 | `--rotate-token` | Control token과 오케스트레이터 식별자(Main ID) 교체 |
 | `--force` | installer가 관리하지 않던 같은 이름의 항목 교체 |
+| `--agent-auto-update on\|off` | ACP agent/adapter 자동 업데이트 설정 후 daemon 재시작 |
+| `--agent-update-notifications on\|off` | health check 업데이트 알림 설정 후 daemon 재시작 |
 
 Control token과 오케스트레이터 식별자(Main ID)는 `~/.acp-gateway/install.json`에 권한 `0600`으로 저장되며 반복 설치에서도 재사용됩니다.
 
@@ -108,11 +110,25 @@ npm run monitor:sync-dependencies  # 저장소가 직접 포함한 ACP adapter �
 
 두 업데이트 경로는 역할이 다릅니다.
 
-- **ACP agent/adapter 버전:** 공식 registry가 지정한 고정 버전을 감지하며, 사용자가 `acp-gateway-bootstrap --update`를 실행하면 로컬 설치본과 provider 정의를 실제로 갱신합니다.
+- **ACP agent/adapter 버전:** daemon이 공식 registry의 고정 버전을 주기적으로 확인해 자동 갱신합니다. `acp-gateway-bootstrap --update`를 실행할 때도 즉시 registry를 새로 읽고 같은 갱신을 수행합니다.
 - **ACP protocol wire version:** 새 major를 감지해 PR에 경고하지만 자동 적용하지 않습니다. 호환성 테스트 후 `src/acp-version.js`와 monitor 설정을 함께 바꿔야 합니다.
 - **Gateway npm 의존성:** Dependabot PR에서 lockfile과 CI 결과를 확인한 뒤 병합합니다.
 
 현재 runtime은 ACP wire version 1을 사용합니다. 공식 저장소의 `schema/v2`도 감지되지만, v2 지원으로 표시하거나 자동 전환하지 않습니다. Snapshot PR은 알림과 검토 시작점이며 자동 병합 또는 Gateway release를 수행하지 않습니다.
+
+v1.1.0부터 daemon은 시작 시점과 이후 24시간마다 ACP 공식 registry를 확인합니다. 발견된 `npx`·`uvx` adapter가 새 버전이면 자동으로 설치하고 provider 정의를 갱신합니다. 이미 실행 중인 Worker process는 중단하지 않으며, 새 process나 session부터 갱신된 adapter가 적용됩니다. 직접 설치해야 하는 binary 배포는 자동 교체하지 않고 health 경고로 남깁니다.
+
+`agent_acp_setup` health 응답의 `agentUpdates`에는 확인 시각, 적용된 버전, 남은 수동 업데이트와 오류가 포함됩니다. 알림이 켜져 있으면 같은 응답의 `alerts`에 사용자에게 보여줄 메시지가 들어갑니다. 즉 Gateway가 임의로 화면에 push하는 방식은 아니며, 오케스트레이터가 health check 결과를 받을 때 알림을 사용자에게 전달합니다. 즉시 다시 확인하려면 `refreshAgentUpdates: true`로 setup을 호출합니다.
+
+자동 업데이트와 알림은 기본으로 켜집니다. 설치 후 다음처럼 각각 끄거나 다시 켤 수 있으며, 사용자 정의 skill은 변경하지 않습니다.
+
+```bash
+acp-gateway-bootstrap --agent-auto-update off
+acp-gateway-bootstrap --agent-update-notifications off
+
+acp-gateway-bootstrap --agent-auto-update on
+acp-gateway-bootstrap --agent-update-notifications on
+```
 
 예약 실행과 Dependabot 설정은 GitHub의 기본 브랜치에 존재해야 활성화됩니다. 따라서 `dev` 검증이 끝나면 monitoring workflow 자체는 `main`에 병합하고 원격 `dev` 브랜치를 유지해야 합니다. 또한 저장소의 **Settings → Actions → General → Workflow permissions**에서 GitHub Actions의 PR 생성을 허용해야 자동 PR이 생성됩니다.
 

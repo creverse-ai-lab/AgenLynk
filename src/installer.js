@@ -39,6 +39,7 @@ export function parseInstallerArgs(argv) {
     installSkill: false,
     discoverAgents: false,
     registryAgents: [],
+    registryAgentsOnly: false,
     offline: false,
     refreshRegistry: false,
     rotateToken: false,
@@ -48,6 +49,8 @@ export function parseInstallerArgs(argv) {
     showSecrets: false,
     update: false,
     restartDaemon: false,
+    agentAutoUpdate: null,
+    agentUpdateNotifications: null,
     allTargets: false,
     targets: []
   };
@@ -96,6 +99,13 @@ export function parseInstallerArgs(argv) {
     else if (arg === "--force") options.force = true;
     else if (arg === "--skip-health-check") options.healthCheck = false;
     else if (arg === "--show-secrets") options.showSecrets = true;
+    else if (arg === "--agent-auto-update") {
+      options.agentAutoUpdate = parseOnOff(argv[++index], arg);
+      options.restartDaemon = true;
+    } else if (arg === "--agent-update-notifications") {
+      options.agentUpdateNotifications = parseOnOff(argv[++index], arg);
+      options.restartDaemon = true;
+    }
     else if (arg === "--target") {
       const target = argv[++index];
       if (!target) throw new Error("--target requires codex, claude, grok, auggie, or all");
@@ -143,6 +153,10 @@ export async function runInstaller(options, dependencies = {}) {
   const actions = [];
   const warnings = [];
   let state = await readInstallState(statePath);
+  const configuresAgentUpdates = options.agentAutoUpdate != null || options.agentUpdateNotifications != null;
+  if (configuresAgentUpdates && !state && !options.installControl) {
+    throw new Error("Install ACP Gateway before configuring the agent update policy");
+  }
   let registry = { checked: false, source: null, available: 0, discovered: [], configured: [] };
 
   if (options.discoverAgents) {
@@ -176,7 +190,9 @@ export async function runInstaller(options, dependencies = {}) {
           packageInstalled: false
         });
       }
-      const matches = [...selected.values()];
+      const matches = [...selected.values()].filter(
+        (item) => !options.registryAgentsOnly || options.registryAgents.includes(item.registryId)
+      );
       const definitions = matches.map(providerDefinition);
       for (const match of matches) {
         const definition = definitions.find((item) => item.registryId === match.registryId);
@@ -249,8 +265,16 @@ export async function runInstaller(options, dependencies = {}) {
     : [];
 
   let identity = state?.identity ?? null;
-  if ((options.installControl || options.installGuide || options.installSkill) && !state) {
-    state = { version: 1, managedMcp: {}, managedSkills: {} };
+  if ((options.installControl || options.installGuide || options.installSkill || configuresAgentUpdates) && !state) {
+    state = { version: 1, managedMcp: {}, managedSkills: {}, agentUpdates: { autoUpdate: true, notifications: true } };
+  }
+  if (state) {
+    state.agentUpdates ??= { autoUpdate: true, notifications: true };
+    if (options.agentAutoUpdate != null) state.agentUpdates.autoUpdate = options.agentAutoUpdate;
+    if (options.agentUpdateNotifications != null) state.agentUpdates.notifications = options.agentUpdateNotifications;
+    if (configuresAgentUpdates) {
+      actions.push({ type: "agent-update-policy", ...state.agentUpdates });
+    }
   }
   if (options.installControl) {
     if (!identity || options.rotateToken) identity = createIdentity();
@@ -315,7 +339,7 @@ export async function runInstaller(options, dependencies = {}) {
     }
   }
 
-  if (state && !options.dryRun && (options.installControl || options.installGuide || options.installSkill)) {
+  if (state && !options.dryRun && (options.installControl || options.installGuide || options.installSkill || configuresAgentUpdates)) {
     state.updatedAt = new Date().toISOString();
     await writeInstallState(statePath, state);
   }
@@ -348,7 +372,13 @@ export async function runInstaller(options, dependencies = {}) {
       };
       result = await gatewaySetup(makeRpc, identity);
     }
-    health = { checked: true, ok: result?.ok === true && result?.gatewayVersion === GATEWAY_VERSION, version: result?.gatewayVersion };
+    health = {
+      checked: true,
+      ok: result?.ok === true && result?.gatewayVersion === GATEWAY_VERSION,
+      version: result?.gatewayVersion,
+      agentUpdates: result?.agentUpdates ?? null,
+      alerts: result?.alerts ?? []
+    };
     if (!health.ok) {
       throw new Error(`Gateway health check version mismatch: expected ${GATEWAY_VERSION}, received ${result?.gatewayVersion ?? "unknown"}`);
     }
@@ -397,8 +427,16 @@ export function installerHelp() {
     "  --force                Replace same-name MCP entries not managed by this installer",
     "  --skip-health-check    Do not start/connect to the daemon after installation",
     "  --show-secrets         Include the generated Control token in JSON output",
+    "  --agent-auto-update <on|off>       Configure automatic ACP adapter updates",
+    "  --agent-update-notifications <on|off>  Configure health-check update alerts",
     "  --help                 Show this help"
   ].join("\n");
+}
+
+function parseOnOff(value, option) {
+  if (value === "on") return true;
+  if (value === "off") return false;
+  throw new Error(`${option} requires on or off`);
 }
 
 async function installMcp(spec, { options, state, run, actions }) {
@@ -552,6 +590,11 @@ async function readInstallState(path) {
     if (state.identity && (typeof state.identity.token !== "string" || state.identity.token.length < 24)) {
       throw new Error("invalid stored Control identity");
     }
+    if (state.agentUpdates && (
+      typeof state.agentUpdates !== "object"
+      || typeof state.agentUpdates.autoUpdate !== "boolean"
+      || typeof state.agentUpdates.notifications !== "boolean"
+    )) throw new Error("invalid stored agent update policy");
     return state;
   } catch (error) {
     if (error?.code === "ENOENT") return null;

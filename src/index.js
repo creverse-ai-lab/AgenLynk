@@ -51,7 +51,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     if (task) throw new Error(`Tool ${request.params.name} does not support task execution`);
     const args = request.params.arguments ?? {};
-    const timeoutMs = method === "poll" ? Math.max(30_000, Number(args.waitMs ?? 0) + 5_000) : 30_000;
+    const timeoutMs = method === "poll"
+      ? Math.max(30_000, Number(args.waitMs ?? 0) + 5_000)
+      : method === "setup" && args.refreshAgentUpdates === true
+        ? 120_000
+        : 30_000;
     return toolResult(await rpc.call(method, args, timeoutMs));
   } catch (error) {
     return toolResult({ ok: false, error: error?.message ?? String(error) }, true);
@@ -98,10 +102,13 @@ function controlTools() {
   return [
     {
       name: "agent_acp_setup",
-      description: "Inspect and start a configured ACP provider through the persistent Gateway.",
+      description: "Inspect and start a configured ACP provider through the persistent Gateway. Always surface non-empty health alerts to the user.",
       inputSchema: {
         type: "object",
-        properties: { provider: { type: "string", minLength: 1 } }
+        properties: {
+          provider: { type: "string", minLength: 1 },
+          refreshAgentUpdates: { type: "boolean", description: "Wait for a fresh ACP registry check and apply enabled automatic adapter updates." }
+        }
       }
     },
     {

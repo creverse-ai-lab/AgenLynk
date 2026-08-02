@@ -1,5 +1,6 @@
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { readFileSync } from "node:fs";
 
 const uid = typeof process.getuid === "function" ? process.getuid() : "user";
 
@@ -41,10 +42,39 @@ export function gatewayLifecycleConfig() {
   };
 }
 
+export function gatewayAgentUpdateConfig() {
+  const policy = readAgentUpdatePolicy();
+  const autoUpdate = typeof policy.autoUpdate === "boolean" ? policy.autoUpdate : true;
+  const notifications = typeof policy.notifications === "boolean" ? policy.notifications : true;
+  return {
+    enabled: booleanEnv("ACP_GATEWAY_AGENT_AUTO_UPDATE", autoUpdate),
+    notifications: booleanEnv("ACP_GATEWAY_AGENT_UPDATE_NOTIFICATIONS", notifications),
+    intervalMs: numberEnv("ACP_GATEWAY_AGENT_UPDATE_INTERVAL_MS", 24 * 60 * 60_000, 5 * 60_000)
+  };
+}
+
+function readAgentUpdatePolicy() {
+  const path = process.env.ACP_GATEWAY_INSTALL_STATE || join(homedir(), ".acp-gateway", "install.json");
+  try {
+    const state = JSON.parse(readFileSync(path, "utf8"));
+    return state?.agentUpdates && typeof state.agentUpdates === "object" ? state.agentUpdates : {};
+  } catch {
+    return {};
+  }
+}
+
 function numberEnv(name, fallback, minimum) {
   const raw = process.env[name];
   if (raw == null || raw === "") return fallback;
   const value = Number(raw);
   if (!Number.isFinite(value) || value < minimum) throw new Error(`${name} must be a number >= ${minimum}`);
   return value;
+}
+
+function booleanEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw == null || raw === "") return fallback;
+  if (["1", "true", "on", "yes"].includes(raw.toLowerCase())) return true;
+  if (["0", "false", "off", "no"].includes(raw.toLowerCase())) return false;
+  throw new Error(`${name} must be on or off`);
 }
