@@ -44,6 +44,8 @@ acp-gateway-bootstrap --install-all --refresh-registry
 - 발견된 AI 각각의 사용자 skill 경로에 `agent-delegator` 설치
 - daemon 실행과 인증 상태 확인
 
+기존 0.x 환경에서 1.0으로 설치할 때 이전 daemon이 남아 있으면 installer가 health 응답의 버전을 비교해 자동으로 교체한 뒤 다시 검사합니다. 따라서 `git pull`, `npm ci` 후 `--install-all --refresh-registry`를 실행하는 수동 업그레이드도 지원합니다.
+
 기본 설치에서는 Codex를 오케스트레이터로 우선 선택하고, 발견된 다른 agent에는 읽기 전용 Guide MCP를 등록합니다. 다른 agent를 오케스트레이터로 선택하려면 해당 target을 지정하세요.
 
 ```bash
@@ -94,11 +96,31 @@ Control·Guide MCP 등록은 Codex, Claude, Grok, Auggie를 지원합니다. 기
 
 공식 registry 원본은 `https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json`이며 `~/.acp-gateway/registry.json`에 24시간 캐시합니다. 발견된 provider 실행 정의는 `~/.acp-gateway/providers.json`에 저장됩니다. `npx`·`uvx` 배포는 registry에 고정된 버전을 설치하고, binary 배포는 이미 설치된 실행 파일을 사용합니다. registry에 등록되지 않은 임의의 AI는 ACP 실행 계약을 안전하게 추론할 수 없으므로 자동 등록하지 않습니다.
 
+### ACP 상류 버전 모니터링
+
+저장소는 ACP 공식 protocol 저장소와 registry 전체를 매일 확인합니다. Protocol release·공개 wire version, registry agent의 추가·삭제·버전·배포 정보가 바뀌면 `automation/acp-upstream-monitor` 브랜치에서 `dev` 대상 검토 PR을 생성하거나 기존 PR을 갱신합니다. npm과 GitHub Actions의 일반 버전 업데이트는 Dependabot이 별도의 `dev` 대상 PR로 관리합니다. 보안 업데이트는 GitHub 정책에 따라 기본 브랜치인 `main`을 대상으로 합니다.
+
+```bash
+npm run monitor:check   # 변경이 있으면 보고서를 출력하고 종료 코드 2 반환
+npm run monitor:update  # 검토용 snapshot을 현재 상류 상태로 갱신
+npm run monitor:sync-dependencies  # 저장소가 직접 포함한 ACP adapter 버전 동기화
+```
+
+두 업데이트 경로는 역할이 다릅니다.
+
+- **ACP agent/adapter 버전:** 공식 registry가 지정한 고정 버전을 감지하며, 사용자가 `acp-gateway-bootstrap --update`를 실행하면 로컬 설치본과 provider 정의를 실제로 갱신합니다.
+- **ACP protocol wire version:** 새 major를 감지해 PR에 경고하지만 자동 적용하지 않습니다. 호환성 테스트 후 `src/acp-version.js`와 monitor 설정을 함께 바꿔야 합니다.
+- **Gateway npm 의존성:** Dependabot PR에서 lockfile과 CI 결과를 확인한 뒤 병합합니다.
+
+현재 runtime은 ACP wire version 1을 사용합니다. 공식 저장소의 `schema/v2`도 감지되지만, v2 지원으로 표시하거나 자동 전환하지 않습니다. Snapshot PR은 알림과 검토 시작점이며 자동 병합 또는 Gateway release를 수행하지 않습니다.
+
+예약 실행과 Dependabot 설정은 GitHub의 기본 브랜치에 존재해야 활성화됩니다. 따라서 `dev` 검증이 끝나면 monitoring workflow 자체는 `main`에 병합하고 원격 `dev` 브랜치를 유지해야 합니다. 또한 저장소의 **Settings → Actions → General → Workflow permissions**에서 GitHub Actions의 PR 생성을 허용해야 자동 PR이 생성됩니다.
+
 ## 사용 방법
 
 Installer는 발견된 AI에 `agent-delegator` skill을 함께 설치합니다. 이 skill은 사용자의 요청에서 Worker, 모델과 권한 범위를 파악하고, Gateway 세션 생성부터 작업 전달, 진행 확인, 질문·권한 처리와 결과 회수까지 안내합니다. 설치 후에는 MCP 도구 이름을 외울 필요 없이 오케스트레이터에게 자연어로 작업을 요청하면 됩니다.
 
-기본 제공되는 `agent-delegator`는 범용 사용을 위한 시작점입니다. 자주 사용하는 Worker, 기본 모델, 권한 정책, 리뷰 순서나 결과 형식이 있다면 설치된 skill을 사용자 작업 방식에 맞게 수정해 사용할 수 있습니다. 단, `acp-gateway-bootstrap --update`를 실행하면 installer가 관리하는 skill이 최신 기본본으로 다시 설치되므로, 지속적으로 유지할 변경은 저장소의 `skills/agent-delegator/SKILL.md`에 반영하거나 별도 이름의 개인 skill로 복사해 관리하세요.
+기본 제공되는 `agent-delegator`는 범용 사용을 위한 시작점입니다. 자주 사용하는 Worker, 기본 모델, 권한 정책, 리뷰 순서나 결과 형식이 있다면 설치된 skill을 사용자 작업 방식에 맞게 수정해 사용할 수 있습니다. `acp-gateway-bootstrap --update`는 설치된 skill을 건드리지 않으므로 사용자 수정이 유지됩니다. 저장소의 최신 기본본으로 되돌리고 싶을 때만 `--install-skill --force`를 명시적으로 실행하세요.
 
 예를 들어 사용자가 대화 중인 오케스트레이터 AI에 다음처럼 요청할 수 있습니다.
 

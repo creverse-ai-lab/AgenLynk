@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "supportedWireVersions": [1],
+  "watchAllRegistryAgents": true,
+  "watchedAgents": [
+    "auggie",
+    "claude-acp",
+    "codex-acp",
+    "grok-build"
+  ],
+  "managedNpmAdapters": {
+    "claude-acp": "@agentclientprotocol/claude-agent-acp"
+  },
+  "protocolRepository": "agentclientprotocol/agent-client-protocol"
+}

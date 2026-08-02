@@ -1,0 +1,49 @@
+#!/usr/bin/env node
+
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { parseInstallerArgs } from "../src/installer.js";
+import { GATEWAY_VERSION } from "../src/version.js";
+import { ACP_PROTOCOL_VERSION } from "../src/acp-version.js";
+import { compareSnapshots, validateMonitorConfig, validateSnapshot } from "./acp-upstream-monitor.js";
+
+const packageDocument = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+const monitorConfig = JSON.parse(await readFile(new URL("../config/acp-monitor.json", import.meta.url), "utf8"));
+const upstreamSnapshot = JSON.parse(await readFile(new URL("../config/acp-upstream.snapshot.json", import.meta.url), "utf8"));
+
+assert.equal(packageDocument.version, GATEWAY_VERSION, "package and Gateway versions must match");
+validateMonitorConfig(monitorConfig);
+validateSnapshot(upstreamSnapshot, monitorConfig);
+assert.deepEqual(
+  monitorConfig.supportedWireVersions,
+  [ACP_PROTOCOL_VERSION],
+  "runtime ACP protocol version and monitor config must match"
+);
+for (const [agentId, packageName] of Object.entries(monitorConfig.managedNpmAdapters)) {
+  const upstreamVersion = upstreamSnapshot.registry.agents[agentId]?.version;
+  assert.equal(
+    packageDocument.dependencies?.[packageName],
+    upstreamVersion,
+    `${packageName} must match the monitored ${agentId} version`
+  );
+}
+
+const reorderedSnapshot = structuredClone(upstreamSnapshot);
+const sampleAgent = monitorConfig.watchedAgents[0];
+const sampleDistribution = reorderedSnapshot.registry.agents[sampleAgent].distribution;
+reorderedSnapshot.registry.agents[sampleAgent].distribution = Object.fromEntries(
+  Object.entries(sampleDistribution).reverse()
+);
+assert.deepEqual(
+  compareSnapshots(upstreamSnapshot, reorderedSnapshot, monitorConfig),
+  [],
+  "distribution object key order must not create a false upstream change"
+);
+
+const install = parseInstallerArgs(["--install-all"]);
+assert.equal(install.installSkill, true, "first install must include the delegation skill");
+const update = parseInstallerArgs(["--update"]);
+assert.equal(update.installSkill, false, "updates must preserve customized skills");
+assert.equal(update.restartDaemon, true, "updates must restart the daemon");
+
+process.stdout.write("ACP Gateway CI checks passed\n");

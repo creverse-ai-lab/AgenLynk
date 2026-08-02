@@ -21,11 +21,15 @@
     "start": "node src/index.js",
     "daemon": "node src/gateway-daemon.js",
     "guide": "node src/guide.js",
-    "bootstrap": "node src/bootstrap.js"
+    "bootstrap": "node src/bootstrap.js",
+    "ci": "node scripts/ci-check.js && node scripts/acp-upstream-monitor.js --validate",
+    "monitor:check": "node scripts/acp-upstream-monitor.js",
+    "monitor:update": "node scripts/acp-upstream-monitor.js --update",
+    "monitor:sync-dependencies": "node scripts/sync-acp-dependencies.js"
   },
   "dependencies": {
-    "@agentclientprotocol/claude-agent-acp": "0.60.0",
-    "@modelcontextprotocol/sdk": "1.29.0"
+    "@agentclientprotocol/claude-agent-acp": "0.64.0",
+    "@modelcontextprotocol/sdk": "1.30.0"
   },
   "engines": {
     "node": ">=22"

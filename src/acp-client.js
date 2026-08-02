@@ -5,6 +5,7 @@ import { StringDecoder } from "node:string_decoder";
 import { BoundedUtf8Text } from "./bounded-utf8.js";
 import { readNdjson } from "./ndjson.js";
 import { GATEWAY_VERSION } from "./version.js";
+import { ACP_PROTOCOL_VERSION } from "./acp-version.js";
 
 export const PERMISSION_POLICIES = ["ask", "read_only", "auto_approve"];
 const READ_ONLY_TOOL_KINDS = new Set(["read", "search", "think", "fetch"]);
@@ -67,7 +68,7 @@ export class AcpClient {
     this.initResult = await this.request(
       "initialize",
       {
-        protocolVersion: 1,
+        protocolVersion: ACP_PROTOCOL_VERSION,
         clientInfo: { name: "acp-gateway", version: GATEWAY_VERSION },
         clientCapabilities: {
           fs: { readTextFile: true, writeTextFile: true },
