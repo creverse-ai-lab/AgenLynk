@@ -333,13 +333,24 @@ export async function runInstaller(options, dependencies = {}) {
 
   let health = { checked: false };
   if (options.installControl && options.healthCheck && !options.dryRun) {
-    const rpc = makeRpc({ token: identity.token, rootId: identity.rootId });
-    try {
-      const result = await rpc.call("setup", {}, 10_000);
-      health = { checked: true, ok: result?.ok === true && result?.gatewayVersion === GATEWAY_VERSION, version: result?.gatewayVersion };
-      if (!health.ok) throw new Error("Gateway health check returned an invalid response");
-    } finally {
-      rpc.close();
+    let result = await gatewaySetup(makeRpc, identity);
+    if (result?.ok === true && result?.gatewayVersion !== GATEWAY_VERSION && !options.restartDaemon) {
+      actions.push({
+        type: "daemon-restart",
+        reason: "version-mismatch",
+        fromVersion: result?.gatewayVersion ?? null,
+        toVersion: GATEWAY_VERSION
+      });
+      restart = {
+        requested: false,
+        automatic: true,
+        ...await restartGateway({ identity, makeRpc, socketPath: gatewaySocketPath() })
+      };
+      result = await gatewaySetup(makeRpc, identity);
+    }
+    health = { checked: true, ok: result?.ok === true && result?.gatewayVersion === GATEWAY_VERSION, version: result?.gatewayVersion };
+    if (!health.ok) {
+      throw new Error(`Gateway health check version mismatch: expected ${GATEWAY_VERSION}, received ${result?.gatewayVersion ?? "unknown"}`);
     }
   }
 
@@ -634,6 +645,15 @@ async function restartGatewayDaemon({ identity, makeRpc, socketPath }) {
     return { performed: true, wasRunning, graceful, version: setup.gatewayVersion };
   } finally {
     starter.close();
+  }
+}
+
+async function gatewaySetup(makeRpc, identity) {
+  const rpc = makeRpc({ token: identity.token, rootId: identity.rootId });
+  try {
+    return await rpc.call("setup", {}, 10_000);
+  } finally {
+    rpc.close();
   }
 }
 
