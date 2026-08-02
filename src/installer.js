@@ -23,6 +23,7 @@ const CONTROL_NAME = "agent-acp";
 const GUIDE_NAME = "agent-acp-guide";
 const DELEGATOR_SKILL_NAME = "agent-delegator";
 const MCP_TARGETS = ["codex", "claude", "grok", "auggie"];
+const FRONT_DOOR_TARGETS = new Set(["codex", "claude", "grok"]);
 const SUPPORTED_TARGETS = new Set(MCP_TARGETS);
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const bundledSkillSource = join(dirname(sourceDirectory), "skills", DELEGATOR_SKILL_NAME);
@@ -34,6 +35,7 @@ export function defaultInstallStatePath() {
 export function parseInstallerArgs(argv) {
   const options = {
     installAdapters: false,
+    installAll: false,
     installControl: false,
     installGuide: false,
     installSkill: false,
@@ -51,12 +53,14 @@ export function parseInstallerArgs(argv) {
     restartDaemon: false,
     agentAutoUpdate: null,
     agentUpdateNotifications: null,
+    frontDoor: null,
     allTargets: false,
     targets: []
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--install-all") {
+      options.installAll = true;
       options.installAdapters = true;
       options.installControl = true;
       options.installGuide = true;
@@ -99,6 +103,15 @@ export function parseInstallerArgs(argv) {
     else if (arg === "--force") options.force = true;
     else if (arg === "--skip-health-check") options.healthCheck = false;
     else if (arg === "--show-secrets") options.showSecrets = true;
+    else if (arg === "--front-door") {
+      const target = argv[++index];
+      if (!FRONT_DOOR_TARGETS.has(target)) throw new Error("--front-door requires codex, claude, or grok");
+      options.frontDoor = target;
+    } else if (arg.startsWith("--front-door=")) {
+      const target = arg.slice("--front-door=".length);
+      if (!FRONT_DOOR_TARGETS.has(target)) throw new Error("--front-door requires codex, claude, or grok");
+      options.frontDoor = target;
+    }
     else if (arg === "--agent-auto-update") {
       options.agentAutoUpdate = parseOnOff(argv[++index], arg);
       options.restartDaemon = true;
@@ -126,6 +139,8 @@ export function parseInstallerArgs(argv) {
   for (const target of options.targets) {
     if (!SUPPORTED_TARGETS.has(target)) throw new Error(`Unsupported installer target: ${target}`);
   }
+  if (options.frontDoor && !options.installAll) throw new Error("--front-door can only be used with --install-all");
+  if (options.frontDoor && options.targets.length) throw new Error("--front-door and --target cannot be combined");
   return options;
 }
 
@@ -253,7 +268,11 @@ export async function runInstaller(options, dependencies = {}) {
     ? options.targets
     : availableTargets;
   const controlTargets = options.installControl
-    ? (options.targets.length ? requestedTargets : [availableTargets.includes("codex") ? "codex" : availableTargets[0]].filter(Boolean))
+    ? (options.targets.length
+        ? requestedTargets
+        : options.installAll
+          ? [options.frontDoor ?? "codex"]
+          : [availableTargets.includes("codex") ? "codex" : availableTargets[0]].filter(Boolean))
     : [];
   const guideTargets = options.installGuide ? requestedTargets : [];
   const installedProviderIds = new Set([
@@ -413,6 +432,7 @@ export function installerHelp() {
     "  --version, -V          Print the installed ACP Gateway version",
     "  --update               Pull source, preview, update adapters/MCPs, and restart",
     "  --install-all          Install adapters, Control, Guide, and agent-delegator",
+    "  --front-door <agent>   Choose codex, claude, or grok as the install-all Control MCP",
     "  --install-adapters     Install missing ACP adapters",
     "  --discover-agents      Match installed AI CLIs with the official ACP registry",
     "  --registry-agent <id>  Install/configure one official registry agent (repeatable)",

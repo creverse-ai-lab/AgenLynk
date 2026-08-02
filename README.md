@@ -46,11 +46,12 @@ acp-gateway-bootstrap --install-all --refresh-registry
 
 이전 버전의 daemon이 남아 있으면 installer가 health 응답의 버전을 비교해 자동으로 교체한 뒤 다시 검사합니다. 따라서 `git pull`, `npm ci` 후 `--install-all --refresh-registry`를 실행하는 수동 업그레이드도 지원합니다.
 
-기본 설치에서는 Codex를 오케스트레이터로 우선 선택하고, 발견된 다른 agent에는 읽기 전용 Guide MCP를 등록합니다. 다른 agent를 오케스트레이터로 선택하려면 해당 target을 지정하세요.
+기본 `--install-all`은 Codex, Claude, Grok 중 어느 agent를 사용자 대화용 **프론트 도어**로 사용할지 질문합니다. 선택한 하나에만 오케스트레이터용 Control MCP를 등록하고, 발견된 agent 전체에는 읽기 전용 Guide MCP와 skill을 설치합니다. 비대화형 설치에서는 Codex가 기본값이며 다음처럼 명시할 수 있습니다.
 
 ```bash
-acp-gateway-bootstrap --install-all --target grok
-acp-gateway-bootstrap --install-all --target auggie
+acp-gateway-bootstrap --install-all --front-door codex
+acp-gateway-bootstrap --install-all --front-door claude
+acp-gateway-bootstrap --install-all --front-door grok
 ```
 
 여러 agent를 모두 오케스트레이터 후보로 등록하려면 `--target all`을 사용할 수 있습니다. 이 옵션은 각 agent 설정에 오케스트레이터 권한이 있는 Control MCP를 넣으므로, 신뢰하는 로컬 agent에만 사용하세요.
@@ -75,7 +76,8 @@ acp-gateway-bootstrap --update
 |---|---|
 | `--version`, `-V` | 현재 설치된 ACP Gateway 버전 확인 |
 | `--update` | 소스 pull과 내부 dry-run 후 Adapter, MCP, daemon 갱신—사용자 skill 유지 |
-| `--install-all` | Adapter, Control, Guide, skill 전체 설치 |
+| `--install-all` | Adapter, Guide, skill 전체 설치 후 프론트 도어 하나에 Control 등록 |
+| `--front-door codex\|claude\|grok` | `--install-all`의 Control MCP 대상 명시 |
 | `--install-control` | 오케스트레이터용 Control MCP만 설치 |
 | `--install-guide` | 읽기 전용 Guide MCP만 설치 |
 | `--install-skill` | 발견된 모든 AI에 `agent-delegator` skill 설치 |
@@ -94,7 +96,7 @@ Control token과 오케스트레이터 식별자(Main ID)는 `~/.acp-gateway/ins
 
 Skill은 Codex `~/.codex/skills`, Claude `~/.claude/skills`, Grok `~/.grok/skills`, Auggie `~/.augment/skills`에 설치합니다. 별도 경로가 알려지지 않은 registry provider는 공용 `~/.agents/skills`를 사용합니다. 같은 공용 경로를 사용하는 provider가 여러 개면 skill 파일은 한 번만 복사하고 installer 상태에는 각 provider를 모두 기록합니다.
 
-Control·Guide MCP 등록은 Codex, Claude, Grok, Auggie를 지원합니다. 기본 설치에서 Control은 하나의 오케스트레이터(Main)에만 등록되고 Guide와 skill은 발견된 지원 agent 전체에 설치됩니다. 특정 agent를 오케스트레이터로 사용하려면 위의 `--target` 옵션으로 해당 agent에 Control MCP를 등록해야 합니다.
+Control·Guide MCP 등록은 Codex, Claude, Grok, Auggie를 지원합니다. 기본 `--install-all`에서 Control은 사용자가 프론트 도어로 선택한 Codex·Claude·Grok 중 하나에만 등록되고, Guide와 skill은 발견된 지원 agent 전체에 설치됩니다. `--target`은 고급 수동 대상 지정 용도로 유지됩니다. Control MCP는 Gateway 전체 제어 권한이 있으므로 신뢰하는 로컬 agent에만 설치하세요.
 
 공식 registry 원본은 `https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json`이며 `~/.acp-gateway/registry.json`에 24시간 캐시합니다. 발견된 provider 실행 정의는 `~/.acp-gateway/providers.json`에 저장됩니다. `npx`·`uvx` 배포는 registry에 고정된 버전을 설치하고, binary 배포는 이미 설치된 실행 파일을 사용합니다. registry에 등록되지 않은 임의의 AI는 ACP 실행 계약을 안전하게 추론할 수 없으므로 자동 등록하지 않습니다.
 
