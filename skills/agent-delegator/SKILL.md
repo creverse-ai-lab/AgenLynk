@@ -15,12 +15,13 @@ Use the Main-only `agent-acp` MCP. Do not inject that Control MCP into worker se
    - `cwd`: the narrowest working directory needed.
    - `model`: the model requested by Main when known.
    - `permissionPolicy`: `read_only` for analysis/review, `ask` for approval-gated changes, or `auto_approve` only when the user authorized unrestricted changes within the session roots.
-3. Send a bounded task with `agent_acp_prompt`. State the expected artifact or output and validation requirement.
-4. Poll with a cursor and preserve every returned `nextCursor`.
+3. When task quality or cost depends on Worker parameters, call `agent_acp_config` with `action: list` and select only options advertised by that session. Use `action: set` before prompting to change supported model, mode, thought level, or boolean model settings. Do not invent unsupported option IDs or values.
+4. Send a bounded task with `agent_acp_prompt`. State the expected artifact or output and validation requirement.
+5. Poll with a cursor and preserve every returned `nextCursor`.
    - While running, use `waitMs` and `includeResult: false` to avoid retransmitting the cumulative response.
    - A poll wait ending is not a worker execution timeout. Continue until a terminal or Main-input status is returned.
    - Request `includeResult: true` when the turn becomes `idle`, `error`, or `cancelled`.
-5. Review the result and any artifacts yourself before accepting delegated work.
+6. Review the result and any artifacts yourself before accepting delegated work.
 
 ## Handle large results
 
@@ -45,6 +46,7 @@ Use the Main-only `agent-acp` MCP. Do not inject that Control MCP into worker se
 ## Guardrails
 
 - Keep provider choice, model choice, permission policy, and worker MCP options under Main control.
+- Treat `agent_acp_config` output as the source of truth for available parameters. Apply parameter changes only while the session is idle; process-scoped model changes require a new session.
 - Send only task-relevant repository material to an external provider.
 - Do not expose the Gateway Control token, Main root ID, or socket path to a worker.
 - Do not treat worker confidence or test claims as proof; validate according to the task's risk.

@@ -171,8 +171,10 @@ export class AcpClient {
       .finally(() => this.sessionOperationGrants.delete(sessionId));
   }
 
-  setSessionConfigOption({ sessionId, configId, value }) {
-    return this.request("session/set_config_option", { sessionId, configId, value }, 30_000);
+  setSessionConfigOption({ sessionId, configId, value, type = null }) {
+    const params = { sessionId, configId, value };
+    if (type != null) params.type = type;
+    return this.request("session/set_config_option", params, 30_000);
   }
 
   pendingSessionInput(sessionId) {

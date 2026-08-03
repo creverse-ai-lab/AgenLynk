@@ -1,4 +1,4 @@
-# ACP Gateway v1.1.0
+# ACP Gateway v1.2.0
 
 혹시 여러 AI 에이전트를 쓰고 계신가요?
 
@@ -154,10 +154,17 @@ Grok 4.5에게 현재 설계의 보안 취약점을 red-team 검토시키고, pe
 
 1. `agent_acp_setup`으로 provider 확인
 2. `agent_acp_session_open`으로 Worker 세션 생성
-3. `agent_acp_prompt`로 작업 전달
-4. `agent_acp_poll`로 이벤트와 상태 확인
-5. 필요한 경우 `agent_acp_permission` 또는 `agent_acp_answer`로 응답
-6. 완료 후 세션을 재사용하거나 `agent_acp_session`으로 종료
+3. 필요한 경우 `agent_acp_config`로 Worker가 지원하는 모델·모드·추론 수준 등의 파라미터 조회·설정
+4. `agent_acp_prompt`로 작업 전달
+5. `agent_acp_poll`로 이벤트와 상태 확인
+6. 필요한 경우 `agent_acp_permission` 또는 `agent_acp_answer`로 응답
+7. 완료 후 세션을 재사용하거나 `agent_acp_session`으로 종료
+
+### Worker 파라미터 제어
+
+`agent_acp_config`는 Worker가 ACP `configOptions`로 직접 공개한 세션 파라미터를 조회하고 변경합니다. `action: list`로 가능한 값과 현재값을 확인한 뒤, 세션이 작업 중이 아닐 때 `action: set`, `configId`, `value`를 전달합니다. ACP wire v1 기준으로 선택형 문자열과 boolean 설정을 지원하며, `model`, `mode`, `model_config`, `thought_level` 같은 category를 그대로 보존합니다.
+
+Gateway는 Worker가 공개하지 않은 `temperature`, `max_tokens` 같은 값을 임의로 만들어 전달하지 않습니다. 따라서 지원 범위는 Claude, Codex, Grok 등 각 ACP adapter가 실제로 광고하는 옵션에 따라 달라집니다. 설정 변경은 `config_changed` 세션 이벤트로 남으므로, 추후 DAG 오케스트레이터가 노드의 작업 유형·비용·품질 정책에 따라 파라미터를 선택하고 결과와 함께 추적할 수 있습니다. process 단위로 모델을 고정하는 Worker는 기존 세션에서 모델을 바꾸지 않고 새 세션을 열어야 합니다.
 
 중간 poll에서는 `includeResult: false`를 사용하면 누적 결과의 반복 전송을 줄일 수 있습니다. 최종 상태에서만 `includeResult: true`로 전체 결과를 받으면 됩니다.
 
@@ -245,6 +252,12 @@ flowchart LR
 4. **ACP 작업 전달** — prompt, 파일 작업, tool event와 중간 결과가 ACP를 통해 오갑니다.
 5. **권한·질문 처리** — Worker의 permission 요청이나 질문은 Gateway Inbox를 거쳐 오케스트레이터에게 전달되고, 그 응답이 다시 Worker로 돌아갑니다.
 6. **결과 회수·재사용** — 오케스트레이터는 MCP Task 또는 poll로 상태와 결과를 받고, 필요하면 같은 세션을 다시 호출하거나 복구합니다.
+
+## v1.2.0 변경 사항
+
+- **Worker 파라미터 제어** — `agent_acp_config`로 ACP Worker가 공개한 설정 목록과 현재값을 조회하고, 지원되는 select·boolean 값을 세션 단위로 변경할 수 있습니다.
+- **자율 오케스트레이션 기반** — 모델, 모드, 추론 수준과 모델 설정 category를 공통 형식으로 노출하고 변경 이력을 `config_changed` 이벤트로 남겨 향후 DAG 노드별 파라미터 정책에 사용할 수 있게 했습니다.
+- **안전한 동적 검증** — Worker가 광고하지 않은 옵션, 허용 목록 밖의 select 값, 잘못된 boolean 타입, 실행 중 세션의 변경을 차단합니다. process 단위 모델 변경은 새 세션을 요구합니다.
 
 ## v1.1.0 변경 사항
 

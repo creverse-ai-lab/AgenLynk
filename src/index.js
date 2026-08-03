@@ -34,6 +34,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     agent_acp_setup: "setup",
     agent_acp_session_open: "session_open",
     agent_acp_session_restore: "session_restore",
+    agent_acp_config: "config",
     agent_acp_prompt: "prompt",
     agent_acp_poll: "poll",
     agent_acp_permission: "permission",
@@ -147,6 +148,20 @@ function controlTools() {
           mcpServers: { type: "array", items: { type: "object" } }
         },
         required: ["provider", "acpSessionId", "cwd"]
+      }
+    },
+    {
+      name: "agent_acp_config",
+      description: "List or set ACP session configuration options advertised by the Worker, such as model, mode, thought level, or boolean model settings.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["list", "set"] },
+          sessionId: { type: "string" },
+          configId: { type: "string", minLength: 1 },
+          value: { oneOf: [{ type: "string" }, { type: "boolean" }] }
+        },
+        required: ["action", "sessionId"]
       }
     },
     {

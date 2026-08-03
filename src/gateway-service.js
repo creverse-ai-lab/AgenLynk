@@ -16,7 +16,7 @@ const DURABLE_EVENT_TYPES = new Set([
   "session_created", "session_restored", "session_restore_start", "session_restore_failed",
   "turn_start", "turn_end", "error", "permission_request", "permission_response",
   "elicitation_request", "elicitation_response", "cancel_requested", "orphan_cancel_requested",
-  "provider_disconnected", "session_closed", "model_changed"
+  "provider_disconnected", "session_closed", "model_changed", "config_changed"
 ]);
 
 export class GatewayService {
@@ -172,6 +172,7 @@ export class GatewayService {
       setup: () => this.setup(args),
       session_open: () => this.sessionOpen(args, context),
       session_restore: () => this.sessionRestore(args, context),
+      config: () => this.sessionConfig(args, context),
       prompt: () => this.sessionPrompt(args, context),
       poll: () => this.sessionPoll(args, context),
       permission: () => this.sessionPermission(args, context),
@@ -454,6 +455,51 @@ export class GatewayService {
       }
     }
     return { model, response: { ...response, configOptions } };
+  }
+
+  async sessionConfig(args, context) {
+    const session = requireOwnedSession(this.requireSession(args.sessionId), context);
+    if (CLOSED_STATUSES.has(session.status)) throw new Error(`Session ${session.id} is closed`);
+    const action = args.action ?? "list";
+    if (action !== "list" && action !== "set") throw new Error(`Unknown config action: ${action}`);
+    if (action === "set" && (session.promptStarting || ACTIVE_STATUSES.has(session.status))) {
+      throw new Error(`Session ${session.id} is still active`);
+    }
+    await this.ensureConnected(session, context);
+    const configOptions = session.capabilities?.configOptions ?? [];
+    if (action === "list") {
+      return { ok: true, sessionId: session.id, configOptions };
+    }
+
+    requireString(args.configId, "configId");
+    if (!Object.hasOwn(args, "value")) throw new Error("value is required for config set");
+    const option = configOptions.find((item) => item?.id === args.configId);
+    if (!option) throw new Error(`Worker does not advertise config option: ${args.configId}`);
+    const value = validateSessionConfigValue(option, args.value);
+    if (isModelOption(option) && session.client.config.modelScope === "process" && value !== session.model) {
+      throw new Error(`Provider ${session.provider} selects model per process; open a new session with model=${value}`);
+    }
+    const response = await session.client.setSessionConfigOption({
+      sessionId: session.acpSessionId,
+      configId: option.id,
+      value,
+      type: option.type === "boolean" ? "boolean" : null
+    });
+    const updatedOptions = Array.isArray(response?.configOptions) ? response.configOptions : configOptions;
+    session.capabilities = { ...session.capabilities, configOptions: updatedOptions };
+    if (isModelOption(option)) session.model = sessionModelId(updatedOptions) ?? String(value);
+    this.store.push(session, {
+      type: "config_changed",
+      configId: option.id,
+      category: option.category ?? null,
+      value
+    });
+    return {
+      ok: true,
+      sessionId: session.id,
+      changed: { configId: option.id, category: option.category ?? null, value },
+      configOptions: updatedOptions
+    };
   }
 
   async sessionPrompt(args, context) {
@@ -1207,6 +1253,28 @@ function findModelOption(configOptions) {
   return configOptions.find((option) => option?.category === "model")
     ?? configOptions.find((option) => option?.id === "model")
     ?? null;
+}
+
+function isModelOption(option) {
+  return option?.category === "model" || option?.id === "model";
+}
+
+function validateSessionConfigValue(option, value) {
+  if (option.type === "boolean") {
+    if (typeof value !== "boolean") throw new Error(`Config option ${option.id} requires a boolean value`);
+    return value;
+  }
+  if (option.type === "select") {
+    if (typeof value !== "string" || !value) throw new Error(`Config option ${option.id} requires a string value`);
+    const values = (option.options ?? []).flatMap((item) =>
+      Array.isArray(item?.options) ? item.options : [item]
+    ).map((item) => item?.value).filter((item) => typeof item === "string");
+    if (!values.includes(value)) {
+      throw new Error(`Invalid value for config option ${option.id}: ${value}; expected one of: ${values.join(", ")}`);
+    }
+    return value;
+  }
+  throw new Error(`Unsupported config option type for ${option.id}: ${option.type ?? "unknown"}`);
 }
 
 function sessionModelId(configOptions) {
