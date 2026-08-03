@@ -48,6 +48,9 @@ test("disabled agent updater reports an available update without applying it", a
 });
 
 test("binary ACP updates remain manual", () => {
+  const platform = process.platform === "win32" ? "windows" : process.platform;
+  const arch = process.arch === "arm64" ? "aarch64" : process.arch === "x64" ? "x86_64" : process.arch;
+  const target = `${platform}-${arch}`;
   const binaryRegistry = {
     version: "1.0.0",
     agents: [{
@@ -56,7 +59,7 @@ test("binary ACP updates remain manual", () => {
       version: "2.0.0",
       distribution: {
         binary: {
-          "darwin-aarch64": {
+          [target]: {
             archive: "https://example.com/agent.tar.gz",
             cmd: "agent"
           }
