@@ -28,10 +28,11 @@
     "ci": "node scripts/ci-check.js && node scripts/acp-upstream-monitor.js --validate && npm test",
     "monitor:check": "node scripts/acp-upstream-monitor.js",
     "monitor:update": "node scripts/acp-upstream-monitor.js --update",
-    "monitor:sync-dependencies": "node scripts/sync-acp-dependencies.js"
+    "monitor:sync-dependencies": "node scripts/sync-acp-dependencies.js",
+    "update:upstream": "npm run monitor:update && npm run monitor:sync-dependencies && npm run ci"
   },
   "dependencies": {
-    "@agentclientprotocol/claude-agent-acp": "0.64.1",
+    "@agentclientprotocol/claude-agent-acp": "0.64.2",
     "@modelcontextprotocol/sdk": "1.30.0"
   },
   "engines": {

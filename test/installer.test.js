@@ -41,6 +41,35 @@ test("installer update preserves user-customized skills while refreshing runtime
   assert.equal(options.restartDaemon, true);
 });
 
+test("installer update preserves the previously installed front door", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-installer-update-front-door-"));
+  const statePath = join(directory, "install.json");
+  const allProviders = providers.map((provider) => ({ ...provider, agentInstalled: true }));
+  try {
+    await writeFile(statePath, JSON.stringify({
+      version: 1,
+      identity: { token: "test-control-token-at-least-24-characters", rootId: "main-test" },
+      managedMcp: {
+        "claude:agent-acp": { agent: "claude", name: "agent-acp", kind: "control" },
+        "codex:agent-acp-guide": { agent: "codex", name: "agent-acp-guide", kind: "guide" }
+      },
+      managedSkills: {},
+      agentUpdates: { autoUpdate: true, notifications: true }
+    }), "utf8");
+    const result = await runInstaller(parseInstallerArgs(["--update", "--dry-run"]), {
+      statePath,
+      runtime,
+      detectProviders: async () => allProviders,
+      registryLoader: emptyRegistryLoader
+    });
+    assert.deepEqual(result.targets.control, ["claude"]);
+    assert.deepEqual(result.targets.guide, ["codex", "claude"]);
+    assert.deepEqual(result.targets.skill, []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("installer parses persistent ACP update policy controls", () => {
   const options = parseInstallerArgs([
     "--agent-auto-update", "off",

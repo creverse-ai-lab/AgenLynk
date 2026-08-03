@@ -11,10 +11,32 @@ export async function updateSourceCheckout(root, { run = runSourceCommand } = {}
 
   const pull = await requireSuccess(run, "git", ["pull", "--ff-only"], root, "update ACP Gateway source");
   const install = await requireSuccess(run, "npm", ["ci"], root, "install ACP Gateway dependencies");
+  const upstream = await inspectUpstream(run, root);
+  const validation = await requireSuccess(run, "npm", ["run", "ci"], root, "validate the updated ACP Gateway source");
   return {
     root,
     pull: pull.stdout.trim() || pull.stderr.trim(),
-    dependencies: install.stdout.trim() || install.stderr.trim()
+    dependencies: install.stdout.trim() || install.stderr.trim(),
+    upstream,
+    validation: validation.stdout.trim() || validation.stderr.trim()
+  };
+}
+
+async function inspectUpstream(run, root) {
+  const result = await run("npm", ["run", "monitor:check"], root);
+  const output = (result.stdout || result.stderr || "").trim();
+  if (result.code === 0 || result.code === 2) {
+    return {
+      checked: true,
+      changesDetected: result.code === 2,
+      report: output,
+      ...(result.code === 2 ? { maintainerCommand: "npm run update:upstream" } : {})
+    };
+  }
+  return {
+    checked: false,
+    changesDetected: null,
+    warning: output || `monitor:check exited ${result.code}`
   };
 }
 

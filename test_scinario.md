@@ -307,7 +307,7 @@ npm run smoke
 
 ## Latest baseline
 
-- 2026-08-03 `npm test`: 84/84 통과. `agent_acp_config`의 지원 옵션 조회, select·boolean·model 변경, 잘못된 값과 타입 거부, Main 소유권, MCP tool 노출 및 `config_changed` event를 포함한다.
+- 2026-08-03 `npm test`: 86/86 통과. `agent_acp_config`의 지원 옵션 조회, select·boolean·model 변경, 잘못된 값과 타입 거부, Main 소유권, MCP tool 노출 및 `config_changed` event를 포함한다. 수동 source update의 pull·상류 확인·전체 CI 순서와 기존 프론트 도어 보존도 검증한다.
 - 2026-07-30 `npm test`: 62/62 통과. Main model 선택, provider initialize/task/daemon 경쟁 조건, 복수 permission, cancel/close inbox, reconnect event 순서, subscription error/backpressure, reconnect lease, UTF-8 byte limit·분할 surrogate, 상태 디렉터리 재생성, symlink parent 경계와 installer identity 재사용·충돌 차단·dry-run·Main/Worker 대상 분리·skill 원자적 갱신·전체 발견 agent skill 배포·Grok/Auggie MCP 등록·health check, 공식 registry 검증·탐지·cache fallback·동적 provider 등록을 포함한다.
 - 2026-07-30 `npm run smoke`: Main이 지정한 Grok `grok-4.5`, Claude `sonnet`이 session 응답에 반영됐고 각각 `GROK_MCP_ACP_OK`, `CLAUDE_MCP_ACP_OK`, `idle`로 완료했다.
 - 2026-07-30 `npm run smoke:subagents`: Claude `sonnet`의 `Task` child와 Grok `grok-4.5`의 `spawn_subagent` child가 각각 `task.txt`를 처리했다. parent가 child 결과 `CHILD_SUM_42`를 회수해 Main에 provider별 marker를 반환했고 두 session 모두 `idle`로 완료했다.

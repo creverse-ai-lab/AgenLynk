@@ -68,14 +68,16 @@ acp-gateway-bootstrap --install-all --dry-run
 acp-gateway-bootstrap --update
 ```
 
-`--update`는 `git pull --ff-only`와 `npm ci`를 실행하고, 내부 dry-run 계획을 출력한 뒤 ACP registry와 adapter, MCP 등록을 갱신합니다. 마지막으로 실행 중인 Gateway daemon을 새 버전으로 다시 시작하고 실제 버전까지 확인합니다. 설치 상태와 Control identity는 그대로 유지됩니다. 사용자가 수정한 `agent-delegator`를 보호하기 위해 skill은 최초 `--install-all`에서만 설치하며 `--update`에서는 건드리지 않습니다. 기본 skill을 다시 설치하고 싶을 때만 `--install-skill`을 별도로 실행하세요. 로컬 소스 변경을 보호하기 위해 Git 작업 트리가 깨끗하지 않으면 update를 중단하므로 먼저 변경 사항을 commit하거나 stash해야 합니다. 소스와 직접 연결되는 `npm link`는 최초 설치 후 다시 할 필요가 없습니다.
+`--update`는 `git pull --ff-only`와 `npm ci`를 실행하고, ACP protocol·공식 registry의 상류 변경을 확인한 다음 `npm run ci`로 snapshot 검증과 전체 자동 테스트를 통과해야 다음 단계로 진행합니다. 이후 내부 dry-run 계획을 출력하고 ACP registry와 adapter, MCP 등록을 갱신합니다. 마지막으로 실행 중인 Gateway daemon을 새 버전으로 다시 시작하고 실제 버전까지 확인합니다. 설치 상태, Control identity와 최초 설치에서 선택한 프론트 도어는 그대로 유지됩니다. 상류 확인이 일시적으로 실패하면 경고를 남기되 이미 받은 소스의 로컬 검증은 계속하며, 테스트 실패는 daemon을 교체하기 전에 update 전체를 중단합니다.
+
+사용자가 수정한 `agent-delegator`를 보호하기 위해 skill은 최초 `--install-all`에서만 설치하며 `--update`에서는 건드리지 않습니다. 기본 skill을 다시 설치하고 싶을 때만 `--install-skill`을 별도로 실행하세요. 로컬 소스 변경을 보호하기 위해 Git 작업 트리가 깨끗하지 않으면 update를 중단하므로 먼저 변경 사항을 commit하거나 stash해야 합니다. 소스와 직접 연결되는 `npm link`는 최초 설치 후 다시 할 필요가 없습니다.
 
 주요 installer 옵션:
 
 | 옵션 | 설명 |
 |---|---|
 | `--version`, `-V` | 현재 설치된 ACP Gateway 버전 확인 |
-| `--update` | 소스 pull과 내부 dry-run 후 Adapter, MCP, daemon 갱신—사용자 skill 유지 |
+| `--update` | 소스 pull·상류 확인·전체 테스트·dry-run 후 Adapter, MCP, daemon 갱신—사용자 skill 유지 |
 | `--install-all` | Adapter, Guide, skill 전체 설치 후 프론트 도어 하나에 Control 등록 |
 | `--front-door codex\|claude\|grok` | `--install-all`의 Control MCP 대상 명시 |
 | `--install-control` | 오케스트레이터용 Control MCP만 설치 |
@@ -108,7 +110,10 @@ Control·Guide MCP 등록은 Codex, Claude, Grok, Auggie를 지원합니다. 기
 npm run monitor:check   # 변경이 있으면 보고서를 출력하고 종료 코드 2 반환
 npm run monitor:update  # 검토용 snapshot을 현재 상류 상태로 갱신
 npm run monitor:sync-dependencies  # 저장소가 직접 포함한 ACP adapter 버전 동기화
+npm run update:upstream  # 위 갱신과 전체 CI를 한 번에 실행하는 수동 유지보수 경로
 ```
+
+GitHub Actions의 write/PR 권한을 사용할 수 없는 저장소에서는 maintainer가 `npm run update:upstream`을 실행하면 예약 workflow가 하던 snapshot 갱신, 관리 대상 ACP adapter pin·lockfile 동기화와 전체 CI를 로컬에서 한 번에 수행할 수 있습니다. 이 명령은 커밋이나 push를 자동으로 하지 않습니다. `git diff`로 protocol·registry 변경과 테스트 결과를 검토한 뒤 `dev`에 커밋하면 됩니다. 일반 사용자의 `acp-gateway-bootstrap --update`는 저장소 파일을 임의로 수정하지 않고 상류 변경을 보고한 뒤 runtime adapter만 안전하게 갱신합니다.
 
 두 업데이트 경로는 역할이 다릅니다.
 
@@ -258,6 +263,7 @@ flowchart LR
 - **Worker 파라미터 제어** — `agent_acp_config`로 ACP Worker가 공개한 설정 목록과 현재값을 조회하고, 지원되는 select·boolean 값을 세션 단위로 변경할 수 있습니다.
 - **자율 오케스트레이션 기반** — 모델, 모드, 추론 수준과 모델 설정 category를 공통 형식으로 노출하고 변경 이력을 `config_changed` 이벤트로 남겨 향후 DAG 노드별 파라미터 정책에 사용할 수 있게 했습니다.
 - **안전한 동적 검증** — Worker가 광고하지 않은 옵션, 허용 목록 밖의 select 값, 잘못된 boolean 타입, 실행 중 세션의 변경을 차단합니다. process 단위 모델 변경은 새 세션을 요구합니다.
+- **완전한 수동 업데이트** — `--update`가 상류 확인과 전체 테스트를 daemon 교체 전에 수행하며, GitHub Actions 없이 snapshot·adapter pin을 갱신하는 `npm run update:upstream`을 추가했습니다.
 
 ## v1.1.0 변경 사항
 

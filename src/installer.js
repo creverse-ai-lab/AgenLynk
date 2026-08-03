@@ -267,12 +267,17 @@ export async function runInstaller(options, dependencies = {}) {
   const requestedTargets = options.targets.length
     ? options.targets
     : availableTargets;
+  const managedControlTargets = [...new Set(Object.values(state?.managedMcp ?? {})
+    .filter((item) => item?.kind === "control" && availableTargets.includes(item.agent))
+    .map((item) => item.agent))];
   const controlTargets = options.installControl
     ? (options.targets.length
         ? requestedTargets
         : options.installAll
           ? [options.frontDoor ?? "codex"]
-          : [availableTargets.includes("codex") ? "codex" : availableTargets[0]].filter(Boolean))
+          : options.update && managedControlTargets.length
+            ? managedControlTargets
+            : [availableTargets.includes("codex") ? "codex" : availableTargets[0]].filter(Boolean))
     : [];
   const guideTargets = options.installGuide ? requestedTargets : [];
   const installedProviderIds = new Set([
