@@ -569,7 +569,7 @@ function mcpSpec(agent, kind, identity) {
     agent, kind, name, command: "claude",
     getArgs: ["mcp", "get", name],
     removeArgs: ["mcp", "remove", "--scope", "user", name],
-    args: ["mcp", "add", "--scope", "user", ...envArgs, name, "--", serverCommand, ...serverArgs]
+    args: ["mcp", "add", "--scope", "user", name, ...envArgs, "--", serverCommand, ...serverArgs]
   };
 }
 

@@ -479,3 +479,39 @@ test("installer registers Control and Guide MCPs for Grok and Auggie", async () 
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("installer places the Claude MCP name before variadic environment arguments", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-installer-claude-mcp-"));
+  const statePath = join(directory, "install.json");
+  const calls = [];
+  const claudeProviders = providers.map((provider) => ({
+    ...provider,
+    agentInstalled: provider.id === "claude"
+  }));
+  try {
+    await runInstaller(
+      parseInstallerArgs(["--install-control", "--target", "claude", "--skip-health-check"]),
+      {
+        statePath,
+        runtime,
+        detectProviders: async () => claudeProviders,
+        runCommand: async (command, args) => {
+          calls.push([command, ...args]);
+          if (args.slice(0, 2).join(" ") === "mcp get") {
+            return { code: 1, stdout: "", stderr: "No MCP server named agent-acp found" };
+          }
+          return { code: 0, stdout: "", stderr: "" };
+        }
+      }
+    );
+    const add = calls.find((call) => call[0] === "claude" && call[1] === "mcp" && call[2] === "add");
+    assert.ok(add);
+    assert.deepEqual(add.slice(1, 6), ["mcp", "add", "--scope", "user", "agent-acp"]);
+    assert.ok(add.indexOf("agent-acp") < add.indexOf("-e"));
+    assert.match(add[add.indexOf("-e") + 1], /^ACP_GATEWAY_CONTROL_TOKEN=.+/);
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    assert.ok(add.includes(`ACP_GATEWAY_ROOT_ID=${state.identity.rootId}`));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
