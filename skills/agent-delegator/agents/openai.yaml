@@ -1,7 +1,7 @@
 interface:
   display_name: "Agent Delegator"
-  short_description: "Delegate and resume work through the local ACP Gateway"
-  default_prompt: "Use $agent-delegator to delegate this task through the local ACP Gateway."
+  short_description: "Configure and coordinate workers through ACP Gateway"
+  default_prompt: "Use $agent-delegator to configure, delegate, and monitor this work through the local ACP Gateway."
 dependencies:
   tools:
     - type: "mcp"
