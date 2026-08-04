@@ -116,6 +116,39 @@ rl.on("line", (line) => {
       send({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn" } });
       return;
     }
+    if (prompt === "tool-events") {
+      send({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: message.params.sessionId,
+          update: { sessionUpdate: "tool_call", toolCallId: "tool-small", title: "Read file", kind: "read" }
+        }
+      });
+      send({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: message.params.sessionId,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "tool-large",
+            status: "completed",
+            rawOutput: "y".repeat(8_000)
+          }
+        }
+      });
+      send({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: message.params.sessionId,
+          update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "TOOLS DONE" } }
+        }
+      });
+      send({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn" } });
+      return;
+    }
     send({
       jsonrpc: "2.0",
       method: "session/update",

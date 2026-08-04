@@ -188,8 +188,8 @@ function controlTools() {
           cursor: { type: "integer", minimum: 0 },
           waitMs: { type: "integer", minimum: 0, maximum: 120000 },
           includeThoughts: { type: "boolean" },
-          includeToolEvents: { type: "boolean" },
-          includeResult: { type: "boolean", description: "Include the cumulative result object. Defaults to true." },
+          includeToolEvents: { type: "boolean", description: "Deliver tool_call events. Defaults to false." },
+          includeResult: { type: "boolean", description: "Include the cumulative result object. Defaults to true only after the turn has finished; pass true to include it while the turn is still active." },
           maxEvents: { type: "integer", minimum: 1, maximum: 1000 }
         },
         required: ["sessionId"]

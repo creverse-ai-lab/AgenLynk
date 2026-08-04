@@ -110,6 +110,62 @@ test("Gateway poll omits the cumulative result object when includeResult is fals
   }
 });
 
+test("Gateway poll withholds the cumulative result while the turn is active", async () => {
+  const makeClient = (_provider, options) =>
+    new AcpClient({ provider: "mock", command: process.execPath, args: [mockAgent], permissionPolicy: "ask" }, options);
+  const service = new GatewayService({ createClient: makeClient });
+  try {
+    const opened = await service.call("session_open", { provider: "claude", cwd: process.cwd(), permissionPolicy: "ask" }, { rootId: "main-a" });
+    await service.call("prompt", { sessionId: opened.sessionId, prompt: "go" }, { rootId: "main-a" });
+    const waiting = await waitForStatus(service, opened.sessionId, "waiting_permission");
+    assert.equal(Object.hasOwn(waiting, "result"), false);
+    const explicit = await service.call(
+      "poll",
+      { sessionId: opened.sessionId, cursor: 0, includeResult: true },
+      { rootId: "main-a" }
+    );
+    assert.equal(explicit.result.text, "READY ");
+    const request = waiting.events.find((event) => event.type === "permission_request")
+      ?? explicit.events.find((event) => event.type === "permission_request");
+    await service.call(
+      "permission",
+      { sessionId: opened.sessionId, requestId: request.requestId, optionId: "allow-once" },
+      { rootId: "main-a" }
+    );
+    const done = await waitForIdle(service, opened.sessionId);
+    assert.equal(done.result.text, "READY DONE");
+  } finally {
+    await service.shutdown().catch(() => {});
+  }
+});
+
+test("Gateway poll excludes tool_call events unless requested and caps oversized event data", async () => {
+  const makeClient = (_provider, options) =>
+    new AcpClient({ provider: "mock", command: process.execPath, args: [mockAgent], permissionPolicy: "read_only" }, options);
+  const service = new GatewayService({ createClient: makeClient });
+  try {
+    const opened = await service.call("session_open", { provider: "claude", cwd: process.cwd(), permissionPolicy: "read_only" }, { rootId: "main-a" });
+    await service.call("prompt", { sessionId: opened.sessionId, prompt: "tool-events" }, { rootId: "main-a" });
+    await waitForIdle(service, opened.sessionId);
+    const withoutTools = await service.call("poll", { sessionId: opened.sessionId, cursor: 0 }, { rootId: "main-a" });
+    assert.equal(withoutTools.events.some((event) => event.type.startsWith("tool_call")), false);
+    const withTools = await service.call(
+      "poll",
+      { sessionId: opened.sessionId, cursor: 0, includeToolEvents: true },
+      { rootId: "main-a" }
+    );
+    const small = withTools.events.find((event) => event.type === "tool_call");
+    assert.equal(small.data.toolCallId, "tool-small");
+    assert.equal(small.dataTruncated, undefined);
+    const large = withTools.events.find((event) => event.type === "tool_call_update");
+    assert.equal(large.dataTruncated, true);
+    assert.equal(Object.hasOwn(large, "data"), false);
+    assert.ok(large.text.length <= 4000);
+  } finally {
+    await service.shutdown().catch(() => {});
+  }
+});
+
 test("Gateway poll returns a complete artifact for an oversized worker result", async () => {
   const directory = await mkdtemp(join(tmpdir(), "acp-gateway-artifact-"));
   const makeClient = (_provider, options) =>

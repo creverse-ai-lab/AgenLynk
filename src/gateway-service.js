@@ -659,16 +659,20 @@ export class GatewayService {
     const window = session.events.filter((event) => event.i >= effectiveCursor).slice(0, maxEvents);
     const events = window.filter((event) => {
       if (args.includeThoughts !== true && event.type === "agent_thought_chunk") return false;
-      if (args.includeToolEvents === false && event.type.startsWith("tool_call")) return false;
+      if (args.includeToolEvents !== true && event.type.startsWith("tool_call")) return false;
       return true;
     });
+    // The result buffer is cumulative; re-sending it on every poll of a running
+    // turn multiplies the caller's context cost, so it is opt-in until the turn ends.
+    const includeResult = args.includeResult === true
+      || (args.includeResult !== false && !ACTIVE_STATUSES.has(session.status));
     return {
       ok: true,
       ...publicSession(session),
       nextCursor: window.length ? window.at(-1).i + 1 : effectiveCursor,
       cursorTruncated: cursor < firstIndex,
       events,
-      ...(args.includeResult === false ? {} : {
+      ...(!includeResult ? {} : {
         result: {
           text: session.resultText,
           artifact: session.resultArtifact ?? null,
@@ -837,10 +841,11 @@ export class GatewayService {
       this.store.push(session, { type, data: update });
       return;
     }
+    const serialized = JSON.stringify(update);
     this.store.push(session, {
       type: String(type),
-      text: JSON.stringify(update).slice(0, 4000),
-      data: update
+      text: serialized.slice(0, 4000),
+      ...(serialized.length > 4000 ? { dataTruncated: true } : { data: update })
     });
   }
 
