@@ -10,6 +10,12 @@ import { publicSession, SessionStore } from "./sessions.js";
 import { GATEWAY_VERSION } from "./version.js";
 
 const ACTIVE_STATUSES = new Set(["running", "waiting_permission", "waiting_input", "cancelling", "restoring"]);
+// Bookkeeping updates that carry no worker work; they must not close a
+// message segment, or a trailing one would erase the final answer.
+const NOISE_UPDATE_TYPES = new Set([
+  "usage_update", "session_info_update", "available_commands_update",
+  "config_option_update", "current_mode_update", "user_message_chunk"
+]);
 const CLOSED_STATUSES = new Set(["closed"]);
 const CONTROL_SERVER_PATTERN = /(?:acp-gateway-control|acp-mcp-bridge|gateway-daemon|control-mcp)/i;
 const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "cancelled"]);
@@ -25,6 +31,7 @@ export class GatewayService {
     statePath,
     maxEvents = 200,
     maxTextBytes = 1_000_000,
+    maxInlineResultBytes = 64 * 1024,
     maxArtifactBytes = 100 * 1024 * 1024,
     maxArtifactTotalBytes = 512 * 1024 * 1024,
     maxTerminalsPerSession = 16,
@@ -64,6 +71,7 @@ export class GatewayService {
     this.resourceLimits = {
       maxEvents,
       maxTextBytes,
+      maxInlineResultBytes,
       maxArtifactBytes,
       maxArtifactTotalBytes,
       maxTerminalsPerSession,
@@ -83,6 +91,7 @@ export class GatewayService {
     this.store = new SessionStore({
       maxEvents,
       maxTextBytes,
+      maxInlineResultBytes,
       artifactStore: this.artifactStore,
       onChange: (_session, event) => {
         if (!event || DURABLE_EVENT_TYPES.has(event.type)) this.schedulePersist();
@@ -218,7 +227,8 @@ export class GatewayService {
       watchAll: requested == null,
       sessionIds: new Set(sessions.map((session) => session.id)),
       includeThoughts: args.includeThoughts === true,
-      includeToolEvents: args.includeToolEvents !== false,
+      // Same default as poll: tool events are opt-in on every delivery channel.
+      includeToolEvents: args.includeToolEvents === true,
       emit
     };
     this.subscriptions.set(subscriptionId, subscription);
@@ -658,16 +668,16 @@ export class GatewayService {
 
   async sessionPoll(args, context) {
     const session = requireOwnedSession(this.requireSession(args.sessionId), context);
-    const cursor = Math.max(0, Number(args.cursor ?? 0));
-    const waitMs = Math.min(120_000, Math.max(0, Number(args.waitMs ?? 0)));
-    const maxEvents = Math.min(1000, Math.max(1, Number(args.maxEvents ?? 200)));
-    const toCursor = args.toCursor == null ? Infinity : Math.max(0, Number(args.toCursor));
-    const eventTypes = validateEventTypes(args.eventTypes);
+    const cursor = requireNonNegativeNumber(args.cursor, "cursor", 0);
+    const waitMs = Math.min(120_000, requireNonNegativeNumber(args.waitMs, "waitMs", 0));
+    const maxEvents = Math.min(1000, Math.max(1, requireNonNegativeNumber(args.maxEvents, "maxEvents", 200)));
+    const toCursor = args.toCursor == null ? Infinity : requireNonNegativeNumber(args.toCursor, "toCursor");
+    const matchesEventType = compileEventTypes(args.eventTypes);
     const firstIndex = session.events[0]?.i ?? session.eventSequence;
     const effectiveCursor = Math.max(cursor, firstIndex);
     const deliverable = (event) => {
       if (event.i < effectiveCursor || event.i >= toCursor) return false;
-      if (eventTypes) return eventTypes.some((type) => event.type === type || event.type.startsWith(type));
+      if (matchesEventType) return matchesEventType(event.type);
       if (args.includeThoughts !== true && event.type === "agent_thought_chunk") return false;
       if (args.includeToolEvents !== true && event.type.startsWith("tool_call")) return false;
       return true;
@@ -694,6 +704,9 @@ export class GatewayService {
       nextCursor: window.length ? window.at(-1).i + 1 : effectiveCursor,
       cursorTruncated: cursor < firstIndex,
       events,
+      // The cursor advances over filtered-out events too; this says how many,
+      // so an empty poll with a moving cursor is legible.
+      filteredCount: window.length - events.length,
       ...(!includeResult ? {} : {
         result: {
           // After the turn ends, text carries only the final message segment;
@@ -717,9 +730,11 @@ export class GatewayService {
     metrics.pollResponses += 1;
     metrics.pollBytes += Buffer.byteLength(JSON.stringify(response));
     if (response.result) metrics.resultBytes += Buffer.byteLength(JSON.stringify(response.result));
-    for (const event of response.events) {
-      metrics.eventBytes += Buffer.byteLength(JSON.stringify(event));
-      metrics.eventsByType[event.type] = (metrics.eventsByType[event.type] ?? 0) + 1;
+    if (response.events.length) {
+      metrics.eventBytes += Buffer.byteLength(JSON.stringify(response.events));
+      for (const event of response.events) {
+        metrics.eventsByType[event.type] = (metrics.eventsByType[event.type] ?? 0) + 1;
+      }
     }
   }
 
@@ -785,7 +800,9 @@ export class GatewayService {
         ...(args.includeTranscript === true ? { resultText: session.resultText } : {}),
         transcriptBytes: Buffer.byteLength(session.resultText),
         finalResultText: session.resultFinalText ?? null,
-        events: args.includeEvents ? session.events : undefined
+        // Raw event dumps drop the unbounded data field; the capped text
+        // preview and dataArtifact pointers stay.
+        events: args.includeEvents ? session.events.map(({ data, ...rest }) => rest) : undefined
       };
     }
     if (args.action === "close") {
@@ -853,7 +870,7 @@ export class GatewayService {
       this.store.push(session, { type, text });
       return;
     }
-    this.store.markSegmentBoundary(session, String(type));
+    if (!NOISE_UPDATE_TYPES.has(type)) this.store.markSegmentBoundary(session, String(type));
     if (type === "permission_request") {
       session.status = "waiting_permission";
       this.store.push(session, {
@@ -1166,7 +1183,13 @@ export class GatewayService {
           sessionId: session.id,
           turnId: session.turnId,
           status: "cancelled",
-          result: { text: session.resultText, stopReason: "cancelled" }
+          result: {
+            text: session.resultFinalText ?? session.resultText,
+            transcriptBytes: Buffer.byteLength(session.resultText),
+            artifact: session.resultArtifact ?? null,
+            ...(session.resultFinalArtifact ? { textArtifact: session.resultFinalArtifact } : {}),
+            stopReason: "cancelled"
+          }
         });
         changed = true;
       }
@@ -1430,13 +1453,29 @@ function requireString(value, name) {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${name} is required`);
 }
 
-function validateEventTypes(value) {
+function requireNonNegativeNumber(value, name, fallback) {
+  if (value == null) {
+    if (fallback === undefined) throw new Error(`${name} is required`);
+    return fallback;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`${name} must be a non-negative number`);
+  return parsed;
+}
+
+// Entries match exactly; a trailing * opts into prefix matching ("tool_call*").
+// Exact-by-default keeps a short entry from silently widening the evidence set.
+function compileEventTypes(value) {
   if (value == null) return null;
   if (!Array.isArray(value) || value.length === 0
     || value.some((item) => typeof item !== "string" || !item.trim())) {
     throw new Error("eventTypes must be a non-empty array of strings");
   }
-  return value;
+  const matchers = value.map((entry) => entry.endsWith("*")
+    ? { prefix: entry.slice(0, -1) }
+    : { exact: entry });
+  return (type) => matchers.some((matcher) =>
+    matcher.exact != null ? type === matcher.exact : type.startsWith(matcher.prefix));
 }
 
 function isExpired(timestamp, ttl, now) {

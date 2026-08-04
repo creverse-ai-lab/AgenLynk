@@ -209,6 +209,69 @@ test("Gateway separates the final answer from narration segments", async () => {
   }
 });
 
+test("Gateway keeps every narration part when a multi-segment turn ends on tool work", async () => {
+  const makeClient = (_provider, options) =>
+    new AcpClient({ provider: "mock", command: process.execPath, args: [mockAgent], permissionPolicy: "read_only" }, options);
+  const service = new GatewayService({ createClient: makeClient });
+  try {
+    const opened = await service.call("session_open", { provider: "claude", cwd: process.cwd(), permissionPolicy: "read_only" }, { rootId: "main-a" });
+    await service.call("prompt", { sessionId: opened.sessionId, prompt: "multi-narration-tool-end" }, { rootId: "main-a" });
+    const done = await waitForIdle(service, opened.sessionId);
+    assert.equal(done.result.text, "Part A important. Part B progress.");
+    const inspected = await service.call(
+      "poll",
+      { sessionId: opened.sessionId, cursor: 999_999, includeInspection: true },
+      { rootId: "main-a" }
+    );
+    assert.deepEqual(
+      inspected.result.inspection.map((segment) => segment.text),
+      ["Part A important. ", "Part B progress."]
+    );
+  } finally {
+    await service.shutdown().catch(() => {});
+  }
+});
+
+test("Gateway caps inline finals and points mid-sized narration at artifacts", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-gateway-inline-cap-"));
+  const service = new GatewayService({
+    gcIntervalMs: 0,
+    maxInlineResultBytes: 64,
+    artifactRoot: join(directory, "artifacts")
+  });
+  try {
+    const session = service.store.create({
+      provider: "mock", acpSessionId: "cap-test", cwd: "/", ownerRootId: "main-a",
+      permissionPolicy: "ask", turnId: "turn-1"
+    });
+    session.status = "running";
+    const narration = `narration ${"n".repeat(5_000)}`;
+    service.handleUpdate(session, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: narration } });
+    service.handleUpdate(session, { sessionUpdate: "tool_call", toolCallId: "tool-x", title: "Read", kind: "read" });
+    const finalText = `final ${"f".repeat(200)}`;
+    service.handleUpdate(session, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: finalText } });
+    session.status = "idle";
+    session.stopReason = "end_turn";
+    service.store.finalizeResult(session);
+    const poll = await service.call(
+      "poll",
+      { sessionId: session.id, cursor: 999_999, includeInspection: true },
+      { rootId: "main-a" }
+    );
+    assert.ok(Buffer.byteLength(poll.result.text) <= 64);
+    assert.equal(poll.result.textArtifact.complete, true);
+    assert.equal(await readFile(poll.result.textArtifact.path, "utf8"), finalText);
+    const segment = poll.result.inspection[0];
+    assert.equal(segment.truncated, true);
+    assert.ok(Buffer.byteLength(segment.text) <= 4000);
+    assert.equal(segment.artifact.complete, true);
+    assert.equal(await readFile(segment.artifact.path, "utf8"), narration);
+  } finally {
+    await service.shutdown().catch(() => {});
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Gateway falls back to the transcript when a turn ends without a final message segment", async () => {
   const makeClient = (_provider, options) =>
     new AcpClient({ provider: "mock", command: process.execPath, args: [mockAgent], permissionPolicy: "read_only" }, options);
@@ -285,19 +348,51 @@ test("Gateway poll supports bounded retrospective reads by cursor range and even
     const opened = await service.call("session_open", { provider: "claude", cwd: process.cwd(), permissionPolicy: "read_only" }, { rootId: "main-a" });
     await service.call("prompt", { sessionId: opened.sessionId, prompt: "tool-events" }, { rootId: "main-a" });
     const done = await waitForIdle(service, opened.sessionId);
-    const evidence = await service.call(
+    const exact = await service.call(
       "poll",
       { sessionId: opened.sessionId, cursor: 0, toCursor: done.nextCursor, eventTypes: ["tool_call"], waitMs: 5_000 },
+      { rootId: "main-a" }
+    );
+    assert.deepEqual(exact.events.map((event) => event.type), ["tool_call"]);
+    const evidence = await service.call(
+      "poll",
+      { sessionId: opened.sessionId, cursor: 0, toCursor: done.nextCursor, eventTypes: ["tool_call*"] },
       { rootId: "main-a" }
     );
     assert.deepEqual(
       evidence.events.map((event) => event.type),
       ["tool_call", "tool_call_update"]
     );
+    assert.ok(evidence.filteredCount > 0);
     await assert.rejects(
       service.call("poll", { sessionId: opened.sessionId, eventTypes: [] }, { rootId: "main-a" }),
       /eventTypes must be/
     );
+    await assert.rejects(
+      service.call("poll", { sessionId: opened.sessionId, toCursor: "nope" }, { rootId: "main-a" }),
+      /toCursor must be/
+    );
+    await assert.rejects(
+      service.call("poll", { sessionId: opened.sessionId, cursor: "NaN" }, { rootId: "main-a" }),
+      /cursor must be/
+    );
+    const detail = await service.call(
+      "session",
+      { action: "get", sessionId: opened.sessionId, includeEvents: true },
+      { rootId: "main-a" }
+    );
+    assert.ok(detail.events.length > 0);
+    assert.equal(detail.events.some((event) => Object.hasOwn(event, "data")), false);
+    const replay = service.subscribe({ sessionIds: [opened.sessionId] }, { rootId: "main-a" }, () => {});
+    assert.equal(replay.events.some((event) => event.type.startsWith("tool_call")), false);
+    service.unsubscribe(replay.subscriptionId, { rootId: "main-a" });
+    const replayWithTools = service.subscribe(
+      { sessionIds: [opened.sessionId], includeToolEvents: true },
+      { rootId: "main-a" },
+      () => {}
+    );
+    assert.equal(replayWithTools.events.some((event) => event.type.startsWith("tool_call")), true);
+    service.unsubscribe(replayWithTools.subscriptionId, { rootId: "main-a" });
     const metrics = (await service.call("setup", {}, { rootId: "main-a" })).metrics;
     assert.ok(metrics.pollResponses > 0);
     assert.ok(metrics.pollBytes > 0);

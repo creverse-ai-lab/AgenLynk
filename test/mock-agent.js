@@ -172,6 +172,23 @@ rl.on("line", (line) => {
       send({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn" } });
       return;
     }
+    if (prompt === "multi-narration-tool-end") {
+      const updates = [
+        { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Part A important. " } },
+        { sessionUpdate: "tool_call", toolCallId: "tool-m1", title: "Read file", kind: "read" },
+        { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Part B progress." } },
+        { sessionUpdate: "tool_call", toolCallId: "tool-m2", title: "Write file", kind: "edit" }
+      ];
+      for (const update of updates) {
+        send({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: { sessionId: message.params.sessionId, update }
+        });
+      }
+      send({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn" } });
+      return;
+    }
     if (prompt === "tool-then-end") {
       send({
         jsonrpc: "2.0",

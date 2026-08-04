@@ -84,6 +84,18 @@ Apply model rules precisely:
 - Pin only when retention cleanup must not unload or delete the session. Unpin it when that need ends.
 - Close disposable idle sessions explicitly. Use `clean` for expired or terminal owned sessions, not as a substitute for closing an idle session.
 
+## Where each result lives
+
+| Needed | Where |
+|---|---|
+| Final answer | `agent_acp_poll` / `task_result` → `result.text`; full copy at `result.textArtifact` when the inline text was capped |
+| Intermediate narration | poll `includeInspection: true` (per-segment 4KB preview + `artifact` pointer when larger) |
+| Full narrated transcript | `agent_acp_session` `get` + `includeTranscript: true`; `transcriptBytes` always reports its size |
+| Tool evidence | poll `includeToolEvents: true` live, or `cursor`/`toCursor` + `eventTypes` retrospectively |
+| Oversized tool payload | the event's `dataArtifact` path |
+
+A poll's `nextCursor` advances over filtered-out events; `filteredCount` reports how many were withheld, so an empty `events` array with a moving cursor is expected behavior, not loss.
+
 ## Handle large results
 
 - When a result is likely to be large and writes are allowed, ask the worker to write the complete deliverable inside `cwd` and return a concise final answer plus its absolute path. Do not request file output in `read_only` mode.

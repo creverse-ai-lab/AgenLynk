@@ -4,13 +4,31 @@ import { BoundedUtf8Text, utf8ByteHead } from "./bounded-utf8.js";
 const textAccumulators = new WeakMap();
 
 export class SessionStore {
-  constructor({ maxEvents = 200, maxTextBytes = 1_000_000, artifactStore = null, onChange = null, onEvent = null } = {}) {
+  constructor({
+    maxEvents = 200,
+    maxTextBytes = 1_000_000,
+    maxInlineResultBytes = 64 * 1024,
+    artifactStore = null,
+    onChange = null,
+    onEvent = null
+  } = {}) {
     this.sessions = new Map();
     this.maxEvents = maxEvents;
     this.maxTextBytes = maxTextBytes;
+    this.maxInlineResultBytes = maxInlineResultBytes;
     this.artifactStore = artifactStore;
     this.onChange = onChange;
     this.onEvent = onEvent;
+  }
+
+  // Writes complete text to a disk artifact so a capped inline copy always has
+  // a pointer to the full data.
+  spillText(sessionId, kind, text) {
+    const writer = this.artifactStore?.create(sessionId, kind);
+    if (!writer) return null;
+    writer.append(text);
+    writer.finalize();
+    return writer.metadata();
   }
 
   create(fields) {
@@ -51,7 +69,6 @@ export class SessionStore {
       thoughtBuffer,
       segmentBuffer,
       inspection: [],
-      lastClosedSegment: null,
       get resultWriter() { return resultWriter; },
       // Closes the spill writer for the current segment (if one started) and
       // returns its metadata, so the full segment stays readable on disk.
@@ -80,7 +97,6 @@ export class SessionStore {
           state.closeSegmentWriter(null);
           segmentBuffer.reset(value);
           state.inspection.length = 0;
-          state.lastClosedSegment = null;
           session.resultFinalText = null;
           session.resultFinalArtifact = null;
           session.resultInspection = [];
@@ -108,49 +124,56 @@ export class SessionStore {
     state?.segmentBuffer.append(text);
   }
 
-  // Any non-message update (tool call, permission, plan, ...) closes the current
-  // message segment: the text before it is narration, not the final answer.
+  // A meaningful non-message update (tool call, permission, plan, ...) closes
+  // the current message segment: the text before it is narration, not the
+  // final answer. Noise updates (usage, session info) must not reach here.
   markSegmentBoundary(session, boundary) {
     const state = textAccumulators.get(session);
     if (!state) return;
     const text = state.segmentBuffer.toString();
-    const artifact = state.closeSegmentWriter(text.trim() ? text : null);
+    let artifact = state.closeSegmentWriter(text.trim() ? text : null);
     if (text.trim() || artifact) {
       const bytes = artifact?.bytes ?? Buffer.byteLength(text);
-      const entry = {
+      if (!artifact && bytes > 4000) {
+        // Keep the capped preview recoverable: mid-sized segments get a disk
+        // pointer too, not only the ones that overflowed the memory bound.
+        artifact = this.spillText(session.id, "narration", text);
+      }
+      state.inspection.push({
         text: utf8ByteHead(text, 4000),
         bytes,
         truncated: bytes > 4000 || artifact != null,
         ...(artifact ? { artifact } : {}),
         boundary
-      };
-      state.inspection.push(entry);
+      });
       if (state.inspection.length > 32) state.inspection.splice(0, state.inspection.length - 32);
-      state.lastClosedSegment = { text, artifact: artifact ?? null, entry };
     }
     state.segmentBuffer.reset("");
+  }
+
+  // Bounds the inline copy of a final result; oversized text goes to disk in
+  // full and the response carries the head plus the pointer.
+  #capFinal(session, text, artifact) {
+    if (Buffer.byteLength(text) <= this.maxInlineResultBytes) {
+      return { text, artifact: artifact ?? null };
+    }
+    return {
+      text: utf8ByteHead(text, this.maxInlineResultBytes),
+      artifact: artifact ?? this.spillText(session.id, "final", text)
+    };
   }
 
   finalizeResult(session) {
     const state = textAccumulators.get(session);
     if (state) {
       const finalText = state.segmentBuffer.toString();
-      if (finalText.trim()) {
-        session.resultFinalArtifact = state.closeSegmentWriter(finalText);
-        session.resultFinalText = finalText;
-      } else if (state.lastClosedSegment) {
-        // A trailing non-message update (usage, session info, ...) closed the
-        // final segment; the answer is the last non-empty segment, not the
-        // whole narrated transcript.
-        state.closeSegmentWriter(null);
-        session.resultFinalText = state.lastClosedSegment.text;
-        session.resultFinalArtifact = state.lastClosedSegment.artifact;
-        if (state.inspection.at(-1) === state.lastClosedSegment.entry) state.inspection.pop();
-      } else {
-        state.closeSegmentWriter(null);
-        session.resultFinalText = state.resultBuffer.toString();
-        session.resultFinalArtifact = null;
-      }
+      const capped = finalText.trim()
+        ? this.#capFinal(session, finalText, state.closeSegmentWriter(finalText))
+        // The turn ended on a boundary (tool work after the last message), so
+        // no single segment is the answer; fall back to the whole transcript.
+        : (state.closeSegmentWriter(null), this.#capFinal(session, state.resultBuffer.toString(), null));
+      session.resultFinalText = capped.text;
+      session.resultFinalArtifact = capped.artifact;
       session.resultInspection = [...state.inspection];
     }
     const writer = state?.resultWriter;
