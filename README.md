@@ -260,7 +260,9 @@ flowchart LR
 
 ## v1.3.0 변경 사항
 
-- **Poll 기본값 절약형 전환** — 턴이 진행 중일 때 누적 `result`를 반복 전송하지 않고 종료 후에만 포함하며, `tool_call*` 이벤트는 poll과 subscribe 모두 `includeToolEvents: true`로 요청할 때만 전달합니다. 오케스트레이터 컨텍스트로 들어가는 턴당 전송량이 실측 기준 약 84% 감소합니다.
+v1.2.x 대비 Worker 위임 턴 1회당 오케스트레이터로 유입되는 토큰 사용량이 실측 기준 **최대 87% 감소**합니다(동일 시나리오 재생 벤치마크, 전체 턴 기준 약 84~87%). 누적 결과 재전송과 tool 페이로드 이중 전달을 기본 경로에서 제거한 결과이며, 절감치는 `agent_acp_setup`의 `metrics`로 직접 확인할 수 있습니다.
+
+- **Poll 기본값 절약형 전환** — 턴이 진행 중일 때 누적 `result`를 반복 전송하지 않고 종료 후에만 포함하며, `tool_call*` 이벤트는 poll과 subscribe 모두 `includeToolEvents: true`로 요청할 때만 전달합니다.
 - **결과 모델 분리** — Worker 턴의 누적 transcript에서 최종 답변을 분리합니다. `result.text`는 마지막 작업 경계(`tool_call` 시작, permission, elicitation) 이후의 메시지 텍스트만 담고, 진행 narration은 `includeInspection: true`(세그먼트별 4KB 미리보기 + artifact 포인터, `inspectionDropped` 카운트)로, 전체 transcript는 `agent_acp_session` `get`의 `includeTranscript: true`로만 조회합니다. 진행 업데이트(`tool_call_update`)·thought·usage 등은 경계를 만들지 않아 답변을 자르거나 지울 수 없으며, 최종 세그먼트가 비면 전체 transcript로 안전하게 폴백합니다.
 - **Cap-and-point 전달** — 상한에 걸리는 모든 페이로드가 정보 손실 없이 디스크 포인터를 갖습니다. 4KB(UTF-8 byte 기준)를 넘는 tool 이벤트 `data`·permission `toolCall`·elicitation schema·메시지 청크 사본은 잘린 미리보기와 함께 `dataArtifact`로, 64KB(`maxInlineResultBytes`)를 넘는 최종 답변은 `textArtifact`로 스필됩니다. 응답용 Inbox 레코드는 전문을 유지합니다.
 - **Poll 조회 표면 확장** — `toCursor`와 `eventTypes`(정확 일치, 후행 `*`만 접두어)로 보존된 이벤트 이력을 대기 없이 범위 조회할 수 있고, `filteredCount`로 커서가 건너뛴 이벤트 수를 확인합니다. 대기는 호출자가 실제로 받을 이벤트나 상태 변화가 있을 때만 깨어나며, 숫자 인자는 음수·NaN·소수를 명시적으로 거부합니다.
