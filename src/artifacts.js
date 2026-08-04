@@ -27,12 +27,13 @@ export class ArtifactStore {
     return new ArtifactWriter(this, sessionId, kind);
   }
 
-  prune(retentionMs, now = Date.now()) {
+  prune(retentionMs, now = Date.now(), keepPaths = null) {
     if (retentionMs < 0) return 0;
     let removed = 0;
     for (const entry of safeEntries(this.root)) {
       if (!entry.isFile() || !entry.name.startsWith(ARTIFACT_PREFIX)) continue;
       const path = join(this.root, entry.name);
+      if (keepPaths?.has(path)) continue;
       try {
         const info = statSync(path);
         if (info.mtimeMs + retentionMs > now) continue;
@@ -79,7 +80,11 @@ class ArtifactWriter {
   append(value) {
     if (this.complete || this.error != null || value == null || value.length === 0) return;
     const buffer = Buffer.isBuffer(value) ? value : Buffer.from(String(value), "utf8");
-    const accepted = this.store.reserve(buffer.length, this.bytes);
+    let accepted = this.store.reserve(buffer.length, this.bytes);
+    if (accepted > 0 && accepted < buffer.length) {
+      // Never end a truncated text artifact mid-character.
+      while (accepted > 0 && (buffer[accepted] & 0xc0) === 0x80) accepted -= 1;
+    }
     if (accepted <= 0) {
       this.truncated = true;
       return;

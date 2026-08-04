@@ -10,12 +10,12 @@ import { publicSession, SessionStore } from "./sessions.js";
 import { GATEWAY_VERSION } from "./version.js";
 
 const ACTIVE_STATUSES = new Set(["running", "waiting_permission", "waiting_input", "cancelling", "restoring"]);
-// Bookkeeping updates that carry no worker work; they must not close a
-// message segment, or a trailing one would erase the final answer.
-const NOISE_UPDATE_TYPES = new Set([
-  "usage_update", "session_info_update", "available_commands_update",
-  "config_option_update", "current_mode_update", "user_message_chunk"
-]);
+// Only the start of new work closes a message segment. Progress updates
+// (tool_call_update), thoughts, and bookkeeping types never do — a boundary
+// mid-answer would amputate the text before it, and a trailing one would
+// erase the final answer.
+const SEGMENT_BOUNDARY_TYPES = new Set(["tool_call", "permission_request", "elicitation_request"]);
+const EVENT_PAYLOAD_CAP_BYTES = 4000;
 const CLOSED_STATUSES = new Set(["closed"]);
 const CONTROL_SERVER_PATTERN = /(?:acp-gateway-control|acp-mcp-bridge|gateway-daemon|control-mcp)/i;
 const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "cancelled"]);
@@ -235,7 +235,7 @@ export class GatewayService {
     const events = [];
     const cursorTruncated = {};
     for (const session of sessions) {
-      const cursor = Math.max(0, Number(cursors[session.id] ?? 0));
+      const cursor = requireNonNegativeNumber(cursors[session.id], `cursors.${session.id}`, 0);
       const firstIndex = session.events[0]?.i ?? session.eventSequence;
       cursorTruncated[session.id] = cursor < firstIndex;
       for (const event of session.events.filter((item) => item.i >= Math.max(cursor, firstIndex))) {
@@ -558,6 +558,10 @@ export class GatewayService {
     session.error = null;
     session.resultText = "";
     session.thoughtText = "";
+    // A new turn owns fresh transient state: retention timers keyed to the
+    // previous turn must not clear or skip this one.
+    session.completedAt = null;
+    session.transientClearedAt = null;
     this.store.push(session, { type: "turn_start", turnId: session.turnId });
     void session.client
       .sessionPrompt({ sessionId: session.acpSessionId, prompt: args.prompt })
@@ -690,10 +694,20 @@ export class GatewayService {
       await this.store.wait(session, waitMs, () =>
         session.status !== statusAtWait || session.events.some(deliverable));
     }
-    const window = session.events
-      .filter((event) => event.i >= effectiveCursor && event.i < toCursor)
-      .slice(0, maxEvents);
-    const events = window.filter(deliverable);
+    // maxEvents counts deliverable events; the cursor still advances over the
+    // filtered-out ones in between so sparse type reads do not return empty
+    // page after empty page.
+    const ordered = session.events.filter((event) => event.i >= effectiveCursor && event.i < toCursor);
+    const events = [];
+    let consumed = 0;
+    for (const event of ordered) {
+      consumed += 1;
+      if (deliverable(event)) {
+        events.push(event);
+        if (events.length >= maxEvents) break;
+      }
+    }
+    const window = ordered.slice(0, consumed);
     // The result buffer is cumulative; re-sending it on every poll of a running
     // turn multiplies the caller's context cost, so it is opt-in until the turn ends.
     const active = ACTIVE_STATUSES.has(session.status);
@@ -717,7 +731,10 @@ export class GatewayService {
           ...(session.resultFinalArtifact ? { textArtifact: session.resultFinalArtifact } : {}),
           thought: args.includeThoughts === true ? session.thoughtText : undefined,
           stopReason: session.stopReason,
-          ...(args.includeInspection === true ? { inspection: session.resultInspection ?? [] } : {})
+          ...(args.includeInspection === true ? (() => {
+            const snapshot = this.store.inspectionSnapshot(session);
+            return { inspection: snapshot.segments, inspectionDropped: snapshot.dropped };
+          })() : {})
         }
       })
     };
@@ -854,6 +871,9 @@ export class GatewayService {
       session.status = "running";
       this.updateTaskForSession(session, "working", "Main response sent");
     }
+    // Status changed without an event push; pollers filtering out the
+    // response events must still observe the transition.
+    this.store.notifyWaiters(session);
   }
 
   handleUpdate(session, update) {
@@ -861,22 +881,31 @@ export class GatewayService {
     if (type === "agent_message_chunk") {
       const text = extractText(update);
       this.store.appendResultText(session, text);
-      this.store.push(session, { type, text });
+      this.store.push(session, this.capTextEvent(session, type, text));
       return;
     }
     if (type === "agent_thought_chunk") {
       const text = extractText(update);
       this.store.appendThoughtText(session, text);
-      this.store.push(session, { type, text });
+      this.store.push(session, this.capTextEvent(session, type, text));
       return;
     }
-    if (!NOISE_UPDATE_TYPES.has(type)) this.store.markSegmentBoundary(session, String(type));
+    if (SEGMENT_BOUNDARY_TYPES.has(type)) this.store.markSegmentBoundary(session, String(type));
     if (type === "permission_request") {
       session.status = "waiting_permission";
+      const cappedToolCall = this.capStructuredField(session, `${type}-toolCall`, "toolCall", update.toolCall);
       this.store.push(session, {
         type,
         requestId: update.requestId,
-        toolCall: update.toolCall,
+        ...cappedToolCall,
+        // Main still needs enough of the tool call to answer the request.
+        ...(cappedToolCall.toolCallTruncated ? {
+          toolCall: {
+            toolCallId: update.toolCall?.toolCallId,
+            title: update.toolCall?.title,
+            kind: update.toolCall?.kind
+          }
+        } : {}),
         options: update.options
       });
       this.createPermissionInbox(session, update);
@@ -889,8 +918,10 @@ export class GatewayService {
         type,
         requestId: update.requestId,
         mode: update.mode,
-        message: update.message,
-        requestedSchema: update.requestedSchema,
+        message: typeof update.message === "string"
+          ? utf8ByteHead(update.message, EVENT_PAYLOAD_CAP_BYTES)
+          : update.message,
+        ...this.capStructuredField(session, `${type}-schema`, "requestedSchema", update.requestedSchema),
         toolCallId: update.toolCallId
       });
       this.createElicitationInbox(session, update);
@@ -900,24 +931,41 @@ export class GatewayService {
     if (type === "config_option_update") {
       session.capabilities = { ...session.capabilities, configOptions: update.configOptions ?? [] };
       session.model = sessionModelId(update.configOptions) ?? session.model;
-      this.store.push(session, { type, data: update });
+      this.store.push(session, { type, ...this.capStructuredField(session, type, "data", update) });
       return;
     }
     const serialized = JSON.stringify(update);
-    if (Buffer.byteLength(serialized) <= 4000) {
+    if (Buffer.byteLength(serialized) <= EVENT_PAYLOAD_CAP_BYTES) {
       this.store.push(session, { type: String(type), text: serialized, data: update });
       return;
     }
     // Oversized payloads leave the delivery path but stay readable on disk.
-    const writer = this.artifactStore.create(session.id, `event-${type}`);
-    writer.append(serialized);
-    writer.finalize();
     this.store.push(session, {
       type: String(type),
-      text: utf8ByteHead(serialized, 4000),
+      text: utf8ByteHead(serialized, EVENT_PAYLOAD_CAP_BYTES),
       dataTruncated: true,
-      dataArtifact: writer.metadata()
+      dataArtifact: this.store.spillText(session.id, `event-${type}`, serialized)
     });
+  }
+
+  // Message and thought chunks are usually tiny, but nothing stops a worker
+  // from putting megabytes into one chunk; the event copy is capped while the
+  // transcript keeps the full text.
+  capTextEvent(session, type, text) {
+    const capped = utf8ByteHead(text, EVENT_PAYLOAD_CAP_BYTES);
+    return capped === text ? { type, text } : { type, text: capped, textTruncated: true };
+  }
+
+  // Caps a structured event field by byte size; the durable inbox record keeps
+  // the full object for answering, only the delivered event copy is bounded.
+  capStructuredField(session, kind, field, value) {
+    if (value == null) return { [field]: value };
+    const serialized = JSON.stringify(value);
+    if (Buffer.byteLength(serialized) <= EVENT_PAYLOAD_CAP_BYTES) return { [field]: value };
+    return {
+      [`${field}Truncated`]: true,
+      dataArtifact: this.store.spillText(session.id, `event-${kind}`, serialized)
+    };
   }
 
   async getClient(provider, model = null) {
@@ -1157,7 +1205,20 @@ export class GatewayService {
 
   async #runMaintenance(now) {
     let changed = this.pruneTasks();
-    if (this.artifactStore.prune(this.lifecycle.resultRetentionMs, now) > 0) changed = true;
+    // Artifacts still referenced by a live session outlive the age-based
+    // prune; they disappear when their session record does.
+    const keepPaths = new Set();
+    for (const session of this.store.list()) {
+      if (session.resultArtifact?.path) keepPaths.add(session.resultArtifact.path);
+      if (session.resultFinalArtifact?.path) keepPaths.add(session.resultFinalArtifact.path);
+      for (const segment of session.resultInspection ?? []) {
+        if (segment.artifact?.path) keepPaths.add(segment.artifact.path);
+      }
+      for (const event of session.events) {
+        if (event.dataArtifact?.path) keepPaths.add(event.dataArtifact.path);
+      }
+    }
+    if (this.artifactStore.prune(this.lifecycle.resultRetentionMs, now, keepPaths) > 0) changed = true;
 
     for (const [id, item] of this.inbox) {
       if (item.status === "pending") continue;
@@ -1178,6 +1239,9 @@ export class GatewayService {
         session.status = "cancelling";
         this.store.push(session, { type: "orphan_cancel_requested" });
         this.interruptSessionInbox(session, "Main did not reconnect before the orphan grace period expired");
+        // Snapshot through the result model, not the raw transcript: the task
+        // result must honor the final-segment split and the inline cap.
+        this.store.finalizeResult(session);
         this.updateTaskForSession(session, "cancelled", "Cancelled after Main disconnect", {
           ok: true,
           sessionId: session.id,
@@ -1194,7 +1258,10 @@ export class GatewayService {
         changed = true;
       }
 
+      // Never clear a session whose current turn is still active: completedAt
+      // belongs to the previous turn until the prompt path resets it.
       if (!session.pinned && !session.transientClearedAt && session.completedAt
+        && !ACTIVE_STATUSES.has(session.status)
         && isExpired(session.completedAt, this.lifecycle.resultRetentionMs, now)) {
         session.resultText = "";
         session.thoughtText = "";
@@ -1459,7 +1526,7 @@ function requireNonNegativeNumber(value, name, fallback) {
     return fallback;
   }
   const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`${name} must be a non-negative number`);
+  if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`${name} must be a non-negative integer`);
   return parsed;
 }
 
@@ -1471,9 +1538,12 @@ function compileEventTypes(value) {
     || value.some((item) => typeof item !== "string" || !item.trim())) {
     throw new Error("eventTypes must be a non-empty array of strings");
   }
-  const matchers = value.map((entry) => entry.endsWith("*")
-    ? { prefix: entry.slice(0, -1) }
-    : { exact: entry });
+  const matchers = value.map((entry) => {
+    if (!entry.endsWith("*")) return { exact: entry };
+    const prefix = entry.slice(0, -1);
+    if (!prefix) throw new Error("eventTypes wildcard entries need at least one character before *");
+    return { prefix };
+  });
   return (type) => matchers.some((matcher) =>
     matcher.exact != null ? type === matcher.exact : type.startsWith(matcher.prefix));
 }

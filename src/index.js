@@ -192,7 +192,7 @@ function controlTools() {
           includeThoughts: { type: "boolean" },
           includeToolEvents: { type: "boolean", description: "Deliver tool_call events. Defaults to false." },
           includeResult: { type: "boolean", description: "Include the result object. Defaults to true only after the turn has finished; pass true to include it while the turn is still active. After the turn ends result.text carries only the final message segment; the full narrated transcript stays readable via agent_acp_session get." },
-          includeInspection: { type: "boolean", description: "Include closed narration segments (each capped to 4000 chars) inside the result object. Defaults to false." },
+          includeInspection: { type: "boolean", description: "Include closed narration segments (each preview capped to 4KB of UTF-8; full text via each segment's artifact pointer; inspectionDropped counts evicted segments) inside the result object. Defaults to false." },
           maxEvents: { type: "integer", minimum: 1, maximum: 1000 }
         },
         required: ["sessionId"]
@@ -243,7 +243,7 @@ function controlTools() {
           action: { type: "string", enum: ["list", "get", "close", "clean", "pin", "unpin"] },
           sessionId: { type: "string" },
           includeEvents: { type: "boolean" },
-          includeTranscript: { type: "boolean", description: "Include the full narrated transcript (resultText) on get. Defaults to false; transcriptBytes always reports its size." }
+          includeTranscript: { type: "boolean", description: "Include the narrated transcript (resultText) on get. Defaults to false; transcriptBytes always reports its size. The in-memory copy is bounded (maxTextBytes) - when it overflowed, resultArtifact points at the complete spill." }
         },
         required: ["action"]
       }

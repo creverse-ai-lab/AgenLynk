@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -334,8 +335,131 @@ test("Gateway poll wait ignores events the caller would filter out", async () =>
     const quiet = await filteredOnly;
     assert.ok(Date.now() - quietStart >= 250, "poll should sleep through filtered-out events");
     assert.deepEqual(quiet.events, []);
+
+    // A status change without any new event must still wake a filtered poll.
+    const statusWatch = service.call(
+      "poll",
+      { sessionId: session.id, cursor: quiet.nextCursor, waitMs: 5_000, eventTypes: ["never_matches"] },
+      { rootId: "main-a" }
+    );
+    setTimeout(() => {
+      session.status = "idle";
+      service.store.notifyWaiters(session);
+    }, 30);
+    const statusStart = Date.now();
+    const woke = await statusWatch;
+    assert.ok(Date.now() - statusStart < 4_000);
+    assert.equal(woke.status, "idle");
   } finally {
     await service.shutdown().catch(() => {});
+  }
+});
+
+test("Gateway final segment survives mid-answer progress updates and thoughts", async () => {
+  const service = new GatewayService({ gcIntervalMs: 0 });
+  try {
+    const session = service.store.create({
+      provider: "mock", acpSessionId: "mid-answer", cwd: "/", ownerRootId: "main-a",
+      permissionPolicy: "ask", turnId: "turn-1"
+    });
+    session.status = "running";
+    service.handleUpdate(session, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Answer is " } });
+    service.handleUpdate(session, { sessionUpdate: "tool_call_update", toolCallId: "t", status: "in_progress" });
+    service.handleUpdate(session, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "hmm" } });
+    service.handleUpdate(session, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "42" } });
+    session.status = "idle";
+    session.stopReason = "end_turn";
+    service.store.finalizeResult(session);
+    const poll = await service.call("poll", { sessionId: session.id, cursor: 999_999 }, { rootId: "main-a" });
+    assert.equal(poll.result.text, "Answer is 42");
+  } finally {
+    await service.shutdown().catch(() => {});
+  }
+});
+
+test("Gateway retention spares active turns and session-referenced artifacts", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-gateway-retention-"));
+  const service = new GatewayService({
+    gcIntervalMs: 0,
+    resultRetentionMs: 60_000,
+    maxInlineResultBytes: 32,
+    artifactRoot: join(directory, "artifacts")
+  });
+  try {
+    const active = service.store.create({
+      provider: "mock", acpSessionId: "active", cwd: "/", ownerRootId: "main-a",
+      permissionPolicy: "ask", turnId: "turn-2"
+    });
+    active.status = "running";
+    active.completedAt = new Date(Date.now() - 3_600_000).toISOString();
+    service.store.appendResultText(active, "live turn text");
+
+    const finished = service.store.create({
+      provider: "mock", acpSessionId: "finished", cwd: "/", ownerRootId: "main-a",
+      permissionPolicy: "ask", turnId: "turn-1"
+    });
+    finished.status = "idle";
+    service.store.appendResultText(finished, `final ${"x".repeat(200)}`);
+    service.store.finalizeResult(finished);
+    const referenced = finished.resultFinalArtifact.path;
+    const loose = service.store.spillText("loose-session", "final", "unreferenced").path;
+
+    const future = Date.now() + 3_600_000;
+    await service.runMaintenance(future);
+    assert.equal(active.resultText, "live turn text", "active turn must not be cleared");
+    assert.equal(existsSync(referenced), true, "referenced artifact must survive prune");
+    assert.equal(existsSync(loose), false, "unreferenced artifact should be pruned");
+
+    active.status = "idle";
+    await service.runMaintenance(future);
+    assert.equal(active.resultText, "", "idle expired turn is cleared");
+  } finally {
+    await service.shutdown().catch(() => {});
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Gateway caps chunk and permission payload copies while keeping full data recoverable", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-gateway-payload-cap-"));
+  const service = new GatewayService({ gcIntervalMs: 0, artifactRoot: join(directory, "artifacts") });
+  try {
+    const session = service.store.create({
+      provider: "mock", acpSessionId: "payload", cwd: "/", ownerRootId: "main-a",
+      permissionPolicy: "ask", turnId: "turn-1"
+    });
+    session.status = "running";
+    const hugeChunk = `chunk ${"c".repeat(10_000)}`;
+    service.handleUpdate(session, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: hugeChunk } });
+    service.handleUpdate(session, {
+      sessionUpdate: "permission_request",
+      requestId: 7,
+      toolCall: { toolCallId: "tool-big", title: "Edit file", kind: "edit", rawInput: "r".repeat(10_000) },
+      options: [{ optionId: "allow-once", name: "Allow once", kind: "allow_once" }]
+    });
+    const poll = await service.call(
+      "poll",
+      { sessionId: session.id, cursor: 0, includeResult: false },
+      { rootId: "main-a" }
+    );
+    const chunk = poll.events.find((event) => event.type === "agent_message_chunk");
+    assert.ok(Buffer.byteLength(chunk.text) <= 4000);
+    assert.equal(chunk.textTruncated, true);
+    const permission = poll.events.find((event) => event.type === "permission_request");
+    assert.equal(permission.toolCallTruncated, true);
+    assert.deepEqual(permission.toolCall, { toolCallId: "tool-big", title: "Edit file", kind: "edit" });
+    assert.equal(JSON.parse(await readFile(permission.dataArtifact.path, "utf8")).rawInput.length, 10_000);
+    assert.deepEqual(permission.options, [{ optionId: "allow-once", name: "Allow once", kind: "allow_once" }]);
+    const inbox = await service.call("inbox", { action: "list", status: "pending" }, { rootId: "main-a" });
+    assert.equal(inbox.items[0].toolCall.rawInput.length, 10_000, "inbox keeps the full tool call");
+    const detail = await service.call(
+      "session",
+      { action: "get", sessionId: session.id, includeTranscript: true },
+      { rootId: "main-a" }
+    );
+    assert.equal(detail.resultText, hugeChunk, "transcript keeps the full chunk text");
+  } finally {
+    await service.shutdown().catch(() => {});
+    await rm(directory, { recursive: true, force: true });
   }
 });
 
@@ -375,6 +499,22 @@ test("Gateway poll supports bounded retrospective reads by cursor range and even
     await assert.rejects(
       service.call("poll", { sessionId: opened.sessionId, cursor: "NaN" }, { rootId: "main-a" }),
       /cursor must be/
+    );
+    await assert.rejects(
+      service.call("poll", { sessionId: opened.sessionId, cursor: 1.5 }, { rootId: "main-a" }),
+      /cursor must be/
+    );
+    await assert.rejects(
+      service.call("poll", { sessionId: opened.sessionId, eventTypes: ["*"] }, { rootId: "main-a" }),
+      /wildcard entries/
+    );
+    assert.throws(
+      () => service.subscribe(
+        { sessionIds: [opened.sessionId], cursors: { [opened.sessionId]: "bogus" } },
+        { rootId: "main-a" },
+        () => {}
+      ),
+      /must be a non-negative integer/
     );
     const detail = await service.call(
       "session",
@@ -424,7 +564,9 @@ test("Gateway poll returns a complete artifact for an oversized worker result", 
     assert.equal(poll.result.artifact.complete, true);
     assert.equal(poll.result.artifact.truncated, false);
     assert.equal(await readFile(poll.result.artifact.path, "utf8"), "가나다".repeat(32));
-    assert.ok(Buffer.byteLength(poll.result.text) <= 24);
+    // The memory buffer only held a 24-byte tail, but the inline final is
+    // re-read from the spill so it is the head of the actual answer.
+    assert.equal(poll.result.text, "가나다".repeat(32));
     assert.equal(poll.result.textArtifact.complete, true);
     assert.equal(poll.result.textArtifact.truncated, false);
     assert.equal(await readFile(poll.result.textArtifact.path, "utf8"), "가나다".repeat(32));

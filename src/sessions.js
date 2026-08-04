@@ -1,5 +1,27 @@
 import { randomUUID } from "node:crypto";
+import { closeSync, openSync, readSync } from "node:fs";
 import { BoundedUtf8Text, utf8ByteHead } from "./bounded-utf8.js";
+
+// Reads the first maxBytes of a text artifact without splitting a character;
+// returns null when the file cannot be read.
+function readHeadBytes(path, maxBytes) {
+  let fd = null;
+  try {
+    fd = openSync(path, "r");
+    // Over-read a few bytes to tell "file fits entirely" apart from "cut
+    // mid-character at exactly maxBytes".
+    const buffer = Buffer.alloc(maxBytes + 3);
+    const read = readSync(fd, buffer, 0, maxBytes + 3, 0);
+    if (read <= maxBytes) return buffer.subarray(0, read).toString("utf8");
+    let end = maxBytes;
+    while (end > 0 && (buffer[end] & 0xc0) === 0x80) end -= 1;
+    return buffer.subarray(0, end).toString("utf8");
+  } catch {
+    return null;
+  } finally {
+    if (fd != null) closeSync(fd);
+  }
+}
 
 const textAccumulators = new WeakMap();
 
@@ -58,7 +80,7 @@ export class SessionStore {
     let segmentWriter = null;
     const segmentBuffer = new BoundedUtf8Text(this.maxTextBytes, {
       onTrim: (buffer) => {
-        segmentWriter ??= this.artifactStore?.create(session.id, "final") ?? null;
+        segmentWriter ??= this.artifactStore?.create(session.id, "segment") ?? null;
         segmentWriter?.append(buffer);
       }
     });
@@ -69,6 +91,7 @@ export class SessionStore {
       thoughtBuffer,
       segmentBuffer,
       inspection: [],
+      inspectionDropped: 0,
       get resultWriter() { return resultWriter; },
       // Closes the spill writer for the current segment (if one started) and
       // returns its metadata, so the full segment stays readable on disk.
@@ -97,6 +120,7 @@ export class SessionStore {
           state.closeSegmentWriter(null);
           segmentBuffer.reset(value);
           state.inspection.length = 0;
+          state.inspectionDropped = 0;
           session.resultFinalText = null;
           session.resultFinalArtifact = null;
           session.resultInspection = [];
@@ -124,9 +148,9 @@ export class SessionStore {
     state?.segmentBuffer.append(text);
   }
 
-  // A meaningful non-message update (tool call, permission, plan, ...) closes
-  // the current message segment: the text before it is narration, not the
-  // final answer. Noise updates (usage, session info) must not reach here.
+  // A work boundary (tool_call start, permission, elicitation) closes the
+  // current message segment: the text before it is narration, not the final
+  // answer. Progress updates and bookkeeping must not reach here.
   markSegmentBoundary(session, boundary) {
     const state = textAccumulators.get(session);
     if (!state) return;
@@ -142,45 +166,73 @@ export class SessionStore {
       state.inspection.push({
         text: utf8ByteHead(text, 4000),
         bytes,
-        truncated: bytes > 4000 || artifact != null,
+        truncated: bytes > 4000,
         ...(artifact ? { artifact } : {}),
         boundary
       });
-      if (state.inspection.length > 32) state.inspection.splice(0, state.inspection.length - 32);
+      if (state.inspection.length > 32) {
+        state.inspectionDropped += state.inspection.length - 32;
+        state.inspection.splice(0, state.inspection.length - 32);
+      }
     }
     state.segmentBuffer.reset("");
   }
 
+  inspectionSnapshot(session) {
+    const state = textAccumulators.get(session);
+    return {
+      segments: state ? [...state.inspection] : [],
+      dropped: state?.inspectionDropped ?? 0
+    };
+  }
+
+  notifyWaiters(session) {
+    for (const wake of [...session.waiters]) wake();
+  }
+
   // Bounds the inline copy of a final result; oversized text goes to disk in
-  // full and the response carries the head plus the pointer.
-  #capFinal(session, text, artifact) {
-    if (Buffer.byteLength(text) <= this.maxInlineResultBytes) {
+  // full and the response carries the head plus the pointer. When the memory
+  // buffer already lost its prefix, the inline head is re-read from the full
+  // artifact so it is the head of the answer, not of the retained tail.
+  #capFinal(session, text, artifact, lostPrefix) {
+    if (!lostPrefix && Buffer.byteLength(text) <= this.maxInlineResultBytes) {
       return { text, artifact: artifact ?? null };
     }
+    const full = artifact ?? this.spillText(session.id, "final", text);
+    const head = lostPrefix && full?.path ? readHeadBytes(full.path, this.maxInlineResultBytes) : null;
     return {
-      text: utf8ByteHead(text, this.maxInlineResultBytes),
-      artifact: artifact ?? this.spillText(session.id, "final", text)
+      text: head ?? utf8ByteHead(text, this.maxInlineResultBytes),
+      artifact: full ?? null
     };
   }
 
   finalizeResult(session) {
     const state = textAccumulators.get(session);
+    // Finalize the transcript spill first so the fallback below can reuse it
+    // as the full-text pointer instead of re-spilling a truncated tail.
+    const writer = state?.resultWriter;
+    if (writer?.active) {
+      writer.finalize(state.resultBuffer.toString());
+      session.resultArtifact = writer.metadata();
+    }
     if (state) {
       const finalText = state.segmentBuffer.toString();
       const capped = finalText.trim()
-        ? this.#capFinal(session, finalText, state.closeSegmentWriter(finalText))
+        ? this.#capFinal(
+            session, finalText, state.closeSegmentWriter(finalText),
+            state.segmentBuffer.trimmedBytes > 0
+          )
         // The turn ended on a boundary (tool work after the last message), so
         // no single segment is the answer; fall back to the whole transcript.
-        : (state.closeSegmentWriter(null), this.#capFinal(session, state.resultBuffer.toString(), null));
+        : (state.closeSegmentWriter(null), this.#capFinal(
+            session, state.resultBuffer.toString(), session.resultArtifact ?? null,
+            state.resultBuffer.trimmedBytes > 0
+          ));
       session.resultFinalText = capped.text;
       session.resultFinalArtifact = capped.artifact;
       session.resultInspection = [...state.inspection];
     }
-    const writer = state?.resultWriter;
-    if (!writer?.active) return null;
-    writer.finalize(state.resultBuffer.toString());
-    session.resultArtifact = writer.metadata();
-    return session.resultArtifact;
+    return session.resultArtifact ?? null;
   }
 
   appendThoughtText(session, text) {
