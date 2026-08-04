@@ -4,18 +4,21 @@ import { checkGatewaySource } from "../src/gateway-source-monitor.js";
 import { GATEWAY_VERSION } from "../src/version.js";
 
 test("Gateway source monitor reports a newer version on remote main", async () => {
+  // Always one major ahead of whatever the current version is, so the fixture
+  // survives release bumps.
+  const newerVersion = `${Number(GATEWAY_VERSION.split(".")[0]) + 1}.0.0`;
   let requestedUrl;
   const result = await checkGatewaySource({
     run: async () => "https://github.com/nesto-ai/agent_gateway.git\n",
     fetchImpl: async (url) => {
       requestedUrl = url;
-      return { ok: true, text: async () => JSON.stringify({ version: "1.3.0" }) };
+      return { ok: true, text: async () => JSON.stringify({ version: newerVersion }) };
     },
     now: () => Date.parse("2026-08-02T00:00:00.000Z")
   });
   assert.equal(requestedUrl, "https://raw.githubusercontent.com/nesto-ai/agent_gateway/main/package.json");
   assert.equal(result.currentVersion, GATEWAY_VERSION);
-  assert.equal(result.mainVersion, "1.3.0");
+  assert.equal(result.mainVersion, newerVersion);
   assert.equal(result.updateAvailable, true);
 });
 
