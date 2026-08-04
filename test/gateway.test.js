@@ -161,6 +161,11 @@ test("Gateway poll excludes tool_call events unless requested and caps oversized
     assert.equal(large.dataTruncated, true);
     assert.equal(Object.hasOwn(large, "data"), false);
     assert.ok(large.text.length <= 4000);
+    assert.equal(large.dataArtifact.complete, true);
+    assert.equal(large.dataArtifact.truncated, false);
+    const spilled = JSON.parse(await readFile(large.dataArtifact.path, "utf8"));
+    assert.equal(spilled.toolCallId, "tool-large");
+    assert.equal(spilled.rawOutput.length, 8_000);
   } finally {
     await service.shutdown().catch(() => {});
   }
@@ -243,6 +248,9 @@ test("Gateway poll returns a complete artifact for an oversized worker result", 
     assert.equal(poll.result.artifact.truncated, false);
     assert.equal(await readFile(poll.result.artifact.path, "utf8"), "가나다".repeat(32));
     assert.ok(Buffer.byteLength(poll.result.text) <= 24);
+    assert.equal(poll.result.textArtifact.complete, true);
+    assert.equal(poll.result.textArtifact.truncated, false);
+    assert.equal(await readFile(poll.result.textArtifact.path, "utf8"), "가나다".repeat(32));
   } finally {
     await service.shutdown().catch(() => {});
     await rm(directory, { recursive: true, force: true });

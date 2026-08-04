@@ -37,7 +37,13 @@ export class SessionStore {
       }
     });
     const thoughtBuffer = new BoundedUtf8Text(this.maxTextBytes);
-    const segmentBuffer = new BoundedUtf8Text(this.maxTextBytes);
+    let segmentWriter = null;
+    const segmentBuffer = new BoundedUtf8Text(this.maxTextBytes, {
+      onTrim: (buffer) => {
+        segmentWriter ??= this.artifactStore?.create(session.id, "final") ?? null;
+        segmentWriter?.append(buffer);
+      }
+    });
     if (initialResultText) resultBuffer.append(initialResultText);
     if (initialThoughtText) thoughtBuffer.append(initialThoughtText);
     textAccumulators.set(session, {
@@ -45,7 +51,19 @@ export class SessionStore {
       thoughtBuffer,
       segmentBuffer,
       inspection: [],
-      get resultWriter() { return resultWriter; }
+      get resultWriter() { return resultWriter; },
+      // Closes the spill writer for the current segment (if one started) and
+      // returns its metadata, so the full segment stays readable on disk.
+      closeSegmentWriter(tail) {
+        if (!segmentWriter?.active) {
+          segmentWriter = null;
+          return null;
+        }
+        segmentWriter.finalize(tail);
+        const artifact = segmentWriter.metadata();
+        segmentWriter = null;
+        return artifact;
+      }
     });
     Object.defineProperties(session, {
       resultText: {
@@ -57,9 +75,11 @@ export class SessionStore {
           resultWriter = null;
           session.resultArtifact = null;
           resultBuffer.reset(value);
+          textAccumulators.get(session).closeSegmentWriter(null);
           segmentBuffer.reset(value);
           textAccumulators.get(session).inspection.length = 0;
           session.resultFinalText = null;
+          session.resultFinalArtifact = null;
           session.resultInspection = [];
         }
       },
@@ -91,11 +111,13 @@ export class SessionStore {
     const state = textAccumulators.get(session);
     if (!state) return;
     const text = state.segmentBuffer.toString();
-    if (text.trim()) {
+    const artifact = state.closeSegmentWriter(text.trim() ? text : null);
+    if (text.trim() || artifact) {
       state.inspection.push({
         text: text.length > 4000 ? text.slice(0, 4000).replace(/[\uD800-\uDBFF]$/, "") : text,
-        bytes: Buffer.byteLength(text),
-        truncated: text.length > 4000,
+        bytes: artifact?.bytes ?? Buffer.byteLength(text),
+        truncated: text.length > 4000 || artifact != null,
+        ...(artifact ? { artifact } : {}),
         boundary
       });
       if (state.inspection.length > 32) state.inspection.splice(0, state.inspection.length - 32);
@@ -107,6 +129,7 @@ export class SessionStore {
     const state = textAccumulators.get(session);
     if (state) {
       const finalText = state.segmentBuffer.toString();
+      session.resultFinalArtifact = state.closeSegmentWriter(finalText.trim() ? finalText : null);
       session.resultFinalText = finalText.trim() ? finalText : state.resultBuffer.toString();
       session.resultInspection = [...state.inspection];
     }

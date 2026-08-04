@@ -679,6 +679,7 @@ export class GatewayService {
           text: active ? session.resultText : session.resultFinalText ?? session.resultText,
           transcriptBytes: Buffer.byteLength(session.resultText),
           artifact: session.resultArtifact ?? null,
+          ...(session.resultFinalArtifact ? { textArtifact: session.resultFinalArtifact } : {}),
           thought: args.includeThoughts === true ? session.thoughtText : undefined,
           stopReason: session.stopReason,
           ...(args.includeInspection === true ? { inspection: session.resultInspection ?? [] } : {})
@@ -848,10 +849,19 @@ export class GatewayService {
       return;
     }
     const serialized = JSON.stringify(update);
+    if (serialized.length <= 4000) {
+      this.store.push(session, { type: String(type), text: serialized, data: update });
+      return;
+    }
+    // Oversized payloads leave the delivery path but stay readable on disk.
+    const writer = this.artifactStore.create(session.id, `event-${type}`);
+    writer.append(serialized);
+    writer.finalize();
     this.store.push(session, {
       type: String(type),
       text: serialized.slice(0, 4000),
-      ...(serialized.length > 4000 ? { dataTruncated: true } : { data: update })
+      dataTruncated: true,
+      dataArtifact: writer.metadata()
     });
   }
 
@@ -970,6 +980,7 @@ export class GatewayService {
         text: session.resultFinalText ?? session.resultText,
         transcriptBytes: Buffer.byteLength(session.resultText),
         artifact: session.resultArtifact ?? null,
+        ...(session.resultFinalArtifact ? { textArtifact: session.resultFinalArtifact } : {}),
         stopReason: session.stopReason
       },
       ...(session.error ? { error: session.error } : {})
