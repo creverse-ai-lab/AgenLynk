@@ -186,6 +186,8 @@ function controlTools() {
         properties: {
           sessionId: { type: "string" },
           cursor: { type: "integer", minimum: 0 },
+          toCursor: { type: "integer", minimum: 0, description: "Exclusive upper bound for a retrospective range read. Bounded reads never wait." },
+          eventTypes: { type: "array", items: { type: "string", minLength: 1 }, description: "Deliver only events whose type matches an entry exactly or by prefix (e.g. tool_call). Overrides the default thought/tool filters." },
           waitMs: { type: "integer", minimum: 0, maximum: 120000 },
           includeThoughts: { type: "boolean" },
           includeToolEvents: { type: "boolean", description: "Deliver tool_call events. Defaults to false." },
@@ -240,7 +242,8 @@ function controlTools() {
         properties: {
           action: { type: "string", enum: ["list", "get", "close", "clean", "pin", "unpin"] },
           sessionId: { type: "string" },
-          includeEvents: { type: "boolean" }
+          includeEvents: { type: "boolean" },
+          includeTranscript: { type: "boolean", description: "Include the full narrated transcript (resultText) on get. Defaults to false; transcriptBytes always reports its size." }
         },
         required: ["action"]
       }

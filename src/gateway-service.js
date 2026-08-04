@@ -71,6 +71,14 @@ export class GatewayService {
       maxFrameBytes
     };
     this.lifecycle = { gcIntervalMs, idleUnloadMs, orphanGraceMs, resultRetentionMs, inboxRetentionMs, sessionRetentionMs };
+    this.metrics = {
+      startedAt: new Date(this.now()).toISOString(),
+      pollResponses: 0,
+      pollBytes: 0,
+      eventBytes: 0,
+      resultBytes: 0,
+      eventsByType: {}
+    };
     this.maintenanceRunning = null;
     this.store = new SessionStore({
       maxEvents,
@@ -282,6 +290,7 @@ export class GatewayService {
         liveSessions: this.store.list().filter((session) => session.client?.alive).length
       },
       resourceLimits: this.resourceLimits,
+      metrics: { ...this.metrics, eventsByType: { ...this.metrics.eventsByType } },
       agentUpdates,
       gatewayUpdate: agentUpdates?.gatewaySource ?? null,
       alerts: agentUpdates?.alerts ?? [],
@@ -652,22 +661,34 @@ export class GatewayService {
     const cursor = Math.max(0, Number(args.cursor ?? 0));
     const waitMs = Math.min(120_000, Math.max(0, Number(args.waitMs ?? 0)));
     const maxEvents = Math.min(1000, Math.max(1, Number(args.maxEvents ?? 200)));
+    const toCursor = args.toCursor == null ? Infinity : Math.max(0, Number(args.toCursor));
+    const eventTypes = validateEventTypes(args.eventTypes);
     const firstIndex = session.events[0]?.i ?? session.eventSequence;
     const effectiveCursor = Math.max(cursor, firstIndex);
-    if (waitMs && ACTIVE_STATUSES.has(session.status) && !session.events.some((event) => event.i >= effectiveCursor)) {
-      await this.store.wait(session, waitMs);
-    }
-    const window = session.events.filter((event) => event.i >= effectiveCursor).slice(0, maxEvents);
-    const events = window.filter((event) => {
+    const deliverable = (event) => {
+      if (event.i < effectiveCursor || event.i >= toCursor) return false;
+      if (eventTypes) return eventTypes.some((type) => event.type === type || event.type.startsWith(type));
       if (args.includeThoughts !== true && event.type === "agent_thought_chunk") return false;
       if (args.includeToolEvents !== true && event.type.startsWith("tool_call")) return false;
       return true;
-    });
+    };
+    // A bounded window is a retrospective inspection read; only open-ended
+    // polls wait, and only for an event the caller would actually receive.
+    if (waitMs && toCursor === Infinity && ACTIVE_STATUSES.has(session.status)
+      && !session.events.some(deliverable)) {
+      const statusAtWait = session.status;
+      await this.store.wait(session, waitMs, () =>
+        session.status !== statusAtWait || session.events.some(deliverable));
+    }
+    const window = session.events
+      .filter((event) => event.i >= effectiveCursor && event.i < toCursor)
+      .slice(0, maxEvents);
+    const events = window.filter(deliverable);
     // The result buffer is cumulative; re-sending it on every poll of a running
     // turn multiplies the caller's context cost, so it is opt-in until the turn ends.
     const active = ACTIVE_STATUSES.has(session.status);
     const includeResult = args.includeResult === true || (args.includeResult !== false && !active);
-    return {
+    const response = {
       ok: true,
       ...publicSession(session),
       nextCursor: window.length ? window.at(-1).i + 1 : effectiveCursor,
@@ -687,6 +708,19 @@ export class GatewayService {
         }
       })
     };
+    this.recordPollMetrics(response);
+    return response;
+  }
+
+  recordPollMetrics(response) {
+    const metrics = this.metrics;
+    metrics.pollResponses += 1;
+    metrics.pollBytes += Buffer.byteLength(JSON.stringify(response));
+    if (response.result) metrics.resultBytes += Buffer.byteLength(JSON.stringify(response.result));
+    for (const event of response.events) {
+      metrics.eventBytes += Buffer.byteLength(JSON.stringify(event));
+      metrics.eventsByType[event.type] = (metrics.eventsByType[event.type] ?? 0) + 1;
+    }
   }
 
   async sessionPermission(args, context) {
@@ -746,7 +780,10 @@ export class GatewayService {
       return {
         ok: true,
         ...publicSession(session),
-        resultText: session.resultText,
+        // The narrated transcript can be up to maxTextBytes; hand it out only
+        // when the caller explicitly asks for it.
+        ...(args.includeTranscript === true ? { resultText: session.resultText } : {}),
+        transcriptBytes: Buffer.byteLength(session.resultText),
         finalResultText: session.resultFinalText ?? null,
         events: args.includeEvents ? session.events : undefined
       };
@@ -1391,6 +1428,15 @@ function requireProvider(provider) {
 
 function requireString(value, name) {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${name} is required`);
+}
+
+function validateEventTypes(value) {
+  if (value == null) return null;
+  if (!Array.isArray(value) || value.length === 0
+    || value.some((item) => typeof item !== "string" || !item.trim())) {
+    throw new Error("eventTypes must be a non-empty array of strings");
+  }
+  return value;
 }
 
 function isExpired(timestamp, ttl, now) {

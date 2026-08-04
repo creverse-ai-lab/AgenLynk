@@ -194,9 +194,16 @@ test("Gateway separates the final answer from narration segments", async () => {
     );
     assert.deepEqual(inspected.result.inspection.map((segment) => segment.text), ["Working on it. ", "Still checking. "]);
     assert.equal(inspected.result.inspection[0].boundary, "tool_call");
-    const detail = await service.call("session", { action: "get", sessionId: opened.sessionId }, { rootId: "main-a" });
+    const summary = await service.call("session", { action: "get", sessionId: opened.sessionId }, { rootId: "main-a" });
+    assert.equal(Object.hasOwn(summary, "resultText"), false);
+    assert.equal(summary.transcriptBytes, Buffer.byteLength("Working on it. Still checking. FINAL ANSWER"));
+    assert.equal(summary.finalResultText, "FINAL ANSWER");
+    const detail = await service.call(
+      "session",
+      { action: "get", sessionId: opened.sessionId, includeTranscript: true },
+      { rootId: "main-a" }
+    );
     assert.equal(detail.resultText, "Working on it. Still checking. FINAL ANSWER");
-    assert.equal(detail.finalResultText, "FINAL ANSWER");
   } finally {
     await service.shutdown().catch(() => {});
   }
@@ -229,6 +236,76 @@ test("Gateway task result returns only the final answer segment", async () => {
     assert.equal(result.result.transcriptBytes, Buffer.byteLength("Working on it. Still checking. FINAL ANSWER"));
   } finally {
     await service.shutdown().catch(() => {});
+  }
+});
+
+test("Gateway poll wait ignores events the caller would filter out", async () => {
+  const service = new GatewayService({ gcIntervalMs: 0 });
+  try {
+    const session = service.store.create({
+      provider: "mock", acpSessionId: "wake-test", cwd: "/", ownerRootId: "main-a",
+      permissionPolicy: "ask", turnId: "turn-1"
+    });
+    session.status = "running";
+    const startedAt = Date.now();
+    const pending = service.call("poll", { sessionId: session.id, waitMs: 5_000 }, { rootId: "main-a" });
+    setTimeout(() => {
+      service.handleUpdate(session, { sessionUpdate: "tool_call", toolCallId: "noisy", title: "Read", kind: "read" });
+    }, 30);
+    setTimeout(() => {
+      service.handleUpdate(session, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "visible" } });
+    }, 120);
+    const response = await pending;
+    assert.ok(Date.now() - startedAt < 4_000);
+    assert.deepEqual(response.events.map((event) => event.type), ["agent_message_chunk"]);
+
+    const filteredOnly = service.call(
+      "poll",
+      { sessionId: session.id, cursor: response.nextCursor, waitMs: 300 },
+      { rootId: "main-a" }
+    );
+    setTimeout(() => {
+      service.handleUpdate(session, { sessionUpdate: "tool_call", toolCallId: "noisy-2", title: "Read", kind: "read" });
+    }, 30);
+    const quietStart = Date.now();
+    const quiet = await filteredOnly;
+    assert.ok(Date.now() - quietStart >= 250, "poll should sleep through filtered-out events");
+    assert.deepEqual(quiet.events, []);
+  } finally {
+    await service.shutdown().catch(() => {});
+  }
+});
+
+test("Gateway poll supports bounded retrospective reads by cursor range and event type", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-gateway-range-"));
+  const makeClient = (_provider, options) =>
+    new AcpClient({ provider: "mock", command: process.execPath, args: [mockAgent], permissionPolicy: "read_only" }, options);
+  const service = new GatewayService({ createClient: makeClient, artifactRoot: join(directory, "artifacts") });
+  try {
+    const opened = await service.call("session_open", { provider: "claude", cwd: process.cwd(), permissionPolicy: "read_only" }, { rootId: "main-a" });
+    await service.call("prompt", { sessionId: opened.sessionId, prompt: "tool-events" }, { rootId: "main-a" });
+    const done = await waitForIdle(service, opened.sessionId);
+    const evidence = await service.call(
+      "poll",
+      { sessionId: opened.sessionId, cursor: 0, toCursor: done.nextCursor, eventTypes: ["tool_call"], waitMs: 5_000 },
+      { rootId: "main-a" }
+    );
+    assert.deepEqual(
+      evidence.events.map((event) => event.type),
+      ["tool_call", "tool_call_update"]
+    );
+    await assert.rejects(
+      service.call("poll", { sessionId: opened.sessionId, eventTypes: [] }, { rootId: "main-a" }),
+      /eventTypes must be/
+    );
+    const metrics = (await service.call("setup", {}, { rootId: "main-a" })).metrics;
+    assert.ok(metrics.pollResponses > 0);
+    assert.ok(metrics.pollBytes > 0);
+    assert.ok(metrics.eventsByType.agent_message_chunk >= 1);
+    assert.ok(metrics.eventsByType.tool_call >= 1);
+  } finally {
+    await service.shutdown().catch(() => {});
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

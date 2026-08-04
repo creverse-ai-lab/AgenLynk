@@ -226,14 +226,19 @@ export class SessionStore {
     }));
   }
 
-  wait(session, waitMs) {
+  // Waiters fire on every push; shouldWake keeps the poll asleep for events
+  // the caller would only filter out again (tool noise for a text-only poll).
+  wait(session, waitMs, shouldWake = () => true) {
     return new Promise((done) => {
-      const wake = () => {
+      const finish = () => {
         clearTimeout(timer);
         session.waiters.delete(wake);
         done();
       };
-      const timer = setTimeout(wake, waitMs);
+      const wake = () => {
+        if (shouldWake()) finish();
+      };
+      const timer = setTimeout(finish, waitMs);
       session.waiters.add(wake);
     });
   }

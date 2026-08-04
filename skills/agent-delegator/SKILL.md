@@ -87,8 +87,9 @@ Apply model rules precisely:
 ## Handle large results
 
 - When a result is likely to be large and writes are allowed, ask the worker to write the complete deliverable inside `cwd` and return a concise final answer plus its absolute path. Do not request file output in `read_only` mode.
-- Keep intermediate polls on `includeResult: false`. At a terminal status `result.text` carries only the worker's final message segment; the full narrated transcript stays readable through `agent_acp_session` `get` (`resultText`) and `result.artifact`.
+- Keep intermediate polls on `includeResult: false`. At a terminal status `result.text` carries only the worker's final message segment; the full narrated transcript stays readable through `agent_acp_session` `get` with `includeTranscript: true` (`transcriptBytes` always reports its size) and `result.artifact`.
 - Request closed narration segments with `includeInspection: true` only when reviewing how the worker reached its answer.
+- Re-inspect retained history without re-receiving the stream: poll with a past `cursor`, a bounding `toCursor`, and `eventTypes` (exact or prefix match, e.g. `["tool_call"]`) to fetch just the evidence needed. Bounded reads return immediately and do not advance live polling state.
 - Follow pointers instead of asking for re-delivery: an oversized final answer exposes `result.textArtifact`, and an oversized tool payload exposes `dataArtifact` on its event. Read only the portions needed.
 - Accept a Gateway artifact only when `complete` is true, `path` is present, and `truncated` is false. Disclose incomplete or rejected output.
 - Read only the portions needed for final review. A frame rejected by the protocol hard limit is not a valid artifact.
