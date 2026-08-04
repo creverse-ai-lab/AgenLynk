@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { BoundedUtf8Text } from "./bounded-utf8.js";
+import { BoundedUtf8Text, utf8ByteHead } from "./bounded-utf8.js";
 
 const textAccumulators = new WeakMap();
 
@@ -51,6 +51,7 @@ export class SessionStore {
       thoughtBuffer,
       segmentBuffer,
       inspection: [],
+      lastClosedSegment: null,
       get resultWriter() { return resultWriter; },
       // Closes the spill writer for the current segment (if one started) and
       // returns its metadata, so the full segment stays readable on disk.
@@ -75,9 +76,11 @@ export class SessionStore {
           resultWriter = null;
           session.resultArtifact = null;
           resultBuffer.reset(value);
-          textAccumulators.get(session).closeSegmentWriter(null);
+          const state = textAccumulators.get(session);
+          state.closeSegmentWriter(null);
           segmentBuffer.reset(value);
-          textAccumulators.get(session).inspection.length = 0;
+          state.inspection.length = 0;
+          state.lastClosedSegment = null;
           session.resultFinalText = null;
           session.resultFinalArtifact = null;
           session.resultInspection = [];
@@ -113,14 +116,17 @@ export class SessionStore {
     const text = state.segmentBuffer.toString();
     const artifact = state.closeSegmentWriter(text.trim() ? text : null);
     if (text.trim() || artifact) {
-      state.inspection.push({
-        text: text.length > 4000 ? text.slice(0, 4000).replace(/[\uD800-\uDBFF]$/, "") : text,
-        bytes: artifact?.bytes ?? Buffer.byteLength(text),
-        truncated: text.length > 4000 || artifact != null,
+      const bytes = artifact?.bytes ?? Buffer.byteLength(text);
+      const entry = {
+        text: utf8ByteHead(text, 4000),
+        bytes,
+        truncated: bytes > 4000 || artifact != null,
         ...(artifact ? { artifact } : {}),
         boundary
-      });
+      };
+      state.inspection.push(entry);
       if (state.inspection.length > 32) state.inspection.splice(0, state.inspection.length - 32);
+      state.lastClosedSegment = { text, artifact: artifact ?? null, entry };
     }
     state.segmentBuffer.reset("");
   }
@@ -129,8 +135,22 @@ export class SessionStore {
     const state = textAccumulators.get(session);
     if (state) {
       const finalText = state.segmentBuffer.toString();
-      session.resultFinalArtifact = state.closeSegmentWriter(finalText.trim() ? finalText : null);
-      session.resultFinalText = finalText.trim() ? finalText : state.resultBuffer.toString();
+      if (finalText.trim()) {
+        session.resultFinalArtifact = state.closeSegmentWriter(finalText);
+        session.resultFinalText = finalText;
+      } else if (state.lastClosedSegment) {
+        // A trailing non-message update (usage, session info, ...) closed the
+        // final segment; the answer is the last non-empty segment, not the
+        // whole narrated transcript.
+        state.closeSegmentWriter(null);
+        session.resultFinalText = state.lastClosedSegment.text;
+        session.resultFinalArtifact = state.lastClosedSegment.artifact;
+        if (state.inspection.at(-1) === state.lastClosedSegment.entry) state.inspection.pop();
+      } else {
+        state.closeSegmentWriter(null);
+        session.resultFinalText = state.resultBuffer.toString();
+        session.resultFinalArtifact = null;
+      }
       session.resultInspection = [...state.inspection];
     }
     const writer = state?.resultWriter;

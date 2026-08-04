@@ -1,3 +1,14 @@
+// Truncates text to at most maxBytes of UTF-8 without splitting a multi-byte
+// character. Length checks on JavaScript strings count code units, not bytes,
+// so byte caps must go through here.
+export function utf8ByteHead(text, maxBytes) {
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
+}
+
 // Bounded tail accumulator for UTF-8 text: append cost is proportional to the
 // new/evicted chunks, not the full accumulated size. A string is materialized
 // only when read.

@@ -134,7 +134,9 @@ rl.on("line", (line) => {
             sessionUpdate: "tool_call_update",
             toolCallId: "tool-large",
             status: "completed",
-            rawOutput: "y".repeat(8_000)
+            // 3,000 chars but 9,000 UTF-8 bytes: catches caps that measure
+            // string length instead of bytes.
+            rawOutput: "가".repeat(3_000)
           }
         }
       });
@@ -157,7 +159,8 @@ rl.on("line", (line) => {
         { sessionUpdate: "tool_call_update", toolCallId: "tool-a", status: "completed" },
         { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "thinking" } },
         { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "FINAL " } },
-        { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ANSWER" } }
+        { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ANSWER" } },
+        { sessionUpdate: "usage_update", usage: { inputTokens: 1200, outputTokens: 340 } }
       ];
       for (const update of updates) {
         send({

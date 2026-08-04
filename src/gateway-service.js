@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { stat } from "node:fs/promises";
 import { AcpClient, PERMISSION_POLICIES, requirePermissionPolicy } from "./acp-client.js";
 import { ArtifactStore, defaultArtifactRoot } from "./artifacts.js";
+import { utf8ByteHead } from "./bounded-utf8.js";
 import { currentModelId, detectProviders, providerConfig } from "./providers.js";
 import { publicSession, SessionStore } from "./sessions.js";
 import { GATEWAY_VERSION } from "./version.js";
@@ -849,7 +850,7 @@ export class GatewayService {
       return;
     }
     const serialized = JSON.stringify(update);
-    if (serialized.length <= 4000) {
+    if (Buffer.byteLength(serialized) <= 4000) {
       this.store.push(session, { type: String(type), text: serialized, data: update });
       return;
     }
@@ -859,7 +860,7 @@ export class GatewayService {
     writer.finalize();
     this.store.push(session, {
       type: String(type),
-      text: serialized.slice(0, 4000),
+      text: utf8ByteHead(serialized, 4000),
       dataTruncated: true,
       dataArtifact: writer.metadata()
     });

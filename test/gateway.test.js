@@ -139,10 +139,11 @@ test("Gateway poll withholds the cumulative result while the turn is active", as
   }
 });
 
-test("Gateway poll excludes tool_call events unless requested and caps oversized event data", async () => {
+test("Gateway poll excludes tool_call events unless requested and caps oversized event data by UTF-8 bytes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-gateway-event-artifact-"));
   const makeClient = (_provider, options) =>
     new AcpClient({ provider: "mock", command: process.execPath, args: [mockAgent], permissionPolicy: "read_only" }, options);
-  const service = new GatewayService({ createClient: makeClient });
+  const service = new GatewayService({ createClient: makeClient, artifactRoot: join(directory, "artifacts") });
   try {
     const opened = await service.call("session_open", { provider: "claude", cwd: process.cwd(), permissionPolicy: "read_only" }, { rootId: "main-a" });
     await service.call("prompt", { sessionId: opened.sessionId, prompt: "tool-events" }, { rootId: "main-a" });
@@ -157,17 +158,21 @@ test("Gateway poll excludes tool_call events unless requested and caps oversized
     const small = withTools.events.find((event) => event.type === "tool_call");
     assert.equal(small.data.toolCallId, "tool-small");
     assert.equal(small.dataTruncated, undefined);
+    // 3,000 Korean chars serialize to ~9KB: a character-based cap would keep
+    // the full payload; the byte-based cap must truncate and spill it.
     const large = withTools.events.find((event) => event.type === "tool_call_update");
     assert.equal(large.dataTruncated, true);
     assert.equal(Object.hasOwn(large, "data"), false);
-    assert.ok(large.text.length <= 4000);
+    assert.ok(Buffer.byteLength(large.text) <= 4000);
+    assert.doesNotMatch(large.text, /�/);
     assert.equal(large.dataArtifact.complete, true);
     assert.equal(large.dataArtifact.truncated, false);
     const spilled = JSON.parse(await readFile(large.dataArtifact.path, "utf8"));
     assert.equal(spilled.toolCallId, "tool-large");
-    assert.equal(spilled.rawOutput.length, 8_000);
+    assert.equal(spilled.rawOutput, "가".repeat(3_000));
   } finally {
     await service.shutdown().catch(() => {});
+    await rm(directory, { recursive: true, force: true });
   }
 });
 
