@@ -189,7 +189,8 @@ function controlTools() {
           waitMs: { type: "integer", minimum: 0, maximum: 120000 },
           includeThoughts: { type: "boolean" },
           includeToolEvents: { type: "boolean", description: "Deliver tool_call events. Defaults to false." },
-          includeResult: { type: "boolean", description: "Include the cumulative result object. Defaults to true only after the turn has finished; pass true to include it while the turn is still active." },
+          includeResult: { type: "boolean", description: "Include the result object. Defaults to true only after the turn has finished; pass true to include it while the turn is still active. After the turn ends result.text carries only the final message segment; the full narrated transcript stays readable via agent_acp_session get." },
+          includeInspection: { type: "boolean", description: "Include closed narration segments (each capped to 4000 chars) inside the result object. Defaults to false." },
           maxEvents: { type: "integer", minimum: 1, maximum: 1000 }
         },
         required: ["sessionId"]

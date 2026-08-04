@@ -133,7 +133,7 @@ test("Gateway poll withholds the cumulative result while the turn is active", as
       { rootId: "main-a" }
     );
     const done = await waitForIdle(service, opened.sessionId);
-    assert.equal(done.result.text, "READY DONE");
+    assert.equal(done.result.text, "DONE");
   } finally {
     await service.shutdown().catch(() => {});
   }
@@ -161,6 +161,62 @@ test("Gateway poll excludes tool_call events unless requested and caps oversized
     assert.equal(large.dataTruncated, true);
     assert.equal(Object.hasOwn(large, "data"), false);
     assert.ok(large.text.length <= 4000);
+  } finally {
+    await service.shutdown().catch(() => {});
+  }
+});
+
+test("Gateway separates the final answer from narration segments", async () => {
+  const makeClient = (_provider, options) =>
+    new AcpClient({ provider: "mock", command: process.execPath, args: [mockAgent], permissionPolicy: "read_only" }, options);
+  const service = new GatewayService({ createClient: makeClient });
+  try {
+    const opened = await service.call("session_open", { provider: "claude", cwd: process.cwd(), permissionPolicy: "read_only" }, { rootId: "main-a" });
+    await service.call("prompt", { sessionId: opened.sessionId, prompt: "narrated-result" }, { rootId: "main-a" });
+    const done = await waitForIdle(service, opened.sessionId);
+    assert.equal(done.result.text, "FINAL ANSWER");
+    assert.equal(done.result.transcriptBytes, Buffer.byteLength("Working on it. Still checking. FINAL ANSWER"));
+    assert.equal(Object.hasOwn(done.result, "inspection"), false);
+    const inspected = await service.call(
+      "poll",
+      { sessionId: opened.sessionId, cursor: 999_999, includeInspection: true },
+      { rootId: "main-a" }
+    );
+    assert.deepEqual(inspected.result.inspection.map((segment) => segment.text), ["Working on it. ", "Still checking. "]);
+    assert.equal(inspected.result.inspection[0].boundary, "tool_call");
+    const detail = await service.call("session", { action: "get", sessionId: opened.sessionId }, { rootId: "main-a" });
+    assert.equal(detail.resultText, "Working on it. Still checking. FINAL ANSWER");
+    assert.equal(detail.finalResultText, "FINAL ANSWER");
+  } finally {
+    await service.shutdown().catch(() => {});
+  }
+});
+
+test("Gateway falls back to the transcript when a turn ends without a final message segment", async () => {
+  const makeClient = (_provider, options) =>
+    new AcpClient({ provider: "mock", command: process.execPath, args: [mockAgent], permissionPolicy: "read_only" }, options);
+  const service = new GatewayService({ createClient: makeClient });
+  try {
+    const opened = await service.call("session_open", { provider: "claude", cwd: process.cwd(), permissionPolicy: "read_only" }, { rootId: "main-a" });
+    await service.call("prompt", { sessionId: opened.sessionId, prompt: "tool-then-end" }, { rootId: "main-a" });
+    const done = await waitForIdle(service, opened.sessionId);
+    assert.equal(done.result.text, "ONLY NARRATION");
+  } finally {
+    await service.shutdown().catch(() => {});
+  }
+});
+
+test("Gateway task result returns only the final answer segment", async () => {
+  const makeClient = (_provider, options) =>
+    new AcpClient({ provider: "mock", command: process.execPath, args: [mockAgent], permissionPolicy: "read_only" }, options);
+  const service = new GatewayService({ createClient: makeClient });
+  try {
+    const opened = await service.call("session_open", { provider: "claude", cwd: process.cwd(), permissionPolicy: "read_only" }, { rootId: "main-a" });
+    const task = await service.call("task_prompt", { sessionId: opened.sessionId, prompt: "narrated-result" }, { rootId: "main-a" });
+    await waitForIdle(service, opened.sessionId);
+    const result = await service.call("task_result", { taskId: task.taskId }, { rootId: "main-a" });
+    assert.equal(result.result.text, "FINAL ANSWER");
+    assert.equal(result.result.transcriptBytes, Buffer.byteLength("Working on it. Still checking. FINAL ANSWER"));
   } finally {
     await service.shutdown().catch(() => {});
   }
@@ -400,7 +456,7 @@ test("Gateway keeps task handles in memory but persists only a minimal resume ch
     await waitForIdle(service, opened.sessionId);
     assert.equal((await service.call("inbox", { action: "list", status: "answered" }, { rootId: "main-a" })).items.length, 1);
     assert.equal((await service.call("task_get", { taskId: task.taskId }, { rootId: "main-a" })).status, "completed");
-    assert.equal((await service.call("task_result", { taskId: task.taskId }, { rootId: "main-a" })).result.text, "READY DONE");
+    assert.equal((await service.call("task_result", { taskId: task.taskId }, { rootId: "main-a" })).result.text, "DONE");
     await service.flushPersist();
     const saved = JSON.parse(await readFile(statePath, "utf8"));
     assert.equal(saved.version, 4);

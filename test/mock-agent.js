@@ -149,6 +149,46 @@ rl.on("line", (line) => {
       send({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn" } });
       return;
     }
+    if (prompt === "narrated-result") {
+      const updates = [
+        { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Working on it. " } },
+        { sessionUpdate: "tool_call", toolCallId: "tool-a", title: "Read file", kind: "read" },
+        { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Still checking. " } },
+        { sessionUpdate: "tool_call_update", toolCallId: "tool-a", status: "completed" },
+        { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "thinking" } },
+        { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "FINAL " } },
+        { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ANSWER" } }
+      ];
+      for (const update of updates) {
+        send({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: { sessionId: message.params.sessionId, update }
+        });
+      }
+      send({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn" } });
+      return;
+    }
+    if (prompt === "tool-then-end") {
+      send({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: message.params.sessionId,
+          update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ONLY NARRATION" } }
+        }
+      });
+      send({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: message.params.sessionId,
+          update: { sessionUpdate: "tool_call", toolCallId: "tool-b", title: "Write file", kind: "edit" }
+        }
+      });
+      send({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn" } });
+      return;
+    }
     send({
       jsonrpc: "2.0",
       method: "session/update",

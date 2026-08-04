@@ -37,11 +37,14 @@ export class SessionStore {
       }
     });
     const thoughtBuffer = new BoundedUtf8Text(this.maxTextBytes);
+    const segmentBuffer = new BoundedUtf8Text(this.maxTextBytes);
     if (initialResultText) resultBuffer.append(initialResultText);
     if (initialThoughtText) thoughtBuffer.append(initialThoughtText);
     textAccumulators.set(session, {
       resultBuffer,
       thoughtBuffer,
+      segmentBuffer,
+      inspection: [],
       get resultWriter() { return resultWriter; }
     });
     Object.defineProperties(session, {
@@ -54,6 +57,10 @@ export class SessionStore {
           resultWriter = null;
           session.resultArtifact = null;
           resultBuffer.reset(value);
+          segmentBuffer.reset(value);
+          textAccumulators.get(session).inspection.length = 0;
+          session.resultFinalText = null;
+          session.resultInspection = [];
         }
       },
       thoughtText: {
@@ -73,11 +80,36 @@ export class SessionStore {
   }
 
   appendResultText(session, text) {
-    textAccumulators.get(session)?.resultBuffer.append(text);
+    const state = textAccumulators.get(session);
+    state?.resultBuffer.append(text);
+    state?.segmentBuffer.append(text);
+  }
+
+  // Any non-message update (tool call, permission, plan, ...) closes the current
+  // message segment: the text before it is narration, not the final answer.
+  markSegmentBoundary(session, boundary) {
+    const state = textAccumulators.get(session);
+    if (!state) return;
+    const text = state.segmentBuffer.toString();
+    if (text.trim()) {
+      state.inspection.push({
+        text: text.length > 4000 ? text.slice(0, 4000).replace(/[\uD800-\uDBFF]$/, "") : text,
+        bytes: Buffer.byteLength(text),
+        truncated: text.length > 4000,
+        boundary
+      });
+      if (state.inspection.length > 32) state.inspection.splice(0, state.inspection.length - 32);
+    }
+    state.segmentBuffer.reset("");
   }
 
   finalizeResult(session) {
     const state = textAccumulators.get(session);
+    if (state) {
+      const finalText = state.segmentBuffer.toString();
+      session.resultFinalText = finalText.trim() ? finalText : state.resultBuffer.toString();
+      session.resultInspection = [...state.inspection];
+    }
     const writer = state?.resultWriter;
     if (!writer?.active) return null;
     writer.finalize(state.resultBuffer.toString());

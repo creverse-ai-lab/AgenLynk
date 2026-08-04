@@ -664,8 +664,8 @@ export class GatewayService {
     });
     // The result buffer is cumulative; re-sending it on every poll of a running
     // turn multiplies the caller's context cost, so it is opt-in until the turn ends.
-    const includeResult = args.includeResult === true
-      || (args.includeResult !== false && !ACTIVE_STATUSES.has(session.status));
+    const active = ACTIVE_STATUSES.has(session.status);
+    const includeResult = args.includeResult === true || (args.includeResult !== false && !active);
     return {
       ok: true,
       ...publicSession(session),
@@ -674,10 +674,14 @@ export class GatewayService {
       events,
       ...(!includeResult ? {} : {
         result: {
-          text: session.resultText,
+          // After the turn ends, text carries only the final message segment;
+          // the full narrated transcript stays readable via session get.
+          text: active ? session.resultText : session.resultFinalText ?? session.resultText,
+          transcriptBytes: Buffer.byteLength(session.resultText),
           artifact: session.resultArtifact ?? null,
           thought: args.includeThoughts === true ? session.thoughtText : undefined,
-          stopReason: session.stopReason
+          stopReason: session.stopReason,
+          ...(args.includeInspection === true ? { inspection: session.resultInspection ?? [] } : {})
         }
       })
     };
@@ -741,6 +745,7 @@ export class GatewayService {
         ok: true,
         ...publicSession(session),
         resultText: session.resultText,
+        finalResultText: session.resultFinalText ?? null,
         events: args.includeEvents ? session.events : undefined
       };
     }
@@ -809,6 +814,7 @@ export class GatewayService {
       this.store.push(session, { type, text });
       return;
     }
+    this.store.markSegmentBoundary(session, String(type));
     if (type === "permission_request") {
       session.status = "waiting_permission";
       this.store.push(session, {
@@ -960,7 +966,12 @@ export class GatewayService {
       sessionId: session.id,
       turnId: session.turnId,
       status: session.status,
-      result: { text: session.resultText, artifact: session.resultArtifact ?? null, stopReason: session.stopReason },
+      result: {
+        text: session.resultFinalText ?? session.resultText,
+        transcriptBytes: Buffer.byteLength(session.resultText),
+        artifact: session.resultArtifact ?? null,
+        stopReason: session.stopReason
+      },
       ...(session.error ? { error: session.error } : {})
     });
   }
