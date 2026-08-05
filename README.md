@@ -25,7 +25,7 @@ Node.js 22 이상과 macOS 또는 Linux가 필요합니다.
 ## 설치 방법
 
 ```bash
-git clone https://github.com/nesto-ai/agent_gateway.git
+git clone https://github.com/creverse-ai-lab/agent_gateway.git
 cd agent_gateway
 npm ci
 npm link

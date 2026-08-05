@@ -9,14 +9,14 @@ test("Gateway source monitor reports a newer version on remote main", async () =
   const newerVersion = `${Number(GATEWAY_VERSION.split(".")[0]) + 1}.0.0`;
   let requestedUrl;
   const result = await checkGatewaySource({
-    run: async () => "https://github.com/nesto-ai/agent_gateway.git\n",
+    run: async () => "https://github.com/creverse-ai-lab/agent_gateway.git\n",
     fetchImpl: async (url) => {
       requestedUrl = url;
       return { ok: true, text: async () => JSON.stringify({ version: newerVersion }) };
     },
     now: () => Date.parse("2026-08-02T00:00:00.000Z")
   });
-  assert.equal(requestedUrl, "https://raw.githubusercontent.com/nesto-ai/agent_gateway/main/package.json");
+  assert.equal(requestedUrl, "https://raw.githubusercontent.com/creverse-ai-lab/agent_gateway/main/package.json");
   assert.equal(result.currentVersion, GATEWAY_VERSION);
   assert.equal(result.mainVersion, newerVersion);
   assert.equal(result.updateAvailable, true);
@@ -24,7 +24,7 @@ test("Gateway source monitor reports a newer version on remote main", async () =
 
 test("Gateway source monitor does not treat an older main as an update", async () => {
   const result = await checkGatewaySource({
-    run: async () => "git@github.com:nesto-ai/agent_gateway.git\n",
+    run: async () => "git@github.com:creverse-ai-lab/agent_gateway.git\n",
     fetchImpl: async () => ({ ok: true, text: async () => JSON.stringify({ version: "1.0.0" }) })
   });
   assert.equal(result.updateAvailable, false);
