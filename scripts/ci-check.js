@@ -45,5 +45,9 @@ assert.equal(install.installSkill, true, "first install must include the delegat
 const update = parseInstallerArgs(["--update"]);
 assert.equal(update.installSkill, false, "updates must preserve customized skills");
 assert.equal(update.restartDaemon, true, "updates must restart the daemon");
+const skillUpdate = parseInstallerArgs(["--update-skill"]);
+assert.equal(skillUpdate.updateSkill, true, "skill updates must use the managed-copy update path");
+assert.equal(skillUpdate.update, false, "skill updates must not pull or update runtime components");
+assert.equal(skillUpdate.restartDaemon, false, "skill-only updates must not restart the daemon");
 
 process.stdout.write("ACP Gateway CI checks passed\n");

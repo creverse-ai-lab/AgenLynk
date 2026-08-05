@@ -41,6 +41,23 @@ test("installer update preserves user-customized skills while refreshing runtime
   assert.equal(options.restartDaemon, true);
 });
 
+test("installer parses standalone managed skill updates", () => {
+  const options = parseInstallerArgs(["--update-skill", "--target", "codex", "--dry-run"]);
+  assert.equal(options.installSkill, true);
+  assert.equal(options.updateSkill, true);
+  assert.equal(options.discoverAgents, false);
+  assert.equal(options.installAdapters, false);
+  assert.equal(options.restartDaemon, false);
+  assert.throws(
+    () => parseInstallerArgs(["--install-skill", "--update-skill"]),
+    /cannot be combined/
+  );
+  assert.throws(
+    () => parseInstallerArgs(["--install-all", "--update-skill"]),
+    /cannot be combined/
+  );
+});
+
 test("installer update preserves the previously installed front door", async () => {
   const directory = await mkdtemp(join(tmpdir(), "acp-installer-update-front-door-"));
   const statePath = join(directory, "install.json");
@@ -143,7 +160,8 @@ test("installer dry-run does not create state or execute commands", async () => 
       runtime,
       runCommand: async () => { commandCalls += 1; return { code: 0, stdout: "", stderr: "" }; },
       detectProviders: async () => providers,
-      registryLoader: emptyRegistryLoader
+      registryLoader: emptyRegistryLoader,
+      skillRoots: { codex: join(directory, "codex-skills") }
     });
     assert.equal(result.dryRun, true);
     assert.deepEqual(result.targets, { control: ["codex"], guide: ["codex"], skill: ["codex"] });
@@ -166,7 +184,12 @@ test("install-all uses one selected front door while Guide reaches every agent",
       statePath,
       runtime,
       detectProviders: async () => allProviders,
-      registryLoader: emptyRegistryLoader
+      registryLoader: emptyRegistryLoader,
+      skillRoots: {
+        codex: join(directory, "codex-skills"),
+        claude: join(directory, "claude-skills"),
+        grok: join(directory, "grok-skills")
+      }
     });
     assert.deepEqual(result.targets, {
       control: ["claude"],
@@ -191,7 +214,7 @@ test("install-all front door validation is explicit", () => {
   );
 });
 
-test("installer copies and atomically updates the managed agent-delegator skill", async () => {
+test("installer keeps reinstall separate from managed skill updates", async () => {
   const directory = await mkdtemp(join(tmpdir(), "acp-installer-skill-"));
   const statePath = join(directory, "install.json");
   const skillSource = join(directory, "source-skill");
@@ -211,11 +234,102 @@ test("installer copies and atomically updates the managed agent-delegator skill"
     };
     await runInstaller(options, dependencies);
     assert.equal(await readFile(destination, "utf8"), "version-one\n");
+    const unchanged = await runInstaller(parseInstallerArgs(["--update-skill", "--target", "codex"]), dependencies);
+    assert.equal(unchanged.actions.find((action) => action.type === "skill").status, "up-to-date");
     await writeFile(join(skillSource, "SKILL.md"), "version-two\n", "utf8");
-    await runInstaller(options, dependencies);
+    const reinstall = await runInstaller(options, dependencies);
+    assert.equal(await readFile(destination, "utf8"), "version-one\n");
+    assert.equal(reinstall.actions.find((action) => action.type === "skill").status, "already-installed");
+    assert.match(reinstall.warnings.join("\n"), /--update-skill/);
+
+    const updated = await runInstaller(parseInstallerArgs(["--update-skill", "--target", "codex"]), dependencies);
     assert.equal(await readFile(destination, "utf8"), "version-two\n");
+    assert.equal(updated.actions.find((action) => action.type === "skill").status, "updated");
     const state = JSON.parse(await readFile(statePath, "utf8"));
     assert.equal(state.managedSkills["codex:agent-delegator"].path, skillDirectory);
+    assert.match(state.managedSkills["codex:agent-delegator"].sourceDigest, /^[a-f0-9]{64}$/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("managed skill updates preserve local customization unless forced", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-installer-skill-custom-"));
+  const statePath = join(directory, "install.json");
+  const skillSource = join(directory, "source-skill");
+  const codexSkillRoot = join(directory, "codex-skills");
+  const destination = join(codexSkillRoot, "agent-delegator", "SKILL.md");
+  try {
+    await mkdir(skillSource);
+    await writeFile(join(skillSource, "SKILL.md"), "version-one\n", "utf8");
+    const dependencies = {
+      statePath,
+      skillSource,
+      skillRoots: { codex: codexSkillRoot },
+      runtime,
+      detectProviders: async () => providers
+    };
+    await runInstaller(parseInstallerArgs(["--install-skill", "--target", "codex"]), dependencies);
+    await writeFile(destination, "local-customization\n", "utf8");
+    await writeFile(join(skillSource, "SKILL.md"), "version-two\n", "utf8");
+
+    const preserved = await runInstaller(parseInstallerArgs(["--update-skill"]), dependencies);
+    assert.equal(await readFile(destination, "utf8"), "local-customization\n");
+    assert.equal(preserved.actions.find((action) => action.type === "skill").status, "customized");
+
+    const forced = await runInstaller(parseInstallerArgs(["--update-skill", "--force"]), dependencies);
+    assert.equal(await readFile(destination, "utf8"), "version-two\n");
+    assert.equal(forced.actions.find((action) => action.type === "skill").status, "updated");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("managed skill updates require recorded state and protect legacy installs", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-installer-skill-legacy-"));
+  const statePath = join(directory, "install.json");
+  const skillSource = join(directory, "source-skill");
+  const codexSkillRoot = join(directory, "codex-skills");
+  const skillDirectory = join(codexSkillRoot, "agent-delegator");
+  const destination = join(skillDirectory, "SKILL.md");
+  const dependencies = {
+    statePath,
+    skillSource,
+    skillRoots: { codex: codexSkillRoot },
+    runtime,
+    detectProviders: async () => providers
+  };
+  try {
+    await mkdir(skillSource);
+    await writeFile(join(skillSource, "SKILL.md"), "version-two\n", "utf8");
+    await assert.rejects(
+      runInstaller(parseInstallerArgs(["--update-skill"]), dependencies),
+      /requires an installer-managed skill/
+    );
+
+    await mkdir(skillDirectory, { recursive: true });
+    await writeFile(destination, "version-two\n", "utf8");
+    await writeFile(statePath, JSON.stringify({
+      version: 1,
+      managedMcp: {},
+      managedSkills: {
+        "codex:agent-delegator": {
+          agent: "codex",
+          name: "agent-delegator",
+          path: skillDirectory,
+          installedAt: "2026-01-01T00:00:00.000Z"
+        }
+      },
+      agentUpdates: { autoUpdate: true, notifications: true }
+    }), "utf8");
+
+    const protectedLegacy = await runInstaller(parseInstallerArgs(["--update-skill"]), dependencies);
+    assert.equal(await readFile(destination, "utf8"), "version-two\n");
+    assert.equal(protectedLegacy.actions.find((action) => action.type === "skill").status, "legacy-unverified");
+
+    await writeFile(destination, "legacy-copy\n", "utf8");
+    await runInstaller(parseInstallerArgs(["--update-skill", "--force"]), dependencies);
+    assert.equal(await readFile(destination, "utf8"), "version-two\n");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

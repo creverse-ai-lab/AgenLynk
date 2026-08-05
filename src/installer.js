@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { accessSync, constants } from "node:fs";
-import { access, chmod, cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, chmod, cp, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { detectProviders } from "./providers.js";
 import {
@@ -33,12 +33,15 @@ export function defaultInstallStatePath() {
 }
 
 export function parseInstallerArgs(argv) {
+  let explicitInstallSkill = false;
+  let explicitUpdateSkill = false;
   const options = {
     installAdapters: false,
     installAll: false,
     installControl: false,
     installGuide: false,
     installSkill: false,
+    updateSkill: false,
     discoverAgents: false,
     registryAgents: [],
     registryAgentsOnly: false,
@@ -93,8 +96,13 @@ export function parseInstallerArgs(argv) {
     } else if (arg === "--install-control") options.installControl = true;
     else if (arg === "--install-guide") options.installGuide = true;
     else if (arg === "--install-skill") {
+      explicitInstallSkill = true;
       options.installSkill = true;
       options.discoverAgents = true;
+    } else if (arg === "--update-skill") {
+      explicitUpdateSkill = true;
+      options.installSkill = true;
+      options.updateSkill = true;
     }
     else if (arg === "--rotate-token") {
       options.rotateToken = true;
@@ -141,6 +149,8 @@ export function parseInstallerArgs(argv) {
   }
   if (options.frontDoor && !options.installAll) throw new Error("--front-door can only be used with --install-all");
   if (options.frontDoor && options.targets.length) throw new Error("--front-door and --target cannot be combined");
+  if (explicitInstallSkill && explicitUpdateSkill) throw new Error("--install-skill and --update-skill cannot be combined");
+  if (options.updateSkill && options.installAll) throw new Error("--update-skill cannot be combined with --install-all");
   return options;
 }
 
@@ -168,6 +178,9 @@ export async function runInstaller(options, dependencies = {}) {
   const actions = [];
   const warnings = [];
   let state = await readInstallState(statePath);
+  if (options.updateSkill && !Object.keys(state?.managedSkills ?? {}).length) {
+    throw new Error("--update-skill requires an installer-managed skill; use --install-skill for the initial installation");
+  }
   const configuresAgentUpdates = options.agentAutoUpdate != null || options.agentUpdateNotifications != null;
   if (configuresAgentUpdates && !state && !options.installControl) {
     throw new Error("Install ACP Gateway before configuring the agent update policy");
@@ -284,9 +297,20 @@ export async function runInstaller(options, dependencies = {}) {
     ...registry.configured,
     ...providers.filter((provider) => provider.agentInstalled).map((provider) => provider.id)
   ]);
-  const skillTargets = options.installSkill
-    ? (options.targets.length && !options.allTargets ? requestedTargets : [...installedProviderIds])
-    : [];
+  const managedSkillTargets = [...new Set(Object.values(state?.managedSkills ?? {})
+    .filter((item) => item?.name === DELEGATOR_SKILL_NAME && item.agent)
+    .map((item) => item.agent))];
+  if (options.updateSkill && options.targets.length && !options.allTargets) {
+    const unmanaged = requestedTargets.filter((target) => !managedSkillTargets.includes(target));
+    if (unmanaged.length) {
+      throw new Error(`--update-skill target is not installer-managed: ${unmanaged.join(", ")}; use --install-skill for initial installation`);
+    }
+  }
+  const skillTargets = options.updateSkill
+    ? (options.targets.length && !options.allTargets ? requestedTargets : managedSkillTargets)
+    : options.installSkill
+      ? (options.targets.length && !options.allTargets ? requestedTargets : [...installedProviderIds])
+      : [];
 
   let identity = state?.identity ?? null;
   if ((options.installControl || options.installGuide || options.installSkill || configuresAgentUpdates) && !state) {
@@ -323,12 +347,16 @@ export async function runInstaller(options, dependencies = {}) {
       const spec = mcpSpec(target, "guide", identity);
       await installMcp(spec, { options, state, run, actions });
     }
-    if (skillTargets.includes(target) && installedProviderIds.has(target)) {
-      const destinationRoot = skillRoots[target] ?? skillRoots.default;
+    const managedSkill = state?.managedSkills?.[`${target}:${DELEGATOR_SKILL_NAME}`];
+    const canManageSkill = installedProviderIds.has(target) || (options.updateSkill && managedSkill?.path);
+    if (skillTargets.includes(target) && canManageSkill) {
+      const destinationRoot = options.updateSkill && managedSkill?.path
+        ? dirname(managedSkill.path)
+        : skillRoots[target] ?? skillRoots.default;
       if (!destinationRoot) throw new Error(`No skill installation path is configured for ${target}`);
       const destination = join(destinationRoot, DELEGATOR_SKILL_NAME);
-      const sharedWith = installedSkillDestinations.get(destination);
-      if (sharedWith) {
+      const shared = installedSkillDestinations.get(destination);
+      if (shared) {
         actions.push({
           type: "skill",
           agent: target,
@@ -336,28 +364,29 @@ export async function runInstaller(options, dependencies = {}) {
           source: skillSource,
           destination,
           status: "shared",
-          sharedWith
+          sharedWith: shared.agent,
+          sharedStatus: shared.status
         });
-        if (!options.dryRun) {
+        if (!options.dryRun && shared.stateSafe && shared.record) {
           state.managedSkills ??= {};
           state.managedSkills[`${target}:${DELEGATOR_SKILL_NAME}`] = {
+            ...shared.record,
             agent: target,
-            name: DELEGATOR_SKILL_NAME,
             path: destination,
-            sharedWith,
-            installedAt: new Date().toISOString()
+            sharedWith: shared.agent
           };
         }
         continue;
       }
-      installedSkillDestinations.set(destination, target);
-      await installBundledSkill(target, {
+      const installed = await installBundledSkill(target, {
         source: skillSource,
         destinationRoot,
         options,
         state,
-        actions
+        actions,
+        warnings
       });
+      installedSkillDestinations.set(destination, { agent: target, ...installed });
     } else if (skillTargets.includes(target)) {
       warnings.push(`${target} is not installed; skill installation skipped`);
     }
@@ -445,11 +474,12 @@ export function installerHelp() {
     "  --offline              Use only the cached ACP registry",
     "  --install-control      Register the Main-only Control MCP",
     "  --install-guide        Register the read-only Guide MCP",
-    "  --install-skill        Install agent-delegator for every discovered agent",
+    "  --install-skill        Initially install agent-delegator for discovered agents",
+    "  --update-skill         Update unchanged installer-managed agent-delegator copies",
     "  --target <agent>       codex, claude, grok, auggie, or all (repeatable)",
     "  --rotate-token         Rotate credentials and update Control MCP entries",
     "  --dry-run              Print planned changes without modifying the system",
-    "  --force                Replace same-name MCP entries not managed by this installer",
+    "  --force                Replace unmanaged entries or overwrite customized managed skills",
     "  --skip-health-check    Do not start/connect to the daemon after installation",
     "  --show-secrets         Include the generated Control token in JSON output",
     "  --agent-auto-update <on|off>       Configure automatic ACP adapter updates",
@@ -487,16 +517,71 @@ async function installMcp(spec, { options, state, run, actions }) {
   state.managedMcp[key] = { agent: spec.agent, name: spec.name, kind: spec.kind, installedAt: new Date().toISOString() };
 }
 
-async function installBundledSkill(agent, { source, destinationRoot, options, state, actions }) {
+async function installBundledSkill(agent, { source, destinationRoot, options, state, actions, warnings }) {
   if (!destinationRoot) throw new Error(`No skill installation path is configured for ${agent}`);
   const destination = join(destinationRoot, DELEGATOR_SKILL_NAME);
   const key = `${agent}:${DELEGATOR_SKILL_NAME}`;
   const exists = await pathExists(destination);
-  actions.push({ type: "skill", agent, name: DELEGATOR_SKILL_NAME, source, destination });
-  if (options.dryRun) return;
-  const managedDestination = Object.values(state?.managedSkills ?? {}).some((item) => item?.path === destination);
-  if (exists && !state?.managedSkills?.[key] && !managedDestination && !options.force) {
+  const sourceDigest = await skillTreeDigest(source);
+  const existingRecord = state?.managedSkills?.[key]
+    ?? Object.values(state?.managedSkills ?? {}).find((item) => item?.path === destination);
+  const managedDestination = Boolean(existingRecord);
+  let destinationDigest = null;
+  let destinationDigestError = null;
+  if (exists) {
+    try {
+      destinationDigest = await skillTreeDigest(destination);
+    } catch (error) {
+      destinationDigestError = error;
+    }
+  }
+  const action = { type: "skill", agent, name: DELEGATOR_SKILL_NAME, source, destination };
+  actions.push(action);
+
+  if (!options.updateSkill && exists && !managedDestination && !options.force) {
     throw new Error(`${key} already exists and is not managed by this installer; rerun with --force to replace it`);
+  }
+
+  if (!options.updateSkill && exists && managedDestination && !options.force) {
+    action.status = "already-installed";
+    warnings.push(`${key} is already installed; use --update-skill to update an unchanged managed copy or --force to replace it`);
+    return { status: action.status, record: existingRecord, stateSafe: false };
+  }
+
+  if (options.updateSkill && exists && !options.force) {
+    if (destinationDigestError) {
+      action.status = "customized-or-unsupported";
+      warnings.push(`${key} was not updated because its installed tree could not be verified: ${destinationDigestError.message}; rerun with --force to replace it`);
+      return { status: action.status, record: existingRecord, stateSafe: false };
+    }
+    if (!existingRecord?.sourceDigest) {
+      action.status = "legacy-unverified";
+      warnings.push(`${key} was not updated because its legacy install has no recorded digest; rerun with --force after reviewing local customizations`);
+      return { status: action.status, record: existingRecord, stateSafe: false };
+    }
+    if (destinationDigest === sourceDigest) {
+      action.status = "up-to-date";
+      const record = skillInstallRecord(agent, destination, existingRecord, sourceDigest);
+      if (!options.dryRun) {
+        state.managedSkills ??= {};
+        state.managedSkills[key] = record;
+      }
+      return { status: action.status, record, stateSafe: true };
+    }
+    if (destinationDigest !== existingRecord.sourceDigest) {
+      action.status = "customized";
+      warnings.push(`${key} was not updated because the installed skill was modified; rerun with --force to overwrite it`);
+      return { status: action.status, record: existingRecord, stateSafe: false };
+    }
+  }
+
+  action.status = exists ? (options.updateSkill ? "updated" : "replaced") : "installed";
+  if (options.dryRun) {
+    return {
+      status: action.status,
+      record: skillInstallRecord(agent, destination, existingRecord, sourceDigest),
+      stateSafe: true
+    };
   }
 
   await mkdir(destinationRoot, { recursive: true, mode: 0o700 });
@@ -518,7 +603,51 @@ async function installBundledSkill(agent, { source, destinationRoot, options, st
     throw error;
   }
   state.managedSkills ??= {};
-  state.managedSkills[key] = { agent, name: DELEGATOR_SKILL_NAME, path: destination, installedAt: new Date().toISOString() };
+  const record = skillInstallRecord(agent, destination, existingRecord, sourceDigest);
+  state.managedSkills[key] = record;
+  return { status: action.status, record, stateSafe: true };
+}
+
+function skillInstallRecord(agent, path, existing, sourceDigest) {
+  const now = new Date().toISOString();
+  return {
+    ...existing,
+    agent,
+    name: DELEGATOR_SKILL_NAME,
+    path,
+    sourceDigest,
+    installedAt: existing?.installedAt ?? now,
+    updatedAt: now
+  };
+}
+
+async function skillTreeDigest(root) {
+  const hash = createHash("sha256");
+  const absoluteRoot = resolve(root);
+  const rootStat = await lstat(absoluteRoot);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error(`skill root must be a real directory: ${absoluteRoot}`);
+  }
+  async function visit(directory, prefix = "") {
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+    for (const entry of entries) {
+      const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        hash.update(`directory\0${relative}\0`);
+        await visit(path, relative);
+      } else if (entry.isFile()) {
+        const data = await readFile(path);
+        hash.update(`file\0${relative}\0${data.length}\0`);
+        hash.update(data);
+      } else {
+        throw new Error(`unsupported skill entry: ${path}`);
+      }
+    }
+  }
+  await visit(absoluteRoot);
+  return hash.digest("hex");
 }
 
 function mcpSpec(agent, kind, identity) {
