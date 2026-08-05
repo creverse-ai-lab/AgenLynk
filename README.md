@@ -171,9 +171,9 @@ Grok 4.5에게 현재 설계의 보안 취약점을 red-team 검토시키고, pe
 
 Gateway는 Worker가 공개하지 않은 `temperature`, `max_tokens` 같은 값을 임의로 만들어 전달하지 않습니다. 따라서 지원 범위는 Claude, Codex, Grok 등 각 ACP adapter가 실제로 광고하는 옵션에 따라 달라집니다. 설정 변경은 `config_changed` 세션 이벤트로 남으므로, 추후 DAG 오케스트레이터가 노드의 작업 유형·비용·품질 정책에 따라 파라미터를 선택하고 결과와 함께 추적할 수 있습니다. process 단위로 모델을 고정하는 Worker는 기존 세션에서 모델을 바꾸지 않고 새 세션을 열어야 합니다.
 
-중간 poll에서는 `includeResult: false`를 사용하면 누적 결과의 반복 전송을 줄일 수 있습니다. 최종 상태에서만 `includeResult: true`로 전체 결과를 받으면 됩니다.
+v1.3.0부터 poll 기본값이 절약형입니다. 턴이 진행 중일 때 `result`는 자동으로 생략되고(`includeResult: true`로 명시할 때만 포함), 종료 후 poll의 `result.text`에는 누적 transcript가 아니라 **최종 답변 세그먼트**(마지막 작업 경계 이후의 메시지 텍스트)만 담깁니다. 진행 narration은 `includeInspection: true`, 전체 transcript는 `agent_acp_session` `get`의 `includeTranscript: true`로 조회하며, `cursor`/`toCursor`/`eventTypes`로 보존된 이벤트 이력을 범위 조회할 수 있습니다. 자세한 회수 경로는 `agent-delegator` skill의 "Where each result lives" 표를 따르세요.
 
-결과나 terminal 출력이 인라인 상한을 넘으면 Gateway가 전체 내용을 `~/.acp-gateway/artifacts`의 파일로 넘겨 저장하고, poll 결과에 파일 경로·바이트 수·완료 여부를 돌려줍니다. 인라인에는 최신 부분만 유지하므로 RAM 사용량이 결과 크기에 따라 계속 늘어나지 않습니다. Artifact는 파일당 100MB·전체 512MB이고, 동시 미응답 권한·질문 요청은 세션당 64개의 안전 상한을 따릅니다. 큰 설명 chunk는 32MB protocol frame 상한 안에서 그대로 처리합니다.
+인라인 상한을 넘는 데이터는 전부 `~/.acp-gateway/artifacts`의 파일로 스필되고 응답에는 잘린 미리보기와 포인터(경로·바이트 수·완료 여부)가 실립니다 — 4KB(UTF-8)를 넘는 tool 이벤트 payload는 `dataArtifact`, 64KB를 넘는 최종 답변은 `textArtifact`, 메모리 상한(1MB)을 넘는 transcript는 `resultArtifact`. 인라인에는 상한 내 내용만 유지하므로 RAM과 오케스트레이터 컨텍스트가 결과 크기에 따라 늘어나지 않습니다. Artifact는 파일당 100MB·전체 512MB이고, 라이브 세션이 참조하는 파일은 24시간 정리에서 보존됩니다. 동시 미응답 권한·질문 요청은 세션당 64개의 안전 상한을 따르며, 큰 설명 chunk는 32MB protocol frame 상한 안에서 그대로 처리합니다.
 
 ### 권한 정책
 
