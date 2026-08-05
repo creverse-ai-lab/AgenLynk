@@ -10,7 +10,7 @@ Use the Main-only `agent-acp` MCP from the interactive orchestrator. Keep worker
 ## Inspect before delegating
 
 1. Call `agent_acp_setup` without `provider` to discover installed providers without starting them.
-2. Surface every non-empty health `alerts` entry to the user before delegating. Use `refreshAgentUpdates: true` only when the user requests a fresh version or health check.
+2. Surface every non-empty health `alerts` entry to the user before delegating. Use `refreshAgentUpdates: true` only when the user requests a fresh version or health check. The same response's `metrics` reports cumulative poll traffic (responses, bytes, per-event-type counts) since the daemon started, for delegation cost accounting.
 3. Select only a provider reported as usable. Call setup with that explicit provider before its first use to verify initialization, capabilities, and reported default model.
 4. Treat the live MCP tool schema and setup response as authoritative. Treat model names in examples or old sessions as hints, not capabilities.
 
@@ -49,13 +49,14 @@ Apply model rules precisely:
 2. Do not start concurrent prompts in the same session. Use separate sessions for independent work.
 3. If the MCP host returns a task handle, use its task get/result/cancel lifecycle and do not submit a duplicate prompt. Otherwise monitor with `agent_acp_poll`.
 4. Start polling with `cursor: 0`, preserve every returned `nextCursor`, and pass it to the next poll.
-5. While work is active, use a bounded `waitMs` and `includeResult: false`. A completed poll wait is not a worker execution deadline; continue until a terminal or Main-input status appears.
-6. Request `includeResult: true` when status becomes `idle`, `error`, or `cancelled`. Request thoughts or tool events only when needed for review.
+5. While work is active, poll with a bounded `waitMs`. The result object is withheld automatically until the turn ends; pass `includeResult: true` only when partial text is genuinely needed mid-turn. The wait wakes only for events the poll would deliver or a status change, so an empty `events` array with `filteredCount > 0` and an advancing `nextCursor` is normal progress, not loss. A completed poll wait is not a worker execution deadline; continue until a terminal or Main-input status appears.
+6. At a terminal status (`idle`, `error`, `cancelled`) the result is included automatically and `result.text` carries the final message segment. Opt into thoughts (`includeThoughts`), tool events (`includeToolEvents`), or closed narration (`includeInspection`) only when needed for review.
 7. If `cursorTruncated` is true, acknowledge that retained event history has a gap and rely on the current session state plus final result instead of reconstructing missing events.
 
 ## Handle permissions and worker questions
 
 - On `waiting_permission`, inspect the poll event or list pending items with `agent_acp_inbox`. Answer the matching `requestId` with `agent_acp_permission` and an option actually offered by the worker.
+- An oversized permission or elicitation payload arrives on the poll event truncated (`toolCallTruncated` / `requestedSchemaTruncated` plus a `dataArtifact` pointer); the durable inbox item always keeps the full payload, so read the inbox when the detail matters for the decision.
 - Keep polling after one permission response because multiple requests may remain pending. Never let a worker self-approve an `ask` request.
 - On `waiting_input`, inspect the inbox item's message and requested schema. Use `agent_acp_answer` with the matching `requestId`; provide schema-valid `content` for `accept`, or use `decline` or `cancel` explicitly.
 - After reconnecting, list pending inbox items before prompting again. Durable inbox records may outlive the original front-door connection.
@@ -89,7 +90,7 @@ Apply model rules precisely:
 | Needed | Where |
 |---|---|
 | Final answer | `agent_acp_poll` / `task_result` → `result.text`; full copy at `result.textArtifact` when the inline text was capped |
-| Intermediate narration | poll `includeInspection: true` (per-segment 4KB preview + `artifact` pointer when larger) |
+| Intermediate narration | poll `includeInspection: true` (per-segment 4KB preview + `artifact` pointer when larger; `inspectionDropped` counts segments evicted past the 32-entry ring) |
 | Full narrated transcript | `agent_acp_session` `get` + `includeTranscript: true`; `transcriptBytes` always reports its size |
 | Tool evidence | poll `includeToolEvents: true` live, or `cursor`/`toCursor` + `eventTypes` retrospectively |
 | Oversized tool payload | the event's `dataArtifact` path |
