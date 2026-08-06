@@ -153,6 +153,12 @@
   .livecard .wait { padding: 8px 12px; border-top: 1px dashed var(--amber); color: var(--amber); font-size: 12px; }
   /* git-graph timeline (/live) */
   .glegend { display: flex; flex-wrap: wrap; gap: 6px 18px; padding: 4px 2px 12px; font-size: 12px; align-items: center; }
+  .glegend select {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 3px 8px; font: inherit; font-size: 12px;
+  }
+  .gl2 { padding: 10px 6px; overflow-x: auto; }
+  .gl2 svg { display: block; }
   .gleg { display: inline-flex; align-items: center; gap: 6px; }
   .gleg .dot { width: 9px; height: 9px; border-radius: 50%; }
   .gleg .k { color: var(--dim); font-size: 11px; }
@@ -533,118 +539,137 @@ const elapsed = (ts) => {
    프롬프트 = fork, 턴 종료 = merge, 진행 중 브랜치는 아래로 계속 뻗는다. */
 const BRANCH_COLORS = ["#4da3ff", "#e8935a", "#a78bfa", "#3fb96f", "#e0a63c", "#e05b5b"];
 function renderLive() {
-  const cutoff = Date.now() - 10 * 60_000;
+  const winMin = store.liveWindow ?? 15;
+  const winMs = winMin * 60_000;
+  const now = Date.now();
+  const t0 = now - winMs;
+  const selector = `<select id="liveWin">
+      ${[5, 15, 60].map((m) => `<option value="${m}"${m === winMin ? " selected" : ""}>최근 ${m}분</option>`).join("")}
+    </select>`;
+
+  const hasRecent = (s) => (store.events[s.sessionId] ?? []).some((e) => e.ts && new Date(e.ts).getTime() >= t0);
   const shown = store.sessions
-    .filter((s) => LIVE_STATUSES.has(s.status)
-      || ((store.events[s.sessionId] ?? []).length && new Date(s.updatedAt ?? 0).getTime() > cutoff))
+    .filter((s) => LIVE_STATUSES.has(s.status) || hasRecent(s))
     .sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? ""));
   if (!shown.length) {
-    return '<div class="bigempty">지금 진행 중인 작업이 없습니다<div class="sub">워커가 일을 시작하면 여기에 타임라인으로 나타납니다</div></div>';
+    return `<div class="glegend">${selector}</div>
+      <div class="bigempty">이 시간 창에 활동이 없습니다<div class="sub">워커가 일을 시작하면 시간축 그래프로 나타납니다</div></div>`;
   }
 
-  const LANE_W = 18, PAD = 12, ROW_H = 28, MID = ROW_H / 2;
-  const laneOf = new Map(shown.map((s, i) => [s.sessionId, i + 1]));
-  const laneX = (lane) => PAD + lane * LANE_W;
-  const colorOf = (sid) => BRANCH_COLORS[(laneOf.get(sid) - 1) % BRANCH_COLORS.length];
-  const graphW = PAD * 2 + LANE_W * shown.length;
-
-  let nodes = [];
+  // cwd = 한 Main(프로젝트)의 기준선. 게이트웨이는 소유 Main을 구분하지 않으므로
+  // 작업 디렉터리 단위로 trunk을 나눠 여러 Main의 활동을 동시에 보여준다.
+  const groups = new Map();
   for (const s of shown) {
-    for (const turn of turnsOf(s.sessionId)) {
-      for (const st of stepsOf(turn)) nodes.push({ s, st, ts: st.ts ?? "" });
+    const key = s.cwd ?? "?";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s);
+  }
+
+  const LANE_W = 22, GUTTER = 52, GROUP_GAP = 26, TOP = 30, BOTTOM = 26;
+  let cx = GUTTER;
+  const trunkOf = new Map(), laneOf2 = new Map(), trunks = [];
+  for (const [cwd, list] of groups) {
+    cx += 12;
+    trunks.push({ cwd, x: cx });
+    for (const s of list) { trunkOf.set(s.sessionId, cx); }
+    for (const s of list) { cx += LANE_W; laneOf2.set(s.sessionId, cx); }
+    cx += GROUP_GAP;
+  }
+  const W = Math.max(cx + 8, 320);
+  const el = document.getElementById("timeline");
+  const H = Math.max(380, (el?.clientHeight ?? 600) - 110);
+  const plotH = H - TOP - BOTTOM;
+  const yOf = (ts) => TOP + Math.max(0, Math.min(1, (new Date(ts).getTime() - t0) / winMs)) * plotH;
+  const NOW_Y = TOP + plotH;
+  const colorAt = (i) => BRANCH_COLORS[i % BRANCH_COLORS.length];
+  const colorOf2 = new Map([...laneOf2.keys()].map((sid, i) => [sid, colorAt(i)]));
+
+  const parts = [];
+  // 시간 눈금 (가로선 + 시각) — 마지막 눈금은 "지금" 기준선이 대신한다
+  for (let i = 0; i < 5; i += 1) {
+    const gy = TOP + (plotH * i) / 5;
+    const gt = new Date(t0 + (winMs * i) / 5);
+    parts.push(`<line x1="${GUTTER - 6}" y1="${gy}" x2="${W}" y2="${gy}" stroke="var(--border)" stroke-width="1" opacity=".45"/>
+      <text x="${GUTTER - 10}" y="${gy + 3}" text-anchor="end" fill="var(--dim)" font-size="9" font-family="ui-monospace,Menlo,monospace">${gt.toTimeString().slice(0, 5)}</text>`);
+  }
+  // "지금" 기준선
+  parts.push(`<line x1="${GUTTER - 6}" y1="${NOW_Y}" x2="${W}" y2="${NOW_Y}" stroke="var(--accent)" stroke-width="1.5" opacity=".7"/>
+    <text x="${GUTTER - 10}" y="${NOW_Y + 3}" text-anchor="end" fill="var(--accent)" font-size="10" font-weight="700">지금</text>`);
+
+  // trunk (Main 기준선) — cwd basename 라벨, hover로 전체 경로
+  for (const tr of trunks) {
+    const base = tr.cwd.split("/").filter(Boolean).pop() ?? tr.cwd;
+    parts.push(`<line x1="${tr.x}" y1="${TOP}" x2="${tr.x}" y2="${NOW_Y}" stroke="var(--dim)" stroke-width="2.5"/>
+      <text x="${tr.x}" y="${TOP - 14}" text-anchor="middle" fill="var(--text)" font-size="10" font-weight="700">Main</text>
+      <text x="${tr.x}" y="${TOP - 4}" text-anchor="middle" fill="var(--dim)" font-size="9">${esc(base.slice(0, 14))}</text>
+      <circle cx="${tr.x}" cy="${TOP - 24}" r="7" fill="transparent" ${tipAttr("Main · " + base, tr.cwd)}/>`);
+  }
+
+  const KIND_COLOR = (kind, fallback) =>
+    kind === "권한 요청" || kind === "워커 질문" ? "var(--amber)"
+    : kind === "오류" ? "var(--red)"
+    : kind === "턴 종료" ? "var(--green)"
+    : kind === "사고 과정" ? "var(--purple)"
+    : fallback;
+
+  for (const s of shown) {
+    const sid = s.sessionId, lx = laneOf2.get(sid), tx = trunkOf.get(sid), color = colorOf2.get(sid);
+    // 레인 헤더 점: hover에 세션 정보
+    parts.push(`<circle cx="${lx}" cy="${TOP - 8}" r="4" fill="${color}"/>
+      <circle cx="${lx}" cy="${TOP - 8}" r="9" fill="transparent" ${tipAttr(s.title || sid, `${s.provider} · ${s.model ?? "?"}\n상태: ${s.status}\ncwd: ${s.cwd}`)}/>`);
+    for (const turn of turnsOf(sid)) {
+      const steps = stepsOf(turn);
+      if (!steps.length) continue;
+      const startMs = new Date(turn.start).getTime();
+      const endMs = turn.end ? new Date(turn.end).getTime() : null;
+      const runningTurn = !turn.end && LIVE_STATUSES.has(s.status) && s.turnId === turn.turnId;
+      if (endMs != null && endMs < t0) continue;              // 창 밖에서 이미 끝난 턴
+      if (!runningTurn && endMs == null && startMs < t0) continue;
+      const yStart = yOf(turn.start);
+      const yEnd = runningTurn ? NOW_Y : endMs != null ? yOf(turn.end) : yOf(steps.at(-1).ts);
+      const clippedStart = startMs < t0;
+      // fork: trunk → 브랜치 (창에 시작점이 보일 때만 곡선)
+      if (!clippedStart) {
+        parts.push(`<path d="M ${tx} ${yStart} Q ${lx} ${yStart} ${lx} ${Math.min(yStart + 12, yEnd)}" fill="none" stroke="${color}" stroke-width="2"/>
+          <circle cx="${tx}" cy="${yStart}" r="3.5" fill="var(--text)" stroke="var(--bg)" stroke-width="1.5"/>`);
+      }
+      // 브랜치 몸통
+      parts.push(`<line x1="${lx}" y1="${clippedStart ? TOP : Math.min(yStart + 12, yEnd)}" x2="${lx}" y2="${runningTurn ? NOW_Y : Math.max(yEnd - (endMs != null ? 12 : 0), yStart)}" stroke="${color}" stroke-width="2"/>`);
+      // merge: 브랜치 → trunk
+      if (!runningTurn && endMs != null && endMs >= t0) {
+        parts.push(`<path d="M ${lx} ${Math.max(yEnd - 12, yStart)} Q ${lx} ${yEnd} ${tx} ${yEnd}" fill="none" stroke="${color}" stroke-width="2"/>
+          <circle cx="${tx}" cy="${yEnd}" r="3.5" fill="var(--text)" stroke="var(--bg)" stroke-width="1.5"/>`);
+      }
+      // 이벤트 점 + hover
+      for (const st of steps) {
+        if (!st.ts || new Date(st.ts).getTime() < t0) continue;
+        const kind = (st.tipTitle ?? "").split(" ·")[0];
+        const y = yOf(st.ts);
+        const c = KIND_COLOR(kind, color);
+        const touchesMain = kind.startsWith("권한") || kind.startsWith("질문") || kind === "워커 질문";
+        if (touchesMain) {
+          parts.push(`<line x1="${Math.min(tx, lx)}" y1="${y}" x2="${Math.max(tx, lx)}" y2="${y}" stroke="${c}" stroke-width="1.5" stroke-dasharray="3 3"/>
+            <circle cx="${tx}" cy="${y}" r="3.5" fill="var(--text)" stroke="var(--bg)" stroke-width="1.5"/>`);
+        }
+        parts.push(`<circle cx="${lx}" cy="${y}" r="${kind === "프롬프트" || kind === "턴 종료" ? 5 : 4}" fill="${c}" stroke="var(--bg)" stroke-width="1.5"/>
+          <circle cx="${lx}" cy="${y}" r="9" fill="transparent" ${tipAttr(st.tipTitle, st.tip, st.md)}/>`);
+      }
+      // 진행 중 헤드
+      if (runningTurn) {
+        const waiting = s.status === "waiting_permission" || s.status === "waiting_input";
+        parts.push(`<circle cx="${lx}" cy="${NOW_Y}" r="5.5" fill="${waiting ? "var(--amber)" : color}" class="pulsecircle"/>
+          <circle cx="${lx}" cy="${NOW_Y}" r="10" fill="transparent" ${tipAttr((waiting ? "⏳ " : "") + s.status, `${s.title || sid}\n${elapsed(turn.start)} 경과`)}/>`);
+      }
     }
   }
-  nodes.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
-  nodes = nodes.slice(-80);
-
-  const open = new Set();
-  // Main trunk은 이 그래프의 기준축이다 — 배경 색이 아니라 뚜렷한 선으로 그린다.
-  const trunk = () => `<line x1="${laneX(0)}" y1="0" x2="${laneX(0)}" y2="${ROW_H}" stroke="var(--dim)" stroke-width="2.5"/>`;
-  // Main이 개입하는 지점(fork·merge·권한 왕복)마다 trunk 위에 접점을 찍는다.
-  const mainDot = () => `<circle cx="${laneX(0)}" cy="${MID}" r="3.5" fill="var(--text)" stroke="var(--bg)" stroke-width="1.5"/>`;
-  const passThroughs = (except) => [...open]
-    .filter((sid) => sid !== except)
-    .map((sid) => `<line x1="${laneX(laneOf.get(sid))}" y1="0" x2="${laneX(laneOf.get(sid))}" y2="${ROW_H}" stroke="${colorOf(sid)}" stroke-width="2" opacity=".8"/>`)
-    .join("");
-
-  const rows = nodes.map(({ s, st }) => {
-    const sid = s.sessionId;
-    const lane = laneOf.get(sid), x = laneX(lane), x0 = laneX(0), color = colorOf(sid);
-    const kind = (st.tipTitle ?? "").split(" ·")[0];
-    const isFork = kind === "프롬프트";
-    const isMerge = kind === "턴 종료" || kind === "오류";
-    const wasOpen = open.has(sid);
-    let self;
-    if (isFork) {
-      // trunk에서 브랜치가 갈라져 나온다
-      self = `<path d="M ${x0} ${MID} C ${x0 + LANE_W / 2} ${MID}, ${x - LANE_W / 2} ${MID}, ${x} ${MID}" fill="none" stroke="${color}" stroke-width="2"/>
-        <line x1="${x}" y1="${MID}" x2="${x}" y2="${ROW_H}" stroke="${color}" stroke-width="2"/>`;
-      open.add(sid);
-    } else if (isMerge) {
-      // 브랜치가 trunk로 합류한다
-      self = `<line x1="${x}" y1="0" x2="${x}" y2="${MID}" stroke="${color}" stroke-width="2"/>
-        <path d="M ${x} ${MID} C ${x - LANE_W / 2} ${MID}, ${x0 + LANE_W / 2} ${MID}, ${x0} ${MID}" fill="none" stroke="${color}" stroke-width="2"/>`;
-      open.delete(sid);
-    } else {
-      if (!wasOpen) open.add(sid); // 링버퍼로 fork가 잘린 브랜치는 첫 등장부터 선을 잇는다
-      self = `<line x1="${x}" y1="${wasOpen ? 0 : MID}" x2="${x}" y2="${ROW_H}" stroke="${color}" stroke-width="2"/>`;
-    }
-    const nodeColor = kind === "권한 요청" || kind === "워커 질문" ? "var(--amber)"
-      : kind === "오류" ? "var(--red)"
-      : kind === "턴 종료" ? "var(--green)"
-      : kind === "사고 과정" ? "var(--purple)"
-      : color;
-    const touchesMain = kind.startsWith("권한") || kind.startsWith("질문") || kind === "워커 질문";
-    const dashed = touchesMain
-      ? `<line x1="${Math.min(x0, x)}" y1="${MID}" x2="${Math.max(x0, x)}" y2="${MID}" stroke="${nodeColor}" stroke-width="1.5" stroke-dasharray="3 3"/>` : "";
-    const svg = `<svg width="${graphW}" height="${ROW_H}">${trunk()}${passThroughs(sid)}${self}${dashed}
-      ${isFork || isMerge || touchesMain ? mainDot() : ""}
-      <circle cx="${x}" cy="${MID}" r="4.5" fill="${nodeColor}" stroke="var(--bg)" stroke-width="1.5"/></svg>`;
-    return `<div class="glrow" ${tipAttr(st.tipTitle, st.tip, st.md)}>
-      <span class="ts">${hms(st.ts)}</span>${svg}
-      <span class="lbl"><span class="gsess" style="color:${color}">${esc(s.title || sid)}</span>
-        <span style="${kind === "프롬프트" ? "font-weight:600;color:var(--accent)" : kind === "권한 요청" ? "color:var(--amber)" : kind === "사고 과정" ? "color:var(--purple)" : kind === "턴 종료" ? "color:var(--green)" : ""}">${esc(st.label)}</span></span>
-    </div>`;
-  }).join("");
-
-  // 진행 중인 브랜치의 현재 상태 행 (그래프의 "지금" 지점)
-  const nowRows = shown.filter((s) => LIVE_STATUSES.has(s.status)).map((s) => {
-    const sid = s.sessionId, lane = laneOf.get(sid), x = laneX(lane), color = colorOf(sid);
-    const waiting = s.status === "waiting_permission" || s.status === "waiting_input";
-    const others = [...open].filter((o) => o !== sid)
-      .map((o) => `<line x1="${laneX(laneOf.get(o))}" y1="0" x2="${laneX(laneOf.get(o))}" y2="${ROW_H}" stroke="${colorOf(o)}" stroke-width="2" opacity=".8"/>`).join("");
-    const head = open.has(sid)
-      ? `<line x1="${x}" y1="0" x2="${x}" y2="${MID}" stroke="${color}" stroke-width="2"/>`
-      : "";
-    const turn = turnsOf(sid).find((t) => t.turnId === s.turnId);
-    return `<div class="glrow now">
-      <span class="ts">지금</span>
-      <svg width="${graphW}" height="${ROW_H}">${trunk()}${others}${head}
-        <circle cx="${x}" cy="${MID}" r="5.5" fill="${waiting ? "var(--amber)" : color}" class="pulsecircle"/></svg>
-      <span class="lbl"><span class="gsess" style="color:${color}">${esc(s.title || sid)}</span>
-        <span style="color:${waiting ? "var(--amber)" : "var(--accent)"}">${waiting ? "⏳ " : ""}${esc(s.status)} · ${elapsed(turn?.start ?? s.updatedAt)} 경과</span></span>
-    </div>`;
-  }).join("");
 
   const legend = shown.map((s) => `
-    <span class="gleg"><span class="dot" style="background:${colorOf(s.sessionId)}"></span>
+    <span class="gleg"><span class="dot" style="background:${colorOf2.get(s.sessionId)}"></span>
       ${esc(s.title || s.sessionId)} <span class="k" style="color:${provColor(s.provider)}">${esc(s.provider)} · ${esc(s.model ?? "?")}</span>
       <span class="k">${esc(s.status)}</span></span>`).join("");
 
-  // sticky 컬럼 헤더: trunk 위에 Main 라벨, 각 브랜치 레인 위에 색 점
-  const headDots = shown.map((s) => `<circle cx="${laneX(laneOf.get(s.sessionId))}" cy="14" r="4" fill="${colorOf(s.sessionId)}"/>`).join("");
-  const header = `<div class="glrow ghead">
-    <span class="ts"></span>
-    <svg width="${graphW}" height="20">
-      <text x="${laneX(0)}" y="12" text-anchor="middle" fill="var(--text)" font-size="10" font-weight="700">Main</text>
-      <line x1="${laneX(0)}" y1="15" x2="${laneX(0)}" y2="20" stroke="var(--dim)" stroke-width="2.5"/>
-      ${headDots}
-    </svg>
-    <span class="lbl k" style="color:var(--dim)">오케스트레이터 기준선 — fork/merge/권한 지점마다 Main 접점이 찍힙니다</span>
-  </div>`;
-
-  return `<div class="glegend"><span class="gleg"><span class="dot" style="background:var(--dim)"></span>Main (trunk)</span>${legend}</div>
-    <div class="glgraph">${header}${rows}${nowRows}</div>`;
+  return `<div class="glegend">${selector}<span class="gleg"><span class="dot" style="background:var(--dim)"></span>Main (trunk)</span>${legend}</div>
+    <div class="glgraph gl2"><svg width="${W}" height="${H}">${parts.join("")}</svg></div>`;
 }
 
 /* ===== detail view (기존 카드 뷰) ===== */
@@ -806,6 +831,9 @@ document.getElementById("timeline").addEventListener("mousemove", (e) => {
   positionTip(e.clientX, e.clientY);
 });
 document.getElementById("timeline").addEventListener("mouseleave", () => hideTip());
+document.getElementById("timeline").addEventListener("change", (e) => {
+  if (e.target?.id === "liveWin") { store.liveWindow = Number(e.target.value); renderTimeline(); }
+});
 document.addEventListener("click", (e) => {
   const target = e.target.closest("[data-tip]");
   if (target) {
