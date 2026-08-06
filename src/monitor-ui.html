@@ -163,6 +163,9 @@
   .glrow svg { display: block; }
   .glrow .lbl { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 10px 0 8px; }
   .glrow.now { background: #4da3ff0d; }
+  .glrow.ghead { position: sticky; top: 0; z-index: 2; background: var(--panel); border-bottom: 1px solid var(--border); min-height: 20px; }
+  .glrow.ghead:hover { background: var(--panel); }
+  .glrow.ghead .lbl { font-size: 11px; }
   .glrow.now .ts { color: var(--accent); font-weight: 700; }
   .gsess { font-weight: 600; margin-right: 8px; }
   .pulsecircle { animation: pulse 1.4s ease-in-out infinite; transform-origin: center; transform-box: fill-box; }
@@ -555,7 +558,10 @@ function renderLive() {
   nodes = nodes.slice(-80);
 
   const open = new Set();
-  const trunk = (extra = "") => `<line x1="${laneX(0)}" y1="0" x2="${laneX(0)}" y2="${ROW_H}" stroke="var(--border)" stroke-width="2"${extra}/>`;
+  // Main trunk은 이 그래프의 기준축이다 — 배경 색이 아니라 뚜렷한 선으로 그린다.
+  const trunk = () => `<line x1="${laneX(0)}" y1="0" x2="${laneX(0)}" y2="${ROW_H}" stroke="var(--dim)" stroke-width="2.5"/>`;
+  // Main이 개입하는 지점(fork·merge·권한 왕복)마다 trunk 위에 접점을 찍는다.
+  const mainDot = () => `<circle cx="${laneX(0)}" cy="${MID}" r="3.5" fill="var(--text)" stroke="var(--bg)" stroke-width="1.5"/>`;
   const passThroughs = (except) => [...open]
     .filter((sid) => sid !== except)
     .map((sid) => `<line x1="${laneX(laneOf.get(sid))}" y1="0" x2="${laneX(laneOf.get(sid))}" y2="${ROW_H}" stroke="${colorOf(sid)}" stroke-width="2" opacity=".8"/>`)
@@ -588,9 +594,11 @@ function renderLive() {
       : kind === "턴 종료" ? "var(--green)"
       : kind === "사고 과정" ? "var(--purple)"
       : color;
-    const dashed = kind.startsWith("권한") || kind.startsWith("질문") || kind === "워커 질문"
+    const touchesMain = kind.startsWith("권한") || kind.startsWith("질문") || kind === "워커 질문";
+    const dashed = touchesMain
       ? `<line x1="${Math.min(x0, x)}" y1="${MID}" x2="${Math.max(x0, x)}" y2="${MID}" stroke="${nodeColor}" stroke-width="1.5" stroke-dasharray="3 3"/>` : "";
     const svg = `<svg width="${graphW}" height="${ROW_H}">${trunk()}${passThroughs(sid)}${self}${dashed}
+      ${isFork || isMerge || touchesMain ? mainDot() : ""}
       <circle cx="${x}" cy="${MID}" r="4.5" fill="${nodeColor}" stroke="var(--bg)" stroke-width="1.5"/></svg>`;
     return `<div class="glrow" ${tipAttr(st.tipTitle, st.tip, st.md)}>
       <span class="ts">${hms(st.ts)}</span>${svg}
@@ -623,8 +631,20 @@ function renderLive() {
       ${esc(s.title || s.sessionId)} <span class="k" style="color:${provColor(s.provider)}">${esc(s.provider)} · ${esc(s.model ?? "?")}</span>
       <span class="k">${esc(s.status)}</span></span>`).join("");
 
-  return `<div class="glegend"><span class="gleg"><span class="dot" style="background:var(--border)"></span>Main</span>${legend}</div>
-    <div class="glgraph">${rows}${nowRows}</div>`;
+  // sticky 컬럼 헤더: trunk 위에 Main 라벨, 각 브랜치 레인 위에 색 점
+  const headDots = shown.map((s) => `<circle cx="${laneX(laneOf.get(s.sessionId))}" cy="14" r="4" fill="${colorOf(s.sessionId)}"/>`).join("");
+  const header = `<div class="glrow ghead">
+    <span class="ts"></span>
+    <svg width="${graphW}" height="20">
+      <text x="${laneX(0)}" y="12" text-anchor="middle" fill="var(--text)" font-size="10" font-weight="700">Main</text>
+      <line x1="${laneX(0)}" y1="15" x2="${laneX(0)}" y2="20" stroke="var(--dim)" stroke-width="2.5"/>
+      ${headDots}
+    </svg>
+    <span class="lbl k" style="color:var(--dim)">오케스트레이터 기준선 — fork/merge/권한 지점마다 Main 접점이 찍힙니다</span>
+  </div>`;
+
+  return `<div class="glegend"><span class="gleg"><span class="dot" style="background:var(--dim)"></span>Main (trunk)</span>${legend}</div>
+    <div class="glgraph">${header}${rows}${nowRows}</div>`;
 }
 
 /* ===== detail view (기존 카드 뷰) ===== */
