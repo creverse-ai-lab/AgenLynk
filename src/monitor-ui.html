@@ -330,30 +330,38 @@ function turnsOf(sessionId) {
 }
 
 /* ===== step extraction: compress raw events into sequence-diagram steps =====
-   프롬프트 ↔ 응답 중심의 간략 뷰. tool call·사고·시스템 이벤트는 여기서 제외하고
-   상세(카드) 뷰에서만 보여준다. hover 내용도 프롬프트/응답 전문 위주. */
+   프롬프트 ↔ 응답 ↔ 사고 중심의 간략 뷰. tool call·시스템 이벤트는 여기서 제외하고
+   상세(카드) 뷰에서만 보여준다. hover 내용은 프롬프트/응답/사고 전문. */
 // lanes: 0 = Main, 1 = Worker
 function stepsOf(turn) {
   const steps = [];
-  let buffer = null; // 연속된 응답 청크를 하나의 화살표로 병합
+  let buffer = null; // 연속된 같은 종류의 청크(응답/사고)를 하나의 항목으로 병합
   const flushBuffer = () => {
     if (!buffer || !buffer.text.trim()) { buffer = null; return; }
-    steps.push({
-      from: 1, to: 0, color: "var(--text)", ts: buffer.ts, md: true,
-      label: buffer.text.replace(/\s+/g, " ").slice(0, 70),
-      tipTitle: `응답 · ${buffer.text.length.toLocaleString()}자`, tip: buffer.text
-    });
+    if (buffer.type === "agent_message_chunk") {
+      steps.push({
+        from: 1, to: 0, color: "var(--text)", ts: buffer.ts, md: true,
+        label: buffer.text.replace(/\s+/g, " ").slice(0, 70),
+        tipTitle: `응답 · ${buffer.text.length.toLocaleString()}자`, tip: buffer.text
+      });
+    } else {
+      steps.push({
+        self: 1, color: "var(--purple)", ts: buffer.ts, md: true,
+        label: `사고 · ${buffer.text.length.toLocaleString()}자`,
+        tipTitle: `사고 과정 · ${buffer.text.length.toLocaleString()}자`, tip: buffer.text
+      });
+    }
     buffer = null;
   };
   for (const ev of turn.items) {
     const t = ev.type;
-    if (t === "agent_message_chunk") {
-      if (buffer) buffer.text += ev.text ?? "";
-      else buffer = { text: ev.text ?? "", ts: ev.ts };
+    if (t === "agent_message_chunk" || t === "agent_thought_chunk") {
+      if (buffer && buffer.type === t) buffer.text += ev.text ?? "";
+      else { flushBuffer(); buffer = { type: t, text: ev.text ?? "", ts: ev.ts }; }
       continue;
     }
-    // tool call 진행은 응답 흐름을 끊는 이벤트가 아니므로 병합 버퍼를 유지한다
-    if (t === "agent_thought_chunk" || t.startsWith("tool_call") || t === "usage_update") continue;
+    // tool call 진행은 응답/사고 흐름을 끊는 이벤트가 아니므로 병합 버퍼를 유지한다
+    if (t.startsWith("tool_call") || t === "usage_update") continue;
     flushBuffer();
     if (t === "turn_start") {
       steps.push({ from: 0, to: 1, color: "var(--accent)", ts: ev.ts, bold: true, md: true,
