@@ -556,23 +556,23 @@ function renderLive() {
       <div class="bigempty">이 시간 창에 활동이 없습니다<div class="sub">워커가 일을 시작하면 시간축 그래프로 나타납니다</div></div>`;
   }
 
-  // cwd = 한 Main(프로젝트)의 기준선. 게이트웨이는 소유 Main을 구분하지 않으므로
-  // 작업 디렉터리 단위로 trunk을 나눠 여러 Main의 활동을 동시에 보여준다.
+  // trunk = frontdoor 하나: 세션을 연 에이전트(opener) + 작업 폴더(cwd) 조합.
+  // opener는 control MCP 브리지가 부모 프로세스에서 감지해 세션에 남긴다.
   const groups = new Map();
   for (const s of shown) {
-    const key = s.cwd ?? "?";
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(s);
+    const key = `${s.opener ?? "?"}|${s.cwd ?? "?"}`;
+    if (!groups.has(key)) groups.set(key, { cwd: s.cwd ?? "?", opener: s.opener ?? null, list: [] });
+    groups.get(key).list.push(s);
   }
 
   const LANE_W = 22, GUTTER = 52, GROUP_GAP = 30, TOP = 58, BOTTOM = 26;
   let cx = GUTTER;
   const trunkOf = new Map(), laneOf2 = new Map(), trunks = [];
-  for (const [cwd, list] of groups) {
+  for (const group of groups.values()) {
     cx += 12;
-    trunks.push({ cwd, x: cx });
-    for (const s of list) { trunkOf.set(s.sessionId, cx); }
-    for (const s of list) { cx += LANE_W; laneOf2.set(s.sessionId, cx); }
+    trunks.push({ cwd: group.cwd, opener: group.opener, x: cx });
+    for (const s of group.list) { trunkOf.set(s.sessionId, cx); }
+    for (const s of group.list) { cx += LANE_W; laneOf2.set(s.sessionId, cx); }
     cx += GROUP_GAP;
   }
   const W = Math.max(cx + 8, 320);
@@ -596,14 +596,20 @@ function renderLive() {
   parts.push(`<line x1="${GUTTER - 6}" y1="${NOW_Y}" x2="${W}" y2="${NOW_Y}" stroke="var(--accent)" stroke-width="1.5" opacity=".7"/>
     <text x="${GUTTER - 10}" y="${NOW_Y + 3}" text-anchor="end" fill="var(--accent)" font-size="10" font-weight="700">지금</text>`);
 
-  // trunk (Frontdoor 기준선) — 어느 폴더의 작업인지 폴더명을 함께 표시
+  // trunk (Frontdoor 기준선) — 어떤 에이전트가 어느 폴더에서 지휘하는지 표시.
+  // opener를 아는 세션은 에이전트 로고 뱃지, 모르는 옛 세션은 🚪 폴백.
   for (const tr of trunks) {
     const base = tr.cwd.split("/").filter(Boolean).pop() ?? tr.cwd;
+    const head = tr.opener
+      ? `<rect x="${tr.x - 9}" y="${TOP - 57}" width="18" height="18" rx="6" fill="${provColor(tr.opener)}"/>
+         <text x="${tr.x}" y="${TOP - 44.5}" text-anchor="middle" fill="#0e1116" font-size="8.5" font-weight="800">${esc(tr.opener.slice(0, 2).toUpperCase())}</text>
+         <text x="${tr.x + 13}" y="${TOP - 45}" text-anchor="start" fill="var(--text)" font-size="10" font-weight="700">Frontdoor</text>`
+      : `<text x="${tr.x - 6}" y="${TOP - 44}" text-anchor="start" font-size="12">🚪</text>
+         <text x="${tr.x + 12}" y="${TOP - 45}" text-anchor="start" fill="var(--text)" font-size="10" font-weight="700">Frontdoor</text>`;
     parts.push(`<line x1="${tr.x}" y1="${TOP}" x2="${tr.x}" y2="${NOW_Y}" stroke="var(--dim)" stroke-width="2.5"/>
-      <text x="${tr.x}" y="${TOP - 44}" text-anchor="start" font-size="12">🚪</text>
-      <text x="${tr.x + 16}" y="${TOP - 45}" text-anchor="start" fill="var(--text)" font-size="10" font-weight="700">Frontdoor</text>
-      <text x="${tr.x}" y="${TOP - 31}" text-anchor="start" fill="var(--accent)" font-size="10" font-weight="600">📁 ${esc(base.slice(0, 18))}</text>
-      <rect x="${tr.x - 8}" y="${TOP - 56}" width="110" height="30" fill="transparent" ${tipAttr("Frontdoor · " + base, "작업 폴더: " + tr.cwd)}/>`);
+      ${head}
+      <text x="${tr.x}" y="${TOP - 31}" text-anchor="start" fill="var(--accent)" font-size="10" font-weight="600">📁 ${esc(base.slice(0, 13))}</text>
+      <rect x="${tr.x - 10}" y="${TOP - 58}" width="120" height="32" fill="transparent" ${tipAttr("Frontdoor" + (tr.opener ? " · " + tr.opener : ""), `에이전트: ${tr.opener ?? "미상 (구버전 세션)"}\n작업 폴더: ${tr.cwd}`)}/>`);
   }
 
   const KIND_COLOR = (kind, fallback) =>

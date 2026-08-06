@@ -1047,6 +1047,32 @@ test("Gateway ships a bounded thought preview on completed results only, honorin
   }
 });
 
+test("Gateway records the opener agent on sessions and persists it across restarts", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-opener-test-"));
+  const statePath = join(directory, "state.json");
+  const makeClient = (_provider, options) =>
+    new AcpClient({ provider: "mock", command: process.execPath, args: [mockAgent], permissionPolicy: "read_only" }, options);
+  let service = new GatewayService({ statePath, createClient: makeClient });
+  try {
+    await service.init();
+    const opened = await service.call(
+      "session_open",
+      { provider: "claude", cwd: process.cwd(), permissionPolicy: "read_only", opener: "grok" },
+      { rootId: "main-a" }
+    );
+    assert.equal(opened.opener, "grok");
+    await service.shutdown();
+
+    service = new GatewayService({ statePath, createClient: makeClient });
+    await service.init();
+    const listed = await service.call("session", { action: "list" }, { rootId: "main-a" });
+    assert.equal(listed.sessions.find((s) => s.sessionId === opened.sessionId)?.opener, "grok");
+  } finally {
+    await service.shutdown().catch(() => {});
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Gateway configureSessionModel accepts a session already on the requested model without a config option", async () => {
   const service = new GatewayService({});
   const client = {

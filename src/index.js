@@ -10,10 +10,26 @@ import {
   ListTasksRequestSchema,
   ListToolsRequestSchema
 } from "@modelcontextprotocol/sdk/types.js";
+import { execSync } from "node:child_process";
 import { controlToken, rootId } from "./config.js";
 import { GatewayRpcClient } from "./socket-rpc.js";
 import { PERMISSION_POLICIES } from "./acp-client.js";
 import { GATEWAY_VERSION } from "./version.js";
+
+// This bridge is spawned by the frontdoor agent CLI itself, so the parent
+// process name identifies which agent is orchestrating. Sessions opened here
+// are stamped with it for observability (monitor GUI, session listings).
+const KNOWN_FRONTDOOR_AGENTS = ["claude", "grok", "codex", "cursor", "auggie", "gemini", "windsurf", "zed"];
+function detectOpenerAgent() {
+  try {
+    const command = execSync(`ps -o comm= -p ${process.ppid}`, { timeout: 2_000 }).toString().trim().toLowerCase();
+    const basename = command.split("/").pop() ?? command;
+    return KNOWN_FRONTDOOR_AGENTS.find((agent) => basename.includes(agent)) ?? null;
+  } catch {
+    return null;
+  }
+}
+const openerAgent = detectOpenerAgent();
 
 const rpc = new GatewayRpcClient({ token: controlToken(), rootId: rootId() });
 const tools = controlTools();
@@ -52,7 +68,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { task: await rpc.call("task_prompt", { ...(request.params.arguments ?? {}), ...task }) };
     }
     if (task) throw new Error(`Tool ${request.params.name} does not support task execution`);
-    const args = request.params.arguments ?? {};
+    const args = { ...(request.params.arguments ?? {}) };
+    if ((method === "session_open" || method === "session_restore") && openerAgent && args.opener == null) {
+      args.opener = openerAgent;
+    }
     const timeoutMs = method === "poll" || method === "watch"
       ? Math.max(30_000, Number(args.waitMs ?? 0) + 5_000)
       : method === "setup" && args.refreshAgentUpdates === true

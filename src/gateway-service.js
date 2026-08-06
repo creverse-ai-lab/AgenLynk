@@ -421,6 +421,9 @@ export class GatewayService {
       client: fields.client,
       acpSessionId: fields.acpSessionId,
       cwd: fields.cwd,
+      // 어느 frontdoor 에이전트가 이 세션을 열었는지 — control MCP 브리지가
+      // 부모 프로세스에서 감지해 넣어주는 관측용 메타데이터다.
+      opener: optionalString(fields.args.opener, "opener") ?? null,
       title: fields.args.title ?? null,
       permissionPolicy: fields.permissionPolicy,
       model: fields.model ?? null,
