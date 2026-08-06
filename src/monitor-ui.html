@@ -479,7 +479,7 @@ function renderOverview() {
     return `<div class="step"><span class="ts">${hms(s.ts)}</span><div class="track" style="${trackStyle}">${inner}</div></div>`;
   }).join("");
 
-  const heads = `<div class="lane"><b>Main</b><span class="mdl">오케스트레이터</span></div>` + workers.map((s) => `
+  const heads = `<div class="lane"><b>🚪 Frontdoor</b><span class="mdl">오케스트레이터</span></div>` + workers.map((s) => `
     <div class="lane" style="color:${provColor(s.provider)}" title="${esc(s.title ?? "")}">
       <b>${esc(s.provider)} · ${esc(s.model ?? "?")}</b>
       <span class="mdl">${esc(s.title || s.sessionId)}</span>
@@ -519,7 +519,7 @@ function renderSequence(session, turns) {
       </div>
       <div class="lanes">
         <span></span>
-        <div class="lanehead"><span><b>Main</b> 오케스트레이터</span><span style="color:${provColor(session?.provider)}"><b>Worker</b> ${esc(session?.provider ?? "")} · ${esc(session?.model ?? "?")}</span></div>
+        <div class="lanehead"><span><b>🚪 Frontdoor</b> 오케스트레이터</span><span style="color:${provColor(session?.provider)}"><b>Worker</b> ${esc(session?.provider ?? "")} · ${esc(session?.model ?? "?")}</span></div>
         <div class="steps">${rows}</div>
       </div>
     </div>`;
@@ -565,7 +565,7 @@ function renderLive() {
     groups.get(key).push(s);
   }
 
-  const LANE_W = 22, GUTTER = 52, GROUP_GAP = 26, TOP = 30, BOTTOM = 26;
+  const LANE_W = 22, GUTTER = 52, GROUP_GAP = 30, TOP = 58, BOTTOM = 26;
   let cx = GUTTER;
   const trunkOf = new Map(), laneOf2 = new Map(), trunks = [];
   for (const [cwd, list] of groups) {
@@ -596,13 +596,14 @@ function renderLive() {
   parts.push(`<line x1="${GUTTER - 6}" y1="${NOW_Y}" x2="${W}" y2="${NOW_Y}" stroke="var(--accent)" stroke-width="1.5" opacity=".7"/>
     <text x="${GUTTER - 10}" y="${NOW_Y + 3}" text-anchor="end" fill="var(--accent)" font-size="10" font-weight="700">지금</text>`);
 
-  // trunk (Main 기준선) — cwd basename 라벨, hover로 전체 경로
+  // trunk (Frontdoor 기준선) — 어느 폴더의 작업인지 폴더명을 함께 표시
   for (const tr of trunks) {
     const base = tr.cwd.split("/").filter(Boolean).pop() ?? tr.cwd;
     parts.push(`<line x1="${tr.x}" y1="${TOP}" x2="${tr.x}" y2="${NOW_Y}" stroke="var(--dim)" stroke-width="2.5"/>
-      <text x="${tr.x}" y="${TOP - 14}" text-anchor="middle" fill="var(--text)" font-size="10" font-weight="700">Main</text>
-      <text x="${tr.x}" y="${TOP - 4}" text-anchor="middle" fill="var(--dim)" font-size="9">${esc(base.slice(0, 14))}</text>
-      <circle cx="${tr.x}" cy="${TOP - 24}" r="7" fill="transparent" ${tipAttr("Main · " + base, tr.cwd)}/>`);
+      <text x="${tr.x}" y="${TOP - 44}" text-anchor="start" font-size="12">🚪</text>
+      <text x="${tr.x + 16}" y="${TOP - 45}" text-anchor="start" fill="var(--text)" font-size="10" font-weight="700">Frontdoor</text>
+      <text x="${tr.x}" y="${TOP - 31}" text-anchor="start" fill="var(--accent)" font-size="10" font-weight="600">📁 ${esc(base.slice(0, 18))}</text>
+      <rect x="${tr.x - 8}" y="${TOP - 56}" width="110" height="30" fill="transparent" ${tipAttr("Frontdoor · " + base, "작업 폴더: " + tr.cwd)}/>`);
   }
 
   const KIND_COLOR = (kind, fallback) =>
@@ -614,9 +615,11 @@ function renderLive() {
 
   for (const s of shown) {
     const sid = s.sessionId, lx = laneOf2.get(sid), tx = trunkOf.get(sid), color = colorOf2.get(sid);
-    // 레인 헤더 점: hover에 세션 정보
-    parts.push(`<circle cx="${lx}" cy="${TOP - 8}" r="4" fill="${color}"/>
-      <circle cx="${lx}" cy="${TOP - 8}" r="9" fill="transparent" ${tipAttr(s.title || sid, `${s.provider} · ${s.model ?? "?"}\n상태: ${s.status}\ncwd: ${s.cwd}`)}/>`);
+    // 레인 헤더: AI 모델 뱃지(이미지) — hover에 세션·모델 상세
+    const initials = (s.provider ?? "?").slice(0, 2).toUpperCase();
+    parts.push(`<rect x="${lx - 8}" y="${TOP - 20}" width="16" height="16" rx="5" fill="${provColor(s.provider)}"/>
+      <text x="${lx}" y="${TOP - 9}" text-anchor="middle" fill="#0e1116" font-size="7.5" font-weight="800">${esc(initials)}</text>
+      <circle cx="${lx}" cy="${TOP - 12}" r="11" fill="transparent" ${tipAttr(s.title || sid, `모델: ${s.provider} · ${s.model ?? "?"}\n상태: ${s.status}\n폴더: ${s.cwd}`)}/>`);
     for (const turn of turnsOf(sid)) {
       const steps = stepsOf(turn);
       if (!steps.length) continue;
@@ -668,7 +671,7 @@ function renderLive() {
       ${esc(s.title || s.sessionId)} <span class="k" style="color:${provColor(s.provider)}">${esc(s.provider)} · ${esc(s.model ?? "?")}</span>
       <span class="k">${esc(s.status)}</span></span>`).join("");
 
-  return `<div class="glegend">${selector}<span class="gleg"><span class="dot" style="background:var(--dim)"></span>Main (trunk)</span>${legend}</div>
+  return `<div class="glegend">${selector}<span class="gleg"><span class="dot" style="background:var(--dim)"></span>🚪 Frontdoor</span>${legend}</div>
     <div class="glgraph gl2"><svg width="${W}" height="${H}">${parts.join("")}</svg></div>`;
 }
 
