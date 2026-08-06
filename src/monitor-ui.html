@@ -360,8 +360,12 @@ function stepsOf(turn) {
       else { flushBuffer(); buffer = { type: t, text: ev.text ?? "", ts: ev.ts }; }
       continue;
     }
-    // tool call 진행은 응답/사고 흐름을 끊는 이벤트가 아니므로 병합 버퍼를 유지한다
-    if (t.startsWith("tool_call") || t === "usage_update") continue;
+    // usage_update와 tool_call_update는 스트리밍 도중에도 끼어드는 진행성
+    // 이벤트라 흐름을 끊지 않는다 (게이트웨이 세그먼트 규칙과 동일)
+    if (t === "usage_update" || t === "tool_call_update") continue;
+    // 새 tool call은 게이트웨이의 세그먼트 경계와 동일한 작업 경계다: 표시는
+    // 하지 않지만 병합을 끊어, 경계 전후의 사고/응답이 별개 항목으로 남게 한다
+    if (t === "tool_call") { flushBuffer(); continue; }
     flushBuffer();
     if (t === "turn_start") {
       steps.push({ from: 0, to: 1, color: "var(--accent)", ts: ev.ts, bold: true, md: true,
