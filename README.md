@@ -268,6 +268,29 @@ flowchart LR
 5. **권한·질문 처리** — Worker의 permission 요청이나 질문은 Gateway Inbox를 거쳐 오케스트레이터에게 전달되고, 그 응답이 다시 Worker로 돌아갑니다.
 6. **결과 회수·재사용** — 오케스트레이터는 MCP Task 또는 poll로 상태와 결과를 받고, 필요하면 같은 세션을 다시 호출하거나 복구합니다.
 
+## 파이프라인 모니터 GUI
+
+Gateway를 지나가는 중간 과정을 브라우저에서 실시간으로 볼 수 있는 read-only 대시보드입니다. 어떤 세션에 어떤 프롬프트가 들어갔고, Worker가 어떤 사고 과정·응답·tool call을 거쳐 어떤 결과로 끝났는지, 대기 중인 permission 요청과 Task 상태까지 한 화면에서 확인합니다.
+
+```bash
+npm run gui
+```
+
+- 기본 주소는 `http://127.0.0.1:8642` (`ACP_GATEWAY_MONITOR_PORT`로 변경)이며 로컬에만 바인딩됩니다.
+- `/` 대시보드는 세 가지 뷰를 제공합니다 — **전체**(Main + 워커 레인들을 시간순으로 병합한 멀티 세션 시퀀스), **시퀀스**(선택한 세션의 Main/Worker/도구 3레인 다이어그램), **상세**(턴별 카드). 화살표·박스에 hover하면 프롬프트 전문과 tool 입력 등 세부 내용이 뜨고, 클릭하면 고정됩니다.
+- `http://127.0.0.1:8642/live` 는 **진행 중 세션 현황 페이지**입니다. 지금 실행 중(running/waiting_*)인 세션만 카드로 나란히 보여주고, 각 카드에 현재 턴의 실시간 미니 시퀀스가 흐릅니다. permission/질문 대기 중인 카드는 주황 테두리로 강조되며, 최근 10분 내 완료된 세션도 함께 표시됩니다.
+- Main과 동일한 identity(`~/.acp-gateway/install.json`)로 daemon socket에 접속해 전체 세션을 구독합니다. Gateway의 모든 조회는 rootId 단위로 격리되므로, 다른 identity를 쓰려면 `ACP_GATEWAY_CONTROL_TOKEN`과 `ACP_GATEWAY_ROOT_ID`를 지정하세요.
+- 이벤트는 daemon 메모리에만 유지되므로(세션당 `ACP_GATEWAY_MAX_EVENTS`, 기본 200) 타임라인은 daemon이 기억하는 범위까지만 표시됩니다. `turn_start` 이벤트에 프롬프트 본문이 함께 기록되며, 그 이전 버전 daemon에서 생성된 턴은 프롬프트가 비어 있습니다.
+- 모니터 접속은 Main의 owner presence로 집계되므로, 모니터가 켜져 있는 동안 pin되지 않은 세션의 orphan 정리 타이머는 시작되지 않습니다.
+
+## 미공개 변경 사항 (main)
+
+- **세션 재연결 모델 검증 버그 수정** — idle unload나 daemon 재시작으로 끊긴 세션에 다시 prompt하면 모든 provider에서 복원이 실패하던 문제를 고쳤습니다. 원인은 두 가지: ① 재연결이 세션의 저장된 모델을 프로세스 init 시점에 검증했는데 session-scoped provider는 그 시점에 모델을 알려주지 않음 (이제 init 검증은 `modelScope: "process"`에서만 수행), ② 모델을 `models` capability로만 보고하는 provider(grok)는 요청 모델과 이미 일치해도 설정 가능한 config option이 없다고 실패함 (이제 configOptions → models capability → init 순으로 현재 모델을 발견하고, 일치하면 no-op). 요청 모델이 실제로 다른데 바꿀 수단이 없는 경우는 여전히 실패합니다.
+- **멀티 세션 실시간 감시 도구 `agent_acp_watch`** — Main이 세션 하나씩 poll하는 대신, 소유한 모든(또는 지정한) 세션의 이벤트를 **한 번의 호출로 시간순 병합**해서 받습니다. 세션별 `cursors`로 이어서 조회하고, 응답 대기 중인 permission/질문은 `pendingInbox`로 함께 도착하며, long-poll(`waitMs`)은 어느 세션에서든 새 이벤트가 나오면 깨어납니다. **사고(`agent_thought_chunk`)는 이 채널에서 기본 포함**입니다 — 여러 Worker의 중간 사고를 Main이 실시간으로 검수하는 것이 이 도구의 목적이기 때문입니다 (`includeThoughts: false`로 제외 가능). 기존 `agent_acp_poll`은 증거 회수·회고 조회용으로 그대로 유지됩니다.
+- **파이프라인 모니터 GUI** — `npm run gui`로 실행하는 로컬 대시보드(위 섹션 참고). 전체/시퀀스/상세 뷰와 `/live` 진행 현황 페이지를 제공합니다.
+- **`turn_start` 이벤트에 프롬프트 기록** — 각 턴이 어떤 프롬프트로 시작됐는지 이벤트에 본문(4KB 캡)이 함께 남아, 관측 도구와 회고 조회에서 턴의 목적을 확인할 수 있습니다.
+- **사고 과정 기본 제공** — 턴이 **완료된** poll/Task 결과의 `result.thought`에 Worker의 사고 과정이 16KB 캡 미리보기로 기본 포함됩니다(캡 적용 시 `thoughtTruncated: true`). `includeThoughts: true`는 전문, `includeThoughts: false`는 완전 제외로 토글할 수 있습니다. 진행 중인 턴은 다릅니다 — 반복 폴링 비용을 늘리지 않도록 `includeResult: true` 중간 조회와 라이브 `agent_thought_chunk` 스트림 모두 기존대로 `includeThoughts: true`를 명시해야 사고가 전달됩니다.
+
 ## v1.3.1 변경 사항
 
 - **ACP/MCP 실행 가이드 완성** — `agent-delegator`가 routing 결과를 실제 Control MCP 호출로 옮기는 전 과정을 설명합니다. provider·정확한 모델 검증, session 경계와 `mcpServers`, 직접 prompt와 MCP Task, cursor polling, permission·structured input, 복구·정리, bounded result·artifact 회수 계약을 포함합니다.

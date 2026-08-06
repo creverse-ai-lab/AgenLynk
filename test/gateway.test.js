@@ -988,6 +988,153 @@ test("Gateway subscription replays cursor events, pushes updates, and enforces o
   }
 });
 
+test("Gateway turn_start events carry the prompt text for observers", async () => {
+  const makeClient = (_provider, options) =>
+    new AcpClient({ provider: "mock", command: process.execPath, args: [mockAgent], permissionPolicy: "read_only" }, options);
+  const service = new GatewayService({ createClient: makeClient });
+  try {
+    const opened = await service.call("session_open", { provider: "claude", cwd: process.cwd(), permissionPolicy: "read_only" }, { rootId: "main-a" });
+    await service.call("prompt", { sessionId: opened.sessionId, prompt: "plain prompt" }, { rootId: "main-a" });
+    await waitForIdle(service, opened.sessionId);
+    let poll = await service.call("poll", { sessionId: opened.sessionId }, { rootId: "main-a" });
+    assert.equal(poll.events.find((event) => event.type === "turn_start")?.text, "plain prompt");
+
+    await service.call(
+      "prompt",
+      { sessionId: opened.sessionId, prompt: [{ type: "text", text: "first" }, { type: "text", text: "second" }] },
+      { rootId: "main-a" }
+    );
+    await waitForIdle(service, opened.sessionId);
+    poll = await service.call("poll", { sessionId: opened.sessionId, cursor: poll.nextCursor }, { rootId: "main-a" });
+    assert.equal(poll.events.find((event) => event.type === "turn_start")?.text, "first\nsecond");
+  } finally {
+    await service.shutdown().catch(() => {});
+  }
+});
+
+test("Gateway ships a bounded thought preview on completed results only, honoring the includeThoughts toggle", async () => {
+  const makeClient = (_provider, options) =>
+    new AcpClient({ provider: "mock", command: process.execPath, args: [mockAgent], permissionPolicy: "ask" }, options);
+  const service = new GatewayService({ createClient: makeClient });
+  try {
+    const opened = await service.call("session_open", { provider: "claude", cwd: process.cwd(), permissionPolicy: "ask" }, { rootId: "main-a" });
+    await service.call("prompt", { sessionId: opened.sessionId, prompt: "go" }, { rootId: "main-a" });
+    await waitForStatus(service, opened.sessionId, "waiting_permission");
+    const session = service.requireSession(opened.sessionId);
+    service.handleUpdate(session, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "thinking" } });
+
+    // 진행 중: 반복 폴링 비용 때문에 미리보기도 명시적 opt-in이어야 한다
+    const midTurn = await service.call("poll", { sessionId: opened.sessionId, includeResult: true }, { rootId: "main-a" });
+    assert.equal(Object.hasOwn(midTurn.result, "thought"), false);
+    const midTurnFull = await service.call("poll", { sessionId: opened.sessionId, includeResult: true, includeThoughts: true }, { rootId: "main-a" });
+    assert.equal(midTurnFull.result.thought, "thinking");
+
+    await service.call("permission", { sessionId: opened.sessionId, requestId: 100, optionId: "allow-once" }, { rootId: "main-a" });
+    await waitForIdle(service, opened.sessionId);
+
+    // 완료 후: 캡된 미리보기가 기본 제공
+    const preview = await service.call("poll", { sessionId: opened.sessionId }, { rootId: "main-a" });
+    assert.equal(preview.result.thought, "thinking");
+    assert.equal(Object.hasOwn(preview.result, "thoughtTruncated"), false);
+
+    const suppressed = await service.call("poll", { sessionId: opened.sessionId, includeThoughts: false }, { rootId: "main-a" });
+    assert.equal(Object.hasOwn(suppressed.result, "thought"), false);
+
+    const full = await service.call("poll", { sessionId: opened.sessionId, includeThoughts: true }, { rootId: "main-a" });
+    assert.equal(full.result.thought, "thinking");
+  } finally {
+    await service.shutdown().catch(() => {});
+  }
+});
+
+test("Gateway configureSessionModel accepts a session already on the requested model without a config option", async () => {
+  const service = new GatewayService({});
+  const client = {
+    config: { modelScope: "session" },
+    initResult: {},
+    setSessionConfigOption: () => { throw new Error("must not set a config option for a matching model"); }
+  };
+  // grok 형태: 모델이 configOptions가 아니라 models capability로만 보고된다
+  const response = { sessionId: "s", configOptions: [], models: { currentModelId: "grok-4.5" } };
+  const configured = await service.configureSessionModel(client, response, "grok-4.5");
+  assert.equal(configured.model, "grok-4.5");
+
+  // 정말 다른 모델을 요구했는데 바꿀 방법이 없으면 여전히 실패해야 한다
+  await assert.rejects(
+    () => service.configureSessionModel(client, response, "grok-5"),
+    /does not advertise a model config option/
+  );
+});
+
+test("Gateway reconnects a disconnected session by passing its stored model back through restore", async () => {
+  const makeClient = (_provider, options) =>
+    new AcpClient({ provider: "mock", command: process.execPath, args: [mockAgent], permissionPolicy: "read_only" }, options);
+  const service = new GatewayService({ createClient: makeClient });
+  try {
+    const opened = await service.call("session_open", { provider: "claude", cwd: process.cwd(), permissionPolicy: "read_only" }, { rootId: "main-a" });
+    assert.equal(opened.model, "mock-default");
+    const session = service.requireSession(opened.sessionId);
+    await session.client.stop();
+    session.client = null;
+    session.status = "disconnected";
+
+    // 재프롬프트는 ensureConnected → sessionRestore(저장된 모델 전달) 경로를 탄다
+    await service.call("prompt", { sessionId: opened.sessionId, prompt: "go" }, { rootId: "main-a" });
+    await waitForIdle(service, opened.sessionId);
+    const restored = service.requireSession(opened.sessionId);
+    assert.equal(restored.model, "mock-default");
+    assert.notEqual(restored.status, "unavailable");
+  } finally {
+    await service.shutdown().catch(() => {});
+  }
+});
+
+test("Gateway watch merges events across owned sessions with thoughts on by default", async () => {
+  const makeClient = (_provider, options) =>
+    new AcpClient({ provider: "mock", command: process.execPath, args: [mockAgent], permissionPolicy: "ask" }, options);
+  const service = new GatewayService({ createClient: makeClient });
+  try {
+    const first = await service.call("session_open", { provider: "claude", cwd: process.cwd(), permissionPolicy: "read_only" }, { rootId: "main-a" });
+    await service.call("prompt", { sessionId: first.sessionId, prompt: "narrated-result" }, { rootId: "main-a" });
+    await waitForIdle(service, first.sessionId);
+    const second = await service.call("session_open", { provider: "codex", cwd: process.cwd(), permissionPolicy: "ask" }, { rootId: "main-a" });
+    await service.call("prompt", { sessionId: second.sessionId, prompt: "go" }, { rootId: "main-a" });
+    await waitForStatus(service, second.sessionId, "waiting_permission");
+
+    // 감시 채널은 사고를 기본 포함하고, 세션 전체를 병합해서 돌려준다
+    const watched = await service.call("watch", {}, { rootId: "main-a" });
+    assert.equal(watched.sessions.length, 2);
+    const bySession = new Set(watched.events.map((event) => event.sessionId));
+    assert.ok(bySession.has(first.sessionId) && bySession.has(second.sessionId));
+    assert.ok(watched.events.some((event) => event.type === "agent_thought_chunk" && event.sessionId === first.sessionId));
+    assert.ok(watched.events.some((event) => event.type === "permission_request" && event.sessionId === second.sessionId));
+    assert.equal(watched.pendingInbox.length, 1);
+    assert.equal(watched.pendingInbox[0].sessionId, second.sessionId);
+
+    // 커서 재개: 같은 커서로 다시 부르면 새 이벤트가 없다
+    const resumed = await service.call("watch", { cursors: watched.cursors }, { rootId: "main-a" });
+    assert.equal(resumed.events.length, 0);
+
+    // includeThoughts=false는 사고를 걸러낸다
+    const filtered = await service.call("watch", { includeThoughts: false }, { rootId: "main-a" });
+    assert.ok(!filtered.events.some((event) => event.type === "agent_thought_chunk"));
+    assert.ok(filtered.filteredCount > 0);
+
+    // long-poll: 감시 대기 중 새 이벤트가 오면 깨어난다
+    const waiting = service.call("watch", { cursors: watched.cursors, waitMs: 5_000 }, { rootId: "main-a" });
+    await service.call("permission", { sessionId: second.sessionId, requestId: 100, optionId: "allow-once" }, { rootId: "main-a" });
+    const woken = await waiting;
+    assert.ok(woken.events.some((event) => event.type === "permission_response" && event.sessionId === second.sessionId));
+
+    // 소유권 격리: 다른 Main은 아무것도 보지 못한다
+    const foreign = await service.call("watch", {}, { rootId: "main-b" });
+    assert.equal(foreign.sessions.length, 0);
+    assert.equal(foreign.events.length, 0);
+  } finally {
+    await service.shutdown().catch(() => {});
+  }
+});
+
 test("Gateway watch-all subscriptions include sessions opened later", async () => {
   const makeClient = (_provider, options) =>
     new AcpClient({ provider: "mock", command: process.execPath, args: [mockAgent], permissionPolicy: "read_only" }, options);

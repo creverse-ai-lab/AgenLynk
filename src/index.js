@@ -37,6 +37,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     agent_acp_config: "config",
     agent_acp_prompt: "prompt",
     agent_acp_poll: "poll",
+    agent_acp_watch: "watch",
     agent_acp_permission: "permission",
     agent_acp_answer: "answer",
     agent_acp_cancel: "cancel",
@@ -52,7 +53,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     if (task) throw new Error(`Tool ${request.params.name} does not support task execution`);
     const args = request.params.arguments ?? {};
-    const timeoutMs = method === "poll"
+    const timeoutMs = method === "poll" || method === "watch"
       ? Math.max(30_000, Number(args.waitMs ?? 0) + 5_000)
       : method === "setup" && args.refreshAgentUpdates === true
         ? 120_000
@@ -196,6 +197,21 @@ function controlTools() {
           maxEvents: { type: "integer", minimum: 1, maximum: 1000 }
         },
         required: ["sessionId"]
+      }
+    },
+    {
+      name: "agent_acp_watch",
+      description: "Supervise all owned worker sessions in one call: events from every watched session arrive merged in time order, with per-session cursors and pending inbox items inline. Thought chunks are delivered by default so Main can review worker reasoning live. Long-polls until any watched session emits a deliverable event.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          sessionIds: { type: "array", items: { type: "string", minLength: 1 }, description: "Watch only these sessions. Omit to watch every owned non-closed session, including sessions opened after the watch started." },
+          cursors: { type: "object", additionalProperties: { type: "integer", minimum: 0 }, description: "Per-session resume cursors keyed by sessionId; pass the cursors object from the previous watch response." },
+          waitMs: { type: "integer", minimum: 0, maximum: 120000 },
+          includeThoughts: { type: "boolean", description: "Defaults to true — live reasoning review is what watch is for. Pass false to drop thought chunks." },
+          includeToolEvents: { type: "boolean", description: "Deliver tool_call events. Defaults to false." },
+          maxEvents: { type: "integer", minimum: 1, maximum: 1000, description: "Cap on merged delivered events per call; undelivered events stay behind their session cursors." }
+        }
       }
     },
     {

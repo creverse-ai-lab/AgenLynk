@@ -15,13 +15,15 @@
     "acp-gateway-control": "src/index.js",
     "acp-gateway-guide": "src/guide.js",
     "acp-gateway-daemon": "src/gateway-daemon.js",
-    "acp-gateway-bootstrap": "src/bootstrap.js"
+    "acp-gateway-bootstrap": "src/bootstrap.js",
+    "acp-gateway-monitor": "src/monitor.js"
   },
   "scripts": {
     "start": "node src/index.js",
     "daemon": "node src/gateway-daemon.js",
     "guide": "node src/guide.js",
     "bootstrap": "node src/bootstrap.js",
+    "gui": "node src/monitor.js",
     "test": "sh -c 'export ACP_GATEWAY_DISABLE_DYNAMIC_PROVIDERS=1 ACP_GATEWAY_ARTIFACTS=\"$(mktemp -d)\"; node --test test/*.test.js; s=$?; rm -rf \"$ACP_GATEWAY_ARTIFACTS\"; exit $s'",
     "smoke": "node test/live-smoke.js",
     "smoke:subagents": "node test/live-subagent-smoke.js",

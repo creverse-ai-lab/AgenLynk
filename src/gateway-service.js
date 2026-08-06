@@ -16,6 +16,9 @@ const ACTIVE_STATUSES = new Set(["running", "waiting_permission", "waiting_input
 // erase the final answer.
 const SEGMENT_BOUNDARY_TYPES = new Set(["tool_call", "permission_request", "elicitation_request"]);
 const EVENT_PAYLOAD_CAP_BYTES = 4000;
+// Default byte budget for the worker-reasoning preview that ships with turn
+// results; includeThoughts=true lifts the cap, includeThoughts=false drops it.
+const THOUGHT_PREVIEW_CAP_BYTES = 16_000;
 const CLOSED_STATUSES = new Set(["closed"]);
 const CONTROL_SERVER_PATTERN = /(?:acp-gateway-control|acp-mcp-bridge|gateway-daemon|control-mcp)/i;
 const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "cancelled"]);
@@ -196,6 +199,7 @@ export class GatewayService {
       permission: () => this.sessionPermission(args, context),
       answer: () => this.sessionAnswer(args, context),
       cancel: () => this.sessionCancel(args, context),
+      watch: () => this.sessionWatch(args, context),
       session: () => this.sessionManage(args, context),
       task_prompt: () => this.taskPrompt(args, context),
       task_get: () => this.taskGet(args, context),
@@ -456,14 +460,23 @@ export class GatewayService {
 
   async configureSessionModel(client, response, requestedModel, sessionId = response.sessionId) {
     let configOptions = response.configOptions ?? [];
-    let model = sessionModelId(configOptions) ?? currentModelId(client.initResult);
+    // Providers advertise the session's model through configOptions, the ACP
+    // models capability, or the init response — in decreasing specificity.
+    let model = sessionModelId(configOptions)
+      ?? sessionModelsCapabilityId(response)
+      ?? currentModelId(client.initResult);
     if (requestedModel) {
       if (client.config.modelScope === "process") {
         model = currentModelId(client.initResult) ?? requestedModel;
+      } else if (model === requestedModel) {
+        // The session already runs the requested model. This is the normal
+        // reconnect path — sessionRestore passes the stored model back — and
+        // must not require a writable model option (some providers only
+        // report their model through the models capability).
       } else {
         const modelOption = findModelOption(configOptions);
         if (!modelOption) {
-          throw new Error(`ACP agent does not advertise a model config option; requested model=${requestedModel}`);
+          throw new Error(`ACP agent does not advertise a model config option; requested model=${requestedModel}, current=${model ?? "<unknown>"}`);
         }
         const changed = await client.setSessionConfigOption({
           sessionId,
@@ -562,7 +575,10 @@ export class GatewayService {
     // previous turn must not clear or skip this one.
     session.completedAt = null;
     session.transientClearedAt = null;
-    this.store.push(session, { type: "turn_start", turnId: session.turnId });
+    this.store.push(session, {
+      ...this.capTextEvent(session, "turn_start", promptEventText(args.prompt)),
+      turnId: session.turnId
+    });
     void session.client
       .sessionPrompt({ sessionId: session.acpSessionId, prompt: args.prompt })
       .then((result) => {
@@ -729,7 +745,7 @@ export class GatewayService {
           transcriptBytes: Buffer.byteLength(session.resultText),
           artifact: session.resultArtifact ?? null,
           ...(session.resultFinalArtifact ? { textArtifact: session.resultFinalArtifact } : {}),
-          thought: args.includeThoughts === true ? session.thoughtText : undefined,
+          ...thoughtPayload(session, args.includeThoughts, active),
           stopReason: session.stopReason,
           ...(args.includeInspection === true ? (() => {
             const snapshot = this.store.inspectionSnapshot(session);
@@ -737,6 +753,104 @@ export class GatewayService {
           })() : {})
         }
       })
+    };
+    this.recordPollMetrics(response);
+    return response;
+  }
+
+  // Supervision channel: one call watches every owned worker at once and
+  // returns their events merged in time order with per-session cursors.
+  // Thought chunks are included by default here — live review of worker
+  // reasoning is this method's purpose — while poll keeps them opt-in.
+  async sessionWatch(args, context) {
+    const rootId = requireRoot(context);
+    const requested = args.sessionIds;
+    if (requested != null && !Array.isArray(requested)) throw new Error("sessionIds must be an array");
+    const cursors = args.cursors ?? {};
+    if (typeof cursors !== "object" || Array.isArray(cursors)) throw new Error("cursors must be an object");
+    const waitMs = Math.min(120_000, requireNonNegativeNumber(args.waitMs, "waitMs", 0));
+    const maxEvents = Math.min(1000, Math.max(1, requireNonNegativeNumber(args.maxEvents, "maxEvents", 200)));
+    const filter = {
+      includeThoughts: args.includeThoughts !== false,
+      includeToolEvents: args.includeToolEvents === true
+    };
+    const resolveSessions = () => {
+      const sessions = requested == null
+        ? this.store.list().filter((session) => session.ownerRootId === rootId && !CLOSED_STATUSES.has(session.status))
+        : requested.map((id) => requireOwnedSession(this.requireSession(id), context));
+      for (const session of sessions) this.touchSessionOwner(session);
+      return sessions;
+    };
+
+    const collect = () => {
+      const sessions = resolveSessions();
+      const nextCursors = {};
+      const cursorTruncated = {};
+      const streams = sessions.map((session) => {
+        const cursor = requireNonNegativeNumber(cursors[session.id], `cursors.${session.id}`, 0);
+        const firstIndex = session.events[0]?.i ?? session.eventSequence;
+        cursorTruncated[session.id] = cursor < firstIndex;
+        nextCursors[session.id] = Math.max(cursor, firstIndex);
+        return { session, queue: session.events.filter((event) => event.i >= Math.max(cursor, firstIndex)), index: 0 };
+      });
+      // K-way merge by timestamp keeps the combined story readable while each
+      // session's cursor only advances over events actually consumed here.
+      const events = [];
+      let filteredCount = 0;
+      while (events.length < maxEvents) {
+        let next = null;
+        for (const stream of streams) {
+          const event = stream.queue[stream.index];
+          if (!event) continue;
+          if (!next || event.ts < next.event.ts || (event.ts === next.event.ts && event.i < next.event.i)) {
+            next = { stream, event };
+          }
+        }
+        if (!next) break;
+        next.stream.index += 1;
+        nextCursors[next.stream.session.id] = next.event.i + 1;
+        if (shouldDeliverEvent(filter, next.event)) events.push(publicEvent(next.stream.session, next.event));
+        else filteredCount += 1;
+      }
+      return { sessions, events, nextCursors, cursorTruncated, filteredCount };
+    };
+
+    let result = collect();
+    if (!result.events.length && waitMs) {
+      await new Promise((resolve) => {
+        const subscriptionId = `watch-${randomUUID()}`;
+        let timer = null;
+        const finish = () => {
+          this.subscriptions.delete(subscriptionId);
+          clearTimeout(timer);
+          resolve();
+        };
+        timer = setTimeout(finish, waitMs);
+        this.subscriptions.set(subscriptionId, {
+          subscriptionId,
+          rootId,
+          watchAll: requested == null,
+          sessionIds: new Set(result.sessions.map((session) => session.id)),
+          includeThoughts: filter.includeThoughts,
+          includeToolEvents: filter.includeToolEvents,
+          emit: finish
+        });
+      });
+      result = collect();
+    }
+    const response = {
+      ok: true,
+      sessions: result.sessions.map(publicSession),
+      events: result.events,
+      cursors: result.nextCursors,
+      cursorTruncated: result.cursorTruncated,
+      filteredCount: result.filteredCount,
+      // Pending requests are the items Main must review right now; ship them
+      // inline so supervision does not need a second inbox round-trip.
+      pendingInbox: [...this.inbox.values()]
+        .filter((item) => item.ownerRootId === rootId && item.status === "pending"
+          && result.sessions.some((session) => session.id === item.sessionId))
+        .map(publicInboxItem)
     };
     this.recordPollMetrics(response);
     return response;
@@ -1012,8 +1126,13 @@ export class GatewayService {
       : new AcpClient(config, options);
     try {
       await client.start();
+      // Init-time model verification only makes sense when the model is a
+      // process property (selected via spawn args). Session-scoped providers
+      // pick their model per session — often after session/new or session/load
+      // — so their init response may not advertise one at all; those are
+      // verified in configureSessionModel instead.
       const actualModel = currentModelId(client.initResult);
-      if (config.expectedModel && actualModel !== config.expectedModel) {
+      if (config.modelScope === "process" && config.expectedModel && actualModel !== config.expectedModel) {
         await client.stop();
         throw new Error(`required model=${config.expectedModel}, actual=${actualModel || "<missing>"}`);
       }
@@ -1084,6 +1203,7 @@ export class GatewayService {
         transcriptBytes: Buffer.byteLength(session.resultText),
         artifact: session.resultArtifact ?? null,
         ...(session.resultFinalArtifact ? { textArtifact: session.resultFinalArtifact } : {}),
+        ...thoughtPayload(session),
         stopReason: session.stopReason
       },
       ...(session.error ? { error: session.error } : {})
@@ -1437,6 +1557,13 @@ function sessionModelId(configOptions) {
   return typeof option?.currentValue === "string" ? option.currentValue : null;
 }
 
+// ACP session responses may carry the current model in the models capability
+// instead of (or in addition to) configOptions — grok reports it only there.
+function sessionModelsCapabilityId(response) {
+  const id = response?.models?.currentModelId;
+  return typeof id === "string" && id ? id : null;
+}
+
 function requireOwnedSession(session, context) {
   if (session.ownerRootId !== requireRoot(context)) throw new Error("Session belongs to another Main");
   return session;
@@ -1473,6 +1600,30 @@ function extractText(update) {
   if (typeof update.content === "string") return update.content;
   if (typeof update.content?.text === "string") return update.content.text;
   return typeof update.text === "string" ? update.text : "";
+}
+
+// Worker reasoning is tracking signal for Main, so completed results carry it
+// by default as a bounded preview. Three positions: includeThoughts=true
+// returns the full buffer, false suppresses it entirely, unset ships the
+// capped head — but only once the turn is over. While the turn is still
+// active the preview stays opt-in: mid-turn polls repeat, and re-sending a
+// growing thought buffer on each one multiplies the caller's context cost.
+function thoughtPayload(session, includeThoughts, active = false) {
+  if (includeThoughts === false || !session.thoughtText) return {};
+  if (includeThoughts === true) return { thought: session.thoughtText };
+  if (active) return {};
+  const head = utf8ByteHead(session.thoughtText, THOUGHT_PREVIEW_CAP_BYTES);
+  return head === session.thoughtText ? { thought: head } : { thought: head, thoughtTruncated: true };
+}
+
+// Prompts arrive as a plain string or an ACP content array; the turn_start
+// event carries the readable text so observers can see what each turn ran.
+function promptEventText(prompt) {
+  if (typeof prompt === "string") return prompt;
+  return prompt
+    .map((block) => (typeof block?.text === "string" ? block.text : ""))
+    .filter(Boolean)
+    .join("\n");
 }
 
 function shouldDeliverEvent(subscription, event) {
