@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { parseInstallerArgs, runInstaller } from "../src/installer.js";
-import { GATEWAY_VERSION } from "../src/version.js";
+import { GATEWAY_BUILD_ID, GATEWAY_VERSION } from "../src/version.js";
 
 const runtime = { nodeVersion: "22.0.0", platform: "darwin" };
 const providers = [
@@ -353,13 +353,17 @@ test("installer health check authenticates through the Gateway client", async ()
       rpcFactory: (config) => {
         rpcConfig = config;
         return {
-          async call(method, args) { rpcCall = { method, args }; return { ok: true, gatewayVersion: GATEWAY_VERSION }; },
+          async call(method, args) {
+            rpcCall = { method, args };
+            return { ok: true, gatewayVersion: GATEWAY_VERSION, gatewayBuildId: GATEWAY_BUILD_ID };
+          },
           close() {}
         };
       }
     });
     assert.equal(result.health.ok, true);
     assert.equal(result.health.version, GATEWAY_VERSION);
+    assert.equal(result.health.buildId, GATEWAY_BUILD_ID);
     assert.ok(rpcConfig.token.length >= 24);
     assert.match(rpcConfig.rootId, /^main-/);
     assert.deepEqual(rpcCall, { method: "setup", args: {} });
@@ -395,7 +399,7 @@ test("install-all replaces an older daemon when health reports a version mismatc
         rpcFactory: () => ({
           async call(method) {
             assert.equal(method, "setup");
-            return { ok: true, gatewayVersion: setupVersions.shift() };
+            return { ok: true, gatewayVersion: setupVersions.shift(), gatewayBuildId: GATEWAY_BUILD_ID };
           },
           close() {}
         })
@@ -407,6 +411,58 @@ test("install-all replaces an older daemon when health reports a version mismatc
     assert.equal(result.health.version, GATEWAY_VERSION);
     assert.equal(result.health.ok, true);
     assert.equal(setupVersions.length, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("install-all replaces a same-version daemon with a stale or missing build id", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-installer-build-upgrade-"));
+  const statePath = join(directory, "install.json");
+  const setupResponses = [
+    { ok: true, gatewayVersion: GATEWAY_VERSION },
+    { ok: true, gatewayVersion: GATEWAY_VERSION, gatewayBuildId: GATEWAY_BUILD_ID }
+  ];
+  let restartCalls = 0;
+  try {
+    const result = await runInstaller(
+      parseInstallerArgs(["--install-all", "--target", "codex"]),
+      {
+        statePath,
+        runtime,
+        skillRoots: { codex: join(directory, "codex-skills"), default: join(directory, "shared-skills") },
+        detectProviders: async () => providers,
+        registryLoader: emptyRegistryLoader,
+        registryDiscover: async () => [],
+        runCommand: async (_command, args) => {
+          if (args.includes("get")) return { code: 1, stdout: "", stderr: "not found" };
+          if (args.includes("--json")) return { code: 0, stdout: "{\"dependencies\":{}}", stderr: "" };
+          return { code: 0, stdout: "", stderr: "" };
+        },
+        restartGateway: async () => {
+          restartCalls += 1;
+          return {
+            performed: true,
+            wasRunning: true,
+            graceful: true,
+            version: GATEWAY_VERSION,
+            buildId: GATEWAY_BUILD_ID
+          };
+        },
+        rpcFactory: () => ({
+          async call(method) {
+            assert.equal(method, "setup");
+            return setupResponses.shift();
+          },
+          close() {}
+        })
+      }
+    );
+    assert.equal(restartCalls, 1);
+    assert.equal(result.actions.find((action) => action.reason === "build-mismatch")?.fromBuildId, null);
+    assert.equal(result.health.buildId, GATEWAY_BUILD_ID);
+    assert.equal(result.health.ok, true);
+    assert.equal(setupResponses.length, 0);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -438,7 +494,7 @@ test("installer update invokes daemon replacement before version health", async 
         async call(method) {
           assert.equal(method, "setup");
           healthCalls += 1;
-          return { ok: true, gatewayVersion: GATEWAY_VERSION };
+          return { ok: true, gatewayVersion: GATEWAY_VERSION, gatewayBuildId: GATEWAY_BUILD_ID };
         },
         close() {}
       })

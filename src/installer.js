@@ -17,7 +17,7 @@ import {
 } from "./acp-registry.js";
 import { GatewayRpcClient } from "./socket-rpc.js";
 import { gatewaySocketPath } from "./config.js";
-import { GATEWAY_VERSION } from "./version.js";
+import { GATEWAY_BUILD_ID, GATEWAY_VERSION } from "./version.js";
 
 const CONTROL_NAME = "agent-acp";
 const GUIDE_NAME = "agent-acp-guide";
@@ -411,12 +411,16 @@ export async function runInstaller(options, dependencies = {}) {
   let health = { checked: false };
   if (options.installControl && options.healthCheck && !options.dryRun) {
     let result = await gatewaySetup(makeRpc, identity);
-    if (result?.ok === true && result?.gatewayVersion !== GATEWAY_VERSION && !options.restartDaemon) {
+    const versionMatches = result?.gatewayVersion === GATEWAY_VERSION;
+    const buildMatches = result?.gatewayBuildId === GATEWAY_BUILD_ID;
+    if (result?.ok === true && (!versionMatches || !buildMatches) && !options.restartDaemon) {
       actions.push({
         type: "daemon-restart",
-        reason: "version-mismatch",
+        reason: versionMatches ? "build-mismatch" : "version-mismatch",
         fromVersion: result?.gatewayVersion ?? null,
-        toVersion: GATEWAY_VERSION
+        toVersion: GATEWAY_VERSION,
+        fromBuildId: result?.gatewayBuildId ?? null,
+        toBuildId: GATEWAY_BUILD_ID
       });
       restart = {
         requested: false,
@@ -429,11 +433,15 @@ export async function runInstaller(options, dependencies = {}) {
       checked: true,
       ok: result?.ok === true && result?.gatewayVersion === GATEWAY_VERSION,
       version: result?.gatewayVersion,
+      buildId: result?.gatewayBuildId ?? null,
       agentUpdates: result?.agentUpdates ?? null,
       alerts: result?.alerts ?? []
     };
+    health.ok = health.ok && health.buildId === GATEWAY_BUILD_ID;
     if (!health.ok) {
-      throw new Error(`Gateway health check version mismatch: expected ${GATEWAY_VERSION}, received ${result?.gatewayVersion ?? "unknown"}`);
+      throw new Error(
+        `Gateway health mismatch: expected ${GATEWAY_VERSION} (${GATEWAY_BUILD_ID}), received ${result?.gatewayVersion ?? "unknown"} (${result?.gatewayBuildId ?? "unknown"})`
+      );
     }
   }
 
@@ -748,7 +756,17 @@ async function readInstallState(path) {
       typeof state.agentUpdates !== "object"
       || typeof state.agentUpdates.autoUpdate !== "boolean"
       || typeof state.agentUpdates.notifications !== "boolean"
+      || (state.agentUpdates.intervalMs != null && (
+        !Number.isSafeInteger(state.agentUpdates.intervalMs)
+        || state.agentUpdates.intervalMs < 5 * 60_000
+      ))
     )) throw new Error("invalid stored agent update policy");
+    if (state.gatewayConfig != null && (
+      typeof state.gatewayConfig !== "object"
+      || Array.isArray(state.gatewayConfig)
+      || (state.gatewayConfig.lifecycle != null && typeof state.gatewayConfig.lifecycle !== "object")
+      || (state.gatewayConfig.resourceLimits != null && typeof state.gatewayConfig.resourceLimits !== "object")
+    )) throw new Error("invalid stored Gateway config");
     return state;
   } catch (error) {
     if (error?.code === "ENOENT") return null;
@@ -836,10 +854,18 @@ async function restartGatewayDaemon({ identity, makeRpc, socketPath }) {
   const starter = makeRpc({ token: identity.token, rootId: identity.rootId, autoStart: true });
   try {
     const setup = await starter.call("setup", {}, 10_000);
-    if (setup?.ok !== true || setup?.gatewayVersion !== GATEWAY_VERSION) {
-      throw new Error(`Updated Gateway version mismatch: expected ${GATEWAY_VERSION}, received ${setup?.gatewayVersion ?? "unknown"}`);
+    if (setup?.ok !== true || setup?.gatewayVersion !== GATEWAY_VERSION || setup?.gatewayBuildId !== GATEWAY_BUILD_ID) {
+      throw new Error(
+        `Updated Gateway mismatch: expected ${GATEWAY_VERSION} (${GATEWAY_BUILD_ID}), received ${setup?.gatewayVersion ?? "unknown"} (${setup?.gatewayBuildId ?? "unknown"})`
+      );
     }
-    return { performed: true, wasRunning, graceful, version: setup.gatewayVersion };
+    return {
+      performed: true,
+      wasRunning,
+      graceful,
+      version: setup.gatewayVersion,
+      buildId: setup.gatewayBuildId
+    };
   } finally {
     starter.close();
   }

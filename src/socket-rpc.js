@@ -6,11 +6,13 @@ import { gatewayLifecycleConfig, gatewaySocketPath } from "./config.js";
 import { readNdjson } from "./ndjson.js";
 
 export class GatewayRpcClient {
-  constructor({ socketPath = gatewaySocketPath(), token = null, rootId = null, autoStart = true } = {}) {
+  constructor({ socketPath = gatewaySocketPath(), token = null, rootId = null, autoStart = true, access = "control" } = {}) {
+    if (!new Set(["control", "observer"]).has(access)) throw new Error(`Unknown Gateway access mode: ${access}`);
     this.socketPath = socketPath;
     this.token = token;
     this.rootId = rootId;
     this.autoStart = autoStart;
+    this.access = access;
     this.socket = null;
     this.pending = new Map();
     this.subscriptions = new Map();
@@ -135,7 +137,14 @@ export class GatewayRpcClient {
           reject(error);
         }
       });
-      this.socket.write(`${JSON.stringify({ id, method, args, token: this.token, rootId: this.rootId })}\n`);
+      this.socket.write(`${JSON.stringify({
+        id,
+        method,
+        args,
+        token: this.token,
+        rootId: this.rootId,
+        access: this.access
+      })}\n`);
     });
   }
 

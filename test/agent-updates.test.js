@@ -47,6 +47,33 @@ test("disabled agent updater reports an available update without applying it", a
   assert.equal(result.alerts[0].code, "acp_agent_updates_available");
 });
 
+test("agent updater applies live configuration and reschedules its timer", async () => {
+  const manager = new AgentUpdateManager({
+    enabled: true,
+    notifications: true,
+    intervalMs: 300_000,
+    registryLoader: async () => ({ registry, source: "network", stale: false }),
+    detect: async () => []
+  });
+  manager.start();
+  try {
+    const before = manager.timer;
+    const result = manager.reconfigure({
+      enabled: false,
+      notifications: false,
+      intervalMs: 600_000
+    });
+    assert.equal(result.enabled, false);
+    assert.equal(result.notifications, false);
+    assert.equal(result.intervalMs, 600_000);
+    assert.notEqual(manager.timer, before);
+    assert.match(result.nextCheckAt, /^\d{4}-\d{2}-\d{2}T/);
+    assert.throws(() => manager.reconfigure({ intervalMs: 1 }), /integer >= 300000/);
+  } finally {
+    await manager.stop();
+  }
+});
+
 test("binary ACP updates remain manual", () => {
   const platform = process.platform === "win32" ? "windows" : process.platform;
   const arch = process.arch === "arm64" ? "aarch64" : process.arch === "x64" ? "x86_64" : process.arch;

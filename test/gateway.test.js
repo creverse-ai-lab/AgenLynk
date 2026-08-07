@@ -7,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { AcpClient } from "../src/acp-client.js";
 import { GatewayService, sanitizeWorkerMcpServers } from "../src/gateway-service.js";
+import { GATEWAY_BUILD_ID, GATEWAY_VERSION } from "../src/version.js";
 
 const mockAgent = fileURLToPath(new URL("./mock-agent.js", import.meta.url));
 const capabilityAgent = fileURLToPath(new URL("./mock-capability-agent.js", import.meta.url));
@@ -31,6 +32,8 @@ test("Gateway setup exposes ACP update health alerts and supports a fresh check"
     await service.init();
     const health = await service.call("setup", { refreshAgentUpdates: true }, { rootId: "main-a" });
     assert.equal(refreshCalls, 1);
+    assert.equal(health.gatewayVersion, GATEWAY_VERSION);
+    assert.equal(health.gatewayBuildId, GATEWAY_BUILD_ID);
     assert.equal(health.agentUpdates.status, "ready");
     assert.equal(health.alerts[0].code, "acp_agents_auto_updated");
   } finally {
@@ -73,11 +76,18 @@ test("Gateway isolates Main ownership, persists sessions, and resumes them", asy
 
     const saved = JSON.parse(await readFile(statePath, "utf8"));
     assert.equal(saved.sessions[0].ownerRootId, "main-a");
+    assert.ok(saved.sessions[0].configOptions.length > 0);
 
     service = new GatewayService({ statePath, createClient: makeClient });
     await service.init();
     const restoredList = await service.call("session", { action: "list" }, { rootId: "main-a" });
     assert.equal(restoredList.sessions[0].status, "disconnected");
+    const cachedConfig = await service.call(
+      "config",
+      { action: "list", sessionId: opened.sessionId },
+      { rootId: "main-a", observer: true }
+    );
+    assert.ok(cachedConfig.configOptions.length > 0);
     await service.call("prompt", { sessionId: opened.sessionId, prompt: "again" }, { rootId: "main-a" });
     const second = await waitForIdle(service, opened.sessionId);
     assert.equal(second.result.text, "READY DENIED");
@@ -945,6 +955,52 @@ test("Gateway clears the orphan lease when Main reconnects before grace expires"
   }
 });
 
+test("Gateway observer reads and subscribes without refreshing owner activity", async () => {
+  let clock = Date.now();
+  const makeClient = (_provider, options) =>
+    new AcpClient({ provider: "mock", command: process.execPath, args: [mockAgent], permissionPolicy: "read_only" }, options);
+  const service = new GatewayService({ createClient: makeClient, gcIntervalMs: 0, now: () => clock });
+  try {
+    const opened = await service.call(
+      "session_open",
+      { provider: "claude", cwd: process.cwd(), permissionPolicy: "read_only" },
+      { rootId: "main-a" }
+    );
+    const session = service.requireSession(opened.sessionId);
+    const ownerActivity = session.lastOwnerActivityAt;
+    clock += 10_000;
+
+    await service.call(
+      "session",
+      { action: "get", sessionId: opened.sessionId },
+      { rootId: "main-a", observer: true }
+    );
+    const observedConfig = await service.call(
+      "config",
+      { action: "list", sessionId: opened.sessionId },
+      { rootId: "main-a", observer: true }
+    );
+    assert.ok(observedConfig.configOptions.length > 0);
+    const observerSubscription = service.subscribe(
+      { sessionIds: [opened.sessionId] },
+      { rootId: "main-a", observer: true },
+      () => {}
+    );
+    assert.equal(session.lastOwnerActivityAt, ownerActivity);
+    service.unsubscribe(observerSubscription.subscriptionId, { rootId: "main-a", observer: true });
+
+    const controlSubscription = service.subscribe(
+      { sessionIds: [opened.sessionId] },
+      { rootId: "main-a" },
+      () => {}
+    );
+    assert.notEqual(session.lastOwnerActivityAt, ownerActivity);
+    service.unsubscribe(controlSubscription.subscriptionId, { rootId: "main-a" });
+  } finally {
+    await service.shutdown().catch(() => {});
+  }
+});
+
 test("Gateway subscription replays cursor events, pushes updates, and enforces ownership", async () => {
   const makeClient = (_provider, options) =>
     new AcpClient(
@@ -1057,16 +1113,21 @@ test("Gateway records the opener agent on sessions and persists it across restar
     await service.init();
     const opened = await service.call(
       "session_open",
-      { provider: "claude", cwd: process.cwd(), permissionPolicy: "read_only", opener: "grok" },
+      {
+        provider: "claude", cwd: process.cwd(), permissionPolicy: "read_only",
+        opener: "grok", openerInstanceId: "grok-frontdoor-1"
+      },
       { rootId: "main-a" }
     );
     assert.equal(opened.opener, "grok");
+    assert.equal(opened.openerInstanceId, "grok-frontdoor-1");
     await service.shutdown();
 
     service = new GatewayService({ statePath, createClient: makeClient });
     await service.init();
     const listed = await service.call("session", { action: "list" }, { rootId: "main-a" });
     assert.equal(listed.sessions.find((s) => s.sessionId === opened.sessionId)?.opener, "grok");
+    assert.equal(listed.sessions.find((s) => s.sessionId === opened.sessionId)?.openerInstanceId, "grok-frontdoor-1");
   } finally {
     await service.shutdown().catch(() => {});
     await rm(directory, { recursive: true, force: true });

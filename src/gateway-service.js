@@ -7,7 +7,7 @@ import { ArtifactStore, defaultArtifactRoot } from "./artifacts.js";
 import { utf8ByteHead } from "./bounded-utf8.js";
 import { currentModelId, detectProviders, providerConfig } from "./providers.js";
 import { publicSession, SessionStore } from "./sessions.js";
-import { GATEWAY_VERSION } from "./version.js";
+import { GATEWAY_BUILD_ID, GATEWAY_VERSION } from "./version.js";
 
 const ACTIVE_STATUSES = new Set(["running", "waiting_permission", "waiting_input", "cancelling", "restoring"]);
 // Only the start of new work closes a message segment. Progress updates
@@ -119,6 +119,7 @@ export class GatewayService {
           ...record,
           status: record.status === "closed" ? "closed" : "disconnected",
           client: null,
+          capabilities: { configOptions: record.configOptions ?? [] },
           waiters: new Set(),
           events: [],
           resultText: "",
@@ -188,7 +189,7 @@ export class GatewayService {
   }
 
   async call(method, args = {}, context = {}) {
-    this.touchOwnerActivity(args, context);
+    if (context.observer !== true) this.touchOwnerActivity(args, context);
     const handlers = {
       setup: () => this.setup(args),
       session_open: () => this.sessionOpen(args, context),
@@ -221,7 +222,9 @@ export class GatewayService {
     const sessions = requested == null
       ? this.store.list().filter((session) => session.ownerRootId === rootId)
       : requested.map((id) => requireOwnedSession(this.requireSession(id), context));
-    for (const session of sessions) this.touchSessionOwner(session);
+    if (context.observer !== true) {
+      for (const session of sessions) this.touchSessionOwner(session);
+    }
     const cursors = args.cursors ?? {};
     if (typeof cursors !== "object" || Array.isArray(cursors)) throw new Error("cursors must be an object");
     const subscriptionId = `sub-${randomUUID()}`;
@@ -298,6 +301,7 @@ export class GatewayService {
     return {
       ok: true,
       gatewayVersion: GATEWAY_VERSION,
+      gatewayBuildId: GATEWAY_BUILD_ID,
       persistence: { healthy: this.persistError == null, error: this.persistError },
       lifecycle: {
         ...this.lifecycle,
@@ -424,6 +428,7 @@ export class GatewayService {
       // 어느 frontdoor 에이전트가 이 세션을 열었는지 — control MCP 브리지가
       // 부모 프로세스에서 감지해 넣어주는 관측용 메타데이터다.
       opener: optionalString(fields.args.opener, "opener") ?? null,
+      openerInstanceId: optionalString(fields.args.openerInstanceId, "openerInstanceId") ?? null,
       title: fields.args.title ?? null,
       permissionPolicy: fields.permissionPolicy,
       model: fields.model ?? null,
@@ -501,11 +506,18 @@ export class GatewayService {
     if (action === "set" && (session.promptStarting || ACTIVE_STATUSES.has(session.status))) {
       throw new Error(`Session ${session.id} is still active`);
     }
+    if (action === "list") {
+      // Observers must not wake or restore a Worker merely to render its cached
+      // settings. A control caller keeps the previous live-refresh behavior.
+      if (context.observer === true) {
+        return { ok: true, sessionId: session.id, configOptions: session.capabilities?.configOptions ?? [] };
+      }
+      await this.ensureConnected(session, context);
+      return { ok: true, sessionId: session.id, configOptions: session.capabilities?.configOptions ?? [] };
+    }
+
     await this.ensureConnected(session, context);
     const configOptions = session.capabilities?.configOptions ?? [];
-    if (action === "list") {
-      return { ok: true, sessionId: session.id, configOptions };
-    }
 
     requireString(args.configId, "configId");
     if (!Object.hasOwn(args, "value")) throw new Error("value is required for config set");
@@ -781,7 +793,9 @@ export class GatewayService {
       const sessions = requested == null
         ? this.store.list().filter((session) => session.ownerRootId === rootId && !CLOSED_STATUSES.has(session.status))
         : requested.map((id) => requireOwnedSession(this.requireSession(id), context));
-      for (const session of sessions) this.touchSessionOwner(session);
+      if (context.observer !== true) {
+        for (const session of sessions) this.touchSessionOwner(session);
+      }
       return sessions;
     };
 

@@ -105,9 +105,32 @@ export class AgentUpdateManager {
     return {
       enabled: this.enabled,
       notifications: this.notifications,
+      intervalMs: this.intervalMs,
       ...structuredClone(this.state),
       alerts
     };
+  }
+
+  reconfigure({ enabled = this.enabled, notifications = this.notifications, intervalMs = this.intervalMs } = {}) {
+    if (typeof enabled !== "boolean") throw new Error("Agent auto update enabled must be boolean");
+    if (typeof notifications !== "boolean") throw new Error("Agent update notifications must be boolean");
+    if (!Number.isSafeInteger(intervalMs) || intervalMs < 5 * 60_000) {
+      throw new Error("Agent update interval must be an integer >= 300000");
+    }
+    const wasStarted = this.timer != null;
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    this.enabled = enabled;
+    this.notifications = notifications;
+    this.intervalMs = intervalMs;
+    if (wasStarted) {
+      this.timer = setInterval(() => void this.refresh(), this.intervalMs);
+      this.timer.unref?.();
+      const checkedAt = Date.parse(this.state.lastCheckedAt ?? "");
+      const base = Number.isFinite(checkedAt) ? checkedAt : this.now();
+      this.state.nextCheckAt = new Date(base + this.intervalMs).toISOString();
+    }
+    return this.snapshot();
   }
 
   async #refresh() {

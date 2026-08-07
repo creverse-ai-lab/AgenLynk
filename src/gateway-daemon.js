@@ -9,14 +9,26 @@ import { checkGatewaySource } from "./gateway-source-monitor.js";
 import { GatewayService } from "./gateway-service.js";
 import { readNdjson } from "./ndjson.js";
 import { createSocketSender } from "./socket-flow.js";
-import { GATEWAY_VERSION } from "./version.js";
+import { GATEWAY_BUILD_ID, GATEWAY_VERSION } from "./version.js";
+import {
+  gatewaySettingsSnapshot,
+  resolveGatewaySettings,
+  updateGatewaySettings
+} from "./gateway-settings.js";
 
 const socketPath = gatewaySocketPath();
 const expectedToken = controlToken();
 const expectedRootId = process.env.ACP_GATEWAY_ROOT_ID || null;
 const gatewayConfig = gatewayLifecycleConfig();
-const agentUpdateManager = new AgentUpdateManager({ ...gatewayAgentUpdateConfig(), sourceChecker: checkGatewaySource });
+const agentUpdateConfig = gatewayAgentUpdateConfig();
+const agentUpdateManager = new AgentUpdateManager({ ...agentUpdateConfig, sourceChecker: checkGatewaySource });
 const service = new GatewayService({ statePath: gatewayStatePath(), agentUpdateManager, ...gatewayConfig });
+const activeGatewayValues = {
+  ...gatewayConfig,
+  agentAutoUpdate: agentUpdateConfig.enabled,
+  agentUpdateNotifications: agentUpdateConfig.notifications,
+  agentUpdateIntervalMs: agentUpdateConfig.intervalMs
+};
 const clients = new Set();
 let shutdownPromise = null;
 const daemonLock = await acquireDaemonLock(socketPath);
@@ -33,6 +45,7 @@ const server = createServer((socket) => {
   socket.once("close", () => clients.delete(socket));
   const subscriptions = new Set();
   let boundRootId = null;
+  let boundAccess = null;
   const sender = createSocketSender(socket, {
     unsubscribe: (subscriptionId) => service.unsubscribe(subscriptionId, { rootId: boundRootId }),
     removeSubscription: (subscriptionId) => subscriptions.delete(subscriptionId)
@@ -51,18 +64,54 @@ const server = createServer((socket) => {
           if (typeof request.rootId !== "string" || !request.rootId) throw new Error("rootId is required");
           if (expectedRootId && request.rootId !== expectedRootId) throw new Error("Control root identity mismatch");
           if (boundRootId && request.rootId !== boundRootId) throw new Error("Socket is already bound to another Main");
+          const access = request.access ?? "control";
+          if (!new Set(["control", "observer"]).has(access)) throw new Error(`Unknown Gateway access mode: ${access}`);
+          if (boundAccess && access !== boundAccess) throw new Error("Socket is already bound to another access mode");
           if (!boundRootId) {
             boundRootId = request.rootId;
-            service.attachRoot(boundRootId);
+            boundAccess = access;
+            if (boundAccess === "control") service.attachRoot(boundRootId);
           }
+          if (boundAccess === "observer") assertObserverRequest(request);
+        }
+        if (request.method === "gateway_config") {
+          const action = request.args?.action ?? "get";
+          if (["get", "list"].includes(action)) {
+            send({ id: request.id, ok: true, result: gatewaySettingsSnapshot({ activeValues: activeGatewayValues }) });
+            return;
+          }
+          if (!new Set(["set", "reset"]).has(action)) throw new Error(`Unknown gateway_config action: ${action}`);
+          await updateGatewaySettings({
+            values: action === "set" ? request.args?.values ?? {} : {},
+            resetIds: action === "reset" ? request.args?.ids ?? [] : []
+          });
+          const resolved = resolveGatewaySettings();
+          agentUpdateManager.reconfigure({
+            enabled: resolved.agentAutoUpdate,
+            notifications: resolved.agentUpdateNotifications,
+            intervalMs: resolved.agentUpdateIntervalMs
+          });
+          activeGatewayValues.agentAutoUpdate = resolved.agentAutoUpdate;
+          activeGatewayValues.agentUpdateNotifications = resolved.agentUpdateNotifications;
+          activeGatewayValues.agentUpdateIntervalMs = resolved.agentUpdateIntervalMs;
+          send({ id: request.id, ok: true, result: gatewaySettingsSnapshot({ activeValues: activeGatewayValues }) });
+          return;
         }
         if (request.method === "daemon_shutdown") {
-          send({ id: request.id, ok: true, result: { ok: true, pid: process.pid, version: GATEWAY_VERSION } });
+          send({ id: request.id, ok: true, result: {
+            ok: true,
+            pid: process.pid,
+            version: GATEWAY_VERSION,
+            buildId: GATEWAY_BUILD_ID
+          } });
           setImmediate(() => void shutdown().finally(() => process.exit(0)));
           return;
         }
         if (request.method === "subscribe") {
-          const result = service.subscribe(request.args, { rootId: request.rootId }, (event) => {
+          const result = service.subscribe(request.args, {
+            rootId: request.rootId,
+            observer: boundAccess === "observer"
+          }, (event) => {
             sendEvent(result.subscriptionId, event);
           });
           subscriptions.add(result.subscriptionId);
@@ -70,12 +119,18 @@ const server = createServer((socket) => {
           return;
         }
         if (request.method === "unsubscribe") {
-          const result = service.unsubscribe(request.args?.subscriptionId, { rootId: request.rootId });
+          const result = service.unsubscribe(request.args?.subscriptionId, {
+            rootId: request.rootId,
+            observer: boundAccess === "observer"
+          });
           subscriptions.delete(request.args?.subscriptionId);
           send({ id: request.id, ok: true, result });
           return;
         }
-        const result = isGuide ? await service.guide() : await service.call(request.method, request.args, { rootId: request.rootId });
+        const result = isGuide ? await service.guide() : await service.call(request.method, request.args, {
+          rootId: request.rootId,
+          observer: boundAccess === "observer"
+        });
         send({ id: request.id, ok: true, result });
       } catch (error) {
         if (!socket.destroyed) send({ id: request?.id ?? null, ok: false, error: error?.message ?? String(error) });
@@ -84,7 +139,7 @@ const server = createServer((socket) => {
   });
   socket.once("close", () => {
     service.removeSubscriptions(subscriptions);
-    if (boundRootId) service.detachRoot(boundRootId);
+    if (boundRootId && boundAccess === "control") service.detachRoot(boundRootId);
   });
 });
 
@@ -119,6 +174,18 @@ function tokenMatches(actual, expected) {
   const left = Buffer.from(actual);
   const right = Buffer.from(expected);
   return left.length === right.length && timingSafeEqual(left, right);
+}
+
+function assertObserverRequest(request) {
+  const method = request.method;
+  const args = request.args ?? {};
+  if (["subscribe", "unsubscribe", "poll", "watch", "task_get", "task_list", "task_result"].includes(method)) return;
+  if (method === "setup" && args.provider == null && args.refreshAgentUpdates !== true) return;
+  if (method === "config" && args.action === "list") return;
+  if (method === "gateway_config" && ["get", "list"].includes(args.action ?? "get")) return;
+  if (method === "session" && ["list", "get"].includes(args.action)) return;
+  if (method === "inbox" && ["list", "get"].includes(args.action)) return;
+  throw new Error(`Observer access is read-only: ${method}`);
 }
 
 async function removeStaleSocket(path) {

@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { parseInstallerArgs } from "../src/installer.js";
-import { GATEWAY_VERSION } from "../src/version.js";
+import { GATEWAY_BUILD_ID, GATEWAY_VERSION } from "../src/version.js";
 import { ACP_PROTOCOL_VERSION } from "../src/acp-version.js";
 import { compareSnapshots, validateMonitorConfig, validateSnapshot } from "./acp-upstream-monitor.js";
 
@@ -12,6 +12,7 @@ const monitorConfig = JSON.parse(await readFile(new URL("../config/acp-monitor.j
 const upstreamSnapshot = JSON.parse(await readFile(new URL("../config/acp-upstream.snapshot.json", import.meta.url), "utf8"));
 
 assert.equal(packageDocument.version, GATEWAY_VERSION, "package and Gateway versions must match");
+assert.match(GATEWAY_BUILD_ID, /^[a-f0-9]{16}$/, "Gateway build id must be a short source fingerprint");
 validateMonitorConfig(monitorConfig);
 validateSnapshot(upstreamSnapshot, monitorConfig);
 assert.deepEqual(

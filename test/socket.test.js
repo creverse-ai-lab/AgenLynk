@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, rm, unlink } from "node:fs/promises";
+import { mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,7 +16,14 @@ test("socket Gateway separates public guide access from Main control", async () 
   const directory = await mkdtemp(join(tmpdir(), "acp-gateway-socket-"));
   const socketPath = join(directory, "gateway.sock");
   const statePath = join(directory, "state.json");
+  const installStatePath = join(directory, "install.json");
   const token = "test-control-token-at-least-24-characters";
+  await writeFile(installStatePath, JSON.stringify({
+    version: 1,
+    managedMcp: {},
+    identity: { token, rootId: "main-a" },
+    agentUpdates: { autoUpdate: true, notifications: true }
+  }));
   const daemonPath = fileURLToPath(new URL("../src/gateway-daemon.js", import.meta.url));
   const daemon = spawn(process.execPath, [daemonPath], {
     stdio: ["ignore", "ignore", "pipe"],
@@ -24,6 +31,7 @@ test("socket Gateway separates public guide access from Main control", async () 
       ...process.env,
       ACP_GATEWAY_SOCKET: socketPath,
       ACP_GATEWAY_STATE: statePath,
+      ACP_GATEWAY_INSTALL_STATE: installStatePath,
       ACP_GATEWAY_CONTROL_TOKEN: token,
       ACP_GATEWAY_ROOT_ID: "main-a"
     }
@@ -40,6 +48,13 @@ test("socket Gateway separates public guide access from Main control", async () 
     autoStart: false
   });
   const main = new GatewayRpcClient({ socketPath, token, rootId: "main-a", autoStart: false });
+  const observer = new GatewayRpcClient({
+    socketPath,
+    token,
+    rootId: "main-a",
+    autoStart: false,
+    access: "observer"
+  });
   const imposter = new GatewayRpcClient({ socketPath, token, rootId: "main-b", autoStart: false });
   let mcpClient;
   try {
@@ -48,6 +63,30 @@ test("socket Gateway separates public guide access from Main control", async () 
     await assert.rejects(wrong.call("session", { action: "list" }), /Control access denied/);
     await assert.rejects(imposter.call("session", { action: "list" }), /root identity mismatch/);
     assert.deepEqual((await main.call("session", { action: "list" })).sessions, []);
+    assert.deepEqual((await observer.call("session", { action: "list" })).sessions, []);
+    const gatewayConfig = await observer.call("gateway_config", { action: "get" });
+    assert.equal(gatewayConfig.options.length, 17);
+    assert.equal(gatewayConfig.options.some((option) => option.id === "maxInlineResultBytes"), true);
+    await assert.rejects(
+      observer.call("gateway_config", { action: "set", values: { maxEvents: 250 } }),
+      /Observer access is read-only/
+    );
+    const changedConfig = await main.call("gateway_config", { action: "set", values: { maxEvents: 250 } });
+    const maxEvents = changedConfig.options.find((option) => option.id === "maxEvents");
+    assert.equal(maxEvents.currentValue, 200);
+    assert.equal(maxEvents.configuredValue, 250);
+    assert.equal(maxEvents.pending, true);
+    const observed = await observer.subscribe({}, () => {});
+    assert.equal((await observer.unsubscribe(observed.subscriptionId)).removed, true);
+    await assert.rejects(
+      observer.call("prompt", { sessionId: "session-a", prompt: "forbidden" }),
+      /Observer access is read-only/
+    );
+    await assert.rejects(
+      observer.call("setup", { provider: "claude" }),
+      /Observer access is read-only/
+    );
+    await assert.rejects(observer.call("daemon_shutdown"), /Observer access is read-only/);
 
     const transport = new StdioClientTransport({
       command: process.execPath,
@@ -76,6 +115,7 @@ test("socket Gateway separates public guide access from Main control", async () 
     wrong.close();
     imposter.close();
     main.close();
+    observer.close();
     if (daemon.exitCode == null) {
       const exited = once(daemon, "close");
       daemon.kill("SIGTERM");

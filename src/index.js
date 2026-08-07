@@ -11,6 +11,7 @@ import {
   ListToolsRequestSchema
 } from "@modelcontextprotocol/sdk/types.js";
 import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { controlToken, rootId } from "./config.js";
 import { GatewayRpcClient } from "./socket-rpc.js";
 import { PERMISSION_POLICIES } from "./acp-client.js";
@@ -20,16 +21,26 @@ import { GATEWAY_VERSION } from "./version.js";
 // process name identifies which agent is orchestrating. Sessions opened here
 // are stamped with it for observability (monitor GUI, session listings).
 const KNOWN_FRONTDOOR_AGENTS = ["claude", "grok", "codex", "cursor", "auggie", "gemini", "windsurf", "zed"];
-function detectOpenerAgent() {
+function detectOpenerContext() {
+  let agent = null;
+  let startedAt = "";
   try {
     const command = execSync(`ps -o comm= -p ${process.ppid}`, { timeout: 2_000 }).toString().trim().toLowerCase();
     const basename = command.split("/").pop() ?? command;
-    return KNOWN_FRONTDOOR_AGENTS.find((agent) => basename.includes(agent)) ?? null;
-  } catch {
-    return null;
-  }
+    agent = KNOWN_FRONTDOOR_AGENTS.find((candidate) => basename.includes(candidate)) ?? null;
+  } catch {}
+  try {
+    startedAt = execSync(`ps -o lstart= -p ${process.ppid}`, { timeout: 2_000 }).toString().trim();
+  } catch {}
+  // Parent pid + process start time survives MCP bridge respawns while avoiding
+  // false continuity if macOS later reuses the same pid for another frontdoor.
+  const instanceId = createHash("sha256")
+    .update(`${process.ppid}\0${startedAt}`)
+    .digest("base64url")
+    .slice(0, 24);
+  return { agent, instanceId };
 }
-const openerAgent = detectOpenerAgent();
+const opener = detectOpenerContext();
 
 const rpc = new GatewayRpcClient({ token: controlToken(), rootId: rootId() });
 const tools = controlTools();
@@ -69,8 +80,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     if (task) throw new Error(`Tool ${request.params.name} does not support task execution`);
     const args = { ...(request.params.arguments ?? {}) };
-    if ((method === "session_open" || method === "session_restore") && openerAgent && args.opener == null) {
-      args.opener = openerAgent;
+    if (method === "session_open" || method === "session_restore") {
+      if (opener.agent && args.opener == null) args.opener = opener.agent;
+      if (args.openerInstanceId == null) args.openerInstanceId = opener.instanceId;
     }
     const timeoutMs = method === "poll" || method === "watch"
       ? Math.max(30_000, Number(args.waitMs ?? 0) + 5_000)

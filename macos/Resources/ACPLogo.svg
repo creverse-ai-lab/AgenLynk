@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 210 210">
+  <style>
+    .ink { fill: none; stroke: #101014; stroke-width: 11; stroke-linecap: butt; stroke-linejoin: miter; }
+    @media (prefers-color-scheme: dark) { .ink { stroke: #ffffff; } }
+  </style>
+  <path class="ink" d="M80 57H50V162H155V57H125"/>
+  <path class="ink" d="M75 130V94H131V130"/>
+  <path class="ink" d="M103 26V94"/>
+  <path d="M103 94V142" fill="none" stroke="#1461FA" stroke-width="10"/>
+</svg>
