@@ -70,6 +70,8 @@ acp-gateway-bootstrap --update
 
 `--update`는 `git pull --ff-only`와 `npm ci`를 실행하고, ACP protocol·공식 registry의 상류 변경을 확인한 다음 `npm run ci`로 snapshot 검증과 전체 자동 테스트를 통과해야 다음 단계로 진행합니다. 이후 내부 dry-run 계획을 출력하고 ACP registry와 adapter, MCP 등록을 갱신합니다. 마지막으로 실행 중인 Gateway daemon을 새 버전으로 다시 시작하고 실제 버전까지 확인합니다. 설치 상태, Control identity와 최초 설치에서 선택한 프론트 도어는 그대로 유지됩니다. 상류 확인이 일시적으로 실패하면 경고를 남기되 이미 받은 소스의 로컬 검증은 계속하며, 테스트 실패는 daemon을 교체하기 전에 update 전체를 중단합니다.
 
+이전 설치에서 Control MCP가 여러 agent에 남아 있다면 `acp-gateway-bootstrap --update --front-door codex|claude|grok`으로 실제 프론트 도어 하나를 선택할 수 있습니다. installer가 관리하던 나머지 Control 항목은 제거되고 Guide와 Worker 기능은 유지됩니다.
+
 사용자가 수정한 `agent-delegator`를 보호하기 위해 skill은 최초 `--install-all`에서만 설치하며 `--update`에서는 건드리지 않습니다. `--install-skill`도 최초 설치용이므로 이미 installer가 관리하는 복사본을 자동으로 덮어쓰지 않습니다. 로컬 소스 변경을 보호하기 위해 Git 작업 트리가 깨끗하지 않으면 update를 중단하므로 먼저 변경 사항을 commit하거나 stash해야 합니다. 소스와 직접 연결되는 `npm link`는 최초 설치 후 다시 할 필요가 없습니다.
 
 현재 checkout에 포함된 최신 기본 skill만 별도로 반영하려면 먼저 계획을 확인한 뒤 업데이트합니다.
@@ -88,7 +90,7 @@ acp-gateway-bootstrap --update-skill
 | `--version`, `-V` | 현재 설치된 ACP Gateway 버전 확인 |
 | `--update` | 소스 pull·상류 확인·전체 테스트·dry-run 후 Adapter, MCP, daemon 갱신—사용자 skill 유지 |
 | `--install-all` | Adapter, Guide, skill 전체 설치 후 프론트 도어 하나에 Control 등록 |
-| `--front-door codex\|claude\|grok` | `--install-all`의 Control MCP 대상 명시 |
+| `--front-door codex\|claude\|grok` | `--install-all` 또는 `--update`에서 유일한 Control MCP 대상 명시 |
 | `--install-control` | 오케스트레이터용 Control MCP만 설치 |
 | `--install-guide` | 읽기 전용 Guide MCP만 설치 |
 | `--install-skill` | 발견된 AI에 `agent-delegator` skill 최초 설치—기존 관리본은 보존 |
@@ -104,11 +106,11 @@ acp-gateway-bootstrap --update-skill
 | `--agent-auto-update on\|off` | ACP agent/adapter 자동 업데이트 설정 후 daemon 재시작 |
 | `--agent-update-notifications on\|off` | health check 업데이트 알림 설정 후 daemon 재시작 |
 
-Control token과 오케스트레이터 식별자(Main ID)는 `~/.acp-gateway/install.json`에 권한 `0600`으로 저장되며 반복 설치에서도 재사용됩니다.
+Control token과 Gateway 소유권 경계(`rootId`)는 `~/.acp-gateway/install.json`에 권한 `0600`으로 저장되며 반복 설치에서도 재사용됩니다. MCP 등록에는 credential 대신 이 상태 파일 경로만 기록되므로 token이 agent 프로세스 인자에 포함되지 않습니다. `rootId`는 사용자 대화 세션 ID가 아닙니다. Monitor/Pet의 Frontdoor 노드는 Control MCP가 감지한 실제 Codex thread/Claude·Grok session ID를 사용하고, 이를 얻을 수 없는 호스트에서만 프로세스 기반 식별자로 폴백합니다.
 
 Skill은 Codex `~/.codex/skills`, Claude `~/.claude/skills`, Grok `~/.grok/skills`, Auggie `~/.augment/skills`에 설치합니다. 별도 경로가 알려지지 않은 registry provider는 공용 `~/.agents/skills`를 사용합니다. 같은 공용 경로를 사용하는 provider가 여러 개면 skill 파일은 한 번만 복사하고 installer 상태에는 각 provider를 모두 기록합니다.
 
-Control·Guide MCP 등록은 Codex, Claude, Grok, Auggie를 지원합니다. 기본 `--install-all`에서 Control은 사용자가 프론트 도어로 선택한 Codex·Claude·Grok 중 하나에만 등록되고, Guide와 skill은 발견된 지원 agent 전체에 설치됩니다. `--target`은 고급 수동 대상 지정 용도로 유지됩니다. Control MCP는 Gateway 전체 제어 권한이 있으므로 신뢰하는 로컬 agent에만 설치하세요.
+Control·Guide MCP 등록은 Codex, Claude, Grok, Auggie를 지원합니다. 기본 `--install-all`에서 Control은 사용자가 프론트 도어로 선택한 Codex·Claude·Grok 중 하나에만 등록되고, Guide와 skill은 발견된 지원 agent 전체에 설치됩니다. `--target`은 고급 수동 대상 지정 용도로 유지됩니다. ACP Worker 프로세스는 Frontdoor 세션 환경을 상속하지 않으며, 사용자 설정에서 Control MCP를 발견하더라도 해당 브리지는 도구를 노출하지 않습니다. Control MCP는 Gateway 전체 제어 권한이 있으므로 신뢰하는 로컬 agent에만 설치하세요.
 
 공식 registry 원본은 `https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json`이며 `~/.acp-gateway/registry.json`에 24시간 캐시합니다. 발견된 provider 실행 정의는 `~/.acp-gateway/providers.json`에 저장됩니다. `npx`·`uvx` 배포는 registry에 고정된 버전을 설치하고, binary 배포는 이미 설치된 실행 파일을 사용합니다. registry에 등록되지 않은 임의의 AI는 ACP 실행 계약을 안전하게 추론할 수 없으므로 자동 등록하지 않습니다.
 
@@ -268,9 +270,9 @@ flowchart LR
 5. **권한·질문 처리** — Worker의 permission 요청이나 질문은 Gateway Inbox를 거쳐 오케스트레이터에게 전달되고, 그 응답이 다시 Worker로 돌아갑니다.
 6. **결과 회수·재사용** — 오케스트레이터는 MCP Task 또는 poll로 상태와 결과를 받고, 필요하면 같은 세션을 다시 호출하거나 복구합니다.
 
-## ACP Monitor macOS 앱
+## Lynk macOS 앱
 
-Gateway를 지나가는 중간 과정을 네이티브 SwiftUI 화면에서 실시간으로 확인하고, Worker가 공개한 세션 config를 변경하는 앱입니다. 기존 HTML UI와 `WKWebView`는 사용하지 않습니다.
+Gateway를 지나가는 중간 과정을 네이티브 SwiftUI 화면에서 실시간으로 확인하고 공식 ACP Agent 연결을 관리하는 앱입니다. 기존 HTML UI와 `WKWebView`는 사용하지 않습니다.
 
 ```bash
 npm run macos:test
@@ -279,11 +281,11 @@ npm run macos:run
 ```
 
 - **Dashboard**는 Gateway 상태, 전체/활성 세션, 이벤트, Task, Inbox를 한 화면에 표시합니다.
-- **Live Graph**는 Frontdoor trunk에서 Worker 세션이 branch로 뻗고 턴 종료 시 합쳐지는 흐름을 5분·15분·60분 시간축으로 표시합니다.
+- **Monitoring**은 Frontdoor trunk에서 Worker가 갈라지고 합쳐지는 **Branch** 시간축과, Frontdoor·Worker 관계와 현재 상태를 한눈에 보는 **Map** 보기를 전환해 제공합니다.
 - 세션은 여러 개의 독립 상세 창으로 열 수 있으며 macOS 표준 **Settings** 창에서 active-only, thought/tool 표시, 자동 따라가기, 시간 범위와 Node 경로를 변경할 수 있습니다.
 - Dashboard 툴바의 톱니바퀴에서 **Gateway 구성**을 열면 자동 업데이트, lifecycle, resource limit의 지원 설정 17개를 모두 조회·변경할 수 있습니다. 환경변수로 지정된 값은 잠금 표시되며, 저장된 runtime 변경은 진행 중 세션·Task·Inbox가 없을 때만 안전 재시작으로 적용됩니다.
-- 같은 Settings 창의 **Worker 구성**에서는 선택한 세션이 공개한 model, mode, thought level, boolean model 설정을 조회하고 변경할 수 있습니다. 작업 중인 세션은 변경할 수 없으며, 연결이 끊긴 세션은 자동으로 깨우지 않습니다.
-- **Pet** 탭에서는 `/Users/cyyoon/dev/personal_program/agent-status-pet`의 `CodexPet` overlay를 켜고 끌 수 있습니다. Pet은 별도 watcher를 중복 실행하지 않고 Monitor의 Gateway snapshot을 공유하며, 최초 Frontdoor를 루트로 표시하고 해당 Worker들을 아래에 연결합니다.
+- Settings의 **ACP 연결**은 [공식 ACP registry](https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json) 목록을 보여줍니다. Gateway에 준비되지 않은 `npx`·`uvx` agent와 이미 로컬에 있는 binary agent는 `Install`, 설치된 agent는 `On/Off`로 새 세션 사용 여부를 제어합니다. 자동 설치할 수 없는 binary 배포는 공식 설치 페이지를 안내합니다. Off는 실행 중 세션을 종료하거나 설치 파일을 삭제하지 않습니다.
+- **Pet** 탭에서는 `/Users/cyyoon/dev/personal_program/agent-status-pet`의 `CodexPet` overlay를 켜고 끌 수 있습니다. Pet은 별도 watcher를 중복 실행하지 않고 Monitor의 Gateway snapshot을 공유하며, 실제 대화 세션 ID를 가진 Frontdoor를 루트로 표시하고 해당 Worker들을 아래에 연결합니다.
 - 앱은 번들된 `monitor.js`를 임시 loopback 포트의 snapshot/SSE sidecar로 실행합니다. 이 sidecar는 화면을 제공하지 않고 상시 조회는 `observer` 역할로 수행하며, 사용자가 명시적으로 설정 저장·안전 재시작을 요청할 때만 짧은 `control` 연결을 사용합니다.
 - Main과 동일한 identity(`~/.acp-gateway/install.json`)로 daemon socket에 인증하되, 상시 모니터링은 변경 명령이 차단된 `observer` 역할로 수행합니다. 사용자가 ACP config 값을 바꿀 때만 짧은 `control` 연결을 별도로 열고 즉시 닫습니다. Gateway의 모든 요청은 rootId 단위로 격리되므로, 다른 identity를 쓰려면 `ACP_GATEWAY_CONTROL_TOKEN`과 `ACP_GATEWAY_ROOT_ID`를 지정하세요.
 - 이벤트는 daemon 메모리에만 유지되므로(세션당 `ACP_GATEWAY_MAX_EVENTS`, 기본 200) 타임라인은 daemon이 기억하는 범위까지만 표시됩니다. `turn_start` 이벤트에 프롬프트 본문이 함께 기록되며, 그 이전 버전 daemon에서 생성된 턴은 프롬프트가 비어 있습니다.
@@ -294,7 +296,7 @@ npm run macos:run
 
 - **세션 재연결 모델 검증 버그 수정** — idle unload나 daemon 재시작으로 끊긴 세션에 다시 prompt하면 모든 provider에서 복원이 실패하던 문제를 고쳤습니다. 원인은 두 가지: ① 재연결이 세션의 저장된 모델을 프로세스 init 시점에 검증했는데 session-scoped provider는 그 시점에 모델을 알려주지 않음 (이제 init 검증은 `modelScope: "process"`에서만 수행), ② 모델을 `models` capability로만 보고하는 provider(grok)는 요청 모델과 이미 일치해도 설정 가능한 config option이 없다고 실패함 (이제 configOptions → models capability → init 순으로 현재 모델을 발견하고, 일치하면 no-op). 요청 모델이 실제로 다른데 바꿀 수단이 없는 경우는 여전히 실패합니다.
 - **멀티 세션 실시간 감시 도구 `agent_acp_watch`** — Main이 세션 하나씩 poll하는 대신, 소유한 모든(또는 지정한) 세션의 이벤트를 **한 번의 호출로 시간순 병합**해서 받습니다. 세션별 `cursors`로 이어서 조회하고, 응답 대기 중인 permission/질문은 `pendingInbox`로 함께 도착하며, long-poll(`waitMs`)은 어느 세션에서든 새 이벤트가 나오면 깨어납니다. **사고(`agent_thought_chunk`)는 이 채널에서 기본 포함**입니다 — 여러 Worker의 중간 사고를 Main이 실시간으로 검수하는 것이 이 도구의 목적이기 때문입니다 (`includeThoughts: false`로 제외 가능). 기존 `agent_acp_poll`은 증거 회수·회고 조회용으로 그대로 유지됩니다.
-- **네이티브 ACP Monitor** — Dashboard, Live Graph, 세션별 다중 창, Settings로 구성된 SwiftUI macOS 앱을 제공합니다. 기존 웹 UI는 제거했고 Node sidecar는 observer 데이터 전달만 담당합니다.
+- **네이티브 Lynk** — Dashboard, Branch/Map 전환형 Monitoring, 세션별 다중 창, 공식 ACP Agent 연결 Settings로 구성된 SwiftUI macOS 앱을 제공합니다. 기존 웹 UI는 제거했고 Node sidecar는 observer 데이터 전달과 명시적인 설치·연결 제어만 담당합니다.
 - **`turn_start` 이벤트에 프롬프트 기록** — 각 턴이 어떤 프롬프트로 시작됐는지 이벤트에 본문(4KB 캡)이 함께 남아, 관측 도구와 회고 조회에서 턴의 목적을 확인할 수 있습니다.
 - **사고 과정 기본 제공** — 턴이 **완료된** poll/Task 결과의 `result.thought`에 Worker의 사고 과정이 16KB 캡 미리보기로 기본 포함됩니다(캡 적용 시 `thoughtTruncated: true`). `includeThoughts: true`는 전문, `includeThoughts: false`는 완전 제외로 토글할 수 있습니다. 진행 중인 턴은 다릅니다 — 반복 폴링 비용을 늘리지 않도록 `includeResult: true` 중간 조회와 라이브 `agent_thought_chunk` 스트림 모두 기존대로 `includeThoughts: true`를 명시해야 사고가 전달됩니다.
 

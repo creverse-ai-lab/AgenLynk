@@ -15,17 +15,22 @@ final class AppModel: ObservableObject {
     @Published private(set) var gateway: JSONValue?
     @Published private(set) var sessions: [GatewaySession] = []
     @Published private(set) var eventsBySession: [String: [MonitorEvent]] = [:]
+    @Published private(set) var historySessions: [GatewaySession] = []
+    @Published private(set) var historyEventsBySession: [String: [MonitorEvent]] = [:]
+    @Published private(set) var logSessions: [GatewaySession] = []
+    @Published private(set) var logEventsBySession: [String: [MonitorEvent]] = [:]
     @Published private(set) var tasks: [MonitorRecord] = []
     @Published private(set) var inbox: [MonitorRecord] = []
+    @Published var selectedFrontdoorId: String?
     @Published var selectedSessionId: String?
     @Published var selectedEventId: String?
     @Published var lastNotice: String?
-    @Published private(set) var sessionConfigOptions: [SessionConfigOption] = []
-    @Published private(set) var configSessionId: String?
-    @Published private(set) var configLoading = false
-    @Published private(set) var configSavingId: String?
-    @Published private(set) var configError: String?
-    @Published private(set) var configUnavailableReason: String?
+    @Published private(set) var agentCatalog: [ACPAgentCatalogItem] = []
+    @Published private(set) var agentCatalogLoading = false
+    @Published private(set) var agentCatalogMutationId: String?
+    @Published private(set) var agentCatalogSource = "—"
+    @Published private(set) var agentCatalogStale = false
+    @Published private(set) var agentCatalogError: String?
     @Published private(set) var gatewayConfigOptions: [GatewayConfigOption] = []
     @Published private(set) var gatewayConfigLoading = false
     @Published private(set) var gatewayConfigSaving = false
@@ -40,6 +45,8 @@ final class AppModel: ObservableObject {
     private let pet = PetController()
     private var startTask: Task<Void, Never>?
     private var reconciliationTask: Task<Void, Never>?
+    private var streamFlushTask: Task<Void, Never>?
+    private var pendingStreamEvents: [MonitorEvent] = []
     private var endpoint: MonitorEndpoint?
     private var gatewayConnected = false
     private var gatewayStreaming = false
@@ -95,8 +102,35 @@ final class AppModel: ObservableObject {
     var gatewayConfigLockedCount: Int { gatewayConfigOptions.filter { !$0.editable }.count }
 
     var activeSessions: [GatewaySession] { sessions.filter(\.isActive) }
+    var frontdoorSessions: [FrontdoorSession] {
+        FrontdoorSession.make(sessions: sessions.filter { !$0.isInternalReview })
+    }
+    var activeFrontdoors: [FrontdoorSession] { frontdoorSessions.filter(\.isActive) }
+    var realtimeSessions: [GatewaySession] {
+        let liveCandidates = sessions.filter { !$0.isInternalReview }
+        let activeFrontdoorIds = Set(liveCandidates.filter(\.isActive).compactMap(\.openerInstanceId))
+        return liveCandidates
+            .filter { session in
+                session.isRealtimeVisible || (session.isFrontdoorRecord && activeFrontdoorIds.contains(session.openerInstanceId ?? ""))
+            }
+            .sorted { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
+    }
+    var realtimeInbox: [MonitorRecord] {
+        let sessionIds = Set(realtimeSessions.map(\.sessionId))
+        return inbox.filter { record in
+            guard let sessionId = record.payload.objectValue?.string("sessionId") else { return false }
+            return sessionIds.contains(sessionId)
+        }
+    }
+    var realtimeACPCount: Int { realtimeSessions.filter { !$0.isLocalSource }.count }
+    var realtimeLocalCount: Int { realtimeSessions.filter(\.isLocalSource).count }
     var pendingInbox: [MonitorRecord] { inbox.filter { $0.status == "pending" || $0.status == "interrupted" } }
-    var totalEventCount: Int { eventsBySession.values.reduce(0) { $0 + $1.count } }
+    var visibleLogSessions: [GatewaySession] { logSessions.filter { !$0.isInternalReview } }
+    var logFrontdoorSessions: [FrontdoorSession] { FrontdoorSession.make(sessions: visibleLogSessions) }
+    var totalEventCount: Int {
+        let visibleIds = Set(visibleLogSessions.map(\.sessionId))
+        return logEventsBySession.filter { visibleIds.contains($0.key) }.values.reduce(0) { $0 + $1.count }
+    }
 
     var petStatus: String {
         if petRunning { return "실행 중 · ACP 실시간 상태 공유" }
@@ -104,14 +138,25 @@ final class AppModel: ObservableObject {
         return "꺼짐"
     }
 
-    var visibleSessions: [GatewaySession] {
-        sessions
-            .filter { !settings.activeOnly || $0.isActive }
-            .sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
+    var visibleFrontdoors: [FrontdoorSession] {
+        frontdoorSessions.filter { !settings.activeOnly || $0.isActive }
+    }
+
+    var selectedFrontdoor: FrontdoorSession? {
+        guard let selectedFrontdoorId else { return nil }
+        return frontdoorSessions.first { $0.id == selectedFrontdoorId }
+    }
+
+    var selectedSession: GatewaySession? {
+        guard let selectedSessionId else { return nil }
+        return visibleLogSessions.first { $0.sessionId == selectedSessionId }
     }
 
     var allVisibleEvents: [MonitorEvent] {
-        eventsBySession.values.flatMap { $0 }
+        let mappedSessionIds = Set(logFrontdoorSessions.flatMap { $0.members.map(\.sessionId) })
+        return logEventsBySession
+            .filter { mappedSessionIds.contains($0.key) }
+            .values.flatMap { $0 }
             .filter(eventIsVisible)
             .sorted(by: eventSort)
     }
@@ -121,8 +166,14 @@ final class AppModel: ObservableObject {
     }
 
     var selectedEvents: [MonitorEvent] {
-        guard let selectedSessionId else { return allVisibleEvents }
-        return (eventsBySession[selectedSessionId] ?? []).filter(eventIsVisible).sorted(by: eventSort)
+        guard let selectedFrontdoorId,
+              let frontdoor = logFrontdoorSessions.first(where: { $0.id == selectedFrontdoorId }) else {
+            return allVisibleEvents
+        }
+        return frontdoor.members
+            .flatMap { logEventsBySession[$0.sessionId] ?? [] }
+            .filter(eventIsVisible)
+            .sorted(by: eventSort)
     }
 
     var selectedEvent: MonitorEvent? {
@@ -144,14 +195,20 @@ final class AppModel: ObservableObject {
     func reconnect() {
         startTask?.cancel()
         reconciliationTask?.cancel()
+        streamFlushTask?.cancel()
+        streamFlushTask = nil
+        pendingStreamEvents.removeAll(keepingCapacity: true)
         startTask = Task { [weak self] in await self?.connect(restartSidecar: true) }
     }
 
     func stop() {
         startTask?.cancel()
         reconciliationTask?.cancel()
+        streamFlushTask?.cancel()
         startTask = nil
         reconciliationTask = nil
+        streamFlushTask = nil
+        pendingStreamEvents.removeAll(keepingCapacity: true)
         endpoint = nil
         sidecarStreamConnected = false
         gatewayConnected = false
@@ -185,55 +242,35 @@ final class AppModel: ObservableObject {
         petError = nil
     }
 
-    func loadSessionConfig(sessionId: String) async {
+    func loadAgentCatalog(refresh: Bool = false) async {
+        if endpoint == nil { await ensureStarted() }
         guard let endpoint else {
-            configError = "Gateway monitor가 아직 연결되지 않았습니다."
+            agentCatalogError = "Gateway monitor가 아직 연결되지 않았습니다."
             return
         }
-        configLoading = true
-        configError = nil
-        configUnavailableReason = nil
+        agentCatalogLoading = true
+        agentCatalogError = nil
         do {
-            let response = try await client.fetchSessionConfig(endpoint: endpoint, sessionId: sessionId)
-            guard !Task.isCancelled else { return }
-            configSessionId = response.sessionId
-            sessionConfigOptions = response.options
-            configUnavailableReason = response.unavailableReason
+            apply(try await client.fetchAgentCatalog(endpoint: endpoint, refresh: refresh))
         } catch {
-            configSessionId = sessionId
-            sessionConfigOptions = []
-            configUnavailableReason = nil
-            configError = error.localizedDescription
+            agentCatalogError = error.localizedDescription
         }
-        configLoading = false
+        agentCatalogLoading = false
     }
 
-    @discardableResult
-    func setSessionConfig(sessionId: String, configId: String, value: JSONValue) async -> Bool {
-        guard let endpoint else {
-            configError = "Gateway monitor가 아직 연결되지 않았습니다."
-            return false
-        }
-        configSavingId = configId
-        configError = nil
-        configUnavailableReason = nil
-        do {
-            let response = try await client.setSessionConfig(
-                endpoint: endpoint,
-                sessionId: sessionId,
-                configId: configId,
-                value: value
-            )
-            configSessionId = response.sessionId
-            sessionConfigOptions = response.options
-            configUnavailableReason = response.unavailableReason
-            configSavingId = nil
-            return true
-        } catch {
-            configError = error.localizedDescription
-            configSavingId = nil
-            return false
-        }
+    func installAgent(_ agent: ACPAgentCatalogItem) async {
+        await mutateAgent(agent, body: [
+            "action": .string("install"),
+            "registryId": .string(agent.registryId)
+        ])
+    }
+
+    func setAgentEnabled(_ agent: ACPAgentCatalogItem, enabled: Bool) async {
+        await mutateAgent(agent, body: [
+            "action": .string("set_enabled"),
+            "providerId": .string(agent.providerId),
+            "enabled": .bool(enabled)
+        ])
     }
 
     func loadGatewayConfig() async {
@@ -320,7 +357,10 @@ final class AppModel: ObservableObject {
         reconciliationTask = nil
         if restartSidecar { sidecar.stop() }
         do {
-            let endpoint = try await sidecar.start(nodeOverride: settings.nodePath)
+            let endpoint = try await sidecar.start(
+                nodeOverride: settings.nodePath,
+                localWatcherProjectPath: settings.petProjectPath
+            )
             self.endpoint = endpoint
             sidecarStreamConnected = false
             let snapshot = try await client.fetchSnapshot(endpoint: endpoint)
@@ -350,7 +390,7 @@ final class AppModel: ObservableObject {
         reconciliationTask?.cancel()
         reconciliationTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
                 guard !Task.isCancelled, let self, self.endpoint?.baseURL == endpoint.baseURL else { return }
                 do {
                     let snapshot = try await self.client.fetchSnapshot(endpoint: endpoint)
@@ -366,14 +406,24 @@ final class AppModel: ObservableObject {
     }
 
     private func apply(_ snapshot: MonitorSnapshot) {
-        gateway = snapshot.gateway
-        sessions = snapshot.sessions
-        eventsBySession = snapshot.eventsBySession
-        tasks = snapshot.tasks
-        inbox = snapshot.inbox
+        var logCacheChanged = false
+        if gateway != snapshot.gateway { gateway = snapshot.gateway }
+        if sessions != snapshot.sessions { sessions = snapshot.sessions; logCacheChanged = true }
+        if eventsBySession != snapshot.eventsBySession { eventsBySession = snapshot.eventsBySession; logCacheChanged = true }
+        if historySessions != snapshot.historySessions { historySessions = snapshot.historySessions; logCacheChanged = true }
+        if historyEventsBySession != snapshot.historyEventsBySession {
+            historyEventsBySession = snapshot.historyEventsBySession
+            logCacheChanged = true
+        }
+        if tasks != snapshot.tasks { tasks = snapshot.tasks }
+        if inbox != snapshot.inbox { inbox = snapshot.inbox }
+        if logCacheChanged { rebuildLogCache() }
         gatewayConnected = snapshot.connected
         gatewayStreaming = snapshot.streaming
-        if !snapshot.connected { phase = .disconnected(snapshot.error ?? "Gateway에 연결되지 않았습니다.") }
+        if !snapshot.connected {
+            let nextPhase = ConnectionPhase.disconnected(snapshot.error ?? "Gateway에 연결되지 않았습니다.")
+            if phase != nextPhase { phase = nextPhase }
+        }
         reconcileSelections()
         syncPetSnapshot()
     }
@@ -382,27 +432,41 @@ final class AppModel: ObservableObject {
         guard let message = value.objectValue, let kind = message.string("kind") else { return }
         switch kind {
         case "event":
-            if let eventValue = message["event"], let event = MonitorEvent(eventValue) { append(event) }
+            if let eventValue = message["event"], let event = MonitorEvent(eventValue) { enqueue(event) }
         case "state":
+            var logCacheChanged = false
             if let values = message.array("sessions") {
-                sessions = values.compactMap(GatewaySession.init)
+                let nextSessions = values.compactMap(GatewaySession.init)
+                if sessions != nextSessions {
+                    sessions = nextSessions
+                    logCacheChanged = true
+                }
                 let validSessionIds = Set(sessions.map(\.sessionId))
-                eventsBySession = eventsBySession.filter { validSessionIds.contains($0.key) }
+                let nextEvents = eventsBySession.filter { validSessionIds.contains($0.key) }
+                if eventsBySession != nextEvents {
+                    eventsBySession = nextEvents
+                    logCacheChanged = true
+                }
             }
             for sessionId in (message.array("removedSessionIds") ?? []).compactMap(\.stringValue) {
-                eventsBySession.removeValue(forKey: sessionId)
-                if selectedSessionId == sessionId { selectedSessionId = nil }
+                if eventsBySession.removeValue(forKey: sessionId) != nil { logCacheChanged = true }
             }
             if let values = message.array("tasks") {
-                tasks = values.enumerated().map { MonitorRecord($0.element, fallbackKind: "task", index: $0.offset) }
+                let nextTasks = values.enumerated().map { MonitorRecord($0.element, fallbackKind: "task", index: $0.offset) }
+                if tasks != nextTasks { tasks = nextTasks }
             }
             if let values = message.array("inbox") {
-                inbox = values.enumerated().map { MonitorRecord($0.element, fallbackKind: "inbox", index: $0.offset) }
+                let nextInbox = values.enumerated().map { MonitorRecord($0.element, fallbackKind: "inbox", index: $0.offset) }
+                if inbox != nextInbox { inbox = nextInbox }
             }
             if let connected = message.bool("connected") { gatewayConnected = connected }
             if let streaming = message.bool("streaming") { gatewayStreaming = streaming }
             if gatewayConnected { updateConnectionPhase() }
-            else { phase = .disconnected(message.string("error") ?? "Gateway 연결 끊김") }
+            else {
+                let nextPhase = ConnectionPhase.disconnected(message.string("error") ?? "Gateway 연결 끊김")
+                if phase != nextPhase { phase = nextPhase }
+            }
+            if logCacheChanged { rebuildLogCache() }
             reconcileSelections()
             syncPetSnapshot()
         case "gateway":
@@ -421,37 +485,112 @@ final class AppModel: ObservableObject {
 
     private func updateConnectionPhase() {
         guard sidecarStreamConnected else { return }
+        let nextPhase: ConnectionPhase
         if gatewayConnected && gatewayStreaming {
-            phase = .connected
+            nextPhase = .connected
         } else if gatewayConnected {
-            phase = .degraded("Gateway 조회 가능 · 실시간 이벤트 재연결 중")
+            nextPhase = .degraded("Gateway 조회 가능 · 실시간 이벤트 재연결 중")
         } else {
-            phase = .disconnected("Gateway에 연결되지 않았습니다.")
+            nextPhase = .disconnected("Gateway에 연결되지 않았습니다.")
+        }
+        if phase != nextPhase { phase = nextPhase }
+    }
+
+    private func enqueue(_ event: MonitorEvent) {
+        pendingStreamEvents.append(event)
+        guard streamFlushTask == nil else { return }
+        streamFlushTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.flushPendingStreamEvents()
         }
     }
 
-    private func append(_ event: MonitorEvent) {
-        var events = eventsBySession[event.sessionId] ?? []
-        if let sequence = event.sequence, events.contains(where: { $0.sequence == sequence }) { return }
-        events.append(event)
-        if events.count > 2_000 { events.removeFirst(events.count - 2_000) }
-        eventsBySession[event.sessionId] = events
-        if settings.followLatestEvent, selectedSessionId == nil || selectedSessionId == event.sessionId {
-            selectedEventId = event.id
+    private func flushPendingStreamEvents() {
+        streamFlushTask = nil
+        guard !pendingStreamEvents.isEmpty else { return }
+        let pending = pendingStreamEvents
+        pendingStreamEvents.removeAll(keepingCapacity: true)
+
+        var nextEventsBySession = eventsBySession
+        var nextLogEventsBySession = logEventsBySession
+        for (sessionId, additions) in Dictionary(grouping: pending, by: \.sessionId) {
+            var current = nextEventsBySession[sessionId] ?? []
+            var currentSequences = Set(current.compactMap(\.sequence))
+            var accepted: [MonitorEvent] = []
+            accepted.reserveCapacity(additions.count)
+            for event in additions {
+                if let sequence = event.sequence, !currentSequences.insert(sequence).inserted { continue }
+                current.append(event)
+                accepted.append(event)
+            }
+            guard !accepted.isEmpty else { continue }
+            if current.count > 2_000 { current.removeFirst(current.count - 2_000) }
+            nextEventsBySession[sessionId] = current
+
+            var logged = nextLogEventsBySession[sessionId] ?? []
+            let loggedIds = Set(logged.map(\.id))
+            logged.append(contentsOf: accepted.filter { !loggedIds.contains($0.id) })
+            if logged.count > 2_000 { logged.removeFirst(logged.count - 2_000) }
+            if logged.count > 1 { logged.sort(by: eventSort) }
+            nextLogEventsBySession[sessionId] = logged
         }
+        if eventsBySession != nextEventsBySession { eventsBySession = nextEventsBySession }
+        if logEventsBySession != nextLogEventsBySession { logEventsBySession = nextLogEventsBySession }
     }
 
     private func removeSession(_ sessionId: String) {
         sessions.removeAll { $0.sessionId == sessionId }
         eventsBySession.removeValue(forKey: sessionId)
+        rebuildLogCache()
         reconcileSelections()
+    }
+
+    private func rebuildLogCache() {
+        var sessionsById: [String: GatewaySession] = [:]
+        for session in historySessions { sessionsById[session.sessionId] = session }
+        for session in sessions { sessionsById[session.sessionId] = session }
+        let nextSessions = Array(sessionsById.values)
+            .sorted { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
+
+        var nextEvents = historyEventsBySession
+        for (sessionId, current) in eventsBySession {
+            var eventsById: [String: MonitorEvent] = [:]
+            for event in nextEvents[sessionId] ?? [] { eventsById[event.id] = event }
+            for event in current { eventsById[event.id] = event }
+            nextEvents[sessionId] = Array(eventsById.values).sorted(by: eventSort)
+        }
+        if logSessions != nextSessions { logSessions = nextSessions }
+        if logEventsBySession != nextEvents { logEventsBySession = nextEvents }
+    }
+
+    private func mutateAgent(_ agent: ACPAgentCatalogItem, body: [String: JSONValue]) async {
+        guard let endpoint else {
+            agentCatalogError = "Gateway monitor가 아직 연결되지 않았습니다."
+            return
+        }
+        agentCatalogMutationId = agent.registryId
+        agentCatalogError = nil
+        do {
+            apply(try await client.mutateAgentCatalog(endpoint: endpoint, body: body))
+        } catch {
+            agentCatalogError = error.localizedDescription
+        }
+        agentCatalogMutationId = nil
+    }
+
+    private func apply(_ snapshot: ACPAgentCatalogSnapshot) {
+        agentCatalog = snapshot.agents
+        agentCatalogSource = snapshot.source
+        agentCatalogStale = snapshot.stale
+        agentCatalogError = snapshot.warning
     }
 
     private func startPet() {
         do {
             try pet.start(
                 projectPath: settings.petProjectPath,
-                snapshot: PetSnapshot.make(sessions: sessions, inbox: inbox)
+                snapshot: PetSnapshot.make(sessions: realtimeSessions, inbox: realtimeInbox)
             ) { [weak self] status in
                 guard let self else { return }
                 self.petRunning = false
@@ -470,7 +609,7 @@ final class AppModel: ObservableObject {
     private func syncPetSnapshot() {
         guard settings.petEnabled, petRunning else { return }
         do {
-            try pet.update(PetSnapshot.make(sessions: sessions, inbox: inbox))
+            try pet.update(PetSnapshot.make(sessions: realtimeSessions, inbox: realtimeInbox))
             if petRunning { petError = nil }
         } catch {
             petError = "Pet 상태 공유 실패: \(error.localizedDescription)"
@@ -478,14 +617,18 @@ final class AppModel: ObservableObject {
     }
 
     private func reconcileSelections() {
-        if let selectedSessionId, !sessions.contains(where: { $0.sessionId == selectedSessionId }) {
-            self.selectedSessionId = activeSessions.first?.sessionId ?? sessions.first?.sessionId
-        } else if selectedSessionId == nil {
-            selectedSessionId = activeSessions.first?.sessionId ?? sessions.first?.sessionId
+        if let selectedFrontdoorId, !frontdoorSessions.contains(where: { $0.id == selectedFrontdoorId }) {
+            self.selectedFrontdoorId = activeFrontdoors.first?.id ?? frontdoorSessions.first?.id
+        } else if selectedFrontdoorId == nil {
+            selectedFrontdoorId = activeFrontdoors.first?.id ?? frontdoorSessions.first?.id
         }
         if let selectedEventId,
            !eventsBySession.values.joined().contains(where: { $0.id == selectedEventId }) {
             self.selectedEventId = nil
+        }
+        if let selectedSessionId,
+           !visibleLogSessions.contains(where: { $0.sessionId == selectedSessionId }) {
+            self.selectedSessionId = selectedFrontdoor?.root?.sessionId ?? selectedFrontdoor?.workers.first?.sessionId
         }
     }
 

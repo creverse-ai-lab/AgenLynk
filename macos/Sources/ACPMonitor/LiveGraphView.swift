@@ -5,44 +5,58 @@ struct LiveGraphView: View {
     @EnvironmentObject private var settings: AppSettings
 
     var body: some View {
-        let projection = GraphProjection.make(
-            sessions: model.sessions,
+        let isMap = settings.monitorViewMode == "map"
+        let realtimeSessions = model.realtimeSessions
+        let projection: GraphProjection? = isMap ? nil : GraphProjection.make(
+            sessions: realtimeSessions,
             eventsBySession: model.eventsBySession,
-            windowMinutes: settings.graphWindowMinutes
+            windowMinutes: 1,
+            currentTurnsOnly: true
         )
+        let frontdoorCount = projection?.groups.count
+            ?? Set(realtimeSessions.compactMap(\.openerInstanceId)).count
+        let workerCount = projection?.workerLaneCount
+            ?? realtimeSessions.filter { !$0.isFrontdoorRecord }.count
         VStack(spacing: 0) {
             HStack(spacing: 14) {
-                ACPLogoLockup(subtitle: "실시간 ACP + AI 흐름")
+                ACPLogoLockup(subtitle: "실시간 Agent 흐름 · ACP + Local")
                 Label(liveStatusText, systemImage: "dot.radiowaves.left.and.right")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(liveStatusColor)
-                Text("\(projection.turnCount)개의 대화")
+                Text("\(frontdoorCount) Frontdoor · \(workerCount) Worker")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                if projection.activeTurnCount > 0 {
-                    Label("\(projection.activeTurnCount)개 진행 중", systemImage: "waveform")
+                HStack(spacing: 5) {
+                    SourceBadge(label: "ACP", count: model.realtimeACPCount, color: .blue)
+                    SourceBadge(label: "LOCAL", count: model.realtimeLocalCount, color: .purple)
+                }
+                if (projection?.activeTurnCount ?? realtimeSessions.filter(\.isActive).count) > 0 {
+                    Label("\(projection?.activeTurnCount ?? realtimeSessions.filter(\.isActive).count)개 진행 중", systemImage: "waveform")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.orange)
                 }
                 Spacer()
-                Picker("시간 범위", selection: $settings.graphWindowMinutes) {
-                    Text("5분").tag(5)
-                    Text("15분").tag(15)
-                    Text("60분").tag(60)
+                Picker("보기 방식", selection: $settings.monitorViewMode) {
+                    Label("Branch", systemImage: "point.3.connected.trianglepath.dotted").tag("branch")
+                    Label("Map", systemImage: "circle.grid.cross").tag("map")
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 190)
+                .frame(width: 210)
             }
             .padding(12)
             Divider()
-            GeometryReader { geometry in
-                ScrollView([.horizontal, .vertical]) {
-                    BranchCanvas(projection: projection)
-                        .frame(
-                            width: max(projection.width, geometry.size.width - 28),
-                            height: max(geometry.size.height - 28, 680)
-                        )
-                        .padding(14)
+            if isMap {
+                AgentMapView(sessions: realtimeSessions, inbox: model.realtimeInbox)
+            } else if let projection {
+                GeometryReader { geometry in
+                    ScrollView([.horizontal, .vertical]) {
+                        BranchCanvas(projection: projection)
+                            .frame(
+                                width: max(projection.width, geometry.size.width - 28),
+                                height: max(geometry.size.height - 28, 680)
+                            )
+                            .padding(14)
+                    }
                 }
             }
         }
@@ -129,7 +143,9 @@ private struct BranchCanvas: View {
                                     hoveredTurnId = nil
                                 }
                             }
-                            .accessibilityLabel("Prompt: \(turn.prompt). Return: \(turn.response)")
+                            .accessibilityLabel(
+                                "Prompt: \(String(turn.prompt.prefix(240))). Return: \(String(turn.response.prefix(240)))"
+                            )
                     }
                 }
 
@@ -146,9 +162,9 @@ private struct BranchCanvas: View {
 
                 if projection.turnCount == 0 {
                     ContentUnavailableView(
-                        "현재 ACP Worker 대화가 없습니다",
+                        "현재 진행 중인 ACP Worker가 없습니다",
                         systemImage: "point.3.connected.trianglepath.dotted",
-                        description: Text("Gateway를 통해 Worker prompt가 시작되면 자동으로 표시됩니다. 현재 Main 앱 대화 자체는 Gateway 이벤트가 아닙니다.")
+                        description: Text("Frontdoor 세션에서 Worker prompt가 시작되면 해당 Frontdoor 아래에 실시간으로 표시됩니다.")
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
@@ -156,13 +172,13 @@ private struct BranchCanvas: View {
         }
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
         .overlay(alignment: .bottomLeading) {
-            Label("점에 마우스를 올리면 실제 Prompt와 Return을 볼 수 있습니다.", systemImage: "cursorarrow.motionlines")
+            Label("ACP + Local · Hover: Prompt/Return/이벤트", systemImage: "cursorarrow.motionlines")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .padding(10)
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("ACP 실시간 대화 흐름")
+        .accessibilityLabel("ACP와 로컬 Agent 실시간 대화 흐름")
     }
 
     private var hoveredItem: HoveredTurn? {
@@ -178,7 +194,7 @@ private struct BranchCanvas: View {
     private func draw(lane: GraphLane, context: inout GraphicsContext, top: Double, plotHeight: Double) {
         let color = providerColor(lane.session.provider)
         context.draw(
-            Text("\(lane.session.provider) · \(lane.session.model ?? "default")")
+            Text("[\(lane.session.sourceLabel)] \(lane.session.provider) · \(lane.session.model ?? "default")")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(color),
             at: CGPoint(x: lane.laneX, y: 18), anchor: .top
@@ -217,12 +233,6 @@ private struct BranchCanvas: View {
             let inner = CGRect(x: lane.laneX - 3, y: y - 3, width: 6, height: 6)
             context.fill(Path(ellipseIn: outer), with: .color(nodeColor))
             context.fill(Path(ellipseIn: inner), with: .color(.white))
-            context.draw(
-                Text(turn.promptPreview)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(.primary),
-                at: CGPoint(x: lane.laneX + 12, y: y), anchor: .leading
-            )
         }
     }
 
@@ -233,6 +243,21 @@ private struct BranchCanvas: View {
 
     private func cardY(for nodeY: Double, canvasHeight: Double) -> Double {
         min(max(nodeY, 155), max(canvasHeight - 155, 155))
+    }
+}
+
+private struct SourceBadge: View {
+    let label: String
+    let count: Int
+    let color: Color
+
+    var body: some View {
+        Text("\(label) \(count)")
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(color.opacity(0.12), in: Capsule())
     }
 }
 
@@ -251,7 +276,7 @@ private struct TurnHoverCard: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
-            Text(turn.prompt)
+            Text(String(turn.prompt.prefix(1_200)))
                 .font(.callout)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -265,6 +290,24 @@ private struct TurnHoverCard: View {
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .lineLimit(10)
+            Divider()
+            Label("최근 이벤트", systemImage: "list.bullet.rectangle")
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
+            ForEach(Array(turn.events.suffix(5))) { event in
+                HStack(spacing: 7) {
+                    Image(systemName: eventSymbol(event.type))
+                        .foregroundStyle(eventColor(event.type))
+                        .frame(width: 14)
+                    Text(event.type.replacingOccurrences(of: "_", with: " "))
+                        .font(.caption2.weight(.medium))
+                    Text(String(event.summary.prefix(100)))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+            }
         }
         .padding(14)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
@@ -273,7 +316,7 @@ private struct TurnHoverCard: View {
     }
 
     private var returnText: String {
-        if !turn.response.isEmpty { return turn.response }
+        if !turn.response.isEmpty { return String(turn.response.suffix(2_000)) }
         return turn.completed ? "(텍스트 return 없음)" : "응답 생성 중…"
     }
 }

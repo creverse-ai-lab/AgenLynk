@@ -12,6 +12,46 @@ import { GatewayRpcClient } from "../src/socket-rpc.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
+test("Control MCP stays inert when inherited by a delegated Worker", async () => {
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [fileURLToPath(new URL("../src/index.js", import.meta.url))],
+    stderr: "pipe",
+    env: {
+      ...process.env,
+      ACP_GATEWAY_PROCESS_ROLE: "worker",
+      CODEX_THREAD_ID: "frontdoor-thread-that-must-not-be-used"
+    }
+  });
+  const client = new Client({ name: "worker-boundary-test", version: "0.1.0" });
+  try {
+    await client.connect(transport);
+    assert.deepEqual((await client.listTools()).tools, []);
+  } finally {
+    await client.close();
+  }
+});
+
+test("Control MCP exits cleanly when its host terminates it", async () => {
+  const child = spawn(process.execPath, [fileURLToPath(new URL("../src/index.js", import.meta.url))], {
+    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, ACP_GATEWAY_PROCESS_ROLE: "worker" }
+  });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const exited = once(child, "close");
+    child.kill("SIGTERM");
+    const [code, signal] = await Promise.race([
+      exited,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Control MCP ignored SIGTERM")), 2_000))
+    ]);
+    assert.equal(code, 0);
+    assert.equal(signal, null);
+  } finally {
+    if (child.exitCode == null && child.signalCode == null) child.kill("SIGKILL");
+  }
+});
+
 test("socket Gateway separates public guide access from Main control", async () => {
   const directory = await mkdtemp(join(tmpdir(), "acp-gateway-socket-"));
   const socketPath = join(directory, "gateway.sock");
@@ -95,8 +135,7 @@ test("socket Gateway separates public guide access from Main control", async () 
       env: {
         ...process.env,
         ACP_GATEWAY_SOCKET: socketPath,
-        ACP_GATEWAY_CONTROL_TOKEN: token,
-        ACP_GATEWAY_ROOT_ID: "main-a"
+        ACP_GATEWAY_INSTALL_STATE: installStatePath
       }
     });
     mcpClient = new Client({ name: "gateway-test", version: "0.2.0" });

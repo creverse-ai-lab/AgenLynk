@@ -24,6 +24,7 @@ struct GraphTurnPoint: Identifiable, Sendable {
     let completed: Bool
     let failed: Bool
     let progress: Double
+    let events: [MonitorEvent]
 
     var promptPreview: String {
         String(prompt.replacingOccurrences(of: "\n", with: " ").prefix(44))
@@ -37,35 +38,59 @@ struct GraphProjection: Sendable {
 
     var turnCount: Int { lanes.reduce(0) { $0 + $1.turns.count } }
     var activeTurnCount: Int { lanes.reduce(0) { $0 + $1.turns.filter { !$0.completed }.count } }
+    var workerLaneCount: Int { lanes.filter { !$0.session.isFrontdoorRecord }.count }
+
+    private static let maxTurns = 120
+    private static let maxEventsPerSession = 600
+    private static let maxEventsPerTurn = 160
+    private static let maxPromptCharacters = 4_000
+    private static let maxResponseCharacters = 12_000
 
     static func make(
         sessions: [GatewaySession],
         eventsBySession: [String: [MonitorEvent]],
         windowMinutes: Int,
+        currentTurnsOnly: Bool = false,
         now: Date = Date()
     ) -> GraphProjection {
         let start = now.addingTimeInterval(-Double(windowMinutes * 60))
-        let turnsBySession = Dictionary(uniqueKeysWithValues: sessions.map { session in
-            let turns = makeTurns(events: eventsBySession[session.sessionId] ?? []).filter { turn in
-                guard let raw = turn.startedAt, let date = parseTimestamp(raw) else { return session.isActive }
-                return date >= start
-            }
-            return (session.sessionId, turns)
+        let startTimestamp = monitorTimestamp(start)
+        var turnsBySession: [String: [GraphTurnPoint]] = [:]
+        for session in sessions {
+            let scoped = scopedEvents(
+                eventsBySession[session.sessionId] ?? [],
+                startTimestamp: startTimestamp,
+                activeTurnId: session.isActive ? session.turnId : nil,
+                currentTurnOnly: currentTurnsOnly
+            )
+            turnsBySession[session.sessionId] = makeTurns(events: scoped)
+        }
+
+        let pinnedTurnIds = Set(sessions.compactMap { session -> String? in
+            guard session.isActive, let turnId = session.turnId else { return nil }
+            return turnsBySession[session.sessionId]?.first(where: { $0.turnId == turnId })?.id
         })
+        let allOrderedTurns = turnsBySession.values.flatMap { $0 }.sorted(by: turnOrder)
+        var visibleTurnIds = Set(allOrderedTurns.suffix(maxTurns).map(\.id))
+        visibleTurnIds.formUnion(pinnedTurnIds)
+        for sessionId in Array(turnsBySession.keys) {
+            turnsBySession[sessionId] = turnsBySession[sessionId]?.filter { visibleTurnIds.contains($0.id) }
+        }
         let relevantSessions = sessions.filter { session in
             session.isActive || !(turnsBySession[session.sessionId] ?? []).isEmpty
         }
 
         let orderedTurns = turnsBySession.values.flatMap { $0 }.sorted(by: turnOrder)
-        let progressByTurn = Dictionary(uniqueKeysWithValues: orderedTurns.enumerated().map { index, turn in
+        var progressByTurn: [String: Double] = [:]
+        for (index, turn) in orderedTurns.enumerated() {
             let progress: Double
             if orderedTurns.count == 1 {
                 progress = 0.5
             } else {
                 progress = 0.1 + (0.8 * Double(index) / Double(orderedTurns.count - 1))
             }
-            return (turn.id, progress)
-        })
+            progressByTurn[turn.id] = progress
+        }
 
         let grouped = Dictionary(grouping: relevantSessions) {
             $0.openerInstanceId ?? "legacy:\($0.opener ?? "unknown")|\($0.cwd)"
@@ -76,7 +101,7 @@ struct GraphProjection: Sendable {
         var x = 70.0
 
         for (key, groupSessions) in sortedGroups {
-            let first = groupSessions.first!
+            let first = groupSessions.first(where: \.isFrontdoorRecord) ?? groupSessions.first!
             let trunkX = x
             groups.append(GraphGroup(id: key, opener: first.opener ?? "Frontdoor", cwd: first.cwd, trunkX: trunkX))
             x += 42
@@ -90,7 +115,8 @@ struct GraphProjection: Sendable {
                         startedAt: turn.startedAt,
                         completed: turn.completed,
                         failed: turn.failed,
-                        progress: progressByTurn[turn.id] ?? 0.5
+                        progress: progressByTurn[turn.id] ?? 0.5,
+                        events: turn.events
                     )
                 }
                 lanes.append(GraphLane(id: session.sessionId, session: session, trunkX: trunkX, laneX: x, turns: turns))
@@ -101,82 +127,182 @@ struct GraphProjection: Sendable {
         return GraphProjection(groups: groups, lanes: lanes, width: max(x, 760))
     }
 
+    private static func scopedEvents(
+        _ events: [MonitorEvent],
+        startTimestamp: String,
+        activeTurnId: String?,
+        currentTurnOnly: Bool
+    ) -> [MonitorEvent] {
+        if currentTurnOnly {
+            guard let activeTurnId else { return [] }
+            // Live may receive thousands of token chunks. Walk backwards and retain only
+            // the detail budget instead of filtering/copying the entire session on every chunk.
+            var recent: [MonitorEvent] = []
+            recent.reserveCapacity(maxEventsPerTurn)
+            var startEvent: MonitorEvent?
+            for event in events.reversed() where event.turnId == activeTurnId {
+                if event.type == "turn_start" {
+                    startEvent = event
+                    break
+                }
+                if recent.count < maxEventsPerTurn - 1 { recent.append(event) }
+            }
+            recent.reverse()
+            if let startEvent { recent.insert(startEvent, at: 0) }
+            return recent.sorted(by: eventOrder)
+        }
+        let recentTurnIds = Set(events.compactMap { event -> String? in
+            guard let timestamp = event.timestamp, timestamp >= startTimestamp else { return nil }
+            return event.turnId
+        })
+        var byId: [String: MonitorEvent] = [:]
+        for event in events {
+            let isRecent = event.timestamp.map { $0 >= startTimestamp } ?? false
+            if isRecent || event.turnId.map(recentTurnIds.contains) == true
+                || (activeTurnId != nil && event.turnId == activeTurnId) {
+                byId[event.id] = event
+            }
+        }
+        var scoped = Array(byId.values).sorted(by: eventOrder)
+        guard scoped.count > maxEventsPerSession else { return scoped }
+        let suffix = Array(scoped.suffix(maxEventsPerSession))
+        if let activeTurnId,
+           let startEvent = scoped.first(where: { $0.turnId == activeTurnId && $0.type == "turn_start" }),
+           !suffix.contains(where: { $0.id == startEvent.id }) {
+            scoped = [startEvent] + Array(suffix.dropFirst())
+            return scoped.sorted(by: eventOrder)
+        }
+        return suffix
+    }
+
     private static func makeTurns(events: [MonitorEvent]) -> [GraphTurnPoint] {
         let sorted = events.sorted {
-            if ($0.sequence ?? Int.max) != ($1.sequence ?? Int.max) {
-                return ($0.sequence ?? Int.max) < ($1.sequence ?? Int.max)
-            }
-            return ($0.timestamp ?? "") < ($1.timestamp ?? "")
+            eventOrder($0, $1)
         }
         var turns: [GraphTurnPoint] = []
-        var current: GraphTurnPoint?
+        var current: TurnAccumulator?
 
         func finishCurrent() {
-            if let current { turns.append(current) }
+            if let current { turns.append(current.value) }
             current = nil
         }
 
         for event in sorted {
             if event.type == "turn_start" {
                 finishCurrent()
-                current = GraphTurnPoint(
+                current = TurnAccumulator(
                     id: event.id,
                     turnId: event.turnId,
-                    prompt: event.text ?? "(prompt 내용 없음)",
-                    response: "",
+                    prompt: boundedPrefix(event.text ?? "(prompt 내용 없음)", limit: maxPromptCharacters),
                     startedAt: event.timestamp,
-                    completed: false,
-                    failed: false,
-                    progress: 0
+                    events: [event]
                 )
                 continue
             }
-            guard var turn = current else { continue }
+            guard let turn = current else { continue }
+            turn.append(event, limit: maxEventsPerTurn)
             switch event.type {
             case "agent_message_chunk":
-                turn = copy(turn, response: turn.response + (event.text ?? ""))
+                turn.appendResponse(event.text ?? "", limit: maxResponseCharacters)
             case "tool_call", "permission_request", "elicitation_request":
                 // Gateway의 최종 result와 동일하게 마지막 경계 이후의 메시지만 남긴다.
-                turn = copy(turn, response: "")
+                turn.clearResponse()
             case "turn_end":
-                turn = copy(turn, completed: true)
-                current = turn
+                turn.completed = true
                 finishCurrent()
                 continue
             case "error":
-                turn = copy(turn, response: event.text ?? turn.response, completed: true, failed: true)
-                current = turn
+                if let text = event.text { turn.replaceResponse(text, limit: maxResponseCharacters) }
+                turn.completed = true
+                turn.failed = true
                 finishCurrent()
                 continue
             default:
                 break
             }
-            current = turn
         }
         finishCurrent()
         return turns
     }
 
-    private static func copy(
-        _ turn: GraphTurnPoint,
-        response: String? = nil,
-        completed: Bool? = nil,
-        failed: Bool? = nil
-    ) -> GraphTurnPoint {
-        GraphTurnPoint(
-            id: turn.id,
-            turnId: turn.turnId,
-            prompt: turn.prompt,
-            response: response ?? turn.response,
-            startedAt: turn.startedAt,
-            completed: completed ?? turn.completed,
-            failed: failed ?? turn.failed,
-            progress: turn.progress
-        )
-    }
-
     private static func turnOrder(_ lhs: GraphTurnPoint, _ rhs: GraphTurnPoint) -> Bool {
         if lhs.startedAt != rhs.startedAt { return (lhs.startedAt ?? "") < (rhs.startedAt ?? "") }
         return lhs.id < rhs.id
+    }
+
+    private static func eventOrder(_ lhs: MonitorEvent, _ rhs: MonitorEvent) -> Bool {
+        if (lhs.sequence ?? Int.max) != (rhs.sequence ?? Int.max) {
+            return (lhs.sequence ?? Int.max) < (rhs.sequence ?? Int.max)
+        }
+        return (lhs.timestamp ?? "") < (rhs.timestamp ?? "")
+    }
+
+    private static func boundedPrefix(_ value: String, limit: Int) -> String {
+        guard value.count > limit else { return value }
+        return String(value.prefix(limit)) + "…"
+    }
+
+    private static func boundedSuffix(_ value: String, limit: Int) -> String {
+        guard value.count > limit else { return value }
+        return "…" + String(value.suffix(limit))
+    }
+
+    private final class TurnAccumulator {
+        let id: String
+        let turnId: String?
+        let prompt: String
+        let startedAt: String?
+        var response = ""
+        var responseCharacters = 0
+        var completed = false
+        var failed = false
+        var events: [MonitorEvent]
+
+        init(id: String, turnId: String?, prompt: String, startedAt: String?, events: [MonitorEvent]) {
+            self.id = id
+            self.turnId = turnId
+            self.prompt = prompt
+            self.startedAt = startedAt
+            self.events = events
+        }
+
+        func append(_ event: MonitorEvent, limit: Int) {
+            if events.count >= limit, events.count > 1 { events.remove(at: 1) }
+            events.append(event)
+        }
+
+        func appendResponse(_ text: String, limit: Int) {
+            guard !text.isEmpty else { return }
+            response += text
+            responseCharacters += text.count
+            if responseCharacters > limit {
+                response = GraphProjection.boundedSuffix(response, limit: limit)
+                responseCharacters = response.count
+            }
+        }
+
+        func clearResponse() {
+            response = ""
+            responseCharacters = 0
+        }
+
+        func replaceResponse(_ text: String, limit: Int) {
+            response = GraphProjection.boundedSuffix(text, limit: limit)
+            responseCharacters = response.count
+        }
+
+        var value: GraphTurnPoint {
+            GraphTurnPoint(
+                id: id,
+                turnId: turnId,
+                prompt: prompt,
+                response: response,
+                startedAt: startedAt,
+                completed: completed,
+                failed: failed,
+                progress: 0,
+                events: events
+            )
+        }
     }
 }

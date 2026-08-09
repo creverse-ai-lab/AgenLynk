@@ -24,32 +24,26 @@ actor MonitorClient {
         return try MonitorSnapshot.decode(data)
     }
 
-    func fetchSessionConfig(endpoint: MonitorEndpoint, sessionId: String) async throws -> SessionConfigResponse {
-        var components = URLComponents(url: endpoint.baseURL.appendingPathComponent("api/session-config"), resolvingAgainstBaseURL: false)!
-        components.queryItems = [URLQueryItem(name: "sessionId", value: sessionId)]
-        var request = URLRequest(url: components.url!)
-        request.setValue("Bearer \(endpoint.apiToken)", forHTTPHeaderField: "Authorization")
+    func fetchAgentCatalog(endpoint: MonitorEndpoint, refresh: Bool = false) async throws -> ACPAgentCatalogSnapshot {
+        var components = URLComponents(url: endpoint.baseURL.appendingPathComponent("api/agents"), resolvingAgainstBaseURL: false)!
+        if refresh { components.queryItems = [URLQueryItem(name: "refresh", value: "1")] }
+        var request = endpoint.request(path: "api/agents")
+        request.url = components.url
         let (data, response) = try await URLSession.shared.data(for: request)
         try validate(response: response, data: data)
-        return try SessionConfigResponse.decode(data)
+        return try ACPAgentCatalogSnapshot.decode(data)
     }
 
-    func setSessionConfig(
+    func mutateAgentCatalog(
         endpoint: MonitorEndpoint,
-        sessionId: String,
-        configId: String,
-        value: JSONValue
-    ) async throws -> SessionConfigResponse {
-        var request = endpoint.request(path: "api/session-config", method: "POST")
+        body: [String: JSONValue]
+    ) async throws -> ACPAgentCatalogSnapshot {
+        var request = endpoint.request(path: "api/agents", method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "sessionId": sessionId,
-            "configId": configId,
-            "value": value.foundationValue
-        ])
+        request.httpBody = try JSONSerialization.data(withJSONObject: body.mapValues(\.foundationValue))
         let (data, response) = try await URLSession.shared.data(for: request)
         try validate(response: response, data: data)
-        return try SessionConfigResponse.decode(data)
+        return try ACPAgentCatalogSnapshot.decode(data)
     }
 
     func fetchGatewayConfig(endpoint: MonitorEndpoint) async throws -> GatewayConfigSnapshot {

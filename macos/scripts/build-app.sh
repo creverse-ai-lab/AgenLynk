@@ -3,7 +3,8 @@ set -eu
 
 REPO_ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 SCRATCH="$REPO_ROOT/build/macos-swift"
-APP="$REPO_ROOT/build/ACP Monitor.app"
+APP="$REPO_ROOT/build/Lynk.app"
+LEGACY_APP="$REPO_ROOT/build/ACP Monitor.app"
 CONTENTS="$APP/Contents"
 SDK=${ACP_MONITOR_SDKROOT:-/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk}
 MODULE_CACHE="$REPO_ROOT/build/clang-module-cache"
@@ -14,7 +15,7 @@ env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" SWIFTPM_MODULECACHE_O
 BIN_DIR=$(env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" SWIFTPM_MODULECACHE_OVERRIDE="$REPO_ROOT/build/swiftpm-module-cache" \
   swift build --package-path "$REPO_ROOT/macos" --scratch-path "$SCRATCH" -c release --show-bin-path)
 
-rm -rf "$APP"
+rm -rf "$APP" "$LEGACY_APP"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources/runtime/src"
 cp "$BIN_DIR/ACPMonitor" "$CONTENTS/MacOS/ACPMonitor"
 cp "$REPO_ROOT/macos/Resources/Info.plist" "$CONTENTS/Info.plist"

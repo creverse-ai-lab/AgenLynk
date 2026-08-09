@@ -12,6 +12,48 @@ import { SessionStore } from "../src/sessions.js";
 import { PassThrough } from "node:stream";
 
 const capabilityAgent = fileURLToPath(new URL("./mock-capability-agent.js", import.meta.url));
+const initRetryAgent = fileURLToPath(new URL("./mock-init-retry-agent.js", import.meta.url));
+
+async function waitForProcessExit(pid) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error?.code === "ESRCH") return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`process did not exit: ${pid}`);
+}
+
+test("ACP initialize failure cleans up its process and allows a clean retry", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-init-retry-"));
+  const marker = join(directory, "failed-once");
+  const client = new AcpClient({
+    provider: "mock",
+    command: process.execPath,
+    args: [initRetryAgent, marker],
+    permissionPolicy: "ask"
+  });
+  try {
+    const firstStart = client.start();
+    const firstPid = client.proc.pid;
+    await assert.rejects(firstStart, /initialize failed once/);
+    await waitForProcessExit(firstPid);
+    assert.equal(client.alive, false);
+    assert.equal(client.proc, null);
+    assert.equal(client.rl, null);
+    assert.equal(client.initResult, null);
+
+    const initialized = await client.start();
+    assert.equal(initialized.protocolVersion, 1);
+    assert.equal(client.alive, true);
+  } finally {
+    await client.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("provider policies are explicit", () => {
   const grok = providerConfig("grok");
@@ -286,11 +328,13 @@ test("ACP terminal output truncates on a valid UTF-8 boundary and strips control
   const previous = {
     token: process.env.ACP_GATEWAY_CONTROL_TOKEN,
     root: process.env.ACP_GATEWAY_ROOT_ID,
-    socket: process.env.ACP_GATEWAY_SOCKET
+    socket: process.env.ACP_GATEWAY_SOCKET,
+    thread: process.env.CODEX_THREAD_ID
   };
   process.env.ACP_GATEWAY_CONTROL_TOKEN = "PARENT_SECRET";
   process.env.ACP_GATEWAY_ROOT_ID = "PARENT_ROOT";
   process.env.ACP_GATEWAY_SOCKET = "/tmp/parent.sock";
+  process.env.CODEX_THREAD_ID = "PARENT_THREAD";
   const client = new AcpClient({ provider: "mock", command: process.execPath, args: [capabilityAgent], permissionPolicy: "auto_approve" });
   try {
     await client.start();
@@ -306,12 +350,15 @@ test("ACP terminal output truncates on a valid UTF-8 boundary and strips control
     assert.equal(env.token, undefined);
     assert.equal(env.root, undefined);
     assert.equal(env.socket, undefined);
+    assert.equal(env.thread, undefined);
+    assert.equal(env.role, "worker");
   } finally {
     await client.stop();
     for (const [name, value] of Object.entries({
       ACP_GATEWAY_CONTROL_TOKEN: previous.token,
       ACP_GATEWAY_ROOT_ID: previous.root,
-      ACP_GATEWAY_SOCKET: previous.socket
+      ACP_GATEWAY_SOCKET: previous.socket,
+      CODEX_THREAD_ID: previous.thread
     })) {
       if (value == null) delete process.env[name];
       else process.env[name] = value;

@@ -87,6 +87,64 @@ test("installer update preserves the previously installed front door", async () 
   }
 });
 
+test("installer front-door selection removes stale managed Control MCP entries", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-installer-exclusive-front-door-"));
+  const statePath = join(directory, "install.json");
+  const calls = [];
+  const allProviders = [
+    { id: "codex", agentInstalled: true, adapterInstalled: true, install: null },
+    { id: "claude", agentInstalled: true, adapterInstalled: true, install: null },
+    { id: "grok", agentInstalled: true, adapterInstalled: true, install: null }
+  ];
+  try {
+    await writeFile(statePath, JSON.stringify({
+      version: 1,
+      identity: { token: "test-control-token-at-least-24-characters", rootId: "main-test" },
+      managedMcp: Object.fromEntries(allProviders.map(({ id }) => [
+        `${id}:agent-acp`,
+        { agent: id, name: "agent-acp", kind: "control" }
+      ])),
+      managedSkills: {},
+      agentUpdates: { autoUpdate: true, notifications: true }
+    }), "utf8");
+
+    const result = await runInstaller(
+      parseInstallerArgs(["--update", "--front-door", "codex", "--skip-health-check"]),
+      {
+        statePath,
+        runtime,
+        detectProviders: async () => allProviders,
+        registryLoader: emptyRegistryLoader,
+        restartGateway: async () => ({ performed: true, wasRunning: false }),
+        runCommand: async (command, args) => {
+          calls.push([command, ...args]);
+          if (command === "grok" && args.slice(0, 2).join(" ") === "mcp list") {
+            return { code: 0, stdout: JSON.stringify([{ name: "agent-acp" }]), stderr: "" };
+          }
+          if (args.slice(0, 2).join(" ") === "mcp get") {
+            return args.includes("agent-acp")
+              ? { code: 0, stdout: "existing", stderr: "" }
+              : { code: 1, stdout: "", stderr: "not found" };
+          }
+          return { code: 0, stdout: "", stderr: "" };
+        }
+      }
+    );
+
+    assert.deepEqual(result.targets.control, ["codex"]);
+    assert.ok(calls.some((call) => call[0] === "claude" && call.slice(1).join(" ") === "mcp remove --scope user agent-acp"));
+    assert.ok(calls.some((call) => call[0] === "grok" && call.slice(1).join(" ") === "mcp remove agent-acp"));
+    const saved = JSON.parse(await readFile(statePath, "utf8"));
+    assert.equal(saved.frontDoor, "codex");
+    assert.ok(saved.managedMcp["codex:agent-acp"]);
+    assert.equal(saved.managedMcp["codex:agent-acp"].formatVersion, 2);
+    assert.equal(saved.managedMcp["claude:agent-acp"], undefined);
+    assert.equal(saved.managedMcp["grok:agent-acp"], undefined);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("installer parses persistent ACP update policy controls", () => {
   const options = parseInstallerArgs([
     "--agent-auto-update", "off",
@@ -124,7 +182,8 @@ test("installer persists and reuses its Control identity", async () => {
     assert.equal(firstState.identity.rootId, secondState.identity.rootId);
     assert.equal(first.identity.token, undefined);
     assert.equal(second.health.checked, false);
-    assert.ok(calls.some((call) => call.includes("ACP_GATEWAY_CONTROL_TOKEN=" + firstState.identity.token)));
+    assert.ok(calls.some((call) => call.includes(`ACP_GATEWAY_INSTALL_STATE=${statePath}`)));
+    assert.equal(calls.flat().some((arg) => String(arg).includes(firstState.identity.token)), false);
     assert.equal(calls.filter((call) => call.includes("add")).length, 1);
     assert.equal(second.actions[0].status, "unchanged");
   } finally {
@@ -640,7 +699,7 @@ test("installer registers Control and Guide MCPs for Grok and Auggie", async () 
     assert.ok(calls.some((call) => call[0] === "auggie" && call[1] === "mcp" && call[2] === "add-json"));
     const state = JSON.parse(await readFile(statePath, "utf8"));
     assert.equal(JSON.stringify(result.actions).includes(state.identity.token), false);
-    assert.match(JSON.stringify(result.actions), /<redacted>/);
+    assert.ok(JSON.stringify(result.actions).includes(`ACP_GATEWAY_INSTALL_STATE=${statePath}`));
     assert.ok(state.managedMcp["grok:agent-acp"]);
     assert.ok(state.managedMcp["grok:agent-acp-guide"]);
     assert.ok(state.managedMcp["auggie:agent-acp"]);
@@ -678,9 +737,9 @@ test("installer places the Claude MCP name before variadic environment arguments
     assert.ok(add);
     assert.deepEqual(add.slice(1, 6), ["mcp", "add", "--scope", "user", "agent-acp"]);
     assert.ok(add.indexOf("agent-acp") < add.indexOf("-e"));
-    assert.match(add[add.indexOf("-e") + 1], /^ACP_GATEWAY_CONTROL_TOKEN=.+/);
+    assert.equal(add[add.indexOf("-e") + 1], `ACP_GATEWAY_INSTALL_STATE=${statePath}`);
     const state = JSON.parse(await readFile(statePath, "utf8"));
-    assert.ok(add.includes(`ACP_GATEWAY_ROOT_ID=${state.identity.rootId}`));
+    assert.equal(add.some((arg) => String(arg).includes(state.identity.token)), false);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

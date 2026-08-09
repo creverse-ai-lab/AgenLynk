@@ -4,6 +4,7 @@ import { createConnection } from "node:net";
 import { fileURLToPath } from "node:url";
 import { gatewayLifecycleConfig, gatewaySocketPath } from "./config.js";
 import { readNdjson } from "./ndjson.js";
+import { gatewayDaemonEnvironment } from "./process-environment.js";
 
 export class GatewayRpcClient {
   constructor({ socketPath = gatewaySocketPath(), token = null, rootId = null, autoStart = true, access = "control" } = {}) {
@@ -173,12 +174,11 @@ export class GatewayRpcClient {
     const child = spawn(process.execPath, [daemon], {
       detached: true,
       stdio: "ignore",
-      env: {
-        ...process.env,
+      env: gatewayDaemonEnvironment(process.env, {
         ACP_GATEWAY_SOCKET: this.socketPath,
         ...(this.token ? { ACP_GATEWAY_CONTROL_TOKEN: this.token } : {}),
         ...(this.rootId ? { ACP_GATEWAY_ROOT_ID: this.rootId } : {})
-      }
+      })
     });
     child.unref();
   }

@@ -137,7 +137,7 @@ rl.on("line", async (line) => {
       const created = await request("terminal/create", {
         sessionId,
         command: process.execPath,
-        args: ["-e", "process.stdout.write(JSON.stringify({explicit:process.env.ACP_TEST_EXPLICIT,token:process.env.ACP_GATEWAY_CONTROL_TOKEN,root:process.env.ACP_GATEWAY_ROOT_ID,socket:process.env.ACP_GATEWAY_SOCKET}))"],
+        args: ["-e", "process.stdout.write(JSON.stringify({explicit:process.env.ACP_TEST_EXPLICIT,token:process.env.ACP_GATEWAY_CONTROL_TOKEN,root:process.env.ACP_GATEWAY_ROOT_ID,socket:process.env.ACP_GATEWAY_SOCKET,role:process.env.ACP_GATEWAY_PROCESS_ROLE,thread:process.env.CODEX_THREAD_ID}))"],
         cwd,
         env: [{ name: "ACP_TEST_EXPLICIT", value: "VISIBLE" }, { name: "ACP_GATEWAY_CONTROL_TOKEN", value: "LEAK" }]
       });

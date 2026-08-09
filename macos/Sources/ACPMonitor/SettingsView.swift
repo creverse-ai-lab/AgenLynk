@@ -3,32 +3,27 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
-    @State private var targetSessionId = ""
-
-    private var configurableSessions: [GatewaySession] {
-        model.sessions.filter { $0.status != "closed" }
-    }
-
-    private var targetSession: GatewaySession? {
-        configurableSessions.first { $0.sessionId == targetSessionId }
-    }
 
     var body: some View {
         TabView {
             Form {
                 ACPLogoLockup(subtitle: "표시 설정")
                 Section("기본 표시") {
-                    Picker("Live Graph 시간 범위", selection: $settings.graphWindowMinutes) {
+                    Picker("Branch 시간 범위", selection: $settings.graphWindowMinutes) {
                         Text("최근 5분").tag(5)
                         Text("최근 15분").tag(15)
                         Text("최근 60분").tag(60)
                     }
                     Toggle("활성 세션만 표시", isOn: $settings.activeOnly)
-                    Toggle("새 이벤트 자동 따라가기", isOn: $settings.followLatestEvent)
                 }
                 Section("이벤트") {
                     Toggle("AI thought 표시", isOn: $settings.showThoughts)
                     Toggle("Tool call 표시", isOn: $settings.showToolEvents)
+                }
+                Section("고급 연결") {
+                    TextField("Node 실행 파일 경로 (자동 탐색 시 비움)", text: $settings.nodePath)
+                    LabeledContent("Gateway", value: model.connectionDetail)
+                    Button("Observer 다시 연결") { model.reconnect() }
                 }
                 Button("기본값으로 재설정") { model.resetSettings() }
             }
@@ -38,35 +33,15 @@ struct SettingsView: View {
             GatewayConfigurationView()
                 .tabItem { Label("Gateway 구성", systemImage: "server.rack") }
 
-            sessionConfiguration
-                .tabItem { Label("Worker 구성", systemImage: "gearshape.2") }
+            AgentCatalogView()
+                .tabItem { Label("ACP 연결", systemImage: "cable.connector") }
 
             petConfiguration
                 .tabItem { Label("Pet", systemImage: "pawprint") }
 
-            Form {
-                Section("Observer sidecar") {
-                    TextField("Node 실행 파일 경로 (자동 탐색 시 비움)", text: $settings.nodePath)
-                    LabeledContent("Gateway version", value: model.gatewayVersion)
-                    LabeledContent("Gateway build", value: model.gatewayBuild)
-                    LabeledContent("연결", value: model.connectionDetail)
-                    Button("Observer 다시 연결") { model.reconnect() }
-                }
-                Section("보안 경계") {
-                    Label("Control identity와 socket/state 경로는 이 화면에 노출하지 않습니다.", systemImage: "lock.shield")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            .padding(20)
-            .tabItem { Label("연결", systemImage: "network") }
         }
         .frame(width: 780, height: 640)
-        .task {
-            await model.ensureStarted()
-            if targetSessionId.isEmpty {
-                targetSessionId = model.selectedSessionId ?? configurableSessions.first?.sessionId ?? ""
-            }
-        }
+        .task { await model.ensureStarted() }
     }
 
     private var petConfiguration: some View {
@@ -92,11 +67,11 @@ struct SettingsView: View {
                 .disabled(settings.petProjectPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             Section("상태 공유") {
-                Label("ACP Monitor가 구독 중인 Gateway 세션과 Inbox 상태를 같은 snapshot으로 Pet에 전달합니다.", systemImage: "dot.radiowaves.left.and.right")
+                Label("Lynk가 Gateway(ACP)와 로컬 watcher 세션을 하나의 snapshot으로 Pet에 전달합니다.", systemImage: "dot.radiowaves.left.and.right")
                 Text("각 Worker를 연 최초 에이전트는 Frontdoor 루트로 합성되어 작업 트리의 시작점으로 함께 표시됩니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text("이 옵션으로 실행할 때는 pet의 별도 codex_app_watcher.py를 시작하지 않습니다. ACP 외부에서 직접 실행한 세션은 이 overlay에 포함되지 않습니다.")
+                Text("Pet 프로젝트의 codex_app_watcher.py가 있으면 ACP를 통하지 않고 직접 실행한 Codex·Claude·Grok 세션도 Monitor와 Pet에 LOCAL로 표시됩니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -104,61 +79,6 @@ struct SettingsView: View {
         .padding(20)
     }
 
-    private var sessionConfiguration: some View {
-        Form {
-            Section("Worker 세션") {
-                Picker("세션", selection: $targetSessionId) {
-                    if configurableSessions.isEmpty {
-                        Text("사용 가능한 세션 없음").tag("")
-                    }
-                    ForEach(configurableSessions) { session in
-                        Text("\(session.displayName) · \(session.provider)").tag(session.sessionId)
-                    }
-                }
-                LabeledContent("상태", value: targetSession?.status ?? "—")
-                LabeledContent("모델", value: targetSession?.model ?? "—")
-                HStack {
-                    Text("Worker가 ACP로 공개한 옵션만 표시합니다.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("새로고침", systemImage: "arrow.clockwise") {
-                        Task { await model.loadSessionConfig(sessionId: targetSessionId) }
-                    }
-                    .disabled(targetSessionId.isEmpty || model.configLoading)
-                }
-            }
-
-            Section("수정 가능한 ACP config") {
-                if model.configLoading {
-                    ProgressView("설정을 불러오는 중…")
-                } else if let error = model.configError {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.red)
-                        .textSelection(.enabled)
-                } else if model.sessionConfigOptions.isEmpty {
-                    Text(model.configUnavailableReason ?? "이 세션의 Worker가 수정 가능한 config option을 공개하지 않았습니다.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(model.sessionConfigOptions) { option in
-                        SessionConfigOptionRow(
-                            option: option,
-                            sessionId: targetSessionId,
-                            disabled: targetSession?.isActive == true || model.configSavingId != nil
-                        )
-                    }
-                }
-                if targetSession?.isActive == true {
-                    Label("작업 중인 세션은 완료된 뒤에 설정을 변경할 수 있습니다.", systemImage: "lock.fill")
-                        .font(.caption).foregroundStyle(.orange)
-                }
-            }
-        }
-        .padding(20)
-        .task(id: targetSessionId) {
-            guard !targetSessionId.isEmpty else { return }
-            await model.loadSessionConfig(sessionId: targetSessionId)
-        }
-    }
 }
 
 private struct GatewayConfigurationView: View {
@@ -405,87 +325,5 @@ private struct GatewayRuntimeConfigRow: View {
             .font(.caption2.weight(.medium))
             .padding(.horizontal, 5).padding(.vertical, 2)
             .background(.quaternary, in: Capsule())
-    }
-}
-
-private struct SessionConfigOptionRow: View {
-    @EnvironmentObject private var model: AppModel
-    let option: SessionConfigOption
-    let sessionId: String
-    let disabled: Bool
-    @State private var booleanValue: Bool
-
-    init(option: SessionConfigOption, sessionId: String, disabled: Bool) {
-        self.option = option
-        self.sessionId = sessionId
-        self.disabled = disabled
-        _booleanValue = State(initialValue: option.currentValue.boolValue ?? false)
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            switch option.type {
-            case "select":
-                Picker(option.name, selection: selectBinding) {
-                    ForEach(option.choices) { choice in
-                        Text(choice.name).tag(choice.value)
-                    }
-                }
-            case "boolean":
-                HStack(spacing: 12) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(option.name)
-                        if let category = option.category {
-                            Text(category).font(.caption2).foregroundStyle(.tertiary)
-                        }
-                    }
-                    Spacer()
-                    if model.configSavingId == option.id {
-                        ProgressView().controlSize(.small)
-                    }
-                    Toggle("", isOn: booleanBinding)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .help(booleanValue ? "켜짐" : "꺼짐")
-                }
-                .frame(maxWidth: .infinity)
-            default:
-                LabeledContent(option.name, value: option.currentValue.stringValue ?? "—")
-            }
-            if let description = option.description, !description.isEmpty {
-                Text(description).font(.caption).foregroundStyle(.secondary)
-            } else if let category = option.category, option.type != "boolean" {
-                Text(category).font(.caption2).foregroundStyle(.tertiary)
-            }
-        }
-        .disabled(disabled || !["select", "boolean"].contains(option.type))
-        .opacity(model.configSavingId == option.id ? 0.55 : 1)
-    }
-
-    private var selectBinding: Binding<String> {
-        Binding(
-            get: { option.currentValue.stringValue ?? "" },
-            set: { value in
-                Task { await model.setSessionConfig(sessionId: sessionId, configId: option.id, value: .string(value)) }
-            }
-        )
-    }
-
-    private var booleanBinding: Binding<Bool> {
-        Binding(
-            get: { booleanValue },
-            set: { value in
-                let previous = booleanValue
-                booleanValue = value
-                Task {
-                    let saved = await model.setSessionConfig(
-                        sessionId: sessionId,
-                        configId: option.id,
-                        value: .bool(value)
-                    )
-                    if !saved { booleanValue = previous }
-                }
-            }
-        )
     }
 }

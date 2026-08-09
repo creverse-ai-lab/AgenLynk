@@ -14,3 +14,12 @@ env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$REPO_ROOT/build/clang-module-cache"
   -o "$OUT"
 
 "$OUT"
+
+SETTINGS_OUT="$REPO_ROOT/build/macos-settings-checks"
+env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$REPO_ROOT/build/clang-module-cache" \
+  swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/AppSettings.swift" \
+  "$REPO_ROOT/macos/Tests/ACPMonitorTests/AppSettingsTests.swift" \
+  -o "$SETTINGS_OUT"
+
+"$SETTINGS_OUT"

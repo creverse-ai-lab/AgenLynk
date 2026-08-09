@@ -26,13 +26,29 @@ struct DashboardView: View {
                 SettingsLink {
                     Label("설정", systemImage: "gearshape")
                 }
-                Button("Live Graph", systemImage: "point.3.connected.trianglepath.dotted") {
+                Button("Agent Monitoring", systemImage: "point.3.connected.trianglepath.dotted") {
                     openWindow(id: "live-graph")
                 }
                 Button("다시 연결", systemImage: "arrow.clockwise") { model.reconnect() }
             }
         }
         .task { model.startIfNeeded() }
+        .onChange(of: model.selectedFrontdoorId) { _, _ in
+            settings.followLatestEvent = false
+            model.selectedEventId = nil
+            if model.selectedSession?.openerInstanceId != model.selectedFrontdoorId {
+                model.selectedSessionId = model.selectedFrontdoor?.root?.sessionId
+                    ?? model.selectedFrontdoor?.workers.first?.sessionId
+            }
+        }
+        .onChange(of: model.selectedSessionId) { _, _ in
+            settings.followLatestEvent = false
+            model.selectedEventId = nil
+            if let openerInstanceId = model.selectedSession?.openerInstanceId,
+               openerInstanceId != model.selectedFrontdoorId {
+                model.selectedFrontdoorId = openerInstanceId
+            }
+        }
     }
 
     private var connectionBar: some View {
@@ -54,8 +70,13 @@ struct DashboardView: View {
 
     private var metricStrip: some View {
         HStack(spacing: 12) {
-            MetricCard(title: "활성 세션", value: "\(model.activeSessions.count)", symbol: "bolt.fill", color: .blue)
-            MetricCard(title: "전체 세션", value: "\(model.sessions.count)", symbol: "rectangle.stack", color: .secondary)
+            MetricCard(title: "활성 Frontdoor", value: "\(model.activeFrontdoors.count)", symbol: "bolt.fill", color: .blue)
+            MetricCard(
+                title: "실행 Agent · ACP \(model.realtimeACPCount) / Local \(model.realtimeLocalCount)",
+                value: "\(model.realtimeSessions.count)",
+                symbol: "person.2.wave.2",
+                color: .cyan
+            )
             MetricCard(title: "대기 요청", value: "\(model.pendingInbox.count)", symbol: "exclamationmark.bubble", color: .orange)
             MetricCard(title: "태스크", value: "\(model.tasks.count)", symbol: "checklist", color: .green)
             MetricCard(title: "보관 이벤트", value: model.totalEventCount.formatted(), symbol: "waveform.path.ecg", color: .purple)
@@ -66,48 +87,43 @@ struct DashboardView: View {
     private var sessionColumn: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Label("세션", systemImage: "rectangle.stack")
+                Label("Frontdoor 세션", systemImage: "rectangle.stack")
                     .font(.headline)
                 Spacer()
                 Toggle("활성만", isOn: $settings.activeOnly).toggleStyle(.checkbox).font(.caption)
             }
             .padding(12)
             Divider()
-            List(model.visibleSessions, selection: $model.selectedSessionId) { session in
-                SessionRow(session: session)
-                    .tag(session.sessionId)
-                    .contextMenu {
-                        Button("별도 창에서 열기") {
-                            openWindow(id: "session-detail", value: session.sessionId)
-                        }
-                    }
+            List(model.visibleFrontdoors, selection: $model.selectedFrontdoorId) { frontdoor in
+                FrontdoorRow(frontdoor: frontdoor)
+                    .tag(frontdoor.id)
             }
             .listStyle(.sidebar)
-            if let sessionId = model.selectedSessionId {
-                Button("선택 세션 상세 창 열기", systemImage: "macwindow.badge.plus") {
-                    openWindow(id: "session-detail", value: sessionId)
-                }
-                .buttonStyle(.borderless)
-                .padding(10)
-            }
         }
     }
 
     private var eventColumn: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Label(model.selectedSessionId == nil ? "전체 이벤트" : "세션 이벤트", systemImage: "list.bullet.rectangle")
+                Label(model.selectedFrontdoorId == nil ? "전체 이벤트 시퀀스" : "Frontdoor 이벤트 시퀀스", systemImage: "timeline.selection")
                     .font(.headline)
                 Spacer()
                 Text("\(model.selectedEvents.count)개").foregroundStyle(.secondary).font(.caption)
             }
             .padding(12)
             Divider()
-            List(model.selectedEvents, selection: $model.selectedEventId) { event in
-                EventRow(event: event, session: model.sessions.first { $0.sessionId == event.sessionId })
-                    .tag(event.id)
-            }
-            .listStyle(.inset)
+            SequenceSelectionContext(
+                frontdoor: model.selectedFrontdoor,
+                session: model.selectedSession
+            )
+            Divider()
+            EventSequenceView(
+                sessions: model.visibleLogSessions,
+                events: model.selectedEvents,
+                selectedSessionId: $model.selectedSessionId,
+                selectedEventId: $model.selectedEventId,
+                followLatestEvent: $settings.followLatestEvent
+            )
         }
     }
 
@@ -116,10 +132,33 @@ struct DashboardView: View {
             VStack(alignment: .leading, spacing: 18) {
                 InspectorSection(title: "선택 이벤트", symbol: "doc.text.magnifyingglass") {
                     if let event = model.selectedEvent {
-                        Text(event.payload.prettyPrinted)
+                        if let session = model.visibleLogSessions.first(where: { $0.sessionId == event.sessionId }) {
+                            LabeledContent("세션", value: session.provider.capitalized)
+                            LabeledContent("모델", value: session.model ?? "default")
+                            LabeledContent("역할", value: session.isFrontdoorRecord ? "Frontdoor" : "Worker")
+                        }
+                        LabeledContent("이벤트", value: event.type.replacingOccurrences(of: "_", with: " "))
+                        LabeledContent("시간", value: shortTime(event.timestamp))
+                        Text(String(event.summary.prefix(800)))
+                            .font(.caption)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        if event.summary.count > 800 {
+                            Text("요약 미리보기 · 전체 \(event.summary.count.formatted())자")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                        Divider()
+                        let payload = event.payload.prettyPrinted
+                        Text(String(payload.prefix(4_000)))
                             .font(.system(.caption, design: .monospaced))
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                        if payload.count > 4_000 {
+                            Text("JSON 미리보기 · 전체 \(payload.count.formatted())자")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
                     } else {
                         EmptyLabel("이벤트를 선택하세요")
                     }
@@ -160,6 +199,86 @@ struct DashboardView: View {
     }
 }
 
+private struct SequenceSelectionContext: View {
+    let frontdoor: FrontdoorSession?
+    let session: GatewaySession?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            if let frontdoor {
+                VStack(alignment: .leading, spacing: 5) {
+                    Label("선택 Frontdoor", systemImage: "rectangle.stack")
+                        .font(.caption.weight(.semibold))
+                    Text(frontdoor.id)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        ContextPill(text: frontdoor.provider.capitalized, color: .blue)
+                        ContextPill(text: frontdoor.isActive ? "진행 중" : "대기", color: frontdoor.isActive ? .green : .secondary)
+                        ContextPill(text: "Worker \(frontdoor.workers.count)", color: .secondary)
+                        ContextPill(text: "Workspace \(frontdoor.workspaceCount)", color: .secondary)
+                    }
+                    if let task = frontdoor.latestTask {
+                        Text(task).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if frontdoor != nil, session != nil {
+                Divider().frame(height: 68)
+            }
+
+            if let session {
+                VStack(alignment: .leading, spacing: 5) {
+                    Label("선택 세션", systemImage: "rectangle.and.hand.point.up.left")
+                        .font(.caption.weight(.semibold))
+                    HStack(spacing: 6) {
+                        ContextPill(text: session.sourceLabel, color: session.isLocalSource ? .purple : .blue)
+                        ContextPill(text: session.isFrontdoorRecord ? "Frontdoor" : "Worker", color: .secondary)
+                        ContextPill(text: session.status, color: session.isActive ? .green : .secondary)
+                    }
+                    Text("\(session.provider.capitalized) · \(session.model ?? "default")")
+                        .font(.caption.weight(.medium))
+                        .textSelection(.enabled)
+                    Text(session.cwd.isEmpty ? session.sessionId : session.cwd)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if frontdoor == nil, session == nil {
+                Label("왼쪽 Frontdoor 또는 시퀀스 세션 헤더를 선택하세요", systemImage: "cursorarrow.click")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, minHeight: 82, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+}
+
+private struct ContextPill: View {
+    let text: String
+    let color: Color
+
+    var body: some View {
+        Text(text)
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(color.opacity(0.11), in: Capsule())
+    }
+}
+
 private struct MetricCard: View {
     let title: String
     let value: String
@@ -180,22 +299,35 @@ private struct MetricCard: View {
     }
 }
 
-struct SessionRow: View {
-    let session: GatewaySession
+struct FrontdoorRow: View {
+    let frontdoor: FrontdoorSession
     var body: some View {
         HStack(alignment: .top, spacing: 9) {
-            Circle().fill(statusColor(session.status)).frame(width: 8, height: 8).padding(.top, 5)
+            Circle().fill(frontdoor.isActive ? .blue : .secondary).frame(width: 8, height: 8).padding(.top, 5)
             VStack(alignment: .leading, spacing: 3) {
-                Text(session.displayName).font(.callout.weight(.medium)).lineLimit(1)
-                HStack(spacing: 4) {
-                    Text(session.provider).foregroundStyle(providerColor(session.provider))
-                    Text("· \(session.model ?? "default") · \(session.status)")
+                Text(frontdoor.displayName).font(.callout.weight(.medium)).lineLimit(1)
+                Text(frontdoor.id)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text("Worker \(frontdoor.workers.count) · 진행 중 \(frontdoor.activeWorkerCount) · 작업공간 \(frontdoor.workspaceCount)")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                Text(sourceSummary)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                if let task = frontdoor.latestTask {
+                    Text(task).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 }
-                .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                Text(session.cwd).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
             }
         }
         .padding(.vertical, 3)
+    }
+
+    private var sourceSummary: String {
+        let sources = Set(frontdoor.members.map(\.sourceLabel))
+        return sources.sorted().joined(separator: " + ")
     }
 }
 

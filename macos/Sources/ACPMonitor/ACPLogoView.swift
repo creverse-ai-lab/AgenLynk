@@ -66,7 +66,7 @@ struct ACPLogoLockup: View {
         HStack(spacing: 9) {
             ACPLogoMark().frame(width: 30, height: 30)
             VStack(alignment: .leading, spacing: 0) {
-                Text("ACP Monitor").font(.headline)
+                Text("Lynk").font(.headline)
                 if let subtitle {
                     Text(subtitle).font(.caption).foregroundStyle(.secondary)
                 }

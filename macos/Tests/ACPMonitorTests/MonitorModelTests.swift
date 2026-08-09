@@ -4,12 +4,17 @@ import Foundation
 enum MonitorModelChecks {
     static func main() throws {
         try snapshotDecodesSessionsEventsTasksAndInbox()
-        try sessionConfigDecodesSelectAndBooleanOptions()
+        try agentCatalogDecodesInstallAndEnabledState()
         try gatewayConfigDecodesAllControlMetadata()
         try petSnapshotMapsGatewayStateAndPendingInbox()
         try petSnapshotSeparatesFrontdoorInstancesAndParsesLegacyTimestamps()
+        try realtimeSessionsRequireAnActiveFrontdoorIdentity()
+        try frontdoorSessionsAggregateWorkersAndExcludeLegacyRecords()
+        try localFrontdoorIsNotDuplicatedAsAWorker()
         try graphProjectionGroupsFrontdoorsAndAssignsWorkerLanes()
         try graphProjectionBuildsPromptReturnTurnsAndUsesCanvasHeight()
+        try graphProjectionFollowsOnlyTheCurrentLiveTurn()
+        try graphProjectionBoundsLargeLiveHistories()
         print("Swift model checks passed")
     }
 
@@ -20,6 +25,7 @@ enum MonitorModelChecks {
             "status": .string("idle"), "cwd": .string("/tmp/project"),
             "opener": .string("codex"),
             "openerInstanceId": .string("codex-main-1"),
+            "parentSessionId": .string("codex-parent-1"),
             "title": .string("review"), "updatedAt": .string("2026-08-07T00:00:00.000Z")
         ])
         let inboxValue = JSONValue.object([
@@ -35,6 +41,7 @@ enum MonitorModelChecks {
         let frontdoor = snapshot.sessions.first { $0.role == "frontdoor" }
         let worker = snapshot.sessions.first { $0.role == "worker" }
         try check(frontdoor?.provider == "codex", "session opener should identify the frontdoor")
+        try check(frontdoor?.session == "codex-main-1", "pet should preserve the real frontdoor session id")
         try check(frontdoor?.state == "running", "a pending delegated request should keep the frontdoor active")
         try check(frontdoor?.delegated == false, "frontdoor should not be marked delegated")
         try check(worker?.session == "gateway-1", "pet should use the globally unique Gateway session id")
@@ -42,6 +49,7 @@ enum MonitorModelChecks {
         try check(worker?.state == "needs_input", "pending inbox should override idle state")
         try check(worker?.inboxPending == 1, "pending inbox count should be shared")
         try check(worker?.delegated == true, "Gateway workers should be marked delegated")
+        try check(session.parentSessionId == "codex-parent-1", "session parent relationship should decode")
     }
 
     private static func petSnapshotSeparatesFrontdoorInstancesAndParsesLegacyTimestamps() throws {
@@ -87,6 +95,8 @@ enum MonitorModelChecks {
           "gateway":{"gatewayVersion":"1.3.1"},
           "sessions":[{"sessionId":"s1","provider":"codex","status":"running","cwd":"/tmp/project","eventCount":2}],
           "events":{"s1":[{"sessionId":"s1","sequence":0,"type":"turn_start","ts":"2026-08-07T00:00:00.000Z","text":"work"}]},
+          "historySessions":[{"sessionId":"old","provider":"claude","status":"ready","cwd":"/tmp/project","opener":"codex","openerInstanceId":"main-old"}],
+          "historyEvents":{"old":[{"sessionId":"old","sequence":1,"type":"turn_end","ts":"2026-08-06T23:59:00.000Z"}]},
           "tasks":[{"taskId":"t1","status":"working","statusMessage":"running"}],
           "inbox":[{"inboxId":"i1","status":"pending","type":"permission_request","sessionId":"s1"}]
         }
@@ -96,25 +106,131 @@ enum MonitorModelChecks {
         try check(snapshot.streaming, "snapshot should default streaming to connected for compatibility")
         try check(snapshot.sessions.first?.sessionId == "s1", "session decode failed")
         try check(snapshot.eventsBySession["s1"]?.first?.type == "turn_start", "event decode failed")
+        try check(snapshot.historySessions.first?.sessionId == "old", "history session decode failed")
+        try check(snapshot.historyEventsBySession["old"]?.first?.type == "turn_end", "history event decode failed")
         try check(snapshot.tasks.first?.id == "t1", "task decode failed")
         try check(snapshot.inbox.first?.id == "i1", "inbox decode failed")
     }
 
-    private static func sessionConfigDecodesSelectAndBooleanOptions() throws {
+    private static func realtimeSessionsRequireAnActiveFrontdoorIdentity() throws {
+        func session(id: String, status: String, instanceId: String?, model: String? = nil) throws -> GatewaySession {
+            var value: [String: JSONValue] = [
+                "sessionId": .string(id), "provider": .string("codex"),
+                "status": .string(status), "cwd": .string("/tmp/project"),
+                "opener": .string("codex")
+            ]
+            if let instanceId { value["openerInstanceId"] = .string(instanceId) }
+            if let model { value["model"] = .string(model) }
+            guard let decoded = GatewaySession(.object(value)) else {
+                throw CheckError.failed("realtime fixture creation failed")
+            }
+            return decoded
+        }
+
+        let running = try session(id: "running", status: "running", instanceId: "main-1")
+        let idle = try session(id: "idle", status: "idle", instanceId: "main-1")
+        let legacy = try session(id: "legacy", status: "running", instanceId: nil)
+        let review = try session(id: "review", status: "running", instanceId: "main-1", model: "codex-auto-review")
+        try check(running.isRealtimeVisible,
+                  "an active worker with a real frontdoor id should be visible")
+        try check(!idle.isRealtimeVisible,
+                  "an idle mapped worker should leave the realtime view")
+        try check(!legacy.isRealtimeVisible,
+                  "a worker without a frontdoor session id must not create a synthetic live root")
+        try check(review.isInternalReview,
+                  "auto-review must be identifiable as internal review noise")
+    }
+
+    private static func frontdoorSessionsAggregateWorkersAndExcludeLegacyRecords() throws {
+        func session(id: String, status: String, instanceId: String?, opener: String = "codex") throws -> GatewaySession {
+            var value: [String: JSONValue] = [
+                "sessionId": .string(id), "provider": .string("codex"),
+                "status": .string(status), "cwd": .string("/tmp/project"),
+                "opener": .string(opener), "updatedAt": .string("2026-08-07T00:00:00Z")
+            ]
+            if let instanceId { value["openerInstanceId"] = .string(instanceId) }
+            guard let decoded = GatewaySession(.object(value)) else {
+                throw CheckError.failed("frontdoor aggregation fixture creation failed")
+            }
+            return decoded
+        }
+
+        let frontdoors = FrontdoorSession.make(sessions: [
+            try session(id: "worker-1", status: "running", instanceId: "main-1"),
+            try session(id: "worker-2", status: "idle", instanceId: "main-1"),
+            try session(id: "worker-3", status: "idle", instanceId: "main-2", opener: "grok"),
+            try session(id: "legacy", status: "running", instanceId: nil)
+        ])
+        try check(frontdoors.count == 2, "Dashboard should list Frontdoors, not mapped Worker sessions")
+        let codex = frontdoors.first { $0.id == "main-1" }
+        try check(codex?.workers.count == 2, "workers with the same Frontdoor id should aggregate")
+        try check(codex?.activeWorkerCount == 1, "Frontdoor activity should come from its current workers")
+        try check(!frontdoors.contains(where: { $0.id == "legacy" }), "legacy sessions without a Frontdoor id must stay out of the UI")
+    }
+
+    private static func localFrontdoorIsNotDuplicatedAsAWorker() throws {
+        func session(
+            id: String,
+            provider: String = "codex",
+            status: String = "running",
+            source: String? = nil,
+            role: String? = nil,
+            model: String? = nil
+        ) throws -> GatewaySession {
+            var value: [String: JSONValue] = [
+                "sessionId": .string(id), "provider": .string(provider),
+                "status": .string(status), "cwd": .string("/tmp/local-project"),
+                "opener": .string("codex"), "openerInstanceId": .string("main-local"),
+                "title": .string(id), "updatedAt": .string("2026-08-07T00:00:00Z")
+            ]
+            if let source { value["source"] = .string(source) }
+            if let role { value["role"] = .string(role) }
+            if let model { value["model"] = .string(model) }
+            guard let decoded = GatewaySession(.object(value)) else {
+                throw CheckError.failed("local frontdoor fixture creation failed")
+            }
+            return decoded
+        }
+
+        let root = try session(id: "local:codex:main-local", source: "local", role: "frontdoor", model: "gpt-local")
+        let gatewayWorker = try session(id: "gateway-worker", provider: "claude", model: "sonnet")
+        let localWorker = try session(id: "local:codex:child", source: "local", role: "worker")
+        try check(root.isFrontdoorRecord && root.source == "local", "local frontdoor metadata should decode")
+        try check(!gatewayWorker.isFrontdoorRecord && gatewayWorker.source == "gateway", "Gateway records should keep worker defaults")
+
+        let frontdoors = FrontdoorSession.make(sessions: [root, gatewayWorker, localWorker])
+        try check(frontdoors.count == 1, "a local root and its workers should share one Frontdoor")
+        try check(frontdoors[0].root?.sessionId == root.sessionId, "the local record should become the real Frontdoor root")
+        try check(frontdoors[0].workers.count == 2, "the Frontdoor root must not count as a worker")
+        try check(frontdoors[0].members.count == 3 && frontdoors[0].isActive, "root activity should keep the Frontdoor active")
+
+        let pet = PetSnapshot.make(sessions: [root, gatewayWorker], inbox: [], now: Date(timeIntervalSince1970: 0))
+        try check(pet.sessions.count == 2, "Pet should receive one real root and one worker without a synthetic duplicate")
+        let petRoot = pet.sessions.first { $0.role == "frontdoor" }
+        try check(petRoot?.session == "main-local", "Pet root should use the raw Frontdoor identity")
+        try check(petRoot?.engine == "gpt-local", "Pet root should preserve the local model")
+        try check(!pet.sessions.contains(where: { $0.role == "worker" && $0.session == root.sessionId }), "local root must not be emitted as a worker")
+
+        let projection = GraphProjection.make(sessions: [root, gatewayWorker], eventsBySession: [:], windowMinutes: 10)
+        try check(projection.groups.count == 1, "Branch should keep one Frontdoor trunk")
+        try check(projection.workerLaneCount == 1, "Branch worker count must exclude the local root lane")
+    }
+
+    private static func agentCatalogDecodesInstallAndEnabledState() throws {
         let data = Data(#"""
         {
-          "sessionId":"s1",
-          "configOptions":[
-            {"type":"select","id":"thought_level","name":"Thought level","category":"thought_level","currentValue":"medium","options":[{"value":"low","name":"Low"},{"value":"medium","name":"Medium"}]},
-            {"type":"boolean","id":"auto_compact","name":"Auto compact","currentValue":true}
+          "registryVersion":"1.0.0","source":"cache","stale":false,
+          "agents":[
+            {"registryId":"gemini","providerId":"gemini","name":"Gemini CLI","version":"2.0","description":"agent","website":"https://example.test","distribution":"npx","compatible":true,"installed":true,"enabled":false,"installSupported":true,"installHint":"install"},
+            {"registryId":"manual","providerId":"manual","name":"Manual","version":"1.0","description":"binary","distribution":"binary","compatible":true,"installed":false,"enabled":false,"installSupported":false,"installHint":"manual"}
           ]
         }
         """#.utf8)
-        let response = try SessionConfigResponse.decode(data)
-        try check(response.sessionId == "s1", "config session decode failed")
-        try check(response.options.count == 2, "config options decode failed")
-        try check(response.options[0].choices.last?.value == "medium", "select choices decode failed")
-        try check(response.options[1].currentValue.boolValue == true, "boolean config decode failed")
+        let response = try ACPAgentCatalogSnapshot.decode(data)
+        try check(response.registryVersion == "1.0.0", "registry metadata decode failed")
+        try check(response.agents.count == 2, "agent catalog decode failed")
+        try check(response.agents[0].installed && !response.agents[0].enabled, "installed and enabled must be independent")
+        try check(!response.agents[1].installSupported, "manual binary install state decode failed")
     }
 
     private static func gatewayConfigDecodesAllControlMetadata() throws {
@@ -190,7 +306,88 @@ enum MonitorModelChecks {
         try check(turns.count == 2, "events should collapse into two human-readable turns")
         try check(turns[0].prompt == "first prompt", "prompt should come from turn_start")
         try check(turns[0].response == "final answer", "return should keep the final segment after a tool boundary")
+        try check(turns[0].events.count == 5, "a turn should retain every event for node detail inspection")
         try check(turns[0].progress == 0.1 && turns[1].progress == 0.9, "short live bursts should use the canvas height")
+    }
+
+    private static func graphProjectionFollowsOnlyTheCurrentLiveTurn() throws {
+        let sessionValue = JSONValue.object([
+            "sessionId": .string("s1"), "provider": .string("codex"), "status": .string("running"),
+            "cwd": .string("/tmp/project"), "opener": .string("codex"),
+            "openerInstanceId": .string("main-1"), "turnId": .string("current")
+        ])
+        let fixtures: [[String: JSONValue]] = [
+            ["sequence": .number(0), "type": .string("turn_start"), "ts": .string("2026-08-07T00:00:00.000Z"), "turnId": .string("previous"), "text": .string("old prompt")],
+            ["sequence": .number(1), "type": .string("turn_end"), "ts": .string("2026-08-07T00:01:00.000Z"), "turnId": .string("previous")],
+            ["sequence": .number(2), "type": .string("turn_start"), "ts": .string("2026-08-07T00:02:00.000Z"), "turnId": .string("current"), "text": .string("long running prompt")],
+            ["sequence": .number(3), "type": .string("turn_start"), "ts": .string("2026-08-07T00:59:00.000Z"), "turnId": .string("recent-history"), "text": .string("must stay out of Live")],
+            ["sequence": .number(4), "type": .string("turn_end"), "ts": .string("2026-08-07T00:59:01.000Z"), "turnId": .string("recent-history")]
+        ]
+        guard let session = GatewaySession(sessionValue),
+              let now = parseTimestamp("2026-08-07T01:00:00.000Z") else {
+            throw CheckError.failed("live turn fixture creation failed")
+        }
+        let events = fixtures.compactMap { fixture -> MonitorEvent? in
+            var value = fixture
+            value["sessionId"] = .string("s1")
+            return MonitorEvent(.object(value))
+        }
+
+        let projection = GraphProjection.make(
+            sessions: [session], eventsBySession: ["s1": events], windowMinutes: 15,
+            currentTurnsOnly: true, now: now
+        )
+        let turns = projection.lanes.first?.turns ?? []
+        try check(turns.count == 1, "live branch should contain only the current turn")
+        try check(turns.first?.turnId == "current", "live branch should follow the Gateway session turn id")
+        try check(turns.first?.prompt == "long running prompt", "a long-running current turn must ignore the history window")
+    }
+
+    private static func graphProjectionBoundsLargeLiveHistories() throws {
+        let sessionValue = JSONValue.object([
+            "sessionId": .string("large"), "provider": .string("codex"), "status": .string("running"),
+            "cwd": .string("/tmp/project"), "opener": .string("codex"),
+            "openerInstanceId": .string("main-large"), "turnId": .string("active")
+        ])
+        guard let session = GatewaySession(sessionValue),
+              let now = parseTimestamp("2026-08-07T00:10:00.000Z") else {
+            throw CheckError.failed("large graph fixture creation failed")
+        }
+        var values: [MonitorEvent] = []
+        for index in 0..<180 {
+            for (offset, type) in ["turn_start", "turn_end"].enumerated() {
+                let value = JSONValue.object([
+                    "sessionId": .string("large"), "sequence": .number(Double(index * 2 + offset)),
+                    "type": .string(type), "ts": .string("2026-08-07T00:09:00.000Z"),
+                    "turnId": .string("done-\(index)"), "text": .string("done")
+                ])
+                if let event = MonitorEvent(value) { values.append(event) }
+            }
+        }
+        if let start = MonitorEvent(.object([
+            "sessionId": .string("large"), "sequence": .number(1_000), "type": .string("turn_start"),
+            "ts": .string("2026-08-07T00:09:30.000Z"), "turnId": .string("active"),
+            "text": .string(String(repeating: "p", count: 6_000))
+        ])) { values.append(start) }
+        for index in 0..<300 {
+            let value = JSONValue.object([
+                "sessionId": .string("large"), "sequence": .number(Double(1_001 + index)),
+                "type": .string("agent_message_chunk"), "ts": .string("2026-08-07T00:09:31.000Z"),
+                "turnId": .string("active"), "text": .string(String(repeating: "r", count: 100))
+            ])
+            if let event = MonitorEvent(value) { values.append(event) }
+        }
+
+        let projection = GraphProjection.make(
+            sessions: [session], eventsBySession: ["large": values], windowMinutes: 15, now: now
+        )
+        try check(projection.turnCount <= 120, "live projection should cap the rendered turn count")
+        guard let active = projection.lanes.first?.turns.first(where: { $0.turnId == "active" }) else {
+            throw CheckError.failed("large active turn should stay pinned")
+        }
+        try check(active.events.count <= 160, "a live turn should cap retained detail events")
+        try check(active.prompt.count <= 4_001, "a live prompt should be bounded")
+        try check(active.response.count <= 12_001, "a live response should be bounded")
     }
 
     private static func check(_ condition: @autoclosure () -> Bool, _ message: String) throws {

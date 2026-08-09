@@ -28,6 +28,27 @@ export function defaultProviderRegistryPath() {
   return process.env.ACP_GATEWAY_PROVIDERS || join(homedir(), ".acp-gateway", "providers.json");
 }
 
+export async function readProviderRegistry(path = defaultProviderRegistryPath()) {
+  try {
+    return validateProviderRegistryDocument(JSON.parse(await readFile(path, "utf8")));
+  } catch (error) {
+    if (error?.code === "ENOENT") return { version: 1, providers: {}, disabled: [] };
+    throw new Error(`Cannot read provider registry ${path}: ${error.message}`);
+  }
+}
+
+export async function setProviderEnabled(providerId, enabled, path = defaultProviderRegistryPath()) {
+  if (!/^[a-z0-9][a-z0-9._-]*$/.test(providerId)) throw new Error(`invalid provider id: ${providerId}`);
+  if (typeof enabled !== "boolean") throw new Error("enabled must be boolean");
+  const document = await readProviderRegistry(path);
+  const disabled = new Set(document.disabled);
+  if (enabled) disabled.delete(providerId);
+  else disabled.add(providerId);
+  const next = { ...document, disabled: [...disabled].sort() };
+  await writeJson(path, next);
+  return next;
+}
+
 export async function loadOfficialRegistry({
   cachePath = defaultRegistryCachePath(),
   fetchImpl = globalThis.fetch,
@@ -175,6 +196,10 @@ export function providerDefinition(match) {
   return { ...common, command: match.foundCommand, args: match.distribution.args, env: providerEnvironment(match) };
 }
 
+export function providerIdForRegistryAgent(id) {
+  return normalizeProviderId(id);
+}
+
 function providerEnvironment(match) {
   const env = { ...match.distribution.env };
   if (match.registryId === "claude-acp" && match.foundCommand) env.CLAUDE_CODE_EXECUTABLE = match.foundCommand;
@@ -186,15 +211,7 @@ function providerEnvironment(match) {
 }
 
 export async function mergeProviderDefinitions(path, definitions) {
-  let document = { version: 1, providers: {} };
-  try {
-    document = JSON.parse(await readFile(path, "utf8"));
-    if (document?.version !== 1 || !document.providers || typeof document.providers !== "object") {
-      throw new Error("unsupported provider registry format");
-    }
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw new Error(`Cannot read provider registry ${path}: ${error.message}`);
-  }
+  const document = await readProviderRegistry(path);
   for (const definition of definitions) document.providers[definition.id] = definition;
   await writeJson(path, document);
   return document;
@@ -256,6 +273,17 @@ function normalizeProviderId(id) {
   if (id === "codex-acp") return "codex";
   if (id === "grok-build") return "grok";
   return id;
+}
+
+function validateProviderRegistryDocument(value) {
+  if (value?.version !== 1 || !value.providers || typeof value.providers !== "object" || Array.isArray(value.providers)) {
+    throw new Error("unsupported provider registry format");
+  }
+  const disabled = value.disabled ?? [];
+  if (!Array.isArray(disabled) || disabled.some((id) => typeof id !== "string" || !/^[a-z0-9][a-z0-9._-]*$/.test(id))) {
+    throw new Error("provider registry disabled list is invalid");
+  }
+  return { ...value, providers: { ...value.providers }, disabled: [...new Set(disabled)] };
 }
 
 function packageNameFromSpec(spec) {

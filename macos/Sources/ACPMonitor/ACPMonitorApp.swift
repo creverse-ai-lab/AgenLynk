@@ -12,7 +12,7 @@ struct ACPMonitorApp: App {
     @StateObject private var model = AppModel()
 
     var body: some Scene {
-        WindowGroup("ACP Monitor", id: "dashboard") {
+        WindowGroup("Lynk", id: "dashboard") {
             DashboardView()
                 .environmentObject(model)
                 .environmentObject(model.settings)
@@ -20,7 +20,7 @@ struct ACPMonitorApp: App {
         }
         .defaultSize(width: 1420, height: 880)
 
-        Window("Live Graph", id: "live-graph") {
+        Window("Lynk Monitoring", id: "live-graph") {
             LiveGraphView().environmentObject(model).environmentObject(model.settings)
         }
         .defaultSize(width: 1320, height: 820)

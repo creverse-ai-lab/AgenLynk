@@ -10,47 +10,29 @@ import {
   ListTasksRequestSchema,
   ListToolsRequestSchema
 } from "@modelcontextprotocol/sdk/types.js";
-import { execSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { controlToken, rootId } from "./config.js";
+import { controlIdentity } from "./config.js";
+import { detectFrontdoorContext, frontdoorContextForRequest } from "./frontdoor-context.js";
+import { isDelegatedWorkerEnvironment } from "./process-environment.js";
 import { GatewayRpcClient } from "./socket-rpc.js";
 import { PERMISSION_POLICIES } from "./acp-client.js";
 import { GATEWAY_VERSION } from "./version.js";
 
-// This bridge is spawned by the frontdoor agent CLI itself, so the parent
-// process name identifies which agent is orchestrating. Sessions opened here
-// are stamped with it for observability (monitor GUI, session listings).
-const KNOWN_FRONTDOOR_AGENTS = ["claude", "grok", "codex", "cursor", "auggie", "gemini", "windsurf", "zed"];
-function detectOpenerContext() {
-  let agent = null;
-  let startedAt = "";
-  try {
-    const command = execSync(`ps -o comm= -p ${process.ppid}`, { timeout: 2_000 }).toString().trim().toLowerCase();
-    const basename = command.split("/").pop() ?? command;
-    agent = KNOWN_FRONTDOOR_AGENTS.find((candidate) => basename.includes(candidate)) ?? null;
-  } catch {}
-  try {
-    startedAt = execSync(`ps -o lstart= -p ${process.ppid}`, { timeout: 2_000 }).toString().trim();
-  } catch {}
-  // Parent pid + process start time survives MCP bridge respawns while avoiding
-  // false continuity if macOS later reuses the same pid for another frontdoor.
-  const instanceId = createHash("sha256")
-    .update(`${process.ppid}\0${startedAt}`)
-    .digest("base64url")
-    .slice(0, 24);
-  return { agent, instanceId };
-}
-const opener = detectOpenerContext();
+// A Control MCP inherited by an ACP Worker must stay inert even if the worker
+// loads user-level MCP configuration. The bridge remains protocol-compatible,
+// but advertises no tools and never connects to the Gateway.
+const blockedWorker = isDelegatedWorkerEnvironment();
+const opener = blockedWorker ? null : detectFrontdoorContext();
+const identity = blockedWorker ? null : controlIdentity();
 
-const rpc = new GatewayRpcClient({ token: controlToken(), rootId: rootId() });
-const tools = controlTools();
+const rpc = blockedWorker ? null : new GatewayRpcClient({ token: identity.token, rootId: identity.rootId });
+const tools = blockedWorker ? [] : controlTools();
 const server = new Server(
   { name: "acp-gateway-control", version: GATEWAY_VERSION },
   {
     capabilities: {
       tools: {},
       // Tasks are opt-in: legacy MCP clients keep using prompt + poll.
-      tasks: { list: {}, cancel: {}, requests: { tools: { call: {} } } }
+      ...(blockedWorker ? {} : { tasks: { list: {}, cancel: {}, requests: { tools: { call: {} } } } })
     }
   }
 );
@@ -72,6 +54,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     agent_acp_inbox: "inbox"
   };
   try {
+    if (blockedWorker) throw new Error("Control MCP is disabled inside delegated Workers");
     const method = methods[request.params.name];
     if (!method) throw new Error(`Unknown tool: ${request.params.name}`);
     const task = taskOptions(request.params);
@@ -81,8 +64,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (task) throw new Error(`Tool ${request.params.name} does not support task execution`);
     const args = { ...(request.params.arguments ?? {}) };
     if (method === "session_open" || method === "session_restore") {
-      if (opener.agent && args.opener == null) args.opener = opener.agent;
-      if (args.openerInstanceId == null) args.openerInstanceId = opener.instanceId;
+      const requestOpener = frontdoorContextForRequest(opener, request.params._meta);
+      if (requestOpener?.agent && args.opener == null) args.opener = requestOpener.agent;
+      if (args.openerInstanceId == null) args.openerInstanceId = requestOpener.instanceId;
     }
     const timeoutMs = method === "poll" || method === "watch"
       ? Math.max(30_000, Number(args.waitMs ?? 0) + 5_000)
@@ -95,25 +79,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-server.setRequestHandler(GetTaskRequestSchema, async (request) => {
-  return rpc.call("task_get", { taskId: request.params.taskId });
-});
+if (!blockedWorker) {
+  server.setRequestHandler(GetTaskRequestSchema, async (request) => {
+    return rpc.call("task_get", { taskId: request.params.taskId });
+  });
 
-server.setRequestHandler(ListTasksRequestSchema, async () => {
-  return rpc.call("task_list");
-});
+  server.setRequestHandler(ListTasksRequestSchema, async () => {
+    return rpc.call("task_list");
+  });
 
-server.setRequestHandler(GetTaskPayloadRequestSchema, async (request) => {
-  const result = await rpc.call("task_result", { taskId: request.params.taskId });
-  return toolResult(result, result.ok === false);
-});
+  server.setRequestHandler(GetTaskPayloadRequestSchema, async (request) => {
+    const result = await rpc.call("task_result", { taskId: request.params.taskId });
+    return toolResult(result, result.ok === false);
+  });
 
-server.setRequestHandler(CancelTaskRequestSchema, async (request) => {
-  return rpc.call("task_cancel", { taskId: request.params.taskId });
-});
+  server.setRequestHandler(CancelTaskRequestSchema, async (request) => {
+    return rpc.call("task_cancel", { taskId: request.params.taskId });
+  });
+}
 
-process.once("SIGTERM", () => rpc.close());
-process.once("SIGINT", () => rpc.close());
+let shuttingDown = false;
+const shutdown = () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  rpc?.close();
+  void server.close().finally(() => process.exit(0));
+};
+process.once("SIGTERM", shutdown);
+process.once("SIGINT", shutdown);
 await server.connect(new StdioServerTransport());
 
 function toolResult(data, isError = false) {

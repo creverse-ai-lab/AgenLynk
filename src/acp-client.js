@@ -6,6 +6,7 @@ import { BoundedUtf8Text } from "./bounded-utf8.js";
 import { readNdjson } from "./ndjson.js";
 import { GATEWAY_VERSION } from "./version.js";
 import { ACP_PROTOCOL_VERSION } from "./acp-version.js";
+import { delegatedWorkerEnvironment } from "./process-environment.js";
 
 export const PERMISSION_POLICIES = ["ask", "read_only", "auto_approve"];
 const READ_ONLY_TOOL_KINDS = new Set(["read", "search", "think", "fetch"]);
@@ -32,30 +33,44 @@ export class AcpClient {
     this.sessionPolicies = new Map();
     this.terminals = new Map();
     this.initResult = null;
+    this.startPromise = null;
+    this.stderrListener = null;
     this.stderr = "";
     this.alive = false;
   }
 
   async start() {
-    if (this.alive) return this.initResult;
+    if (this.initResult) return this.initResult;
+    if (this.startPromise) return this.startPromise;
 
-    const childEnv = { ...process.env, ...this.config.env, NO_COLOR: "1" };
-    delete childEnv.ACP_GATEWAY_CONTROL_TOKEN;
-    delete childEnv.ACP_GATEWAY_ROOT_ID;
-    delete childEnv.ACP_GATEWAY_SOCKET;
+    const attempt = this.#startProcess();
+    this.startPromise = attempt;
+    try {
+      return await attempt;
+    } finally {
+      if (this.startPromise === attempt) this.startPromise = null;
+    }
+  }
+
+  async #startProcess() {
+    if (this.alive) throw new Error(`${this.config.provider} ACP is already starting`);
+
+    const childEnv = delegatedWorkerEnvironment(process.env, { ...this.config.env, NO_COLOR: "1" });
     this.proc = spawn(this.config.command, this.config.args, {
       stdio: ["pipe", "pipe", "pipe"],
       env: childEnv
     });
     this.alive = true;
+    this.stderr = "";
     this.proc.once("error", (error) => this.#fail(error));
     this.proc.once("close", (code, signal) => {
       this.#fail(new Error(`${this.config.provider} ACP exited code=${code} signal=${signal}`));
     });
     this.proc.stderr.setEncoding("utf8");
-    this.proc.stderr.on("data", (chunk) => {
+    this.stderrListener = (chunk) => {
       this.stderr = (this.stderr + chunk).slice(-100_000);
-    });
+    };
+    this.proc.stderr.on("data", this.stderrListener);
     this.rl = readNdjson(this.proc.stdout, {
       maxLineBytes: this.maxFrameBytes,
       onLine: (line) => this.#onLine(line),
@@ -65,21 +80,26 @@ export class AcpClient {
       }
     });
 
-    this.initResult = await this.request(
-      "initialize",
-      {
-        protocolVersion: ACP_PROTOCOL_VERSION,
-        clientInfo: { name: "acp-gateway", version: GATEWAY_VERSION },
-        clientCapabilities: {
-          fs: { readTextFile: true, writeTextFile: true },
-          terminal: true,
-          elicitation: { form: {} },
-          session: { configOptions: { boolean: {} } }
-        }
-      },
-      30_000
-    );
-    return this.initResult;
+    try {
+      this.initResult = await this.request(
+        "initialize",
+        {
+          protocolVersion: ACP_PROTOCOL_VERSION,
+          clientInfo: { name: "acp-gateway", version: GATEWAY_VERSION },
+          clientCapabilities: {
+            fs: { readTextFile: true, writeTextFile: true },
+            terminal: true,
+            elicitation: { form: {} },
+            session: { configOptions: { boolean: {} } }
+          }
+        },
+        30_000
+      );
+      return this.initResult;
+    } catch (error) {
+      this.#fail(error);
+      throw error;
+    }
   }
 
   async stop() {
@@ -89,17 +109,15 @@ export class AcpClient {
     for (const rpcId of this.pendingElicitations.keys()) {
       this.respondElicitation(rpcId, { action: "cancel" });
     }
-    this.rl?.close();
-    this.proc?.stdin?.end();
-    this.proc?.kill("SIGTERM");
     for (const terminal of this.terminals.values()) terminal.child.kill("SIGTERM");
     this.terminals.clear();
-    for (const operation of this.pendingOperations.values()) operation.reject(new Error("ACP client stopped"));
+    const error = new Error("ACP client stopped");
+    for (const pending of this.pending.values()) pending.reject(error);
+    this.pending.clear();
+    for (const operation of this.pendingOperations.values()) operation.reject(error);
     this.pendingOperations.clear();
     this.sessionOperationGrants.clear();
-    this.alive = false;
-    this.proc = null;
-    this.initResult = null;
+    this.#disposeProcess();
   }
 
   request(method, params = {}, timeoutMs = null) {
@@ -417,10 +435,10 @@ export class AcpClient {
     }
     const terminalId = `terminal-${this.nextId++}`;
     const limit = Math.min(Math.max(Number(params.outputByteLimit ?? 1_000_000), 1), 10_000_000);
-    const env = { ...process.env, ...Object.fromEntries((params.env ?? []).map(({ name, value }) => [name, value])) };
-    delete env.ACP_GATEWAY_CONTROL_TOKEN;
-    delete env.ACP_GATEWAY_ROOT_ID;
-    delete env.ACP_GATEWAY_SOCKET;
+    const env = delegatedWorkerEnvironment(
+      process.env,
+      Object.fromEntries((params.env ?? []).map(({ name, value }) => [name, value]))
+    );
     const child = spawn(params.command, params.args ?? [], {
       cwd,
       env,
@@ -608,7 +626,6 @@ export class AcpClient {
 
   #fail(error) {
     const wasAlive = this.alive;
-    this.alive = false;
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
     this.pendingPermissions.clear();
@@ -620,8 +637,23 @@ export class AcpClient {
       if (!terminal.exitStatus) terminateChild(terminal);
     }
     this.terminals.clear();
-    this.proc = null;
+    this.#disposeProcess();
     if (wasAlive) this.onExit?.(error);
+  }
+
+  #disposeProcess() {
+    const proc = this.proc;
+    const reader = this.rl;
+    const stderrListener = this.stderrListener;
+    this.alive = false;
+    this.proc = null;
+    this.rl = null;
+    this.stderrListener = null;
+    this.initResult = null;
+    reader?.close();
+    if (stderrListener) proc?.stderr?.off("data", stderrListener);
+    proc?.stdin?.end();
+    if (proc && proc.exitCode == null && proc.signalCode == null) proc.kill("SIGTERM");
   }
 }
 

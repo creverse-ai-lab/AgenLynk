@@ -34,7 +34,9 @@ export const PROVIDER_MANIFESTS = {
 };
 
 export function providerConfig(provider, { model } = {}) {
-  const configured = configuredProviders()[provider];
+  const document = providerRegistryDocument();
+  if (document.disabled.has(provider)) throw new Error(`${provider} is disabled in ACP Connections`);
+  const configured = document.providers[provider];
   if (configured) {
     return {
       provider,
@@ -106,9 +108,11 @@ export function providerConfig(provider, { model } = {}) {
 }
 
 export async function detectProviders() {
+  const document = providerRegistryDocument();
   const builtins = await Promise.all(
     Object.values(PROVIDER_MANIFESTS).map(async (manifest) => ({
       ...manifest,
+      enabled: !document.disabled.has(manifest.id),
       agentInstalled: await executableExists(manifest.agentCommand),
       adapterInstalled:
         manifest.adapter === "built-in" || manifest.id === "claude"
@@ -116,7 +120,7 @@ export async function detectProviders() {
           : await executableExists(manifest.adapter)
     }))
   );
-  const dynamic = await Promise.all(Object.values(configuredProviders()).map(async (definition) => ({
+  const dynamic = await Promise.all(Object.values(document.providers).map(async (definition) => ({
     id: definition.id,
     displayName: definition.displayName ?? definition.id,
     agentCommand: definition.command,
@@ -124,6 +128,7 @@ export async function detectProviders() {
     install: null,
     registryId: definition.registryId,
     registryVersion: definition.registryVersion,
+    enabled: !document.disabled.has(definition.id),
     agentInstalled: await executableExists(definition.command),
     adapterInstalled: await executableExists(definition.command)
   })));
@@ -146,15 +151,21 @@ export async function detectProviders() {
 }
 
 export function providerIds() {
-  return [...new Set([...PROVIDERS, ...Object.keys(configuredProviders())])];
+  const document = providerRegistryDocument();
+  return [...new Set([...PROVIDERS, ...Object.keys(document.providers)])]
+    .filter((provider) => !document.disabled.has(provider));
 }
 
-function configuredProviders() {
-  if (process.env.ACP_GATEWAY_DISABLE_DYNAMIC_PROVIDERS === "1" && !process.env.ACP_GATEWAY_PROVIDERS) return {};
+function providerRegistryDocument() {
+  if (process.env.ACP_GATEWAY_DISABLE_DYNAMIC_PROVIDERS === "1" && !process.env.ACP_GATEWAY_PROVIDERS) {
+    return { providers: {}, disabled: new Set() };
+  }
   const path = defaultProviderRegistryPath();
   try {
     const document = JSON.parse(readFileSync(path, "utf8"));
-    if (document?.version !== 1 || !document.providers || typeof document.providers !== "object") return {};
+    if (document?.version !== 1 || !document.providers || typeof document.providers !== "object") {
+      return { providers: {}, disabled: new Set() };
+    }
     const result = {};
     for (const [id, value] of Object.entries(document.providers)) {
       if (!/^[a-z0-9][a-z0-9._-]*$/.test(id) || !value || typeof value !== "object") continue;
@@ -162,9 +173,12 @@ function configuredProviders() {
       if (value.env != null && (typeof value.env !== "object" || Array.isArray(value.env) || Object.values(value.env).some((item) => typeof item !== "string"))) continue;
       result[id] = { ...value, id, args: [...value.args], env: { ...(value.env ?? {}) } };
     }
-    return result;
+    const disabled = new Set(Array.isArray(document.disabled)
+      ? document.disabled.filter((id) => typeof id === "string")
+      : []);
+    return { providers: result, disabled };
   } catch {
-    return {};
+    return { providers: {}, disabled: new Set() };
   }
 }
 

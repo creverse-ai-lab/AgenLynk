@@ -95,12 +95,26 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
     let createdAt: String?
     let updatedAt: String?
     let eventCount: Int
+    let source: String
+    let role: String
+    let parentSessionId: String?
 
     var id: String { sessionId }
     var displayName: String { title?.isEmpty == false ? title! : sessionId }
+    var isFrontdoorRecord: Bool { role == "frontdoor" }
+    var isLocalSource: Bool { source == "local" }
+    var sourceLabel: String { isLocalSource ? "LOCAL" : "ACP" }
+    var isInternalReview: Bool {
+        let identity = "\(model ?? "") \(title ?? "")".lowercased()
+        return identity.contains("auto-review") || identity.contains("auto_review")
+    }
     var isActive: Bool {
         ["running", "waiting_permission", "waiting_input", "cancelling", "restoring"].contains(status)
     }
+    var hasFrontdoorIdentity: Bool {
+        openerInstanceId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+    var isRealtimeVisible: Bool { isActive && hasFrontdoorIdentity }
 
     init?(_ value: JSONValue) {
         guard let object = value.objectValue, let sessionId = object.string("sessionId") else { return nil }
@@ -117,6 +131,47 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
         createdAt = object.string("createdAt")
         updatedAt = object.string("updatedAt")
         eventCount = object.int("eventCount") ?? 0
+        source = object.string("source") ?? "gateway"
+        role = object.string("role") ?? "worker"
+        parentSessionId = object.string("parentSessionId")
+    }
+}
+
+struct FrontdoorSession: Identifiable, Hashable, Sendable {
+    let id: String
+    let provider: String
+    let root: GatewaySession?
+    let workers: [GatewaySession]
+
+    var displayName: String { "\(provider.capitalized) Frontdoor" }
+    var members: [GatewaySession] { (root.map { [$0] } ?? []) + workers }
+    var isActive: Bool { members.contains(where: \.isActive) }
+    var activeWorkerCount: Int { workers.filter(\.isActive).count }
+    var workspaceCount: Int { Set(members.map(\.cwd).filter { !$0.isEmpty }).count }
+    var updatedAt: String? { members.compactMap(\.updatedAt).max() }
+    var latestTask: String? {
+        members
+            .sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
+            .compactMap(\.title)
+            .first { !$0.isEmpty }
+    }
+
+    static func make(sessions: [GatewaySession]) -> [FrontdoorSession] {
+        let mapped = sessions.filter(\.hasFrontdoorIdentity)
+        return Dictionary(grouping: mapped, by: { $0.openerInstanceId! })
+            .map { instanceId, members in
+                let roots = members.filter(\.isFrontdoorRecord)
+                let root = roots.max { ($0.updatedAt ?? "") < ($1.updatedAt ?? "") }
+                let workers = members.filter { !$0.isFrontdoorRecord }
+                let opener = root?.provider ?? workers.compactMap(\.opener).first { !$0.isEmpty } ?? "unknown"
+                return FrontdoorSession(
+                    id: instanceId,
+                    provider: opener.lowercased(),
+                    root: root,
+                    workers: workers.sorted { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
+                )
+            }
+            .sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
     }
 }
 
@@ -133,9 +188,10 @@ struct PetSnapshot: Encodable, Equatable, Sendable {
         let task: String?
         let delegated: Bool
         let role: String?
+        let source: String
 
         enum CodingKeys: String, CodingKey {
-            case provider, session, state, parent, engine, time, cwd, task, delegated, role
+            case provider, session, state, parent, engine, time, cwd, task, delegated, role, source
             case inboxPending = "inbox_pending"
         }
     }
@@ -165,24 +221,28 @@ struct PetSnapshot: Encodable, Equatable, Sendable {
             lhs.provider == rhs.provider ? lhs.cwd < rhs.cwd : lhs.provider < rhs.provider
         }) {
             guard let group = groups[key] else { continue }
-            let frontdoorId = petFrontdoorId(key)
+            let root = group.filter(\.isFrontdoorRecord)
+                .max { ($0.updatedAt ?? "") < ($1.updatedAt ?? "") }
+            let workers = group.filter { !$0.isFrontdoorRecord }
+            let frontdoorId = key.instanceId ?? petFrontdoorId(key)
             let latest = group.max { lhs, rhs in
                 petTimestamp(lhs.updatedAt, fallback: now) < petTimestamp(rhs.updatedAt, fallback: now)
             }
             projected.append(Session(
-                provider: key.provider,
+                provider: root?.provider ?? key.provider,
                 session: frontdoorId,
                 state: frontdoorPetState(group, pendingBySession: pendingBySession),
                 parent: nil,
-                engine: "\(key.provider)-frontdoor",
-                time: petTimestamp(latest?.updatedAt, fallback: now),
+                engine: root?.model ?? "\(key.provider)-frontdoor",
+                time: petTimestamp(root?.updatedAt ?? latest?.updatedAt, fallback: now),
                 inboxPending: 0,
-                cwd: key.cwd.isEmpty ? nil : key.cwd,
-                task: "Frontdoor",
+                cwd: (root?.cwd ?? key.cwd).isEmpty ? nil : (root?.cwd ?? key.cwd),
+                task: root?.title ?? "Frontdoor",
                 delegated: false,
-                role: "frontdoor"
+                role: "frontdoor",
+                source: root?.source ?? (group.allSatisfy(\.isLocalSource) ? "local" : "gateway")
             ))
-            projected.append(contentsOf: group.map { gatewaySession in
+            projected.append(contentsOf: workers.map { gatewaySession in
                 let pending = pendingBySession[gatewaySession.sessionId] ?? 0
                 return Session(
                     provider: gatewaySession.provider,
@@ -197,7 +257,8 @@ struct PetSnapshot: Encodable, Equatable, Sendable {
                     cwd: gatewaySession.cwd.isEmpty ? nil : gatewaySession.cwd,
                     task: gatewaySession.title,
                     delegated: true,
-                    role: "worker"
+                    role: "worker",
+                    source: gatewaySession.source
                 )
             })
         }
@@ -227,7 +288,8 @@ private func normalizedFrontdoor(_ opener: String?) -> String {
 }
 
 private func petFrontdoorId(_ key: FrontdoorKey) -> String {
-    let identity = key.instanceId ?? "\(key.provider)\u{0}\(key.cwd)"
+    if let instanceId = key.instanceId, !instanceId.isEmpty { return instanceId }
+    let identity = "\(key.provider)\u{0}\(key.cwd)"
     return "frontdoor:\(Data(identity.utf8).base64EncodedString())"
 }
 
@@ -251,6 +313,7 @@ private func petState(for status: String, hasPendingInbox: Bool) -> String {
     case "waiting_permission", "waiting_input": return "needs_input"
     case "disconnected", "closed": return "offline"
     case "idle": return "idle"
+    case "ready": return "ready"
     default: return "blocked"
     }
 }
@@ -327,6 +390,8 @@ struct MonitorSnapshot: Sendable {
     let gateway: JSONValue?
     let sessions: [GatewaySession]
     let eventsBySession: [String: [MonitorEvent]]
+    let historySessions: [GatewaySession]
+    let historyEventsBySession: [String: [MonitorEvent]]
     let tasks: [MonitorRecord]
     let inbox: [MonitorRecord]
 
@@ -338,6 +403,11 @@ struct MonitorSnapshot: Sendable {
         for (sessionId, value) in root.object("events") ?? [:] {
             eventsBySession[sessionId] = (value.arrayValue ?? []).compactMap(MonitorEvent.init)
         }
+        let historySessions = (root.array("historySessions") ?? []).compactMap(GatewaySession.init)
+        var historyEventsBySession: [String: [MonitorEvent]] = [:]
+        for (sessionId, value) in root.object("historyEvents") ?? [:] {
+            historyEventsBySession[sessionId] = (value.arrayValue ?? []).compactMap(MonitorEvent.init)
+        }
         let tasks = (root.array("tasks") ?? []).enumerated().map { MonitorRecord($0.element, fallbackKind: "task", index: $0.offset) }
         let inbox = (root.array("inbox") ?? []).enumerated().map { MonitorRecord($0.element, fallbackKind: "inbox", index: $0.offset) }
         return MonitorSnapshot(
@@ -347,63 +417,67 @@ struct MonitorSnapshot: Sendable {
             gateway: root["gateway"],
             sessions: sessions,
             eventsBySession: eventsBySession,
+            historySessions: historySessions,
+            historyEventsBySession: historyEventsBySession,
             tasks: tasks,
             inbox: inbox
         )
     }
 }
 
-struct SessionConfigChoice: Identifiable, Equatable, Sendable {
-    let value: String
+struct ACPAgentCatalogItem: Identifiable, Equatable, Sendable {
+    let registryId: String
+    let providerId: String
     let name: String
-    let description: String?
+    let version: String
+    let description: String
+    let website: URL?
+    let icon: URL?
+    let distribution: String
+    let compatible: Bool
+    let installed: Bool
+    let enabled: Bool
+    let installSupported: Bool
+    let installHint: String
 
-    var id: String { value }
-
-    init?(_ value: JSONValue) {
-        guard let object = value.objectValue, let rawValue = object.string("value") else { return nil }
-        self.value = rawValue
-        name = object.string("name") ?? rawValue
-        description = object.string("description")
-    }
-}
-
-struct SessionConfigOption: Identifiable, Equatable, Sendable {
-    let id: String
-    let name: String
-    let description: String?
-    let category: String?
-    let type: String
-    let currentValue: JSONValue
-    let choices: [SessionConfigChoice]
+    var id: String { registryId }
 
     init?(_ value: JSONValue) {
         guard let object = value.objectValue,
-              let id = object.string("id"),
-              let type = object.string("type") else { return nil }
-        self.id = id
-        name = object.string("name") ?? id.replacingOccurrences(of: "_", with: " ").capitalized
-        description = object.string("description")
-        category = object.string("category")
-        self.type = type
-        currentValue = object["currentValue"] ?? .null
-        choices = (object.array("options") ?? []).compactMap(SessionConfigChoice.init)
+              let registryId = object.string("registryId"),
+              let providerId = object.string("providerId") else { return nil }
+        self.registryId = registryId
+        self.providerId = providerId
+        name = object.string("name") ?? registryId
+        version = object.string("version") ?? "—"
+        description = object.string("description") ?? ""
+        website = object.string("website").flatMap(URL.init(string:))
+        icon = object.string("icon").flatMap(URL.init(string:))
+        distribution = object.string("distribution") ?? "unsupported"
+        compatible = object.bool("compatible") ?? false
+        installed = object.bool("installed") ?? false
+        enabled = object.bool("enabled") ?? false
+        installSupported = object.bool("installSupported") ?? false
+        installHint = object.string("installHint") ?? ""
     }
 }
 
-struct SessionConfigResponse: Sendable {
-    let sessionId: String
-    let options: [SessionConfigOption]
-    let unavailableReason: String?
+struct ACPAgentCatalogSnapshot: Sendable {
+    let registryVersion: String
+    let source: String
+    let stale: Bool
+    let warning: String?
+    let agents: [ACPAgentCatalogItem]
 
-    static func decode(_ data: Data) throws -> SessionConfigResponse {
+    static func decode(_ data: Data) throws -> ACPAgentCatalogSnapshot {
         let raw = try JSONSerialization.jsonObject(with: data)
-        guard let root = JSONValue(any: raw).objectValue,
-              let sessionId = root.string("sessionId") else { throw MonitorDecodeError.invalidMessage }
-        return SessionConfigResponse(
-            sessionId: sessionId,
-            options: (root.array("configOptions") ?? []).compactMap(SessionConfigOption.init),
-            unavailableReason: root.string("unavailableReason")
+        guard let root = JSONValue(any: raw).objectValue else { throw MonitorDecodeError.invalidMessage }
+        return ACPAgentCatalogSnapshot(
+            registryVersion: root.string("registryVersion") ?? "—",
+            source: root.string("source") ?? "unknown",
+            stale: root.bool("stale") ?? false,
+            warning: root.string("warning"),
+            agents: (root.array("agents") ?? []).compactMap(ACPAgentCatalogItem.init)
         )
     }
 }
@@ -482,9 +556,18 @@ func decodeJSONValue(_ data: Data) throws -> JSONValue {
     JSONValue(any: try JSONSerialization.jsonObject(with: data))
 }
 
+private let fractionalISO8601Formatter: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter
+}()
+
+private let standardISO8601Formatter = ISO8601DateFormatter()
+
 func parseTimestamp(_ value: String) -> Date? {
-    let fractional = ISO8601DateFormatter()
-    fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if let date = fractional.date(from: value) { return date }
-    return ISO8601DateFormatter().date(from: value)
+    fractionalISO8601Formatter.date(from: value) ?? standardISO8601Formatter.date(from: value)
+}
+
+func monitorTimestamp(_ date: Date) -> String {
+    fractionalISO8601Formatter.string(from: date)
 }

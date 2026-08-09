@@ -8,6 +8,8 @@ import {
   loadOfficialRegistry,
   mergeProviderDefinitions,
   providerDefinition,
+  readProviderRegistry,
+  setProviderEnabled,
   validateRegistry
 } from "../src/acp-registry.js";
 import { providerConfig } from "../src/providers.js";
@@ -114,6 +116,30 @@ test("provider definitions are merged into a private dynamic registry", async ()
       else process.env.ACP_GATEWAY_PROVIDERS = previous;
     }
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("provider enabled state is atomic, survives definition merges, and blocks new sessions", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-provider-enabled-"));
+  const path = join(directory, "providers.json");
+  const previous = process.env.ACP_GATEWAY_PROVIDERS;
+  try {
+    await mergeProviderDefinitions(path, [{ id: "gemini", command: "npx", args: ["gemini"], env: {} }]);
+    await setProviderEnabled("gemini", false, path);
+    await mergeProviderDefinitions(path, [{ id: "cursor", command: "cursor-agent", args: ["acp"], env: {} }]);
+    const saved = await readProviderRegistry(path);
+    assert.deepEqual(saved.disabled, ["gemini"]);
+    assert.ok(saved.providers.gemini);
+    assert.ok(saved.providers.cursor);
+
+    process.env.ACP_GATEWAY_PROVIDERS = path;
+    assert.throws(() => providerConfig("gemini"), /disabled in ACP Connections/);
+    await setProviderEnabled("gemini", true, path);
+    assert.equal(providerConfig("gemini").command, "npx");
+  } finally {
+    if (previous == null) delete process.env.ACP_GATEWAY_PROVIDERS;
+    else process.env.ACP_GATEWAY_PROVIDERS = previous;
     await rm(directory, { recursive: true, force: true });
   }
 });

@@ -23,9 +23,13 @@ enum SidecarError: LocalizedError {
 final class SidecarController {
     private var process: Process?
     private var outputPipe: Pipe?
+    private var readyTask: Task<MonitorEndpoint, Error>?
+    private var generation = 0
 
-    func start(nodeOverride: String = "") async throws -> MonitorEndpoint {
+    func start(nodeOverride: String = "", localWatcherProjectPath: String = "") async throws -> MonitorEndpoint {
         stop()
+        generation += 1
+        let startGeneration = generation
         let nodeURL = try locateNode(override: nodeOverride)
         let scriptURL = try locateMonitorScript()
         let process = Process()
@@ -35,28 +39,52 @@ final class SidecarController {
         process.arguments = [scriptURL.path]
         process.standardOutput = output
         process.standardError = FileHandle.standardError
-        process.environment = ProcessInfo.processInfo.environment.merging([
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let path = [
+            nodeURL.deletingLastPathComponent().path,
+            ProcessInfo.processInfo.environment["PATH"] ?? "",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "\(home)/.local/bin",
+            "\(home)/.cargo/bin",
+            "\(home)/.npm-global/bin"
+        ]
+        .flatMap { $0.split(separator: ":").map(String.init) }
+        .reduce(into: [String]()) { result, item in
+            if !item.isEmpty && !result.contains(item) { result.append(item) }
+        }
+        .joined(separator: ":")
+        var monitorEnvironment = [
             "ACP_GATEWAY_MONITOR_PORT": "0",
             "ACP_GATEWAY_MONITOR_AUTOSTART": "1",
-            "ACP_GATEWAY_MONITOR_PARENT_PID": String(ProcessInfo.processInfo.processIdentifier)
-        ]) { _, appValue in appValue }
+            "ACP_GATEWAY_MONITOR_PARENT_PID": String(ProcessInfo.processInfo.processIdentifier),
+            "PATH": path
+        ]
+        let watcherScript = URL(fileURLWithPath: localWatcherProjectPath, isDirectory: true)
+            .appendingPathComponent("codex_app_watcher.py")
+        if FileManager.default.fileExists(atPath: watcherScript.path) {
+            let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+                ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            monitorEnvironment["ACP_MONITOR_LOCAL_WATCHER_SCRIPT"] = watcherScript.path
+            monitorEnvironment["ACP_MONITOR_LOCAL_STATE"] = applicationSupport
+                .appendingPathComponent("ACPMonitor/local-agent-state.json").path
+        }
+        process.environment = ProcessInfo.processInfo.environment.merging(monitorEnvironment) { _, appValue in appValue }
 
         try process.run()
         self.process = process
         outputPipe = output
 
-        return try await Task.detached(priority: .userInitiated) {
+        let readyTask = Task.detached(priority: .userInitiated) {
             var pending = Data()
             while process.isRunning || !pending.isEmpty {
+                try Task.checkCancellation()
                 // read(upToCount:) can wait for the full requested length on a
                 // pipe while the long-lived sidecar keeps stdout open. Read the
                 // bytes currently available so the short monitor_ready line is
                 // delivered immediately.
                 let chunk = output.fileHandleForReading.availableData
-                if chunk.isEmpty {
-                    if !process.isRunning { break }
-                    continue
-                }
+                if chunk.isEmpty { break }
                 pending.append(chunk)
                 while let newline = pending.firstIndex(of: 0x0A) {
                     let line = pending.prefix(upTo: newline)
@@ -69,12 +97,28 @@ final class SidecarController {
                     return MonitorEndpoint(baseURL: url, apiToken: apiToken)
                 }
             }
+            if process.isRunning { throw SidecarError.invalidReadyMessage }
             if process.terminationStatus != 0 { throw SidecarError.processExited(process.terminationStatus) }
             throw SidecarError.invalidReadyMessage
-        }.value
+        }
+        self.readyTask = readyTask
+        do {
+            let endpoint = try await readyTask.value
+            if generation == startGeneration { self.readyTask = nil }
+            return endpoint
+        } catch {
+            if generation == startGeneration {
+                self.readyTask = nil
+                stop()
+            }
+            throw error
+        }
     }
 
     func stop() {
+        generation += 1
+        readyTask?.cancel()
+        readyTask = nil
         if let process, process.isRunning {
             process.terminate()
             process.waitUntilExit()

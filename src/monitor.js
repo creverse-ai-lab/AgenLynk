@@ -11,22 +11,33 @@
 // use separate short-lived control connections.
 
 import { randomBytes } from "node:crypto";
-import { access } from "node:fs/promises";
+import { access, mkdir, readFile, rm } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { spawn } from "node:child_process";
 import { GatewayRpcClient } from "./socket-rpc.js";
-import { MonitorState } from "./monitor-state.js";
+import { MonitorState, queuedSingleFlight } from "./monitor-state.js";
 import { gatewaySocketPath } from "./config.js";
+import { mergeMonitorSessions, projectLocalSnapshot } from "./local-monitor.js";
+import { LocalTranscriptReader } from "./local-transcript.js";
 import { defaultGatewaySettings, gatewaySettingsSnapshot, updateGatewaySettings } from "./gateway-settings.js";
+import {
+  installOfficialAgent,
+  officialAgentCatalog,
+  setOfficialAgentEnabled
+} from "./agent-catalog.js";
 
 const MONITOR_HOST = "127.0.0.1";
 const MONITOR_PORT = numberEnv("ACP_GATEWAY_MONITOR_PORT", 8642, 0);
 const MAX_EVENTS_PER_SESSION = numberEnv("ACP_GATEWAY_MONITOR_MAX_EVENTS", 2000, 1);
 const AUTO_START_GATEWAY = booleanEnv("ACP_GATEWAY_MONITOR_AUTOSTART", true);
 const EXPECTED_PARENT_PID = optionalPositiveIntegerEnv("ACP_GATEWAY_MONITOR_PARENT_PID");
+const LOCAL_WATCHER_SCRIPT = process.env.ACP_MONITOR_LOCAL_WATCHER_SCRIPT ?? "";
+const LOCAL_STATE_PATH = process.env.ACP_MONITOR_LOCAL_STATE ?? "";
 const REFRESH_INTERVAL_MS = 3_000;
+const localTranscripts = new LocalTranscriptReader();
 
 function numberEnv(name, fallback, minimum) {
   const raw = process.env[name];
@@ -86,8 +97,11 @@ async function main() {
   });
   const state = new MonitorState({ maxEventsPerSession: MAX_EVENTS_PER_SESSION });
   const apiToken = randomBytes(32).toString("base64url");
+  const localWatcher = await startLocalWatcher();
+  let gatewaySessions = [];
   let subscriptionActive = false;
   let subscriptionAttempt = null;
+  let agentMutationActive = false;
 
   const onEvent = (event) => {
     if (event?.type === "subscription_error") {
@@ -106,6 +120,7 @@ async function main() {
     if (!state.pushEvent(event)) return;
     state.broadcast({ kind: "event", event });
     if (event.type === "session_closed") {
+      gatewaySessions = gatewaySessions.filter((session) => session.sessionId !== event.sessionId);
       state.removeSession(event.sessionId, { closed: true });
       state.broadcast({ kind: "session_removed", sessionId: event.sessionId });
     }
@@ -123,22 +138,25 @@ async function main() {
     }, 250);
   };
 
-  async function refresh() {
+  async function performRefresh() {
     const wasConnected = state.connected;
+    const beforeRevision = state.revision;
+    const beforeTasks = JSON.stringify(state.tasks);
+    const beforeInbox = JSON.stringify(state.inbox);
     try {
       const [sessions, tasks, inbox] = await Promise.all([
         rpc.call("session", { action: "list" }),
         rpc.call("task_list", {}),
         rpc.call("inbox", { action: "list" })
       ]);
-      const before = JSON.stringify([state.snapshot().sessions, state.tasks, state.inbox]);
-      const removedSessionIds = state.setSessions(sessions.sessions ?? []);
+      gatewaySessions = sessions.sessions ?? [];
+      const { removedSessionIds } = await applySessionSources();
       state.tasks = tasks.tasks ?? [];
       state.inbox = inbox.items ?? [];
       state.connected = true;
       state.lastError = null;
-      const after = JSON.stringify([[...state.sessions.values()], state.tasks, state.inbox]);
-      if (before !== after || !wasConnected) {
+      const recordsChanged = beforeTasks !== JSON.stringify(state.tasks) || beforeInbox !== JSON.stringify(state.inbox);
+      if (state.revision !== beforeRevision || recordsChanged || !wasConnected) {
         state.broadcast({
           kind: "state",
           connected: true,
@@ -150,10 +168,30 @@ async function main() {
         });
       }
     } catch (error) {
+      const { removedSessionIds } = await applySessionSources();
       state.connected = false;
       state.lastError = error?.message ?? String(error);
-      state.broadcast({ kind: "state", connected: false, streaming: state.streaming, error: state.lastError });
+      state.broadcast({
+        kind: "state",
+        connected: false,
+        streaming: state.streaming,
+        error: state.lastError,
+        sessions: [...state.sessions.values()],
+        removedSessionIds
+      });
     }
+  }
+  const refresh = queuedSingleFlight(performRefresh);
+
+  async function applySessionSources() {
+    const beforeRevision = state.revision;
+    const local = await readLocalProjection();
+    const merged = mergeMonitorSessions(gatewaySessions, local.sessions);
+    const acceptedLocalIds = new Set(merged.filter((session) => session.source === "local").map((session) => session.sessionId));
+    const events = Object.fromEntries(Object.entries(local.events).filter(([sessionId]) => acceptedLocalIds.has(sessionId)));
+    const removedSessionIds = state.setSessions(merged);
+    state.setExternalEvents(events);
+    return { removedSessionIds, changed: state.revision !== beforeRevision };
   }
 
   async function refreshGatewayInfo() {
@@ -171,7 +209,8 @@ async function main() {
     subscriptionAttempt = (async () => {
       try {
         const subscription = await rpc.subscribe({ includeThoughts: true, includeToolEvents: true }, onEvent);
-        state.setSessions(subscription.sessions ?? []);
+        gatewaySessions = subscription.sessions ?? [];
+        await applySessionSources();
         for (const event of subscription.events ?? []) state.pushEvent(event);
         subscriptionActive = true;
         state.connected = true;
@@ -199,6 +238,20 @@ async function main() {
     void refreshGatewayInfo();
   }, REFRESH_INTERVAL_MS);
   interval.unref();
+  const localInterval = setInterval(() => {
+    void (async () => {
+      const { removedSessionIds, changed } = await applySessionSources();
+      if (!changed) return;
+      state.broadcast({
+        kind: "state",
+        connected: state.connected,
+        streaming: state.streaming,
+        sessions: [...state.sessions.values()],
+        removedSessionIds
+      });
+    })();
+  }, 1_000);
+  localInterval.unref();
 
   const server = createServer((request, response) => {
     void handleRequest(request, response).catch((error) => {
@@ -235,6 +288,41 @@ async function main() {
       response.write("retry: 2000\n\n");
       state.sseClients.add(response);
       request.on("close", () => state.sseClients.delete(response));
+      return;
+    }
+    if (url.pathname === "/api/agents" && request.method === "GET") {
+      sendJson(response, await officialAgentCatalog({ refresh: url.searchParams.get("refresh") === "1" }));
+      return;
+    }
+    if (url.pathname === "/api/agents" && request.method === "POST") {
+      if (agentMutationActive) {
+        const error = new Error("Another ACP agent operation is already running");
+        error.statusCode = 409;
+        throw error;
+      }
+      const body = await readJsonBody(request);
+      agentMutationActive = true;
+      try {
+        const catalog = await officialAgentCatalog();
+        if (body.action === "install") {
+          const agent = catalog.agents.find((item) => item.registryId === body.registryId);
+          if (!agent) throw new Error(`Official ACP agent not found: ${body.registryId ?? "<missing>"}`);
+          if (!agent.installSupported) throw new Error(agent.installHint);
+          await installOfficialAgent(agent.registryId);
+        } else if (body.action === "set_enabled") {
+          if (typeof body.enabled !== "boolean") throw new Error("enabled must be boolean");
+          const agent = catalog.agents.find((item) => item.providerId === body.providerId);
+          if (!agent) throw new Error(`Official ACP provider not found: ${body.providerId ?? "<missing>"}`);
+          if (!agent.installed) throw new Error(`${agent.name} is not installed`);
+          await setOfficialAgentEnabled(agent.providerId, body.enabled);
+        } else {
+          throw new Error(`Unknown ACP agent action: ${body.action ?? "<missing>"}`);
+        }
+        sendJson(response, await officialAgentCatalog());
+        void refreshGatewayInfo();
+      } finally {
+        agentMutationActive = false;
+      }
       return;
     }
     if (url.pathname === "/api/session-config" && request.method === "GET") {
@@ -400,9 +488,11 @@ async function main() {
     if (shuttingDown) return;
     shuttingDown = true;
     clearInterval(interval);
+    clearInterval(localInterval);
     if (parentWatch) clearInterval(parentWatch);
     for (const client of state.sseClients) client.end();
     rpc.close();
+    await stopLocalWatcher(localWatcher);
     await new Promise((resolve) => server.close(resolve));
   };
   if (EXPECTED_PARENT_PID) {
@@ -414,6 +504,50 @@ async function main() {
   }
   process.on("SIGINT", () => void shutdown().finally(() => process.exit(0)));
   process.on("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
+}
+
+async function startLocalWatcher() {
+  if (!LOCAL_WATCHER_SCRIPT || !LOCAL_STATE_PATH) return null;
+  try {
+    await access(LOCAL_WATCHER_SCRIPT);
+    await mkdir(dirname(LOCAL_STATE_PATH), { recursive: true });
+    await rm(LOCAL_STATE_PATH, { force: true });
+  } catch (error) {
+    console.error(`Local monitor unavailable: ${error.message}`);
+    return null;
+  }
+  const child = spawn(process.env.ACP_MONITOR_PYTHON || "python3", [
+    LOCAL_WATCHER_SCRIPT,
+    "--signals", LOCAL_STATE_PATH,
+    "--ready-after", "3"
+  ], {
+    env: process.env,
+    stdio: ["ignore", "ignore", "inherit"]
+  });
+  child.on("error", (error) => console.error(`Local monitor failed: ${error.message}`));
+  child.on("exit", (code, signal) => {
+    if (code === 0 || signal === "SIGTERM") return;
+    console.error(`Local monitor exited (${signal ?? code})`);
+  });
+  return child;
+}
+
+async function stopLocalWatcher(child) {
+  if (!child || child.exitCode != null || child.signalCode != null) return;
+  const exited = new Promise((resolve) => child.once("exit", resolve));
+  child.kill("SIGTERM");
+  await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 1_000))]);
+  if (child.exitCode == null && child.signalCode == null) child.kill("SIGKILL");
+}
+
+async function readLocalProjection() {
+  if (!LOCAL_STATE_PATH) return { sessions: [], events: {} };
+  try {
+    return localTranscripts.enrich(projectLocalSnapshot(JSON.parse(await readFile(LOCAL_STATE_PATH, "utf8"))));
+  } catch (error) {
+    if (error?.code !== "ENOENT") console.error(`Local monitor snapshot ignored: ${error.message}`);
+    return { sessions: [], events: {} };
+  }
 }
 
 async function pathIsMissing(path) {

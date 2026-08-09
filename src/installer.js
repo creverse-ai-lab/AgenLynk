@@ -22,6 +22,7 @@ import { GATEWAY_BUILD_ID, GATEWAY_VERSION } from "./version.js";
 const CONTROL_NAME = "agent-acp";
 const GUIDE_NAME = "agent-acp-guide";
 const DELEGATOR_SKILL_NAME = "agent-delegator";
+const MCP_FORMAT_VERSION = 2;
 const MCP_TARGETS = ["codex", "claude", "grok", "auggie"];
 const FRONT_DOOR_TARGETS = new Set(["codex", "claude", "grok"]);
 const SUPPORTED_TARGETS = new Set(MCP_TARGETS);
@@ -147,7 +148,9 @@ export function parseInstallerArgs(argv) {
   for (const target of options.targets) {
     if (!SUPPORTED_TARGETS.has(target)) throw new Error(`Unsupported installer target: ${target}`);
   }
-  if (options.frontDoor && !options.installAll) throw new Error("--front-door can only be used with --install-all");
+  if (options.frontDoor && !options.installAll && !options.update) {
+    throw new Error("--front-door can only be used with --install-all or --update");
+  }
   if (options.frontDoor && options.targets.length) throw new Error("--front-door and --target cannot be combined");
   if (explicitInstallSkill && explicitUpdateSkill) throw new Error("--install-skill and --update-skill cannot be combined");
   if (options.updateSkill && options.installAll) throw new Error("--update-skill cannot be combined with --install-all");
@@ -280,16 +283,28 @@ export async function runInstaller(options, dependencies = {}) {
   const requestedTargets = options.targets.length
     ? options.targets
     : availableTargets;
-  const managedControlTargets = [...new Set(Object.values(state?.managedMcp ?? {})
-    .filter((item) => item?.kind === "control" && availableTargets.includes(item.agent))
+  const allManagedControlTargets = [...new Set(Object.values(state?.managedMcp ?? {})
+    .filter((item) => item?.kind === "control" && item.agent)
     .map((item) => item.agent))];
+  const managedControlTargets = allManagedControlTargets.filter((target) => availableTargets.includes(target));
+  const inferredFrontDoor = state?.frontDoor
+    ?? (managedControlTargets.length === 1 ? managedControlTargets[0] : null);
+  const exclusiveFrontDoor = options.installAll
+    ? (options.frontDoor
+      ?? (options.targets.length === 1 && FRONT_DOOR_TARGETS.has(requestedTargets[0]) ? requestedTargets[0] : null)
+      ?? (options.targets.length ? null : "codex"))
+    : options.update
+      ? (options.targets.length ? null : options.frontDoor ?? inferredFrontDoor)
+      : null;
   const controlTargets = options.installControl
     ? (options.targets.length
         ? requestedTargets
         : options.installAll
           ? [options.frontDoor ?? "codex"]
-          : options.update && managedControlTargets.length
-            ? managedControlTargets
+          : options.update && exclusiveFrontDoor
+            ? [exclusiveFrontDoor]
+            : options.update && managedControlTargets.length
+              ? managedControlTargets
             : [availableTargets.includes("codex") ? "codex" : availableTargets[0]].filter(Boolean))
     : [];
   const guideTargets = options.installGuide ? requestedTargets : [];
@@ -327,9 +342,24 @@ export async function runInstaller(options, dependencies = {}) {
   if (options.installControl) {
     if (!identity || options.rotateToken) identity = createIdentity();
     state.identity = identity;
+    if (exclusiveFrontDoor) state.frontDoor = exclusiveFrontDoor;
     state.managedMcp ??= {};
     state.updatedAt = new Date().toISOString();
     if (!options.dryRun) await writeInstallState(statePath, state);
+  }
+
+  if (options.update && !exclusiveFrontDoor && managedControlTargets.length > 1) {
+    warnings.push("Multiple managed Control MCP front doors remain configured; rerun --update --front-door codex|claude|grok to select one and remove stale Control entries");
+  }
+
+  if (exclusiveFrontDoor) {
+    for (const target of allManagedControlTargets.filter((item) => item !== exclusiveFrontDoor)) {
+      if (!availableTargets.includes(target)) {
+        warnings.push(`${target}:agent-acp is stale but ${target} is unavailable, so its Control MCP could not be removed`);
+        continue;
+      }
+      await removeManagedMcp(mcpSpec(target, "control", statePath), { options, state, run, actions });
+    }
   }
 
   const installedSkillDestinations = new Map();
@@ -340,11 +370,11 @@ export async function runInstaller(options, dependencies = {}) {
     if (needsMcp && !providerInstalled) {
       warnings.push(`${target} is not installed; MCP registration skipped`);
     } else if (controlTargets.includes(target)) {
-      const spec = mcpSpec(target, "control", identity);
+      const spec = mcpSpec(target, "control", statePath);
       await installMcp(spec, { options, state, run, actions });
     }
     if (guideTargets.includes(target) && providerInstalled) {
-      const spec = mcpSpec(target, "guide", identity);
+      const spec = mcpSpec(target, "guide", statePath);
       await installMcp(spec, { options, state, run, actions });
     }
     const managedSkill = state?.managedSkills?.[`${target}:${DELEGATOR_SKILL_NAME}`];
@@ -474,7 +504,7 @@ export function installerHelp() {
     "  --version, -V          Print the installed ACP Gateway version",
     "  --update               Pull source, preview, update adapters/MCPs, and restart",
     "  --install-all          Install adapters, Control, Guide, and agent-delegator",
-    "  --front-door <agent>   Choose codex, claude, or grok as the install-all Control MCP",
+    "  --front-door <agent>   Choose the sole codex, claude, or grok Control MCP during install-all/update",
     "  --install-adapters     Install missing ACP adapters",
     "  --discover-agents      Match installed AI CLIs with the official ACP registry",
     "  --registry-agent <id>  Install/configure one official registry agent (repeatable)",
@@ -515,14 +545,45 @@ async function installMcp(spec, { options, state, run, actions }) {
   if (exists && !state?.managedMcp?.[key] && !options.force) {
     throw new Error(`${key} already exists and is not managed by this installer; rerun with --force to replace it`);
   }
-  if (exists && state?.managedMcp?.[key] && !options.force && !options.rotateToken) {
+  if (exists
+      && state?.managedMcp?.[key]?.formatVersion === MCP_FORMAT_VERSION
+      && !options.force
+      && !options.rotateToken) {
     actions.at(-1).status = "unchanged";
     return;
   }
   if (exists) await requireSuccess(run, spec.command, spec.removeArgs, `remove existing ${key}`);
   await requireSuccess(run, spec.command, spec.args, `install ${key}`);
   state.managedMcp ??= {};
-  state.managedMcp[key] = { agent: spec.agent, name: spec.name, kind: spec.kind, installedAt: new Date().toISOString() };
+  state.managedMcp[key] = {
+    agent: spec.agent,
+    name: spec.name,
+    kind: spec.kind,
+    formatVersion: MCP_FORMAT_VERSION,
+    installedAt: new Date().toISOString()
+  };
+}
+
+async function removeManagedMcp(spec, { options, state, run, actions }) {
+  const key = `${spec.agent}:${spec.name}`;
+  const action = {
+    type: "mcp-remove",
+    agent: spec.agent,
+    name: spec.name,
+    command: spec.command,
+    args: [...spec.removeArgs]
+  };
+  actions.push(action);
+  if (options.dryRun) return;
+
+  const existing = await run(spec.command, spec.getArgs);
+  const exists = inspectMcpExists(spec, existing);
+  if (!exists && spec.inspectMode !== "list-json" && !/no mcp server|not found|does not exist/i.test(`${existing.stdout}\n${existing.stderr}`)) {
+    throw commandError(spec.command, spec.getArgs, existing, `inspect ${key}`);
+  }
+  if (exists) await requireSuccess(run, spec.command, spec.removeArgs, `remove stale ${key}`);
+  delete state.managedMcp[key];
+  action.status = exists ? "removed" : "already-absent";
 }
 
 async function installBundledSkill(agent, { source, destinationRoot, options, state, actions, warnings }) {
@@ -658,15 +719,16 @@ async function skillTreeDigest(root) {
   return hash.digest("hex");
 }
 
-function mcpSpec(agent, kind, identity) {
+function mcpSpec(agent, kind, statePath = defaultInstallStatePath()) {
   const isControl = kind === "control";
   const name = isControl ? CONTROL_NAME : GUIDE_NAME;
   const script = join(sourceDirectory, isControl ? "index.js" : "guide.js");
   const serverCommand = stableNodeCommand();
   const serverArgs = [script];
+  const controlEnvironment = isControl ? { ACP_GATEWAY_INSTALL_STATE: statePath } : {};
   if (agent === "codex") {
     const envArgs = isControl
-      ? ["--env", `ACP_GATEWAY_CONTROL_TOKEN=${identity.token}`, "--env", `ACP_GATEWAY_ROOT_ID=${identity.rootId}`]
+      ? ["--env", `ACP_GATEWAY_INSTALL_STATE=${statePath}`]
       : [];
     return {
       agent, kind, name, command: "codex",
@@ -677,7 +739,7 @@ function mcpSpec(agent, kind, identity) {
   }
   if (agent === "grok") {
     const envArgs = isControl
-      ? ["--env", `ACP_GATEWAY_CONTROL_TOKEN=${identity.token}`, "--env", `ACP_GATEWAY_ROOT_ID=${identity.rootId}`]
+      ? ["--env", `ACP_GATEWAY_INSTALL_STATE=${statePath}`]
       : [];
     return {
       agent, kind, name, command: "grok", inspectMode: "list-json",
@@ -687,10 +749,7 @@ function mcpSpec(agent, kind, identity) {
     };
   }
   if (agent === "auggie") {
-    const env = isControl
-      ? { ACP_GATEWAY_CONTROL_TOKEN: identity.token, ACP_GATEWAY_ROOT_ID: identity.rootId }
-      : {};
-    const config = { type: "stdio", command: serverCommand, args: serverArgs, env };
+    const config = { type: "stdio", command: serverCommand, args: serverArgs, env: controlEnvironment };
     return {
       agent, kind, name, command: "auggie", inspectMode: "list-json",
       getArgs: ["mcp", "list", "--json"],
@@ -700,7 +759,7 @@ function mcpSpec(agent, kind, identity) {
   }
   if (agent !== "claude") throw new Error(`MCP registration is not supported for ${agent}`);
   const envArgs = isControl
-    ? ["-e", `ACP_GATEWAY_CONTROL_TOKEN=${identity.token}`, "-e", `ACP_GATEWAY_ROOT_ID=${identity.rootId}`]
+    ? ["-e", `ACP_GATEWAY_INSTALL_STATE=${statePath}`]
     : [];
   return {
     agent, kind, name, command: "claude",
@@ -749,6 +808,9 @@ async function readInstallState(path) {
   try {
     const state = JSON.parse(await readFile(path, "utf8"));
     if (state?.version !== 1 || typeof state.managedMcp !== "object") throw new Error("unsupported install state format");
+    if (state.frontDoor != null && !FRONT_DOOR_TARGETS.has(state.frontDoor)) {
+      throw new Error("invalid stored front door");
+    }
     if (state.identity && (typeof state.identity.token !== "string" || state.identity.token.length < 24)) {
       throw new Error("invalid stored Control identity");
     }
