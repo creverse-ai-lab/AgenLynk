@@ -17,8 +17,12 @@ enum SidecarError: LocalizedError {
 final class SidecarController {
     private var process: Process?
     private var outputPipe: Pipe?
-    private var readyTask: Task<MonitorEndpoint, Error>?
+    private var readyTask: Task<(MonitorEndpoint, MonitorMeta), Error>?
     private var generation = 0
+
+    /// Version/compatibility metadata parsed from the last accepted
+    /// `monitor_ready` message. Never carries the `apiToken`.
+    private(set) var meta: MonitorMeta?
 
     func start(nodeOverride: String = "", localWatcherProjectPath: String = "") async throws -> MonitorEndpoint {
         stop()
@@ -79,7 +83,12 @@ final class SidecarController {
                           let rawURL = value["url"] as? String,
                           let url = URL(string: rawURL),
                           let apiToken = value["apiToken"] as? String else { continue }
-                    return MonitorEndpoint(baseURL: url, apiToken: apiToken)
+                    // Reject an unsupported schema/API major up front instead of
+                    // handing back an endpoint the rest of the app can't safely
+                    // talk to; do not partially decode an incompatible message.
+                    let object = JSONValue(any: value).objectValue ?? [:]
+                    try MonitorCompatibility.validate(object)
+                    return (MonitorEndpoint(baseURL: url, apiToken: apiToken), MonitorMeta(object))
                 }
             }
             if process.isRunning { throw SidecarError.invalidReadyMessage }
@@ -88,8 +97,11 @@ final class SidecarController {
         }
         self.readyTask = readyTask
         do {
-            let endpoint = try await readyTask.value
-            if generation == startGeneration { self.readyTask = nil }
+            let (endpoint, meta) = try await readyTask.value
+            if generation == startGeneration {
+                self.readyTask = nil
+                self.meta = meta
+            }
             return endpoint
         } catch {
             if generation == startGeneration {
@@ -104,6 +116,7 @@ final class SidecarController {
         generation += 1
         readyTask?.cancel()
         readyTask = nil
+        meta = nil
         if let process, process.isRunning {
             process.terminate()
             process.waitUntilExit()

@@ -152,6 +152,86 @@ test("native monitor cold-starts Gateway when no daemon is running", async () =>
   }
 });
 
+test("native monitor exposes /api/meta, versioned snapshot, and stable error codes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-monitor-api-"));
+  const socketPath = join(directory, "gateway.sock");
+  const token = "test-control-token-at-least-24-characters";
+  const rootId = "main-monitor-api-test";
+  const env = {
+    ...process.env,
+    ACP_GATEWAY_SOCKET: socketPath,
+    ACP_GATEWAY_CONTROL_TOKEN: token,
+    ACP_GATEWAY_ROOT_ID: rootId,
+    ACP_GATEWAY_MONITOR_PORT: "0",
+    ACP_GATEWAY_MONITOR_AUTOSTART: "0"
+  };
+
+  // No Gateway daemon is started for this test: the API-shape and
+  // error-code contract must hold even before a "setup" call ever succeeds.
+  const monitor = spawn(process.execPath, [fileURLToPath(new URL("../src/monitor.js", import.meta.url))], {
+    env,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  try {
+    const lines = createInterface({ input: monitor.stdout });
+    const ready = await Promise.race([
+      new Promise((resolve, reject) => lines.once("line", (line) => {
+        try { resolve(JSON.parse(line)); } catch (error) { reject(error); }
+      })),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("monitor ready timeout")), 15_000))
+    ]);
+    assert.equal(ready.schemaVersion, 1);
+    assert.equal(ready.monitorApiVersion, "1.0");
+    assert.deepEqual(ready.gatewayIdentity, {
+      rootId,
+      gatewayApiVersion: null,
+      gatewayVersion: null,
+      gatewayBuildId: null
+    });
+    assert.deepEqual(ready.capabilities, {});
+    const headers = { authorization: `Bearer ${ready.apiToken}` };
+
+    const meta = await fetchJson(`${ready.url}/api/meta`, { headers });
+    assert.equal(meta.schemaVersion, 1);
+    assert.equal(meta.monitorApiVersion, "1.0");
+    assert.deepEqual(meta.gatewayIdentity, ready.gatewayIdentity);
+    assert.deepEqual(meta.capabilities, {});
+
+    const snapshot = await fetchJson(`${ready.url}/api/snapshot`, { headers });
+    assert.equal(snapshot.schemaVersion, 1);
+    assert.equal(snapshot.monitorApiVersion, "1.0");
+
+    const unauthorized = await fetch(`${ready.url}/api/meta`, { headers: { authorization: "Bearer wrong" } });
+    assert.equal(unauthorized.status, 401);
+    const unauthorizedBody = await unauthorized.json();
+    assert.equal(unauthorizedBody.error, "unauthorized");
+    assert.equal(unauthorizedBody.code, "monitor_unauthorized");
+
+    const notFound = await fetch(`${ready.url}/api/does-not-exist`, { headers });
+    assert.equal(notFound.status, 404);
+    const notFoundBody = await notFound.json();
+    assert.equal(notFoundBody.error, "not found");
+    assert.equal(notFoundBody.code, "monitor_not_found");
+
+    const malformed = await fetch(`${ready.url}/api/session-config`, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: "not json"
+    });
+    assert.equal(malformed.status, 500);
+    const malformedBody = await malformed.json();
+    assert.equal(typeof malformedBody.error, "string");
+    assert.equal(malformedBody.code, "monitor_internal");
+  } finally {
+    if (monitor.exitCode == null) {
+      const exited = once(monitor, "close");
+      monitor.kill("SIGTERM");
+      await exited;
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 async function fetchJson(url, options) {
   const response = await fetch(url, options);
   const body = await response.json();

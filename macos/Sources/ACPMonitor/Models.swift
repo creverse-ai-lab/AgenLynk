@@ -383,7 +383,87 @@ struct MonitorRecord: Identifiable, Equatable, Sendable {
     }
 }
 
+/// A parsed `monitorApiVersion` string such as `"1.0"`. Minor is additive
+/// (new optional capabilities); only a major mismatch is incompatible.
+struct MonitorApiVersion: Equatable, Sendable {
+    let major: Int
+    let minor: Int
+
+    init?(_ raw: String) {
+        let parts = raw.split(separator: ".", maxSplits: 1)
+        guard parts.count == 2,
+              let major = Int(parts[0]), major >= 0,
+              let minor = Int(parts[1]), minor >= 0 else { return nil }
+        self.major = major
+        self.minor = minor
+    }
+}
+
+/// Validates the wire-contract version fields shared by `monitor_ready`,
+/// `/api/meta`, `/api/snapshot`, and every SSE envelope. Unknown additive
+/// fields are always compatible; a missing or unsupported schema/API major
+/// must reject up front rather than let callers partially decode a message
+/// they don't understand.
+enum MonitorCompatibility {
+    static let supportedSchemaVersion = 1
+    static let supportedApiMajor = 1
+
+    static func validate(_ object: [String: JSONValue]) throws {
+        guard let schemaVersion = object.int("schemaVersion"), schemaVersion == supportedSchemaVersion else {
+            throw MonitorDecodeError.updateRequired("Monitor schema version이 호환되지 않습니다. 앱을 업데이트하세요.")
+        }
+        guard let rawApiVersion = object.string("monitorApiVersion"),
+              let apiVersion = MonitorApiVersion(rawApiVersion),
+              apiVersion.major == supportedApiMajor else {
+            throw MonitorDecodeError.updateRequired("Monitor API version이 호환되지 않습니다. 앱을 업데이트하세요.")
+        }
+    }
+}
+
+/// Gateway setup identity as surfaced by `monitor_ready`/`/api/meta`. Missing
+/// Gateway setup values decode as `nil` rather than failing the handshake.
+struct GatewayIdentity: Equatable, Sendable {
+    let rootId: String?
+    let gatewayApiVersion: Int?
+    let gatewayVersion: String?
+    let gatewayBuildId: String?
+
+    init(_ value: JSONValue) {
+        let object = value.objectValue ?? [:]
+        rootId = object.string("rootId")
+        gatewayApiVersion = object.int("gatewayApiVersion")
+        gatewayVersion = object.string("gatewayVersion")
+        gatewayBuildId = object.string("gatewayBuildId")
+    }
+}
+
+/// Version/compatibility metadata shared by `monitor_ready` and `/api/meta`.
+/// Deliberately excludes `apiToken` so it can be retained and passed around
+/// without exposing the control secret.
+struct MonitorMeta: Equatable, Sendable {
+    let schemaVersion: Int
+    let monitorApiVersion: String
+    let gatewayIdentity: GatewayIdentity
+    let capabilities: JSONValue
+
+    init(_ object: [String: JSONValue]) {
+        schemaVersion = object.int("schemaVersion") ?? MonitorCompatibility.supportedSchemaVersion
+        monitorApiVersion = object.string("monitorApiVersion") ?? ""
+        gatewayIdentity = GatewayIdentity(object["gatewayIdentity"] ?? .null)
+        capabilities = object["capabilities"] ?? .object([:])
+    }
+
+    static func decode(_ data: Data) throws -> MonitorMeta {
+        let raw = try JSONSerialization.jsonObject(with: data)
+        guard let root = JSONValue(any: raw).objectValue else { throw MonitorDecodeError.invalidMessage }
+        try MonitorCompatibility.validate(root)
+        return MonitorMeta(root)
+    }
+}
+
 struct MonitorSnapshot: Sendable {
+    let schemaVersion: Int
+    let monitorApiVersion: String
     let connected: Bool
     let streaming: Bool
     let error: String?
@@ -398,6 +478,7 @@ struct MonitorSnapshot: Sendable {
     static func decode(_ data: Data) throws -> MonitorSnapshot {
         let raw = try JSONSerialization.jsonObject(with: data)
         guard let root = JSONValue(any: raw).objectValue else { throw MonitorDecodeError.invalidRoot }
+        try MonitorCompatibility.validate(root)
         let sessions = (root.array("sessions") ?? []).compactMap(GatewaySession.init)
         var eventsBySession: [String: [MonitorEvent]] = [:]
         for (sessionId, value) in root.object("events") ?? [:] {
@@ -411,6 +492,8 @@ struct MonitorSnapshot: Sendable {
         let tasks = (root.array("tasks") ?? []).enumerated().map { MonitorRecord($0.element, fallbackKind: "task", index: $0.offset) }
         let inbox = (root.array("inbox") ?? []).enumerated().map { MonitorRecord($0.element, fallbackKind: "inbox", index: $0.offset) }
         return MonitorSnapshot(
+            schemaVersion: root.int("schemaVersion") ?? MonitorCompatibility.supportedSchemaVersion,
+            monitorApiVersion: root.string("monitorApiVersion") ?? "",
             connected: root.bool("connected") ?? false,
             streaming: root.bool("streaming") ?? root.bool("connected") ?? false,
             error: root.string("error"),
@@ -623,12 +706,39 @@ struct SessionConfigSnapshot: Sendable {
 enum MonitorDecodeError: LocalizedError {
     case invalidRoot
     case invalidMessage
+    case updateRequired(String)
 
     var errorDescription: String? {
         switch self {
         case .invalidRoot: "Monitor snapshot is not a JSON object."
         case .invalidMessage: "Monitor stream delivered an invalid message."
+        case let .updateRequired(message): message
         }
+    }
+}
+
+/// A Node Monitor HTTP error response, `{error, code}`. `code` is a stable
+/// identifier callers can branch on (auth failure, incompatible API,
+/// restart blocked, ...); `error` stays the human-readable message.
+enum MonitorClientError: LocalizedError, Equatable, Sendable {
+    case server(code: String?, message: String)
+
+    /// A body without a parseable `error`/`code` still decodes to a
+    /// readable fallback instead of failing.
+    static func decode(data: Data, statusCode: Int) -> MonitorClientError {
+        let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let message = body?["error"] as? String ?? "Monitor request failed (HTTP \(statusCode))"
+        return .server(code: body?["code"] as? String, message: message)
+    }
+
+    var code: String? {
+        guard case let .server(code, _) = self else { return nil }
+        return code
+    }
+
+    var errorDescription: String? {
+        guard case let .server(_, message) = self else { return nil }
+        return message
     }
 }
 

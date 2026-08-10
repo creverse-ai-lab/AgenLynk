@@ -4,6 +4,11 @@ import Foundation
 enum MonitorModelChecks {
     static func main() throws {
         try snapshotDecodesSessionsEventsTasksAndInbox()
+        try snapshotRejectsUnsupportedSchemaMajorWithoutPartialDecode()
+        try monitorApiVersionParsesMajorMinorAndRejectsMalformedStrings()
+        try monitorMetaDecodesGatewayIdentityAndToleratesNullSetupValues()
+        try monitorMetaRejectsMissingMonitorApiVersion()
+        try monitorClientErrorDecodesCodeAndErrorFromHTTPBody()
         try agentCatalogDecodesInstallAndEnabledState()
         try gatewayConfigDecodesAllControlMetadata()
         try gatewayConfigRepresentsAllSeventeenSettingIds()
@@ -95,6 +100,8 @@ enum MonitorModelChecks {
     private static func snapshotDecodesSessionsEventsTasksAndInbox() throws {
         let data = Data(#"""
         {
+          "schemaVersion":1,
+          "monitorApiVersion":"1.0",
           "connected":true,
           "gateway":{"gatewayVersion":"1.3.1"},
           "sessions":[{"sessionId":"s1","provider":"codex","status":"running","cwd":"/tmp/project","eventCount":2}],
@@ -106,6 +113,8 @@ enum MonitorModelChecks {
         }
         """#.utf8)
         let snapshot = try MonitorSnapshot.decode(data)
+        try check(snapshot.schemaVersion == 1, "snapshot should decode the schema version")
+        try check(snapshot.monitorApiVersion == "1.0", "snapshot should decode the monitor API version")
         try check(snapshot.connected, "snapshot should be connected")
         try check(snapshot.streaming, "snapshot should default streaming to connected for compatibility")
         try check(snapshot.sessions.first?.sessionId == "s1", "session decode failed")
@@ -114,6 +123,88 @@ enum MonitorModelChecks {
         try check(snapshot.historyEventsBySession["old"]?.first?.type == "turn_end", "history event decode failed")
         try check(snapshot.tasks.first?.id == "t1", "task decode failed")
         try check(snapshot.inbox.first?.id == "i1", "inbox decode failed")
+    }
+
+    private static func snapshotRejectsUnsupportedSchemaMajorWithoutPartialDecode() throws {
+        let data = Data(#"""
+        {
+          "schemaVersion":2,
+          "monitorApiVersion":"1.0",
+          "connected":true,
+          "sessions":[{"sessionId":"s1","provider":"codex","status":"running","cwd":"/tmp/project"}]
+        }
+        """#.utf8)
+        do {
+            _ = try MonitorSnapshot.decode(data)
+            throw CheckError.failed("an unsupported schema major must be rejected, not partially decoded")
+        } catch let error as MonitorDecodeError {
+            guard case .updateRequired = error else {
+                throw CheckError.failed("rejection should use the stable update-required error")
+            }
+        }
+
+        let missingApiVersion = Data(#"{"schemaVersion":1,"connected":true,"sessions":[]}"#.utf8)
+        do {
+            _ = try MonitorSnapshot.decode(missingApiVersion)
+            throw CheckError.failed("a missing monitorApiVersion must be rejected, not defaulted")
+        } catch let error as MonitorDecodeError {
+            guard case .updateRequired = error else {
+                throw CheckError.failed("rejection should use the stable update-required error")
+            }
+        }
+    }
+
+    private static func monitorApiVersionParsesMajorMinorAndRejectsMalformedStrings() throws {
+        try check(MonitorApiVersion("1.0")?.major == 1, "1.0 should parse as major 1")
+        try check(MonitorApiVersion("1.0")?.minor == 0, "1.0 should parse as minor 0")
+        try check(MonitorApiVersion("1.5")?.minor == 5, "an additive minor version should still parse")
+        try check(MonitorApiVersion("2.0")?.major == 2, "a future major should still parse (compatibility is checked separately)")
+        try check(MonitorApiVersion("bad") == nil, "a malformed version string must not parse")
+        try check(MonitorApiVersion("1") == nil, "a version string missing its minor component must not parse")
+        try check(MonitorApiVersion("-1.0") == nil, "a negative major version must not parse")
+        try check(MonitorApiVersion("1.-1") == nil, "a negative minor version must not parse")
+    }
+
+    private static func monitorMetaDecodesGatewayIdentityAndToleratesNullSetupValues() throws {
+        let data = Data(#"""
+        {
+          "schemaVersion":1,
+          "monitorApiVersion":"1.0",
+          "gatewayIdentity":{"rootId":"root-1","gatewayApiVersion":1,"gatewayVersion":null,"gatewayBuildId":null},
+          "capabilities":{"agentUpdates":true}
+        }
+        """#.utf8)
+        let meta = try MonitorMeta.decode(data)
+        try check(meta.schemaVersion == 1, "meta should decode the schema version")
+        try check(meta.monitorApiVersion == "1.0", "meta should decode the monitor API version")
+        try check(meta.gatewayIdentity.rootId == "root-1", "meta should decode the gateway identity root id")
+        try check(meta.gatewayIdentity.gatewayApiVersion == 1, "meta should decode the gateway API version")
+        try check(meta.gatewayIdentity.gatewayVersion == nil, "a missing Gateway setup value should decode as nil, not crash")
+        try check(meta.gatewayIdentity.gatewayBuildId == nil, "a missing Gateway setup value should decode as nil, not crash")
+        try check(meta.capabilities.objectValue?.bool("agentUpdates") == true, "capabilities should be preserved as additive JSON")
+    }
+
+    private static func monitorMetaRejectsMissingMonitorApiVersion() throws {
+        let data = Data(#"{"schemaVersion":1,"gatewayIdentity":{},"capabilities":{}}"#.utf8)
+        do {
+            _ = try MonitorMeta.decode(data)
+            throw CheckError.failed("a missing monitorApiVersion must be rejected, not defaulted")
+        } catch let error as MonitorDecodeError {
+            guard case .updateRequired = error else {
+                throw CheckError.failed("rejection should use the stable update-required error")
+            }
+        }
+    }
+
+    private static func monitorClientErrorDecodesCodeAndErrorFromHTTPBody() throws {
+        let data = Data(#"{"error":"unauthorized","code":"monitor_unauthorized"}"#.utf8)
+        let error = MonitorClientError.decode(data: data, statusCode: 401)
+        try check(error.code == "monitor_unauthorized", "typed error should retain the stable HTTP code")
+        try check(error.errorDescription == "unauthorized", "typed error should keep the readable message")
+
+        let fallback = MonitorClientError.decode(data: Data(), statusCode: 500)
+        try check(fallback.code == nil, "a body without a code should decode with no code rather than crash")
+        try check(fallback.errorDescription == "Monitor request failed (HTTP 500)", "a missing error body should fall back to a readable status message")
     }
 
     private static func realtimeSessionsRequireAnActiveFrontdoorIdentity() throws {

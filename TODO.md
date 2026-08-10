@@ -1,6 +1,6 @@
 # ACP Gateway / Lynk v1 TODO
 
-검토 기준: `b4016b1` (`merge: integrate origin dev workflow updates`), Gateway `1.3.1`
+검토 기준: 2026-08-10 `dev`, Gateway `1.3.1`
 
 이 문서는 현재 코드와 테스트로 확인된 상태만 완료로 표시한다.
 
@@ -69,10 +69,10 @@ Monitor activity projection
 
 - [x] Swift UI가 인증된 loopback HTTP snapshot/SSE를 사용하고 Gateway socket RPC를 직접 호출하지 않는다 (`MonitorClient.swift`).
 - [x] Dashboard, Live Graph, session detail window가 같은 실시간 snapshot을 사용한다.
-- [ ] `monitor_ready`와 `/api/meta`에 `monitorApiVersion`, Gateway identity, capabilities를 제공한다.
-- [ ] `/api/snapshot`과 SSE `state`/`event` envelope에 `schemaVersion`을 추가한다.
+- [x] `monitor_ready`와 `/api/meta`에 `monitorApiVersion`, Gateway identity, capabilities를 제공한다.
+- [x] `/api/snapshot`과 모든 SSE envelope에 `schemaVersion`과 `monitorApiVersion`을 추가한다.
 - [ ] 인증 실패, 미설치, API 비호환, 업데이트 필요, restart blocked를 안정된 error code로 구분한다.
-- [ ] Swift가 지원하지 않는 schema/API major를 부분 decode하지 않고 업데이트 안내 상태로 전환한다.
+- [x] Swift가 시작 handshake, snapshot과 SSE에서 지원하지 않는 schema/API major를 부분 decode하지 않고 업데이트 안내 오류로 전환한다.
 - [ ] `MenuBarExtra` 또는 동등한 `NSStatusItem` 기반 메뉴바 진입점을 추가한다.
 - [ ] 메뉴바 클릭만으로 Gateway 상태, 활성 세션, 대기 요청, 최근 진행 상태를 작은 popover에서 확인한다.
 - [ ] popover에서 선택한 세션의 기존 상세 창과 전체 Monitoring 창을 열 수 있다.

@@ -18,7 +18,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import { GatewayRpcClient } from "./socket-rpc.js";
-import { MonitorState, queuedSingleFlight } from "./monitor-state.js";
+import { MONITOR_API_VERSION, MONITOR_SCHEMA_VERSION, MonitorState, queuedSingleFlight } from "./monitor-state.js";
 import { gatewaySocketPath } from "./config.js";
 import { mergeMonitorSessions, projectLocalSnapshot } from "./local-monitor.js";
 import { LocalTranscriptReader } from "./local-transcript.js";
@@ -259,8 +259,10 @@ async function main() {
         response.end();
         return;
       }
-      response.writeHead(error?.statusCode ?? 500, { "content-type": "application/json; charset=utf-8" });
-      response.end(JSON.stringify({ error: error?.message ?? String(error) }));
+      const statusCode = error?.statusCode ?? 500;
+      const code = error?.code ?? (statusCode === 500 ? "monitor_internal" : undefined);
+      response.writeHead(statusCode, { "content-type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify({ error: error?.message ?? String(error), ...(code ? { code } : {}) }));
     });
   });
 
@@ -268,7 +270,16 @@ async function main() {
     const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
     if (request.headers.authorization !== `Bearer ${apiToken}`) {
       response.writeHead(401, { "content-type": "application/json; charset=utf-8" });
-      response.end('{"error":"unauthorized"}');
+      response.end('{"error":"unauthorized","code":"monitor_unauthorized"}');
+      return;
+    }
+    if (url.pathname === "/api/meta" && request.method === "GET") {
+      sendJson(response, {
+        schemaVersion: MONITOR_SCHEMA_VERSION,
+        monitorApiVersion: MONITOR_API_VERSION,
+        gatewayIdentity: gatewayIdentity(state, identity),
+        capabilities: monitorCapabilities(state)
+      });
       return;
     }
     if (url.pathname === "/api/snapshot") {
@@ -415,6 +426,7 @@ async function main() {
       if (blockers.length) {
         const error = new Error(`Gateway를 안전하게 재시작할 수 없습니다: ${blockers.join(", ")}`);
         error.statusCode = 409;
+        error.code = "monitor_restart_blocked";
         throw error;
       }
       await restartGateway();
@@ -422,7 +434,7 @@ async function main() {
       return;
     }
     response.writeHead(404, { "content-type": "application/json" });
-    response.end('{"error":"not found"}');
+    response.end('{"error":"not found","code":"monitor_not_found"}');
   }
 
   async function controlCall(method, args) {
@@ -477,9 +489,13 @@ async function main() {
   const port = typeof address === "object" && address ? address.port : MONITOR_PORT;
   console.log(JSON.stringify({
     kind: "monitor_ready",
+    schemaVersion: MONITOR_SCHEMA_VERSION,
+    monitorApiVersion: MONITOR_API_VERSION,
     url: `http://${MONITOR_HOST}:${port}`,
     apiToken,
-    rootId: identity.rootId
+    rootId: identity.rootId,
+    gatewayIdentity: gatewayIdentity(state, identity),
+    capabilities: monitorCapabilities(state)
   }));
 
   let shuttingDown = false;
@@ -558,6 +574,22 @@ async function pathIsMissing(path) {
     if (error?.code === "ENOENT") return true;
     throw error;
   }
+}
+
+// Missing Gateway setup values (e.g. before the first successful "setup"
+// call) surface as null rather than being omitted, per the shared wire
+// contract; apiToken/control token are never part of this shape.
+function gatewayIdentity(state, identity) {
+  return {
+    rootId: identity.rootId ?? null,
+    gatewayApiVersion: state.gateway?.gatewayApiVersion ?? null,
+    gatewayVersion: state.gateway?.gatewayVersion ?? null,
+    gatewayBuildId: state.gateway?.gatewayBuildId ?? null
+  };
+}
+
+function monitorCapabilities(state) {
+  return state.gateway?.capabilities ?? {};
 }
 
 function sendJson(response, value, status = 200) {

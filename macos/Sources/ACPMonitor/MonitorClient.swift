@@ -18,6 +18,12 @@ actor MonitorClient {
 
     private var streamTask: Task<Void, Never>?
 
+    func fetchMeta(endpoint: MonitorEndpoint) async throws -> MonitorMeta {
+        let (data, response) = try await URLSession.shared.data(for: endpoint.request(path: "api/meta"))
+        try validate(response: response, data: data)
+        return try MonitorMeta.decode(data)
+    }
+
     func fetchSnapshot(endpoint: MonitorEndpoint) async throws -> MonitorSnapshot {
         let (data, response) = try await URLSession.shared.data(for: endpoint.request(path: "api/snapshot"))
         try validate(response: response, data: data)
@@ -123,6 +129,8 @@ actor MonitorClient {
                         guard line.hasPrefix("data: "),
                               let data = String(line.dropFirst(6)).data(using: .utf8) else { continue }
                         let value = try decodeJSONValue(data)
+                        guard let object = value.objectValue else { throw MonitorDecodeError.invalidMessage }
+                        try MonitorCompatibility.validate(object)
                         await onMessage(value)
                     }
                     throw URLError(.networkConnectionLost)
@@ -145,16 +153,7 @@ actor MonitorClient {
     private func validate(response: URLResponse, data: Data) throws {
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         guard (200..<300).contains(http.statusCode) else {
-            let message = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
-            throw MonitorClientError.server(message ?? "Monitor request failed (HTTP \(http.statusCode))")
+            throw MonitorClientError.decode(data: data, statusCode: http.statusCode)
         }
-    }
-}
-
-enum MonitorClientError: LocalizedError {
-    case server(String)
-    var errorDescription: String? {
-        guard case let .server(message) = self else { return nil }
-        return message
     }
 }

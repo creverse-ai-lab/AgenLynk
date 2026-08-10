@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { MonitorState, queuedSingleFlight } from "../src/monitor-state.js";
+import { MONITOR_API_VERSION, MONITOR_SCHEMA_VERSION, MonitorState, queuedSingleFlight } from "../src/monitor-state.js";
 
 test("queuedSingleFlight serializes overlapping refreshes and coalesces the queue", async () => {
   let releaseFirst;
@@ -121,4 +121,21 @@ test("MonitorState replaces local events and ignores local work as a Gateway res
     "local:codex:main": [{ sessionId: "local:codex:main", sequence: 12, type: "turn_start" }]
   });
   assert.deepEqual(state.snapshot().events["local:codex:main"].map((event) => event.sequence), [12]);
+});
+
+test("MonitorState stamps snapshot and SSE envelopes with schema/API version", () => {
+  const state = new MonitorState();
+  const snapshot = state.snapshot();
+  assert.equal(snapshot.schemaVersion, MONITOR_SCHEMA_VERSION);
+  assert.equal(snapshot.monitorApiVersion, MONITOR_API_VERSION);
+
+  let frame = "";
+  const client = { write(data) { frame = data; return true; }, end() {} };
+  state.sseClients.add(client);
+  state.broadcast({ kind: "state", connected: true, schemaVersion: 999, monitorApiVersion: "999.0" });
+  const envelope = JSON.parse(frame.replace(/^data: /, "").trim());
+  assert.equal(envelope.schemaVersion, MONITOR_SCHEMA_VERSION);
+  assert.equal(envelope.monitorApiVersion, MONITOR_API_VERSION);
+  assert.equal(envelope.kind, "state");
+  assert.equal(envelope.connected, true);
 });

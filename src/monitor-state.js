@@ -1,3 +1,10 @@
+// Wire contract for the native Monitor app's HTTP/SSE API, independent of
+// GATEWAY_API_VERSION (the Gateway daemon's own setup/subscribe handshake).
+// Bump MONITOR_SCHEMA_VERSION only when a field is removed, renamed, or
+// changes meaning; additive fields do not require a bump.
+export const MONITOR_SCHEMA_VERSION = 1;
+export const MONITOR_API_VERSION = "1.0";
+
 export class MonitorState {
   constructor({ maxEventsPerSession = 2000, historyRetentionMs = 65 * 60 * 1000 } = {}) {
     this.maxEventsPerSession = maxEventsPerSession;
@@ -115,6 +122,8 @@ export class MonitorState {
   snapshot() {
     this.pruneHistory();
     return {
+      schemaVersion: MONITOR_SCHEMA_VERSION,
+      monitorApiVersion: MONITOR_API_VERSION,
       connected: this.connected,
       streaming: this.streaming,
       error: this.lastError,
@@ -165,7 +174,8 @@ export class MonitorState {
   }
 
   broadcast(message) {
-    const frame = `data: ${JSON.stringify(message)}\n\n`;
+    const envelope = { ...message, schemaVersion: MONITOR_SCHEMA_VERSION, monitorApiVersion: MONITOR_API_VERSION };
+    const frame = `data: ${JSON.stringify(envelope)}\n\n`;
     for (const client of this.sseClients) {
       try {
         if (client.write(frame)) continue;

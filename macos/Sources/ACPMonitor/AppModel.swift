@@ -514,6 +514,10 @@ final class AppModel: ObservableObject {
             )
             self.endpoint = endpoint
             sidecarStreamConnected = false
+            // Authenticated compatibility handshake before any normal
+            // snapshot/stream consumption; throws a stable update-required
+            // error if the Monitor's schema/API major isn't supported.
+            _ = try await client.fetchMeta(endpoint: endpoint)
             let snapshot = try await client.fetchSnapshot(endpoint: endpoint)
             apply(snapshot)
             await loadGatewayConfig()
