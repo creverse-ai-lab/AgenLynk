@@ -201,13 +201,54 @@ final class AppModel: ObservableObject {
         return visibleLogSessions.first { $0.sessionId == selectedSessionId }
     }
 
+    // ── Memoized event aggregations ───────────────────────────────────────
+    // These are computed properties referenced from view bodies, so without a
+    // cache they re-run a full flatMap+filter+sort over every retained event
+    // (~100-300ms at the caps) on EVERY body evaluation — 10/s during a busy
+    // turn. `dataRevision` advances whenever the underlying event data
+    // changes; the cache key adds the selection and the two display filters.
+
+    private struct EventCacheKey: Equatable {
+        let revision: Int
+        let frontdoorId: String?
+        let showThoughts: Bool
+        let showToolEvents: Bool
+    }
+
+    private var dataRevision = 0
+    private var allVisibleEventsCache: (key: EventCacheKey, value: [MonitorEvent])?
+    private var selectedEventsCache: (key: EventCacheKey, value: [MonitorEvent])?
+
+    /// Call whenever `logEventsBySession`/`eventsBySession` contents change.
+    private func invalidateEventCaches() {
+        dataRevision &+= 1
+    }
+
+    private var eventCacheKey: EventCacheKey {
+        EventCacheKey(
+            revision: dataRevision,
+            frontdoorId: selectedFrontdoorId,
+            showThoughts: settings.showThoughts,
+            showToolEvents: settings.showToolEvents
+        )
+    }
+
     var allVisibleEvents: [MonitorEvent] {
+        // The selection does not affect this aggregate; exclude it from the
+        // key so selecting a frontdoor doesn't recompute the full list.
+        let key = EventCacheKey(
+            revision: dataRevision, frontdoorId: nil,
+            showThoughts: settings.showThoughts, showToolEvents: settings.showToolEvents
+        )
+        if let cached = allVisibleEventsCache, cached.key == key { return cached.value }
         let mappedSessionIds = Set(logFrontdoorSessions.flatMap { $0.members.map(\.sessionId) })
-        return logEventsBySession
+        let value = logEventsBySession
             .filter { mappedSessionIds.contains($0.key) }
             .values.flatMap { $0 }
             .filter(eventIsVisible)
             .sorted(by: eventSort)
+        allVisibleEventsCache = (key, value)
+        return value
     }
 
     var visibleEventsBySession: [String: [MonitorEvent]] {
@@ -219,15 +260,23 @@ final class AppModel: ObservableObject {
               let frontdoor = logFrontdoorSessions.first(where: { $0.id == selectedFrontdoorId }) else {
             return allVisibleEvents
         }
-        return frontdoor.members
+        let key = eventCacheKey
+        if let cached = selectedEventsCache, cached.key == key { return cached.value }
+        let value = frontdoor.members
             .flatMap { logEventsBySession[$0.sessionId] ?? [] }
             .filter(eventIsVisible)
             .sorted(by: eventSort)
+        selectedEventsCache = (key, value)
+        return value
     }
 
     var selectedEvent: MonitorEvent? {
         guard let selectedEventId else { return nil }
-        return allVisibleEvents.first { $0.id == selectedEventId }
+        // The selected event is on screen, so it is in the selected scope;
+        // searching there avoids materializing the full aggregate just to
+        // resolve one id.
+        return selectedEvents.first { $0.id == selectedEventId }
+            ?? allVisibleEvents.first { $0.id == selectedEventId }
     }
 
     func startIfNeeded() {
@@ -668,6 +717,9 @@ final class AppModel: ObservableObject {
         do {
             let endpoint = try await sidecar.start(nodeOverride: settings.nodePath)
             self.endpoint = endpoint
+            // A fresh monitor counts revisions from zero; a stale baseline
+            // could coincide with the new numbering and skip a real change.
+            appliedSnapshotRevision = nil
             sidecarStreamConnected = false
             // Authenticated compatibility handshake before any normal
             // snapshot/stream consumption; throws a stable update-required
@@ -723,18 +775,31 @@ final class AppModel: ObservableObject {
         if heartbeat.map({ now.timeIntervalSince($0) >= 1 }) ?? true { heartbeat = now }
     }
 
+    /// The monitor revision of the last fully-applied snapshot; nil until one
+    /// applies or when the monitor predates the revision field.
+    private var appliedSnapshotRevision: Int?
+
     private func apply(_ snapshot: MonitorSnapshot) {
         // Deliberately NOT a heartbeat update: snapshots also arrive from the
         // periodic HTTP reconciliation, which would keep the staleness signal
         // green forever even after the SSE stream silently died.
         var logCacheChanged = false
         if gateway != snapshot.gateway { gateway = snapshot.gateway }
-        if sessions != snapshot.sessions { sessions = snapshot.sessions; logCacheChanged = true }
-        if eventsBySession != snapshot.eventsBySession { eventsBySession = snapshot.eventsBySession; logCacheChanged = true }
-        if historySessions != snapshot.historySessions { historySessions = snapshot.historySessions; logCacheChanged = true }
-        if historyEventsBySession != snapshot.historyEventsBySession {
-            historyEventsBySession = snapshot.historyEventsBySession
-            logCacheChanged = true
+        // The monitor's revision covers exactly the session/event data below.
+        // On the 10s reconciliation an unchanged revision skips four deep
+        // comparisons over every retained event (~15ms of main-thread work and
+        // the cache rebuild they can trigger); tasks/inbox are outside the
+        // revision and keep their own cheap checks.
+        let dataUnchanged = snapshot.revision != nil && snapshot.revision == appliedSnapshotRevision
+        if !dataUnchanged {
+            if sessions != snapshot.sessions { sessions = snapshot.sessions; logCacheChanged = true }
+            if eventsBySession != snapshot.eventsBySession { eventsBySession = snapshot.eventsBySession; logCacheChanged = true }
+            if historySessions != snapshot.historySessions { historySessions = snapshot.historySessions; logCacheChanged = true }
+            if historyEventsBySession != snapshot.historyEventsBySession {
+                historyEventsBySession = snapshot.historyEventsBySession
+                logCacheChanged = true
+            }
+            appliedSnapshotRevision = snapshot.revision
         }
         if tasks != snapshot.tasks { tasks = snapshot.tasks }
         if inbox != snapshot.inbox { inbox = snapshot.inbox }
@@ -860,13 +925,24 @@ final class AppModel: ObservableObject {
 
             var logged = nextLogEventsBySession[sessionId] ?? []
             let loggedIds = Set(logged.map(\.id))
-            logged.append(contentsOf: accepted.filter { !loggedIds.contains($0.id) })
+            let tail = logged.last
+            let fresh = accepted.filter { !loggedIds.contains($0.id) }
+            logged.append(contentsOf: fresh)
             if logged.count > 2_000 { logged.removeFirst(logged.count - 2_000) }
-            if logged.count > 1 { logged.sort(by: eventSort) }
+            // Events arrive sequence-ordered per session; the sort only needs
+            // to run when this batch actually lands out of order (a replay
+            // after reconnect). Re-sorting 2000 events per 100ms flush was
+            // measurable main-thread time for a case that almost never occurs.
+            let appendedInOrder = zip(fresh, fresh.dropFirst()).allSatisfy { !eventSort($1, $0) }
+                && (tail == nil || fresh.first == nil || !eventSort(fresh.first!, tail!))
+            if logged.count > 1 && !appendedInOrder { logged.sort(by: eventSort) }
             nextLogEventsBySession[sessionId] = logged
         }
         if eventsBySession != nextEventsBySession { eventsBySession = nextEventsBySession }
-        if logEventsBySession != nextLogEventsBySession { logEventsBySession = nextLogEventsBySession }
+        if logEventsBySession != nextLogEventsBySession {
+            logEventsBySession = nextLogEventsBySession
+            invalidateEventCaches()
+        }
     }
 
     private func removeSession(_ sessionId: String) {
@@ -876,6 +952,13 @@ final class AppModel: ObservableObject {
         reconcileSelections()
     }
 
+    /// The merged per-session inputs of the last rebuild, so an unchanged
+    /// session's merge (dictionary insert of every event + a sort) is skipped.
+    /// Rebuilds run several times a second during a busy turn, and re-merging
+    /// all sessions at the caps measured at ~200ms of main-thread stall each —
+    /// while typically only one session's events actually changed.
+    private var logMergeInputs: [String: (live: [MonitorEvent], history: [MonitorEvent])] = [:]
+
     private func rebuildLogCache() {
         var sessionsById: [String: GatewaySession] = [:]
         for session in historySessions { sessionsById[session.sessionId] = session }
@@ -883,15 +966,40 @@ final class AppModel: ObservableObject {
         let nextSessions = Array(sessionsById.values)
             .sorted { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
 
-        var nextEvents = historyEventsBySession
-        for (sessionId, current) in eventsBySession {
+        var nextEvents = logEventsBySession
+        var nextInputs: [String: (live: [MonitorEvent], history: [MonitorEvent])] = [:]
+        let sessionIds = Set(eventsBySession.keys).union(historyEventsBySession.keys)
+        for sessionId in sessionIds {
+            let live = eventsBySession[sessionId] ?? []
+            let history = historyEventsBySession[sessionId] ?? []
+            nextInputs[sessionId] = (live, history)
+            // Array equality here is cheap in the common case: unchanged
+            // sessions share storage with the previous pass (CoW), so the
+            // comparison is pointer identity, not element-by-element.
+            if let previous = logMergeInputs[sessionId],
+               previous.live == live, previous.history == history,
+               nextEvents[sessionId] != nil {
+                continue
+            }
             var eventsById: [String: MonitorEvent] = [:]
-            for event in nextEvents[sessionId] ?? [] { eventsById[event.id] = event }
-            for event in current { eventsById[event.id] = event }
+            for event in history { eventsById[event.id] = event }
+            for event in live { eventsById[event.id] = event }
             nextEvents[sessionId] = Array(eventsById.values).sorted(by: eventSort)
         }
-        if logSessions != nextSessions { logSessions = nextSessions }
-        if logEventsBySession != nextEvents { logEventsBySession = nextEvents }
+        // Sessions that vanished from both sources drop out of the cache.
+        for sessionId in nextEvents.keys where nextInputs[sessionId] == nil {
+            nextEvents.removeValue(forKey: sessionId)
+        }
+        logMergeInputs = nextInputs
+
+        if logSessions != nextSessions {
+            logSessions = nextSessions
+            invalidateEventCaches()
+        }
+        if logEventsBySession != nextEvents {
+            logEventsBySession = nextEvents
+            invalidateEventCaches()
+        }
     }
 
     private func mutateAgent(_ agent: ACPAgentCatalogItem, body: [String: JSONValue]) async {
@@ -918,9 +1026,13 @@ final class AppModel: ObservableObject {
 
     private func startPet() {
         do {
+            let projection = PetActivityProjection.make(sessions: realtimeSessions, inbox: realtimeInbox)
+            // start() writes the files itself; the skip-identical baseline in
+            // syncPetSnapshot must reflect that write.
+            lastPetProjection = projection
             try pet.start(
                 executablePath: settings.resolvedPetExecutablePath,
-                projection: PetActivityProjection.make(sessions: realtimeSessions, inbox: realtimeInbox)
+                projection: projection
             ) { [weak self] status in
                 guard let self else { return }
                 self.petRunning = false
@@ -936,10 +1048,19 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The projection last written to the contract files. State messages
+    /// arrive several times a second during a turn, but the projection usually
+    /// only changes on real state transitions — skipping identical writes
+    /// spares two atomic file writes + chmods per message.
+    private var lastPetProjection: PetActivityProjection?
+
     private func syncPetSnapshot() {
         guard settings.petEnabled, petRunning else { return }
+        let projection = PetActivityProjection.make(sessions: realtimeSessions, inbox: realtimeInbox)
+        guard projection != lastPetProjection else { return }
         do {
-            try pet.update(PetActivityProjection.make(sessions: realtimeSessions, inbox: realtimeInbox))
+            try pet.update(projection)
+            lastPetProjection = projection
             if petRunning { petError = nil }
         } catch {
             petError = "Pet 상태 공유 실패: \(error.localizedDescription)"

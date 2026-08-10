@@ -16,6 +16,10 @@ import { externalParent, pruneExternalParents } from "./parent-links.js";
 import { snapshotSessions } from "./snapshot.js";
 
 const DISCOVERY_INTERVAL_SECONDS = 2;
+// ps costs ~25ms CPU per pass; grok is its only consumer and a new grok
+// session appearing a few seconds late is fine, so the process scan runs on
+// its own slower cadence than file-based discovery.
+const PROCESS_SCAN_INTERVAL_SECONDS = 5;
 const DEFAULT_READY_AFTER = 3;
 const DEFAULT_STALE_AFTER = 600;
 
@@ -49,6 +53,10 @@ export class LocalAgentScanner {
     this.codexStates = {};
     this.detectedStates = {};
     this.claudeCache = new Map();
+    // Grok process facts, refreshed on their own slower cadence.
+    this.processStates = {};
+    this.grokEventPathCache = new Map();
+    this.lastProcessScan = 0;
     // Parent links are in-memory now. The old watcher reloaded them from its
     // snapshot file; here a monitor restart simply rediscovers them from the
     // transcripts on the next scan.
@@ -97,7 +105,15 @@ export class LocalAgentScanner {
       });
     }
 
-    let detected = await detectCliProcesses(now, this.detectedStates, this.parents);
+    if (now - this.lastProcessScan >= (this.processScanIntervalSeconds ?? PROCESS_SCAN_INTERVAL_SECONDS)) {
+      this.processStates = await detectCliProcesses(now, this.processStates, this.parents, this.grokEventPathCache);
+      this.lastProcessScan = now;
+    }
+    // Copy each carried-over entry: later stages mutate item.parent in place,
+    // and the retained processStates must stay what the scan itself reported.
+    let detected = Object.fromEntries(
+      Object.entries(this.processStates).map(([key, item]) => [key, { ...item }])
+    );
     Object.assign(detected, await detectClaudeSessions(
       this.claudeRoot, now, this.readyAfter, this.staleAfter, this.parents, this.claudeCache
     ));

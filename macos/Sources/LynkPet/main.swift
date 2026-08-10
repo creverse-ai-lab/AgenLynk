@@ -522,6 +522,14 @@ private final class MotionController: ObservableObject {
         let sessions = store.sessions
         let sessionsChanged = sessions != lastSessions
         lastSessions = sessions
+
+        // Deep rest: once visually still for 30 ticks the publish was already
+        // suppressed, but the layout/spring/frame work kept burning ~0.5% CPU
+        // at 60Hz forever. The only things that can wake a resting scene are
+        // the mouse and a session change — both just computed — so everything
+        // below is skipped until one of them happens.
+        if restTicks > 30 && !mouseMoved && !sessionsChanged { return }
+
         let screenFrame = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }?.visibleFrame
             ?? NSScreen.main?.visibleFrame
             ?? NSRect(origin: .zero, size: windowSize)

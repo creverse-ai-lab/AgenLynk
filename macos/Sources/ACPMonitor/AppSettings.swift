@@ -20,7 +20,6 @@ final class AppSettings: ObservableObject {
         static let activeOnly = "monitor.activeOnly"
         static let showThoughts = "monitor.showThoughts"
         static let showToolEvents = "monitor.showToolEvents"
-        static let graphWindowMinutes = "monitor.graphWindowMinutes"
         static let followLatestEvent = "monitor.followLatestEvent"
         static let followLatestEventUXMigration = "monitor.followLatestEventUXMigrationV2"
         static let nodePath = "monitor.nodePath"
@@ -35,7 +34,6 @@ final class AppSettings: ObservableObject {
     @Published var activeOnly: Bool { didSet { defaults.set(activeOnly, forKey: Key.activeOnly) } }
     @Published var showThoughts: Bool { didSet { defaults.set(showThoughts, forKey: Key.showThoughts) } }
     @Published var showToolEvents: Bool { didSet { defaults.set(showToolEvents, forKey: Key.showToolEvents) } }
-    @Published var graphWindowMinutes: Int { didSet { defaults.set(graphWindowMinutes, forKey: Key.graphWindowMinutes) } }
     @Published var followLatestEvent: Bool { didSet { defaults.set(followLatestEvent, forKey: Key.followLatestEvent) } }
     @Published var nodePath: String { didSet { defaults.set(nodePath, forKey: Key.nodePath) } }
     @Published var petEnabled: Bool { didSet { defaults.set(petEnabled, forKey: Key.petEnabled) } }
@@ -60,7 +58,6 @@ final class AppSettings: ObservableObject {
         activeOnly = defaults.object(forKey: Key.activeOnly) as? Bool ?? false
         showThoughts = defaults.object(forKey: Key.showThoughts) as? Bool ?? true
         showToolEvents = defaults.object(forKey: Key.showToolEvents) as? Bool ?? true
-        graphWindowMinutes = defaults.object(forKey: Key.graphWindowMinutes) as? Int ?? 15
         if defaults.bool(forKey: Key.followLatestEventUXMigration) {
             followLatestEvent = defaults.object(forKey: Key.followLatestEvent) as? Bool ?? false
         } else {
@@ -95,7 +92,6 @@ final class AppSettings: ObservableObject {
         activeOnly = false
         showThoughts = true
         showToolEvents = true
-        graphWindowMinutes = 15
         followLatestEvent = false
         nodePath = ""
         petEnabled = bundledPetExecutablePath != nil

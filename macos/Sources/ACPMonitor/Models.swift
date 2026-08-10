@@ -248,9 +248,11 @@ struct PetActivityProjection: Equatable, Sendable {
                 .max { ($0.updatedAt ?? "") < ($1.updatedAt ?? "") }
             let workers = group.filter { !$0.isFrontdoorRecord }
             let frontdoorId = key.instanceId ?? petFrontdoorId(key)
-            let latest = group.max { lhs, rhs in
-                petTimestamp(lhs.updatedAt, fallback: now) < petTimestamp(rhs.updatedAt, fallback: now)
-            }
+            // Lexical comparison: every producer emits the same fixed-width
+            // ISO8601 form, so string order is time order (FrontdoorSession.make
+            // relies on exactly this). Parsing dates on both sides of every
+            // max() comparison was ~90% of this whole projection's cost.
+            let latest = group.max { ($0.updatedAt ?? "") < ($1.updatedAt ?? "") }
             let memberStates = group.map { session in
                 petContractState(for: session.status, hasPendingInbox: (pendingBySession[session.sessionId] ?? 0) > 0)
             }
@@ -739,6 +741,10 @@ struct MonitorMeta: Equatable, Sendable {
 struct MonitorSnapshot: Sendable {
     let schemaVersion: Int
     let monitorApiVersion: String
+    /// The monitor's session/event data revision (additive; nil from an older
+    /// monitor). Unchanged revision means the expensive session/event
+    /// comparisons can be skipped wholesale on reconciliation.
+    let revision: Int?
     let connected: Bool
     let streaming: Bool
     let error: String?
@@ -769,6 +775,7 @@ struct MonitorSnapshot: Sendable {
         return MonitorSnapshot(
             schemaVersion: root.int("schemaVersion") ?? MonitorCompatibility.supportedSchemaVersion,
             monitorApiVersion: root.string("monitorApiVersion") ?? "",
+            revision: root.int("revision"),
             connected: root.bool("connected") ?? false,
             streaming: root.bool("streaming") ?? root.bool("connected") ?? false,
             error: root.string("error"),

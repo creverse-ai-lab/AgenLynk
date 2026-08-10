@@ -98,11 +98,43 @@ export function isGrokProcess(command, args) {
   return basename(command ?? "") === "grok" || basename(executable ?? "") === "grok";
 }
 
-/** Maps grok pids to the events.jsonl each one holds open. */
-export async function grokEventPaths(pids) {
-  if (!pids.length) return new Map();
-  const stdout = await runCommand("lsof", ["-a", "-p", pids.join(","), "-Fn"]);
+/** How long a cached pid→events.jsonl mapping is trusted before re-checking. */
+const EVENT_PATH_REFRESH_SECONDS = 60;
+
+/**
+ * Maps grok pids to the events.jsonl each one holds open.
+ *
+ * `cache` (pid -> {path, at}) makes lsof incremental: a process's open
+ * transcript is stable for its lifetime, and lsof measures ~40ms CPU per call
+ * — on a machine with long-lived grok processes that was the single largest
+ * steady-state cost of the whole scanner (~2% of a core at the 2s cadence).
+ * Only unseen pids are queried; cached entries are re-verified on a slow
+ * refresh as a safety net, and dead pids fall out of the cache.
+ */
+export async function grokEventPaths(pids, cache = null, now = Date.now() / 1000) {
+  if (!pids.length) {
+    cache?.clear();
+    return new Map();
+  }
   const paths = new Map();
+  let stale = pids;
+  if (cache) {
+    for (const pid of [...cache.keys()]) {
+      if (!pids.includes(pid)) cache.delete(pid);
+    }
+    stale = pids.filter((pid) => {
+      const entry = cache.get(pid);
+      if (entry && now - entry.at < EVENT_PATH_REFRESH_SECONDS) {
+        if (entry.path) paths.set(pid, entry.path);
+        return false;
+      }
+      return true;
+    });
+    if (!stale.length) return paths;
+  }
+
+  const stdout = await runCommand("lsof", ["-a", "-p", stale.join(","), "-Fn"]);
+  const found = new Set();
   let pid = null;
   for (const line of stdout.split("\n")) {
     if (line.startsWith("p")) {
@@ -110,7 +142,14 @@ export async function grokEventPaths(pids) {
       pid = Number.isInteger(parsed) ? parsed : null;
     } else if (pid != null && line.startsWith("n") && line.endsWith("/events.jsonl")) {
       paths.set(pid, line.slice(1));
+      cache?.set(pid, { path: line.slice(1), at: now });
+      found.add(pid);
     }
+  }
+  // A queried pid with no open events.jsonl is also worth remembering, so a
+  // non-transcript grok process doesn't get re-lsof'd every pass.
+  for (const staleId of stale) {
+    if (!found.has(staleId)) cache?.set(staleId, { path: null, at: now });
   }
   return paths;
 }
@@ -153,7 +192,7 @@ export async function cliProcessStates(processes, eventPaths, now, previous = {}
   return states;
 }
 
-export async function detectCliProcesses(now, previous = {}, parents = null) {
+export async function detectCliProcesses(now, previous = {}, parents = null, eventPathCache = null) {
   const stdout = await runCommand("ps", ["-axo", "pid=,ppid=,comm=,args="]);
   if (!stdout) return previous;
   const processes = new Map();
@@ -170,5 +209,5 @@ export async function detectCliProcesses(now, previous = {}, parents = null) {
   const grokPids = [...processes]
     .filter(([, [, command, args]]) => isGrokProcess(command, args))
     .map(([pid]) => pid);
-  return cliProcessStates(processes, await grokEventPaths(grokPids), now, previous, parents);
+  return cliProcessStates(processes, await grokEventPaths(grokPids, eventPathCache, now), now, previous, parents);
 }

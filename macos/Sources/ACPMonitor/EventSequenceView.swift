@@ -16,6 +16,13 @@ struct EventSequenceView: View {
     private let eventRowHeight = 44.0
 
     var body: some View {
+        // Derived once per body pass. The computed-property forms re-ran
+        // collapseSequenceEvents up to four times (totalPages, pageEvents,
+        // pageRangeLabel, onChange) and firstEventId filtered+sorted the full
+        // event array once per edge — measurable milliseconds at 10 passes/s
+        // during a busy turn.
+        let diagram = collapseSequenceEvents(events)
+        let firstEventBySession = firstEventIds()
         let lanes = makeSequenceLanes(sessions: sessions, events: events)
         let laneIndex = lanes.enumerated().reduce(into: [String: Int]()) { result, item in
             result[item.element.session.sessionId] = item.offset
@@ -29,10 +36,10 @@ struct EventSequenceView: View {
                 childIndex: childIndex,
                 child: lane.session,
                 childDepth: lane.depth,
-                eventId: firstEventId(for: lane.session.sessionId)
+                eventId: firstEventBySession[lane.session.sessionId]
             )
         }
-        let nodes = pageEvents.compactMap { entry -> SequenceDiagramNode? in
+        let nodes = pageEvents(in: diagram).compactMap { entry -> SequenceDiagramNode? in
             guard let index = laneIndex[entry.event.sessionId] else { return nil }
             return SequenceDiagramNode(laneIndex: index, event: entry.event, collapsedCount: entry.count)
         }
@@ -40,10 +47,11 @@ struct EventSequenceView: View {
         let eventTop = headerHeight + relationHeight + 8
         let width = max(timeWidth + Double(max(lanes.count, 1)) * laneWidth, 620)
         let height = max(eventTop + Double(max(nodes.count, 1)) * eventRowHeight + 20, 420)
+        let pages = max(1, (diagram.count + pageSize - 1) / pageSize)
 
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Text(pageRangeLabel)
+                Text(pageRangeLabel(for: diagram))
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
                 Text("화살표: 호출 관계 · 노드: 이벤트")
@@ -64,7 +72,7 @@ struct EventSequenceView: View {
                     followLatestEvent = false
                     page += 1
                 }
-                    .disabled(page + 1 >= totalPages)
+                    .disabled(page + 1 >= pages)
                 Button("최신 로그", systemImage: "chevron.right") { page = 0 }
                     .disabled(page == 0)
             }
@@ -184,11 +192,11 @@ struct EventSequenceView: View {
         }
         .background(Color(nsColor: .controlBackgroundColor))
         .accessibilityLabel("Frontdoor Agent Subagent 이벤트 시퀀스 다이어그램")
-        .onChange(of: diagramEvents.count) { _, _ in
+        .onChange(of: diagram.count) { _, _ in
             if followLatestEvent {
                 page = 0
             } else {
-                page = min(page, max(totalPages - 1, 0))
+                page = min(page, max(pages - 1, 0))
             }
         }
     }
@@ -197,30 +205,32 @@ struct EventSequenceView: View {
         timeWidth + laneWidth * (Double(index) + 0.5)
     }
 
-    private func firstEventId(for sessionId: String) -> String? {
-        events.filter { $0.sessionId == sessionId }.sorted(by: sequenceEventSort).first?.id
+    /// Earliest event id per session, in one grouping pass instead of a
+    /// filter+sort of every event per edge.
+    private func firstEventIds() -> [String: String] {
+        var earliest: [String: MonitorEvent] = [:]
+        for event in events {
+            if let current = earliest[event.sessionId] {
+                if sequenceEventSort(event, current) { earliest[event.sessionId] = event }
+            } else {
+                earliest[event.sessionId] = event
+            }
+        }
+        return earliest.mapValues(\.id)
     }
 
-    private var totalPages: Int {
-        max(1, (diagramEvents.count + pageSize - 1) / pageSize)
-    }
-
-    private var pageEvents: ArraySlice<SequenceEventEntry> {
-        let values = diagramEvents
+    private func pageEvents(in values: [SequenceEventEntry]) -> ArraySlice<SequenceEventEntry> {
         let end = max(0, values.count - page * pageSize)
         let start = max(0, end - pageSize)
         return values[start..<end]
     }
 
-    private var pageRangeLabel: String {
-        let values = diagramEvents
+    private func pageRangeLabel(for values: [SequenceEventEntry]) -> String {
         guard !values.isEmpty else { return "0 / 0" }
         let end = max(0, values.count - page * pageSize)
         let start = max(0, end - pageSize)
         return "\(start + 1)–\(end) / \(values.count)"
     }
-
-    private var diagramEvents: [SequenceEventEntry] { collapseSequenceEvents(events) }
 }
 
 private struct SequenceLane: Identifiable {

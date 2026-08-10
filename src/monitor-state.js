@@ -124,6 +124,10 @@ export class MonitorState {
     return {
       schemaVersion: MONITOR_SCHEMA_VERSION,
       monitorApiVersion: MONITOR_API_VERSION,
+      // Additive: lets a reconciliation client skip the expensive deep
+      // comparison (and the 200ms cache rebuild it triggers) when nothing
+      // changed since the snapshot it already applied.
+      revision: this.revision,
       connected: this.connected,
       streaming: this.streaming,
       error: this.lastError,

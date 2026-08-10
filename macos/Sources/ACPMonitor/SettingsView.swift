@@ -9,11 +9,6 @@ struct SettingsView: View {
             Form {
                 ACPLogoLockup(subtitle: "표시 설정")
                 Section("기본 표시") {
-                    Picker("Branch 시간 범위", selection: $settings.graphWindowMinutes) {
-                        Text("최근 5분").tag(5)
-                        Text("최근 15분").tag(15)
-                        Text("최근 60분").tag(60)
-                    }
                     Toggle("활성 세션만 표시", isOn: $settings.activeOnly)
                 }
                 Section("이벤트") {
