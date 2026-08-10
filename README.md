@@ -277,8 +277,11 @@ Gateway를 지나가는 중간 과정을 네이티브 SwiftUI 화면에서 실�
 ```bash
 npm run macos:test
 npm run macos:build
+npm run macos:dmg
 npm run macos:run
 ```
+
+`npm run macos:dmg`가 만드는 `Lynk.app`은 Apple Silicon Node 22+ 배포판 전체(`node`/`npm`/`npx`), `src/`, `package.json`/`node_modules`, `skills/agent-delegator`를 `Contents/Resources/runtime/`에 **설치용 seed**로 포함해 시스템 Node나 저장소 checkout 없이 실행됩니다. 이 seed는 앱에서 직접 실행되지 않고, 최초 실행 시 `~/.acp-gateway/runtime/versions/<버전>-<빌드ID>/`로 복사·검증된 뒤에만 그 설치본이 실행됩니다(`~/.acp-gateway/install.json`의 기존 Control identity는 그대로 유지). `npm run macos:dmg`는 공식 Node 배포판을 자동 준비하고 그 결과를 `Applications` 심볼릭 링크와 함께 `build/Lynk.dmg`로 패키징합니다(`npm run macos:build` 단독 실행은 Node를 번들하지 않는 개발용 빠른 빌드로 남습니다). 설치된 runtime이 없거나 무효한 첫 실행에서는 대시보드 대신 Frontdoor 선택 설치 화면이 먼저 나타나며, 설치된 runtime의 `acp-gateway-bootstrap --install-all`이 Gateway 상태 확인까지 마쳐야 모니터링을 시작합니다. 자세한 서명/notarization 파라미터와 설치 경로 경계는 `macos/README.md`를 참고하세요.
 
 - **Dashboard**는 Gateway 상태, 전체/활성 세션, 이벤트, Task, Inbox를 한 화면에 표시합니다.
 - **Monitoring**은 Frontdoor trunk에서 Worker가 갈라지고 합쳐지는 **Branch** 시간축과, Frontdoor·Worker 관계와 현재 상태를 한눈에 보는 **Map** 보기를 전환해 제공합니다.

@@ -25,6 +25,7 @@
     "bootstrap": "node src/bootstrap.js",
     "monitor:server": "node src/monitor.js",
     "macos:build": "sh macos/scripts/build-app.sh",
+    "macos:dmg": "sh macos/scripts/build-dmg.sh",
     "macos:test": "sh macos/scripts/test-models.sh",
     "macos:run": "open \"build/Lynk.app\"",
     "test": "sh -c 'export ACP_GATEWAY_DISABLE_DYNAMIC_PROVIDERS=1 ACP_GATEWAY_ARTIFACTS=\"$(mktemp -d)\"; node --test test/*.test.js; s=$?; rm -rf \"$ACP_GATEWAY_ARTIFACTS\"; exit $s'",

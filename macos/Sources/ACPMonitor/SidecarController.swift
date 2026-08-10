@@ -1,17 +1,11 @@
 import Foundation
 
 enum SidecarError: LocalizedError {
-    case nodeNotFound
-    case monitorScriptNotFound(String)
     case processExited(Int32)
     case invalidReadyMessage
 
     var errorDescription: String? {
         switch self {
-        case .nodeNotFound:
-            "Node 22 이상을 찾지 못했습니다. Settings에서 Node 실행 파일 경로를 지정하세요."
-        case let .monitorScriptNotFound(path):
-            "Monitor sidecar를 찾지 못했습니다: \(path)"
         case let .processExited(code):
             "Monitor sidecar가 준비되기 전에 종료되었습니다 (exit \(code))."
         case .invalidReadyMessage:
@@ -30,8 +24,9 @@ final class SidecarController {
         stop()
         generation += 1
         let startGeneration = generation
-        let nodeURL = try locateNode(override: nodeOverride)
-        let scriptURL = try locateMonitorScript()
+        let nodeURL = try BundledRuntime.locateNode(override: nodeOverride)
+        try BundledRuntime.validateVersion(at: nodeURL)
+        let scriptURL = try BundledRuntime.resourceURL("src/monitor.js")
         let process = Process()
         let output = Pipe()
 
@@ -39,26 +34,16 @@ final class SidecarController {
         process.arguments = [scriptURL.path]
         process.standardOutput = output
         process.standardError = FileHandle.standardError
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let path = [
-            nodeURL.deletingLastPathComponent().path,
-            ProcessInfo.processInfo.environment["PATH"] ?? "",
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "\(home)/.local/bin",
-            "\(home)/.cargo/bin",
-            "\(home)/.npm-global/bin"
-        ]
-        .flatMap { $0.split(separator: ":").map(String.init) }
-        .reduce(into: [String]()) { result, item in
-            if !item.isEmpty && !result.contains(item) { result.append(item) }
-        }
-        .joined(separator: ":")
+        let path = BundledRuntime.launchPath(nodeDirectory: nodeURL.deletingLastPathComponent())
         var monitorEnvironment = [
             "ACP_GATEWAY_MONITOR_PORT": "0",
             "ACP_GATEWAY_MONITOR_AUTOSTART": "1",
             "ACP_GATEWAY_MONITOR_PARENT_PID": String(ProcessInfo.processInfo.processIdentifier),
-            "PATH": path
+            "PATH": path,
+            "ACP_GATEWAY_NODE": nodeURL.path,
+            "ACP_GATEWAY_RUNTIME_BIN": nodeURL.deletingLastPathComponent().path,
+            "NPM_CONFIG_PREFIX": FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".npm-global").path
         ]
         let watcherScript = URL(fileURLWithPath: localWatcherProjectPath, isDirectory: true)
             .appendingPathComponent("codex_app_watcher.py")
@@ -126,30 +111,6 @@ final class SidecarController {
         self.process = nil
         outputPipe?.fileHandleForReading.closeFile()
         outputPipe = nil
-    }
-
-    private func locateNode(override: String) throws -> URL {
-        let environmentOverride = ProcessInfo.processInfo.environment["ACP_GATEWAY_NODE"] ?? ""
-        let candidates = [override, environmentOverride, "/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node"]
-            .filter { !$0.isEmpty }
-        guard let path = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
-            throw SidecarError.nodeNotFound
-        }
-        return URL(fileURLWithPath: path)
-    }
-
-    private func locateMonitorScript() throws -> URL {
-        let bundled = Bundle.main.resourceURL?
-            .appendingPathComponent("runtime/src/monitor.js")
-        if let bundled, FileManager.default.fileExists(atPath: bundled.path) { return bundled }
-
-        var source = URL(fileURLWithPath: #filePath)
-        for _ in 0..<4 { source.deleteLastPathComponent() }
-        let development = source.appendingPathComponent("src/monitor.js")
-        guard FileManager.default.fileExists(atPath: development.path) else {
-            throw SidecarError.monitorScriptNotFound(development.path)
-        }
-        return development
     }
 
     deinit { stop() }

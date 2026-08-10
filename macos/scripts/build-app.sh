@@ -37,5 +37,111 @@ for FILE in "$REPO_ROOT"/src/*.js; do
   cp "$FILE" "$CONTENTS/Resources/runtime/src/$(basename "$FILE")"
 done
 
-codesign --force --deep --sign - "$APP"
+# Bundle package metadata and the agent-delegator skill so the installed
+# runtime resolves node_modules/skills the same way the source checkout does
+# (src/version.js hashes package.json/package-lock.json next to src/, and
+# src/installer.js installs skills/agent-delegator relative to src/).
+cp "$REPO_ROOT/package.json" "$CONTENTS/Resources/runtime/package.json"
+cp "$REPO_ROOT/package-lock.json" "$CONTENTS/Resources/runtime/package-lock.json"
+rm -rf "$CONTENTS/Resources/runtime/skills"
+cp -R "$REPO_ROOT/skills" "$CONTENTS/Resources/runtime/skills"
+
+# Distribution builds provide the complete official Node tree, including
+# npm/npx. Copying only bin/node is insufficient because first-run bootstrap
+# installs registry adapters through npm. Development builds deliberately omit
+# Node and keep the source-tree/system fallback used by SidecarController.
+NODE_DIST=${ACP_LYNK_NODE_DIST_DIR:-}
+rm -rf "$CONTENTS/Resources/runtime/node"
+if [ -n "$NODE_DIST" ]; then
+  NODE_BIN="$NODE_DIST/bin/node"
+  if [ ! -x "$NODE_BIN" ] || [ ! -x "$NODE_DIST/bin/npm" ] || [ ! -x "$NODE_DIST/bin/npx" ]; then
+    echo "error: ACP_LYNK_NODE_DIST_DIR must contain executable bin/node, bin/npm, and bin/npx" >&2
+    exit 1
+  fi
+  NODE_ARCH=$("$NODE_BIN" -e 'process.stdout.write(process.arch)')
+  NODE_MAJOR=$("$NODE_BIN" -e 'process.stdout.write(String(process.versions.node.split(".")[0]))')
+  if [ "$NODE_ARCH" != "arm64" ]; then
+    echo "error: bundled Node must be arm64 (found '$NODE_ARCH')" >&2
+    exit 1
+  fi
+  case "$NODE_MAJOR" in
+    ''|*[!0-9]*)
+      echo "error: could not read the bundled Node major version (got '$NODE_MAJOR')" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$NODE_MAJOR" -lt 22 ]; then
+    echo "error: bundled Node must be >=22 (found major version $NODE_MAJOR)" >&2
+    exit 1
+  fi
+  if otool -L "$NODE_BIN" | tail -n +2 | grep -qE '@rpath|/opt/|/usr/local/|Cellar'; then
+    echo "error: $NODE_BIN depends on non-system shared libraries; use the official nodejs.org darwin-arm64 distribution" >&2
+    exit 1
+  fi
+  cp -R "$NODE_DIST" "$CONTENTS/Resources/runtime/node"
+fi
+
+# Bundle production dependencies. Reuse the checkout's installed node_modules
+# when present (package.json declares no devDependencies, so it is already
+# production-only); otherwise install them fresh from the lockfile.
+rm -rf "$CONTENTS/Resources/runtime/node_modules"
+if [ -d "$REPO_ROOT/node_modules" ]; then
+  cp -R "$REPO_ROOT/node_modules" "$CONTENTS/Resources/runtime/node_modules"
+else
+  ( cd "$CONTENTS/Resources/runtime" && npm ci --omit=dev )
+fi
+
+# Distribution builds only: snapshot this seed's gatewayVersion/gatewayBuildId
+# (reused as-is from src/version.js, not reinvented) plus nodeVersion and a
+# required-file list into runtime-manifest.json. RuntimeProvisioner (Swift)
+# spawns runtime-installer-cli.js to copy this seed into
+# ~/.acp-gateway/runtime/versions/<gatewayVersion>-<gatewayBuildId>/ on first
+# run and reject an incomplete/corrupt copy using this same manifest.
+rm -f "$CONTENTS/Resources/runtime/runtime-manifest.json"
+if [ -x "$CONTENTS/Resources/runtime/node/bin/node" ]; then
+  BUILD_NODE=$(command -v node || true)
+  if [ -z "$BUILD_NODE" ]; then
+    echo "error: a system Node is required at build time to generate runtime-manifest.json" >&2
+    exit 1
+  fi
+  "$BUILD_NODE" "$REPO_ROOT/src/build-runtime-manifest-cli.js" "$CONTENTS/Resources/runtime"
+fi
+
+# Sign nested Mach-O files explicitly. Distribution signing uses hardened
+# runtime and a timestamp; ad-hoc development signing omits those flags.
+CODESIGN_IDENTITY=${ACP_LYNK_CODESIGN_IDENTITY:--}
+if [ "$CODESIGN_IDENTITY" = "-" ]; then
+  SIGN_FLAGS=""
+else
+  SIGN_FLAGS="--options runtime --timestamp"
+fi
+find "$CONTENTS/Resources/runtime" -type f | while IFS= read -r FILE; do
+  if file "$FILE" | grep -q 'Mach-O'; then
+    if [ "$FILE" = "$CONTENTS/Resources/runtime/node/bin/node" ]; then
+      # shellcheck disable=SC2086
+      codesign --force $SIGN_FLAGS --entitlements "$REPO_ROOT/macos/Resources/Node.entitlements" --sign "$CODESIGN_IDENTITY" "$FILE"
+    else
+      # shellcheck disable=SC2086
+      codesign --force $SIGN_FLAGS --sign "$CODESIGN_IDENTITY" "$FILE"
+    fi
+  fi
+done
+# shellcheck disable=SC2086
+codesign --force $SIGN_FLAGS --sign "$CODESIGN_IDENTITY" "$CONTENTS/MacOS/ACPMonitor"
+# shellcheck disable=SC2086
+codesign --force $SIGN_FLAGS --sign "$CODESIGN_IDENTITY" "$APP"
+codesign --verify --deep --strict "$APP"
+
+# Packaging smoke check (distribution builds only): with PATH restricted to
+# the installed runtime's own bin plus minimal system paths — no Homebrew,
+# no other system Node — node/npm/npx must still execute. npm/npx are
+# `#!/usr/bin/env node` shims, so this also proves the runtime's own PATH
+# ordering (bin first) resolves them to the bundled node, not any other one.
+if [ -x "$CONTENTS/Resources/runtime/node/bin/node" ]; then
+  RESTRICTED_PATH="$CONTENTS/Resources/runtime/node/bin:/usr/bin:/bin"
+  env -i PATH="$RESTRICTED_PATH" "$CONTENTS/Resources/runtime/node/bin/node" --version >/dev/null
+  env -i PATH="$RESTRICTED_PATH" "$CONTENTS/Resources/runtime/node/bin/npm" --version >/dev/null
+  env -i PATH="$RESTRICTED_PATH" "$CONTENTS/Resources/runtime/node/bin/npx" --version >/dev/null
+  printf '%s\n' "Bundled node/npm/npx executed with a Homebrew/system-Node-free PATH"
+fi
 printf '%s\n' "Built $APP"

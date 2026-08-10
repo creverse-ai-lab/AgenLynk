@@ -6,6 +6,34 @@ struct DashboardView: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
+        Group {
+            switch model.startupPhase {
+            case .checking, .provisioningRuntime:
+                ProgressView("Gateway runtime 준비 중…").frame(minWidth: 560, minHeight: 420)
+            case let .runtimeError(message):
+                runtimeErrorView(message)
+            case .onboarding:
+                OnboardingView()
+            case .ready:
+                dashboardContent
+            }
+        }
+        .task { model.startIfNeeded() }
+    }
+
+    private func runtimeErrorView(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            ACPLogoMark().frame(width: 40, height: 40)
+            Text("Gateway runtime 설치 실패").font(.title2.weight(.semibold))
+            Text(message).foregroundStyle(.red).font(.callout)
+            Button("다시 시도") { model.retryRuntimeProvisioning() }
+                .buttonStyle(.borderedProminent)
+        }
+        .padding(32)
+        .frame(minWidth: 560, minHeight: 420, alignment: .topLeading)
+    }
+
+    private var dashboardContent: some View {
         VStack(spacing: 0) {
             connectionBar
             metricStrip
@@ -32,7 +60,6 @@ struct DashboardView: View {
                 Button("다시 연결", systemImage: "arrow.clockwise") { model.reconnect() }
             }
         }
-        .task { model.startIfNeeded() }
         .onChange(of: model.selectedFrontdoorId) { _, _ in
             settings.followLatestEvent = false
             model.selectedEventId = nil

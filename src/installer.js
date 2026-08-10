@@ -725,11 +725,17 @@ function mcpSpec(agent, kind, statePath = defaultInstallStatePath()) {
   const script = join(sourceDirectory, isControl ? "index.js" : "guide.js");
   const serverCommand = stableNodeCommand();
   const serverArgs = [script];
-  const controlEnvironment = isControl ? { ACP_GATEWAY_INSTALL_STATE: statePath } : {};
+  const runtimeEnvironment = Object.fromEntries([
+    ["ACP_GATEWAY_NODE", process.env.ACP_GATEWAY_NODE],
+    ["ACP_GATEWAY_RUNTIME_BIN", process.env.ACP_GATEWAY_RUNTIME_BIN],
+    ["NPM_CONFIG_PREFIX", process.env.NPM_CONFIG_PREFIX]
+  ].filter(([, value]) => typeof value === "string" && value));
+  const controlEnvironment = {
+    ...runtimeEnvironment,
+    ...(isControl ? { ACP_GATEWAY_INSTALL_STATE: statePath } : {})
+  };
   if (agent === "codex") {
-    const envArgs = isControl
-      ? ["--env", `ACP_GATEWAY_INSTALL_STATE=${statePath}`]
-      : [];
+    const envArgs = Object.entries(controlEnvironment).flatMap(([key, value]) => ["--env", `${key}=${value}`]);
     return {
       agent, kind, name, command: "codex",
       getArgs: ["mcp", "get", name, "--json"],
@@ -738,9 +744,7 @@ function mcpSpec(agent, kind, statePath = defaultInstallStatePath()) {
     };
   }
   if (agent === "grok") {
-    const envArgs = isControl
-      ? ["--env", `ACP_GATEWAY_INSTALL_STATE=${statePath}`]
-      : [];
+    const envArgs = Object.entries(controlEnvironment).flatMap(([key, value]) => ["--env", `${key}=${value}`]);
     return {
       agent, kind, name, command: "grok", inspectMode: "list-json",
       getArgs: ["mcp", "list", "--json"],
@@ -758,9 +762,7 @@ function mcpSpec(agent, kind, statePath = defaultInstallStatePath()) {
     };
   }
   if (agent !== "claude") throw new Error(`MCP registration is not supported for ${agent}`);
-  const envArgs = isControl
-    ? ["-e", `ACP_GATEWAY_INSTALL_STATE=${statePath}`]
-    : [];
+  const envArgs = Object.entries(controlEnvironment).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
   return {
     agent, kind, name, command: "claude",
     getArgs: ["mcp", "get", name],

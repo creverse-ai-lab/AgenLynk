@@ -23,3 +23,20 @@ env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$REPO_ROOT/build/clang-module-cache"
   -o "$SETTINGS_OUT"
 
 "$SETTINGS_OUT"
+
+ONBOARDING_OUT="$REPO_ROOT/build/macos-onboarding-checks"
+env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$REPO_ROOT/build/clang-module-cache" \
+  swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/BundledRuntime.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/InstallStateChecker.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/InstallerController.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/RuntimeProvisioner.swift" \
+  "$REPO_ROOT/macos/Tests/ACPMonitorTests/OnboardingLogicTests.swift" \
+  -o "$ONBOARDING_OUT"
+
+"$ONBOARDING_OUT"
+
+for SCRIPT in build-app.sh build-dmg.sh prepare-node-runtime.sh; do
+  sh -n "$REPO_ROOT/macos/scripts/$SCRIPT"
+done
+printf '%s\n' "Shell build script syntax checks passed"

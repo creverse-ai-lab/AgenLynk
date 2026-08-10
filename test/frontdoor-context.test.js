@@ -107,3 +107,16 @@ test("Worker and daemon environments strip Frontdoor identity", () => {
   assert.equal(daemon.ACP_GATEWAY_CONTROL_TOKEN, "new-secret");
   assert.equal(daemon.ACP_GATEWAY_ROOT_ID, "new-root");
 });
+
+test("Worker and daemon environments preserve the bundled runtime search path", () => {
+  const source = {
+    PATH: "/usr/bin:/bin",
+    ACP_GATEWAY_RUNTIME_BIN: "/Applications/Lynk.app/runtime/node/bin",
+    NPM_CONFIG_PREFIX: "/Users/test/.npm-global"
+  };
+  const worker = delegatedWorkerEnvironment(source);
+  const daemon = gatewayDaemonEnvironment(source);
+  const expected = "/Applications/Lynk.app/runtime/node/bin:/Users/test/.npm-global/bin:/usr/bin:/bin";
+  assert.equal(worker.PATH, expected);
+  assert.equal(daemon.PATH, expected);
+});

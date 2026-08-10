@@ -11,6 +11,19 @@ final class AppModel: ObservableObject {
         case disconnected(String)
     }
 
+    enum StartupPhase: Equatable {
+        case checking
+        case provisioningRuntime
+        case runtimeError(String)
+        case onboarding
+        case ready
+    }
+
+    @Published private(set) var startupPhase: StartupPhase = .checking
+    @Published var onboardingFrontDoor: String = "codex"
+    @Published private(set) var onboardingRunning = false
+    @Published private(set) var onboardingOutput: [String] = []
+    @Published private(set) var onboardingError: String?
     @Published private(set) var phase: ConnectionPhase = .idle
     @Published private(set) var gateway: JSONValue?
     @Published private(set) var sessions: [GatewaySession] = []
@@ -43,6 +56,9 @@ final class AppModel: ObservableObject {
     private let sidecar = SidecarController()
     private let client = MonitorClient()
     private let pet = PetController()
+    private let installer = InstallerController()
+    private let runtimeProvisioner = RuntimeProvisioner()
+    private var startupCheckStarted = false
     private var startTask: Task<Void, Never>?
     private var reconciliationTask: Task<Void, Never>?
     private var streamFlushTask: Task<Void, Never>?
@@ -100,6 +116,7 @@ final class AppModel: ObservableObject {
     var gatewayConfigPendingRestart: Bool { gatewayConfigOptions.contains { $0.pending && $0.requiresRestart } }
     var gatewayConfigPendingApply: Bool { gatewayConfigOptions.contains { $0.pending } }
     var gatewayConfigLockedCount: Int { gatewayConfigOptions.filter { !$0.editable }.count }
+    var onboardingInstallLocationReady: Bool { BundledRuntime.installationLocationReady }
 
     var activeSessions: [GatewaySession] { sessions.filter(\.isActive) }
     var frontdoorSessions: [FrontdoorSession] {
@@ -182,9 +199,78 @@ final class AppModel: ObservableObject {
     }
 
     func startIfNeeded() {
-        if settings.petEnabled && !petRunning { startPet() }
-        guard startTask == nil else { return }
-        startTask = Task { [weak self] in await self?.connect() }
+        switch startupPhase {
+        case .checking:
+            guard !startupCheckStarted else { return }
+            startupCheckStarted = true
+            Task { [weak self] in await self?.performStartupCheck() }
+        case .provisioningRuntime, .runtimeError, .onboarding:
+            return
+        case .ready:
+            if settings.petEnabled && !petRunning { startPet() }
+            guard startTask == nil else { return }
+            startTask = Task { [weak self] in await self?.connect() }
+        }
+    }
+
+    /// One-time startup sequence: install/activate the bundled runtime seed
+    /// (no-op in source-tree development, see RuntimeProvisioner), then
+    /// decide whether an existing Control identity lets us skip straight to
+    /// the dashboard or first-run onboarding is needed.
+    private func performStartupCheck() async {
+        startupPhase = .provisioningRuntime
+        do {
+            _ = try await runtimeProvisioner.ensureInstalled()
+        } catch {
+            startupPhase = .runtimeError(error.localizedDescription)
+            return
+        }
+        startupPhase = InstallStateChecker.isValid(at: InstallStateChecker.defaultPath()) ? .ready : .onboarding
+        startIfNeeded()
+    }
+
+    /// Retries the runtime seed install after a failure (e.g. transient disk
+    /// error); does nothing unless the app is currently showing that error.
+    func retryRuntimeProvisioning() {
+        guard case .runtimeError = startupPhase else { return }
+        startupCheckStarted = false
+        startupPhase = .checking
+        startIfNeeded()
+    }
+
+    /// Runs the bundled bootstrap (--install-all --front-door <target>
+    /// --refresh-registry) from the first-run onboarding surface. Monitoring
+    /// only starts after the installer reports a health-verified success.
+    func startOnboardingInstall() {
+        guard !onboardingRunning, onboardingInstallLocationReady else { return }
+        onboardingRunning = true
+        onboardingError = nil
+        onboardingOutput.removeAll()
+        let frontDoor = onboardingFrontDoor
+        let nodeOverride = settings.nodePath
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await self.installer.run(frontDoor: frontDoor, nodeOverride: nodeOverride) { line in
+                    Task { @MainActor [weak self] in self?.appendOnboardingOutput(line) }
+                }
+                self.onboardingRunning = false
+                if result.ok {
+                    self.startupPhase = .ready
+                    self.startIfNeeded()
+                } else {
+                    self.onboardingError = result.message
+                }
+            } catch {
+                self.onboardingRunning = false
+                self.onboardingError = error.localizedDescription
+            }
+        }
+    }
+
+    private func appendOnboardingOutput(_ line: String) {
+        onboardingOutput.append(line)
+        if onboardingOutput.count > 200 { onboardingOutput.removeFirst(onboardingOutput.count - 200) }
     }
 
     func ensureStarted() async {
@@ -217,6 +303,8 @@ final class AppModel: ObservableObject {
         sidecar.stop()
         pet.stop()
         petRunning = false
+        installer.cancel()
+        runtimeProvisioner.cancel()
     }
 
     func setPetEnabled(_ enabled: Bool) {
