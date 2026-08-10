@@ -573,3 +573,44 @@ test("a transcript atomically replaced with same-sized content is re-read", asyn
     assert.equal(states.aa.state, "ready", "the rewrite must be picked up despite the unchanged size");
   });
 });
+
+test("watcher-fed claude scanning reuses unchanged transcripts without touching disk", async () => {
+  await withTempDirectory(async (root) => {
+    const claude = join(root, "claude");
+    await mkdir(claude, { recursive: true });
+    const now = Date.now() / 1000;
+    const timestamp = new Date((now - 2) * 1000).toISOString();
+    const record = (id) => JSON.stringify({
+      type: "user", sessionId: id, timestamp,
+      message: { content: [{ type: "tool_result" }] }
+    }) + "\n";
+    await writeFile(join(claude, "a.jsonl"), record("session-a"));
+    await writeFile(join(claude, "b.jsonl"), record("session-b"));
+
+    // Prime with a full walk.
+    const cache = new Map();
+    const parents = new Map();
+    const first = await detectClaudeSessions(claude, now, 5, 600, parents, cache);
+    assert.deepEqual(Object.keys(first).sort(), ["session-a", "session-b"]);
+
+    // Incremental pass with only b dirty: a's file is DELETED on disk, but the
+    // cached entry must carry it — proof the unchanged path was never stat'ed.
+    await rm(join(claude, "a.jsonl"));
+    await writeFile(join(claude, "b.jsonl"), record("session-b-updated"));
+    const dirty = new Set([join(claude, "b.jsonl")]);
+    const second = await detectClaudeSessions(claude, now, 5, 600, parents, cache, dirty);
+    assert.deepEqual(Object.keys(second).sort(), ["session-a", "session-b-updated"],
+      "unchanged paths come from cache; dirty paths are re-read");
+
+    // A deleted dirty path drops out instead of erroring.
+    const third = await detectClaudeSessions(
+      claude, now, 5, 600, parents, cache, new Set([join(claude, "a.jsonl")])
+    );
+    assert.ok(!("session-a" in third), "a dirty path that no longer exists is dropped");
+    assert.ok("session-b-updated" in third, "other cached entries survive");
+
+    // The next full walk reconciles with the real directory contents.
+    const fourth = await detectClaudeSessions(claude, now, 5, 600, parents, cache);
+    assert.deepEqual(Object.keys(fourth), ["session-b-updated"]);
+  });
+});

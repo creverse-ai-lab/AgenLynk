@@ -89,25 +89,30 @@ async function* transcriptPaths(root) {
 }
 
 /**
- * `cache` maps transcript path -> { fingerprint, signal }. It is rebuilt from
- * only the paths seen this scan, so deletions drop out and a rewrite misses on
- * the fingerprint.
+ * `cache` maps transcript path -> { fingerprint, signal, modified }.
+ *
+ * Two modes:
+ * - Full walk (`dirtyPaths` null): enumerate + stat everything, rebuilding the
+ *   cache from only the paths seen, so deletions drop out.
+ * - Incremental (`dirtyPaths` a Set, from an fs watcher): only the dirty paths
+ *   are stat'ed/re-read; every other cached entry is reused with ZERO
+ *   syscalls. The full walk on this machine costs ~550 stat/readdir syscalls
+ *   every 2s — the scanner's dominant steady-state cost once lsof was cached.
  */
-export async function detectClaudeSessions(root, now, readyAfter, staleAfter, parents = null, cache = new Map()) {
+export async function detectClaudeSessions(root, now, readyAfter, staleAfter, parents = null, cache = new Map(), dirtyPaths = null) {
   const states = {};
   const scanned = new Map();
   let sawRoot = false;
 
-  for await (const path of transcriptPaths(root)) {
-    sawRoot = true;
+  const inspect = async (path) => {
     let metadata;
     try {
       metadata = await stat(path, { bigint: true });
     } catch {
-      continue;
+      return null;
     }
     const modified = Number(metadata.mtimeNs) / 1e9;
-    if (now - modified > staleAfter) continue;
+    if (now - modified > staleAfter) return null;
     const fingerprint = [
       metadata.dev, metadata.ino, metadata.mtimeNs, metadata.ctimeNs, metadata.size
     ].join(":");
@@ -116,9 +121,34 @@ export async function detectClaudeSessions(root, now, readyAfter, staleAfter, pa
     const signal = cached && cached.fingerprint === fingerprint
       ? cached.signal
       : await claudeTranscriptSignal(path, modified, stem);
-    scanned.set(path, { fingerprint, signal });
-    if (!signal) continue;
+    return { fingerprint, signal, modified };
+  };
 
+  if (dirtyPaths) {
+    // Unchanged entries carry over untouched; only dirty ones hit the disk.
+    for (const [path, entry] of cache) {
+      if (dirtyPaths.has(path)) continue;
+      if (now - (entry.modified ?? 0) > staleAfter) continue;
+      scanned.set(path, entry);
+    }
+    for (const path of dirtyPaths) {
+      if (!path.endsWith(".jsonl")) continue;
+      const entry = await inspect(path);
+      if (entry) scanned.set(path, entry);
+      // A failed stat means deleted: simply not carrying it forward drops it.
+    }
+    sawRoot = true;
+  } else {
+    for await (const path of transcriptPaths(root)) {
+      sawRoot = true;
+      const entry = await inspect(path);
+      if (entry) scanned.set(path, entry);
+    }
+  }
+
+  for (const [, entry] of scanned) {
+    const signal = entry.signal;
+    if (!signal) continue;
     if (parents) {
       for (const [provider, acpSession] of signal.links) {
         // A session cannot be its own parent.
@@ -127,7 +157,6 @@ export async function detectClaudeSessions(root, now, readyAfter, staleAfter, pa
         if (parents.get(key)?.[0] !== signal.session) parents.set(key, [signal.session, signal.time]);
       }
     }
-
     const lifetime = signal.state === "ready" ? readyAfter : Math.min(staleAfter, RUNNING_LIFETIME_SECONDS);
     if (now - signal.time <= lifetime) {
       states[signal.session] = {

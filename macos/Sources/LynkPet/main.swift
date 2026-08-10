@@ -506,7 +506,11 @@ private final class MotionController: ObservableObject {
         window.contentView = NSHostingView(rootView: TreeFlowScene(controller: self))
         window.orderFrontRegardless()
 
-        timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in self?.tick() }
+        // 30Hz: the physics is dt-based so motion speed is unaffected, and a
+        // desktop overlay's springs/pulses read the same at 30 as at 60 —
+        // while the whole tick pipeline (layout, springs, Canvas redraw)
+        // costs half as much.
+        timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in self?.tick() }
         RunLoop.main.add(timer!, forMode: .common)
     }
 

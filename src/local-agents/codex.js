@@ -54,30 +54,44 @@ async function* rolloutPaths(root) {
  * reconsidered once it actually changes.
  */
 export async function discover({ root, explicitPaths = [], cursors, retired, staleAfter, now, database = null }) {
-  let paths;
-  if (explicitPaths.length) {
-    paths = explicitPaths;
-  } else {
-    const threads = await readRecentThreads(database, { since: now - staleAfter });
-    paths = threads.length ? threads.map((thread) => thread.rollout_path) : null;
-  }
-
-  const consider = async (path) => {
-    let modified;
-    try {
-      modified = (await stat(path)).mtimeMs / 1000;
-    } catch {
-      return;
+  // knownModified: recency already known from the thread database, so those
+  // candidates cost zero syscalls to consider — discovery runs every 2s, and
+  // a stat per candidate was pure duplication of what the DB just reported.
+  const consider = async (path, knownModified = null) => {
+    let modified = knownModified;
+    if (modified == null) {
+      try {
+        modified = (await stat(path)).mtimeMs / 1000;
+      } catch {
+        return;
+      }
     }
-    if (retired.get(path) === modified) return;
-    retired.delete(path);
-    if (cursors.has(path) || explicitPaths.length || now - modified <= staleAfter) {
-      if (!cursors.has(path)) cursors.set(path, newCursor(transcriptStem(path), modified, database));
+    // Retirement holds until the file is newer than when it was retired. The
+    // 1s tolerance matters: the DB reports whole seconds while stat reports
+    // sub-second mtimes, and an exact-equality check across the two sources
+    // would un-retire (and fully re-read) every retired transcript each pass.
+    const retiredAt = retired.get(path);
+    if (retiredAt != null && modified <= retiredAt + 1) return;
+    if (cursors.has(path)) return;
+    if (explicitPaths.length || now - modified <= staleAfter) {
+      // The DB's updated_at can lag the file slightly; poll() stats the real
+      // file before reading, so a coarse recency signal is all that's needed.
+      retired.delete(path);
+      cursors.set(path, newCursor(transcriptStem(path), modified, database));
     }
   };
 
-  if (paths) {
-    for (const path of paths) await consider(path);
+  if (explicitPaths.length) {
+    for (const path of explicitPaths) await consider(path);
+    return;
+  }
+  const threads = await readRecentThreads(database, { since: now - staleAfter });
+  if (threads !== null) {
+    // The database answered — possibly "nothing recent", which is complete
+    // information, not a reason to fall back to walking the whole tree.
+    for (const thread of threads) {
+      await consider(thread.rollout_path, Number(thread.updated_at) || null);
+    }
     return;
   }
   for await (const path of rolloutPaths(root)) await consider(path);
