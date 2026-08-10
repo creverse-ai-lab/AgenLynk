@@ -107,7 +107,11 @@ async function stageAndActivate(seedRoot, runtimeRoot, target, manifest) {
   const staging = join(stagingRoot, `${manifest.gatewayVersion}-${manifest.gatewayBuildId}-${randomBytes(6).toString("hex")}`);
   await rm(staging, { recursive: true, force: true });
   try {
-    await cp(seedRoot, staging, { recursive: true, verbatimSymlinks: false });
+    // Preserve relative link text exactly. Node's default (`false`) resolves
+    // relative links against the source and rewrites them as absolute paths;
+    // that both changes the manifest checksum and can make a copied link
+    // escape the staging root.
+    await cp(seedRoot, staging, { recursive: true, verbatimSymlinks: true });
     await verifyRuntimeManifest(staging, manifest);
     await mkdir(join(runtimeRoot, "versions"), { recursive: true });
     await rm(target, { recursive: true, force: true });

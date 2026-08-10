@@ -9,7 +9,7 @@
 // files and its own bundled node/bin/node, never itself becomes part of it.
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { buildRuntimeManifest } from "./runtime-manifest.js";
+import { buildRuntimeManifest, verifyRuntimeManifest } from "./runtime-manifest.js";
 
 const root = process.argv[2];
 if (!root) {
@@ -20,7 +20,15 @@ if (!root) {
 try {
   const manifest = await buildRuntimeManifest(root);
   await writeFile(join(root, "runtime-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-  process.stdout.write(`runtime-manifest.json: ${manifest.gatewayVersion} (${manifest.gatewayBuildId}), node ${manifest.nodeVersion}\n`);
+  // Self-verify immediately: proves the manifest this build just wrote
+  // actually re-verifies against the same root (catching a bug in the
+  // walk/hash logic here, not just at first install) and reports the real
+  // cost of checking this bundle rather than a guess.
+  const { verificationMs } = await verifyRuntimeManifest(root, manifest);
+  process.stdout.write(
+    `runtime-manifest.json: ${manifest.gatewayVersion} (${manifest.gatewayBuildId}), gatewayApiVersion ${manifest.gatewayApiVersion}, `
+    + `node ${manifest.nodeVersion}, ${manifest.payload.length} payload entries, verified in ${verificationMs.toFixed(1)}ms\n`
+  );
 } catch (error) {
   process.stderr.write(`build-runtime-manifest-cli: ${error?.message ?? String(error)}\n`);
   process.exitCode = 1;

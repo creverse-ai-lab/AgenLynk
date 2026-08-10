@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -19,6 +19,7 @@ async function writeFixtureSeed(root, { gatewayVersion = "1.3.1", gatewayBuildId
     join(root, "src/version.js"),
     `export const GATEWAY_VERSION = ${JSON.stringify(gatewayVersion)};\nexport const GATEWAY_BUILD_ID = ${JSON.stringify(gatewayBuildId)};\n`
   );
+  await writeFile(join(root, "src/gateway-api-version.js"), "export const GATEWAY_API_VERSION = 1;\n");
   for (const name of ["index.js", "guide.js", "bootstrap.js", "monitor.js", "installer.js"]) {
     await writeFile(join(root, "src", name), "export default {};\n");
   }
@@ -59,6 +60,23 @@ test("ensureRuntimeInstalled activates a runtime root outside the seed's .app bu
     // The activated copy must be independently usable: its own required
     // files exist under the installed root, not just the seed.
     await assert.doesNotReject(readFile(join(result.runtimeRoot, "src/monitor.js")));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("ensureRuntimeInstalled preserves confined relative symlinks from the signed seed", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "acp-runtime-installer-"));
+  try {
+    const seed = join(workspace, "seed");
+    await writeFixtureSeed(seed, { gatewayVersion: "1.1.0", gatewayBuildId: "symlink-build" });
+    await writeFile(join(seed, "node/npm-cli.js"), "// fixture npm entry\n");
+    await symlink("../npm-cli.js", join(seed, "node/bin/npm-link"));
+    const manifest = await buildRuntimeManifest(seed);
+    await writeFile(join(seed, "runtime-manifest.json"), JSON.stringify(manifest));
+
+    const installed = await ensureRuntimeInstalled({ seedRoot: seed, runtimeRoot: join(workspace, "runtime") });
+    assert.equal(await readlink(join(installed.runtimeRoot, "node/bin/npm-link")), "../npm-cli.js");
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

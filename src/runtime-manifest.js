@@ -5,16 +5,30 @@
 // inventing a separate identifier or hashing scheme: gatewayBuildId is
 // re-derived by dynamically importing the *copied* version.js, so a
 // corrupted or truncated src/**/*.js, package.json, or package-lock.json at
-// that root produces a different id and fails verification.
-import { execFile } from "node:child_process";
-import { access, readFile } from "node:fs/promises";
-import { join } from "node:path";
+// that root produces a different id and fails verification. gatewayApiVersion
+// is re-derived the same way from the copied gateway-api-version.js.
+//
+// On top of that identity check, the manifest also carries a complete,
+// deterministic payload inventory (every regular file and symlink under the
+// root, sorted by relative POSIX path, each with a sha256) so verification
+// can catch a modified/missing/added file anywhere in the runtime — not just
+// in the small REQUIRED_RUNTIME_FILES marker list.
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { access, readFile, readdir, readlink } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-export const RUNTIME_MANIFEST_FORMAT_VERSION = 1;
+// Bumped alongside the payload/gatewayApiVersion fields added below: an
+// older manifest shape (no payload inventory) must not be silently accepted
+// as fully verified by the newer, stricter check.
+export const RUNTIME_MANIFEST_FORMAT_VERSION = 2;
+
+export const RUNTIME_MANIFEST_FILE_NAME = "runtime-manifest.json";
 
 // Marker files whose presence (not full content) is checked directly,
 // without spawning Node or importing anything. Kept short and cheap: this is
@@ -27,6 +41,7 @@ export const REQUIRED_RUNTIME_FILES = [
   "src/bootstrap.js",
   "src/monitor.js",
   "src/version.js",
+  "src/gateway-api-version.js",
   "src/installer.js",
   "skills/agent-delegator/SKILL.md",
   "node_modules/@agentclientprotocol/claude-agent-acp/package.json",
@@ -37,11 +52,11 @@ export const REQUIRED_RUNTIME_FILES = [
 ];
 
 export async function assertRequiredFilesExist(root, files = REQUIRED_RUNTIME_FILES) {
-  for (const relative of files) {
+  for (const relativePath of files) {
     try {
-      await access(join(root, relative));
+      await access(join(root, relativePath));
     } catch {
-      throw new Error(`runtime is missing a required file: ${relative}`);
+      throw new Error(`runtime is missing a required file: ${relativePath}`);
     }
   }
 }
@@ -56,32 +71,172 @@ export async function readGatewayIdentity(root) {
   return { gatewayVersion: module.GATEWAY_VERSION, gatewayBuildId: module.GATEWAY_BUILD_ID };
 }
 
+/** Imports `<root>/src/gateway-api-version.js` so a corrupted copy fails the same way as version.js. */
+export async function readGatewayApiVersion(root) {
+  const moduleURL = pathToFileURL(join(root, "src", "gateway-api-version.js")).href;
+  const module = await import(moduleURL);
+  if (!Number.isInteger(module.GATEWAY_API_VERSION)) {
+    throw new Error(`${root}/src/gateway-api-version.js did not export an integer GATEWAY_API_VERSION`);
+  }
+  return module.GATEWAY_API_VERSION;
+}
+
 async function readExecutableVersion(binaryPath, args = ["--version"]) {
   const { stdout } = await execFileAsync(binaryPath, args);
   return stdout.trim().replace(/^v/, "");
 }
 
+function sha256Hex(input) {
+  return createHash("sha256").update(input).digest("hex");
+}
+
+/** Streams a file through sha256 instead of buffering it whole (the bundled Node binary alone is tens of MB). */
+async function hashFile(path) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+/**
+ * Rejects a symlink whose target — resolved lexically relative to the
+ * symlink's own directory, never dereferenced on disk — would land outside
+ * `root`. The raw target string (not its resolved contents) is what gets
+ * recorded/hashed in the payload, so a symlink pointing outside the runtime
+ * is never opened/read, only checked textually.
+ */
+function assertSymlinkConfined(root, relativePath, target) {
+  if (isAbsolute(target)) {
+    throw new Error(`runtime symlink target must be relative: ${relativePath} -> ${target}`);
+  }
+  const resolvedTarget = resolve(dirname(join(root, relativePath)), target);
+  const relativeToRoot = relative(root, resolvedTarget);
+  if (relativeToRoot === ".." || relativeToRoot.startsWith(`..${sep}`) || isAbsolute(relativeToRoot)) {
+    throw new Error(`runtime symlink escapes its root: ${relativePath} -> ${target}`);
+  }
+}
+
+/**
+ * Walks the entire runtime root (regular files and symlinks; directories are
+ * only traversed, never recorded on their own) into a stable, sorted payload
+ * inventory. runtime-manifest.json itself is excluded so the manifest does
+ * not need to describe itself. Symlinked directories are never followed —
+ * `readdir(withFileTypes)` reports a symlink's own dirent type, so the walk
+ * naturally treats it as a leaf instead of descending through it.
+ */
+async function collectPayloadEntries(root) {
+  const entries = [];
+
+  async function walk(relativeDir) {
+    const absoluteDir = relativeDir ? join(root, relativeDir) : root;
+    const dirents = await readdir(absoluteDir, { withFileTypes: true });
+    for (const dirent of dirents) {
+      const relativePath = relativeDir ? `${relativeDir}/${dirent.name}` : dirent.name;
+      if (!relativeDir && dirent.name === RUNTIME_MANIFEST_FILE_NAME) continue;
+      const absolutePath = join(root, relativePath);
+      if (dirent.isDirectory()) {
+        await walk(relativePath);
+      } else if (dirent.isSymbolicLink()) {
+        const target = await readlink(absolutePath);
+        assertSymlinkConfined(root, relativePath, target);
+        entries.push({ path: relativePath, type: "symlink", target, sha256: sha256Hex(target) });
+      } else if (dirent.isFile()) {
+        entries.push({ path: relativePath, type: "file", sha256: await hashFile(absolutePath) });
+      } else {
+        throw new Error(`runtime contains an unsupported filesystem entry: ${relativePath}`);
+      }
+    }
+  }
+
+  await walk("");
+  entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return entries;
+}
+
+function assertPayloadEntriesWellFormed(entries) {
+  if (!Array.isArray(entries)) throw new Error("runtime manifest payload must be an array");
+  const seen = new Set();
+  for (const entry of entries) {
+    const path = entry?.path;
+    if (typeof path !== "string" || !path) throw new Error("runtime manifest payload entry is missing a path");
+    const segments = path.split("/");
+    if (isAbsolute(path) || segments.some((segment) => !segment || segment === "." || segment === "..")) {
+      throw new Error(`runtime manifest payload contains an unsafe path: ${path}`);
+    }
+    if (seen.has(path)) throw new Error(`runtime manifest payload contains a duplicate path: ${path}`);
+    seen.add(path);
+    if (entry.type !== "file" && entry.type !== "symlink") {
+      throw new Error(`runtime manifest payload entry has an unknown type: ${path}`);
+    }
+    if (typeof entry.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(entry.sha256)) {
+      throw new Error(`runtime manifest payload entry is missing a checksum: ${path}`);
+    }
+    if (entry.type === "symlink") {
+      if (typeof entry.target !== "string" || sha256Hex(entry.target) !== entry.sha256) {
+        throw new Error(`runtime manifest symlink entry is inconsistent: ${path}`);
+      }
+    }
+  }
+}
+
+/** Compares two already-validated, path-sorted payload lists; throws describing every mismatch found. */
+function comparePayload(actualEntries, expectedEntries) {
+  assertPayloadEntriesWellFormed(expectedEntries);
+  const actualByPath = new Map(actualEntries.map((entry) => [entry.path, entry]));
+  const expectedByPath = new Map(expectedEntries.map((entry) => [entry.path, entry]));
+
+  const missing = [];
+  const modified = [];
+  for (const [path, expected] of expectedByPath) {
+    const actual = actualByPath.get(path);
+    if (!actual) {
+      missing.push(path);
+    } else if (
+      actual.type !== expected.type
+      || actual.sha256 !== expected.sha256
+      || (actual.type === "symlink" && actual.target !== expected.target)
+    ) {
+      modified.push(path);
+    }
+  }
+  const unexpected = [...actualByPath.keys()].filter((path) => !expectedByPath.has(path));
+
+  if (missing.length || modified.length || unexpected.length) {
+    const summarize = (label, paths) => (paths.length ? [`${label} (${paths.length}): ${paths.slice(0, 5).join(", ")}${paths.length > 5 ? ", ..." : ""}`] : []);
+    const details = [...summarize("missing", missing), ...summarize("modified", modified), ...summarize("unexpected", unexpected)];
+    throw new Error(`runtime payload does not match its manifest — ${details.join("; ")}`);
+  }
+}
+
 export async function buildRuntimeManifest(root, { nodeVersion } = {}) {
   await assertRequiredFilesExist(root);
   const identity = await readGatewayIdentity(root);
+  const gatewayApiVersion = await readGatewayApiVersion(root);
   const resolvedNodeVersion = nodeVersion ?? await readExecutableVersion(join(root, "node/bin/node"));
+  const payload = await collectPayloadEntries(root);
   return {
     formatVersion: RUNTIME_MANIFEST_FORMAT_VERSION,
     gatewayVersion: identity.gatewayVersion,
     gatewayBuildId: identity.gatewayBuildId,
+    gatewayApiVersion,
     nodeVersion: resolvedNodeVersion,
     requiredFiles: REQUIRED_RUNTIME_FILES,
+    payload,
     generatedAt: new Date().toISOString()
   };
 }
 
 /**
- * Re-derives a root's identity/executables and throws with an actionable
- * message on the first mismatch. Used both right after staging a copy
- * (reject before activating) and as a fast idempotency check on every
- * startup (skip re-copying an already-valid installed version).
+ * Re-derives a root's identity/executables/payload and throws with an
+ * actionable message on the first mismatch. Used both right after staging a
+ * copy (reject before activating) and as a fast idempotency check on every
+ * startup (skip re-copying an already-valid installed version). Each file is
+ * hashed exactly once (the payload walk below); nothing here re-hashes a
+ * file already covered by an earlier step in the same call. The returned
+ * `verificationMs` lets a caller report the real cost of checking an actual
+ * bundle instead of guessing.
  */
 export async function verifyRuntimeManifest(root, manifest) {
+  const startedAt = process.hrtime.bigint();
   if (!manifest || manifest.formatVersion !== RUNTIME_MANIFEST_FORMAT_VERSION) {
     throw new Error("unsupported runtime manifest format");
   }
@@ -94,6 +249,11 @@ export async function verifyRuntimeManifest(root, manifest) {
     );
   }
 
+  const gatewayApiVersion = await readGatewayApiVersion(root);
+  if (gatewayApiVersion !== manifest.gatewayApiVersion) {
+    throw new Error(`Gateway API version mismatch (expected ${manifest.gatewayApiVersion}, found ${gatewayApiVersion})`);
+  }
+
   const nodeVersion = await readExecutableVersion(join(root, "node/bin/node"));
   if (manifest.nodeVersion && nodeVersion !== manifest.nodeVersion) {
     throw new Error(`installed Node version mismatch (expected ${manifest.nodeVersion}, found ${nodeVersion})`);
@@ -103,9 +263,13 @@ export async function verifyRuntimeManifest(root, manifest) {
   await readExecutableVersion(join(root, "node/bin/npm"));
   await readExecutableVersion(join(root, "node/bin/npx"));
 
-  return identity;
+  const payloadEntries = await collectPayloadEntries(root);
+  comparePayload(payloadEntries, manifest.payload ?? []);
+
+  const verificationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+  return { ...identity, gatewayApiVersion, verificationMs };
 }
 
 export async function readManifestFile(root) {
-  return JSON.parse(await readFile(join(root, "runtime-manifest.json"), "utf8"));
+  return JSON.parse(await readFile(join(root, RUNTIME_MANIFEST_FILE_NAME), "utf8"));
 }

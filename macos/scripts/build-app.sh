@@ -21,6 +21,19 @@ cp "$BIN_DIR/ACPMonitor" "$CONTENTS/MacOS/ACPMonitor"
 cp "$REPO_ROOT/macos/Resources/Info.plist" "$CONTENTS/Info.plist"
 cp "$REPO_ROOT/macos/Resources/ACPLogo.svg" "$CONTENTS/Resources/ACPLogo.svg"
 
+# Optional build-time version overrides. The checked-in Info.plist stays the
+# source of truth (still pre-1.0 — see macos/Resources/Info.plist) until
+# there is actual release evidence; a release build sets these explicitly
+# instead. The staged Info.plist is what build-release-manifest-cli.js later
+# reads, so overriding it here (rather than only recording the env var) is
+# what keeps the app bundle and release manifest from ever disagreeing.
+if [ -n "${ACP_LYNK_APP_VERSION:-}" ]; then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $ACP_LYNK_APP_VERSION" "$CONTENTS/Info.plist"
+fi
+if [ -n "${ACP_LYNK_BUILD_NUMBER:-}" ]; then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $ACP_LYNK_BUILD_NUMBER" "$CONTENTS/Info.plist"
+fi
+
 ICONSET="$REPO_ROOT/build/AppIcon.iconset"
 rm -rf "$ICONSET"
 mkdir -p "$ICONSET"
@@ -91,22 +104,6 @@ else
   ( cd "$CONTENTS/Resources/runtime" && npm ci --omit=dev )
 fi
 
-# Distribution builds only: snapshot this seed's gatewayVersion/gatewayBuildId
-# (reused as-is from src/version.js, not reinvented) plus nodeVersion and a
-# required-file list into runtime-manifest.json. RuntimeProvisioner (Swift)
-# spawns runtime-installer-cli.js to copy this seed into
-# ~/.acp-gateway/runtime/versions/<gatewayVersion>-<gatewayBuildId>/ on first
-# run and reject an incomplete/corrupt copy using this same manifest.
-rm -f "$CONTENTS/Resources/runtime/runtime-manifest.json"
-if [ -x "$CONTENTS/Resources/runtime/node/bin/node" ]; then
-  BUILD_NODE=$(command -v node || true)
-  if [ -z "$BUILD_NODE" ]; then
-    echo "error: a system Node is required at build time to generate runtime-manifest.json" >&2
-    exit 1
-  fi
-  "$BUILD_NODE" "$REPO_ROOT/src/build-runtime-manifest-cli.js" "$CONTENTS/Resources/runtime"
-fi
-
 # Sign nested Mach-O files explicitly. Distribution signing uses hardened
 # runtime and a timestamp; ad-hoc development signing omits those flags.
 CODESIGN_IDENTITY=${ACP_LYNK_CODESIGN_IDENTITY:--}
@@ -126,6 +123,31 @@ find "$CONTENTS/Resources/runtime" -type f | while IFS= read -r FILE; do
     fi
   fi
 done
+
+# Distribution builds only: snapshot this seed's gatewayVersion/gatewayBuildId
+# (reused as-is from src/version.js, not reinvented), gatewayApiVersion,
+# nodeVersion, and a complete payload checksum inventory into
+# runtime-manifest.json. This runs *after* the nested-file signing loop above
+# but *before* the outer ACPMonitor/app-bundle signing below, for two
+# reasons: signing rewrites the embedded signature of every Mach-O file it
+# touches (the node binary, native modules), so hashing beforehand would
+# snapshot bytes that no longer match what actually ships; and the outer
+# app-bundle signature below seals every file under Resources (including
+# this one), so runtime-manifest.json must already exist by then or the
+# final `codesign --verify --deep --strict` would see an unsealed extra file.
+# RuntimeProvisioner (Swift) spawns runtime-installer-cli.js to copy this
+# seed into ~/.acp-gateway/runtime/versions/<gatewayVersion>-<gatewayBuildId>/
+# on first run and reject an incomplete/corrupt copy using this manifest.
+rm -f "$CONTENTS/Resources/runtime/runtime-manifest.json"
+if [ -x "$CONTENTS/Resources/runtime/node/bin/node" ]; then
+  BUILD_NODE=$(command -v node || true)
+  if [ -z "$BUILD_NODE" ]; then
+    echo "error: a system Node is required at build time to generate runtime-manifest.json" >&2
+    exit 1
+  fi
+  "$BUILD_NODE" "$REPO_ROOT/src/build-runtime-manifest-cli.js" "$CONTENTS/Resources/runtime"
+fi
+
 # shellcheck disable=SC2086
 codesign --force $SIGN_FLAGS --sign "$CODESIGN_IDENTITY" "$CONTENTS/MacOS/ACPMonitor"
 # shellcheck disable=SC2086

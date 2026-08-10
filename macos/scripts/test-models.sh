@@ -36,7 +36,7 @@ env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$REPO_ROOT/build/clang-module-cache"
 
 "$ONBOARDING_OUT"
 
-for SCRIPT in build-app.sh build-dmg.sh prepare-node-runtime.sh; do
+for SCRIPT in build-app.sh build-dmg.sh prepare-node-runtime.sh verify-dmg.sh; do
   sh -n "$REPO_ROOT/macos/scripts/$SCRIPT"
 done
 printf '%s\n' "Shell build script syntax checks passed"

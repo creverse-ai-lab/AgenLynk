@@ -206,7 +206,8 @@ Monitor activity projection
 - [x] `codesign --verify --deep --strict` 검증을 release script에 추가한다.
 - [x] `notarytool` 제출과 stapling을 자동화한다.
 - [x] Applications 링크를 포함한 DMG를 생성한다.
-- [ ] DMG checksum과 release manifest를 생성한다.
+- [x] DMG checksum과 release manifest를 생성한다.
+- [x] DMG를 read-only로 마운트해 앱 서명, runtime payload, Applications 링크, 번들 Node 실행을 검증한다.
 - [ ] Gatekeeper가 활성화된 깨끗한 Mac에서 설치·최초 실행·업데이트·rollback을 검증한다.
 - [x] 개발용 ad-hoc build와 배포용 signed/notarized build 명령을 분리한다.
 
@@ -215,6 +216,7 @@ Monitor activity projection
 - [x] `npm test` 전체 통과.
 - [x] `npm run macos:test` 통과.
 - [x] `npm run macos:build` 통과.
+- [x] `npm run macos:verify`로 ad-hoc DMG와 release artifact 일치 검증 통과.
 - [ ] 계약 fixture를 Node와 Swift가 모두 decode.
 - [ ] fresh-machine onboarding 통과.
 - [ ] 기존 CLI 설치 migration 통과.
