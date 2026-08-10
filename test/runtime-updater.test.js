@@ -395,3 +395,42 @@ test("CLI prints exactly one JSON envelope with a matching exit code for success
     await rm(workspace, { recursive: true, force: true });
   }
 });
+
+test("concurrent runtime mutations serialize on the runtime-root lock", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "acp-updater-lock-"));
+  try {
+    const seed = join(workspace, "seed");
+    await writeSmokeCapableSeed(seed);
+    const runtimeRoot = join(workspace, "runtime");
+
+    // Two stages of the same seed launched together: exactly one may mutate;
+    // the loser must get the stable busy code, not a half-interleaved
+    // rm/rename failure (ENOTEMPTY) or a corrupted versions/ entry.
+    const [first, second] = await Promise.all([
+      stageRuntimeCandidate({ runtimeRoot, seedRoot: seed }),
+      stageRuntimeCandidate({ runtimeRoot, seedRoot: seed })
+    ]);
+    const results = [first, second];
+    const winners = results.filter((result) => result.ok);
+    const losers = results.filter((result) => !result.ok);
+    assert.equal(winners.length, 1, "exactly one concurrent stage wins");
+    assert.equal(losers.length, 1);
+    assert.equal(losers[0].error.code, "UPDATER_BUSY", "the loser reports the stable busy code");
+
+    // The winner's output is intact and usable.
+    const validated = await validateRuntimeCandidate({ runtimeRoot, versionId: winners[0].versionId });
+    assert.equal(validated.ok, true, "the surviving stage passes full validation");
+
+    // A stale lock from a dead holder must not wedge the updater forever.
+    const staleLock = join(runtimeRoot, ".runtime-mutation.lock");
+    await mkdir(staleLock, { recursive: true });
+    const past = new Date(Date.now() - 60 * 60 * 1000);
+    const { utimes } = await import("node:fs/promises");
+    await utimes(staleLock, past, past);
+    const reclaimed = await stageRuntimeCandidate({ runtimeRoot, seedRoot: seed });
+    assert.equal(reclaimed.ok, true, "a stale lock is reclaimed instead of blocking");
+    assert.equal(reclaimed.alreadyStaged, true);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});

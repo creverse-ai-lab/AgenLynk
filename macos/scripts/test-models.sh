@@ -44,6 +44,7 @@ env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/InstallStateChecker.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/InstallerController.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/RuntimeProvisioner.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/SeedNodeProcess.swift" \
   "$REPO_ROOT/macos/Tests/ACPMonitorTests/OnboardingLogicTests.swift" \
   -o "$ONBOARDING_OUT"
 

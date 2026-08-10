@@ -7,11 +7,24 @@
 
 import { open, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { isConversationRecord } from "../local-transcript.js";
 import { readRecord } from "./jsonl.js";
 import { recordExternalParent } from "./parent-links.js";
 import { signalWithApprovals } from "./signals.js";
 import { stateRecord } from "./snapshot.js";
 import { readRecentThreads } from "./thread-db.js";
+
+// The tail is read once and feeds TWO consumers: the state reducer (signals/
+// approvals) and the per-session conversation window the event projection
+// reads. Before this, LocalTranscriptReader re-read the very same appended
+// bytes every second with its own cursor, cache and rewrite detection — two
+// copies of the scanner's most fragile logic over its hottest file.
+const CONVERSATION_WINDOW_MS = 65 * 60 * 1000;
+const MAX_CONVERSATION_RECORDS = 4_000;
+// A transcript adopted mid-life is read from its tail, not from byte zero: an
+// old rollout can be arbitrarily large, and state/events both only need the
+// recent window anyway.
+const ADOPTION_TAIL_BYTES = 12 * 1024 * 1024;
 
 function newCursor(session, modified, database) {
   return {
@@ -23,8 +36,25 @@ function newCursor(session, modified, database) {
     lastMtimeMs: 0,
     identified: false,
     database: database ?? null,
-    pendingApprovals: new Set()
+    pendingApprovals: new Set(),
+    // Conversation-shaped records from the tail, bounded by time and count,
+    // consumed by the event projection.
+    conversation: []
   };
+}
+
+function pruneConversation(cursor, nowMs) {
+  const cutoff = nowMs - CONVERSATION_WINDOW_MS;
+  let drop = 0;
+  while (drop < cursor.conversation.length) {
+    const at = Date.parse(cursor.conversation[drop].timestamp ?? "");
+    if (Number.isFinite(at) && at >= cutoff) break;
+    drop += 1;
+  }
+  if (cursor.conversation.length - drop > MAX_CONVERSATION_RECORDS) {
+    drop = cursor.conversation.length - MAX_CONVERSATION_RECORDS;
+  }
+  if (drop > 0) cursor.conversation.splice(0, drop);
 }
 
 function transcriptStem(path) {
@@ -121,6 +151,7 @@ export async function poll({ cursors, states, parents, now }) {
       cursor.offset = 0;
       cursor.identified = false;
       cursor.pendingApprovals.clear();
+      cursor.conversation = [];
     }
     if (metadata.size === cursor.offset) {
       cursor.seen = modified;
@@ -128,6 +159,12 @@ export async function poll({ cursors, states, parents, now }) {
     }
 
     const initial = cursor.offset === 0;
+    // Adoption of a large existing transcript starts from its tail: the whole
+    // file could be hundreds of MB, and both consumers only need the recent
+    // window. Skipping to just past the first newline keeps line integrity.
+    if (initial && metadata.size > ADOPTION_TAIL_BYTES) {
+      cursor.offset = metadata.size - ADOPTION_TAIL_BYTES;
+    }
     let latest = null;
     let handle;
     try {
@@ -135,15 +172,23 @@ export async function poll({ cursors, states, parents, now }) {
       const length = metadata.size - cursor.offset;
       const buffer = Buffer.alloc(length);
       const { bytesRead } = await handle.read(buffer, 0, length, cursor.offset);
+      // A tail-adopted read starts mid-line; drop everything up to (and
+      // including) the first newline so parsing begins on a line boundary.
+      let skip = 0;
+      if (initial && cursor.offset > 0) {
+        const firstNewline = buffer.indexOf(0x0A);
+        skip = firstNewline >= 0 ? firstNewline + 1 : bytesRead;
+      }
+      const view = buffer.subarray(skip, bytesRead);
       // Advance in BYTES, found on the raw buffer. Decoding first and using a
       // string index would undercount whenever the tail holds multibyte text
       // (routine in these transcripts), leaving the cursor short and re-reading
       // — and re-signalling — the same records on every poll forever.
-      const lastNewline = buffer.lastIndexOf(0x0A, bytesRead - 1);
-      const consumed = lastNewline >= 0 && lastNewline < bytesRead ? lastNewline + 1 : 0;
+      const lastNewline = view.lastIndexOf(0x0A);
+      const consumed = lastNewline >= 0 ? lastNewline + 1 : 0;
       // Only advance past complete lines; a transcript the agent is still
       // writing must be re-read from the start of its partial last line.
-      const text = buffer.subarray(0, consumed).toString("utf8");
+      const text = view.subarray(0, consumed).toString("utf8");
       for (const line of text.split("\n")) {
         if (!line) continue;
         const record = readRecord(line);
@@ -153,6 +198,9 @@ export async function poll({ cursors, states, parents, now }) {
           cursor.identified = true;
         }
         if (recordExternalParent(record, cursor.session, parents, now)) changed = true;
+        // Second consumer of the same read: conversation-shaped records feed
+        // the event projection so nothing re-reads this file for events.
+        if (isConversationRecord(record)) cursor.conversation.push(record);
         const signal = signalWithApprovals(record, cursor.pendingApprovals);
         if (signal) {
           latest = stateRecord(cursor.session, signal[0], signal[1], modified, cursor.database);
@@ -160,7 +208,8 @@ export async function poll({ cursors, states, parents, now }) {
           changed = true;
         }
       }
-      cursor.offset += consumed;
+      pruneConversation(cursor, now * 1000);
+      cursor.offset += skip + consumed;
       cursor.lastMtimeMs = metadata.mtimeMs;
       cursor.seen = modified;
     } catch {

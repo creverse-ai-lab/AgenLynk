@@ -10,6 +10,7 @@ import { mkdir, readFile, realpath, rename, rm, writeFile, cp } from "node:fs/pr
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { readManifestFile, verifyRuntimeManifest } from "./runtime-manifest.js";
+import { withRuntimeLock } from "./runtime-lock.js";
 
 export function defaultRuntimeRoot() {
   return process.env.ACP_GATEWAY_RUNTIME_ROOT || join(homedir(), ".acp-gateway", "runtime");
@@ -36,15 +37,24 @@ export async function ensureRuntimeInstalled({ seedRoot, runtimeRoot = defaultRu
   const existing = await currentRuntimeIfValid(runtimeRoot);
   if (existing) return existing;
 
-  const manifest = await readManifestFile(seedRoot);
-  const versionDir = `${manifest.gatewayVersion}-${manifest.gatewayBuildId}`;
-  const target = join(runtimeRoot, "versions", versionDir);
+  // Same advisory lock as the updater's mutations: the provisioner runs on
+  // every app launch and can otherwise interleave its rm/rename staging with
+  // a user-driven stage/activate over the same versions/ tree.
+  return withRuntimeLock(runtimeRoot, async () => {
+    // Re-check under the lock: whoever held it may have just installed.
+    const installed = await currentRuntimeIfValid(runtimeRoot);
+    if (installed) return installed;
 
-  if (!(await isValid(target, manifest))) {
-    await stageAndActivate(seedRoot, runtimeRoot, target, manifest);
-  }
-  await activateCurrent(runtimeRoot, target, manifest);
-  return { runtimeRoot: target, gatewayVersion: manifest.gatewayVersion, gatewayBuildId: manifest.gatewayBuildId };
+    const manifest = await readManifestFile(seedRoot);
+    const versionDir = `${manifest.gatewayVersion}-${manifest.gatewayBuildId}`;
+    const target = join(runtimeRoot, "versions", versionDir);
+
+    if (!(await isValid(target, manifest))) {
+      await stageAndActivate(seedRoot, runtimeRoot, target, manifest);
+    }
+    await activateCurrent(runtimeRoot, target, manifest);
+    return { runtimeRoot: target, gatewayVersion: manifest.gatewayVersion, gatewayBuildId: manifest.gatewayBuildId };
+  });
 }
 
 async function currentRuntimeIfValid(runtimeRoot) {
@@ -119,6 +129,14 @@ async function stageAndActivate(seedRoot, runtimeRoot, target, manifest) {
   } catch (error) {
     await rm(staging, { recursive: true, force: true }).catch(() => {});
     throw new Error(`runtime seed failed validation, install aborted: ${error.message}`);
+  }
+  // Same post-rename realpath re-check the updater's stage performs: the
+  // lexical checks above cannot see a symlink introduced on the path between
+  // verification and rename. The two staging paths must not diverge on a
+  // confinement guard.
+  if (!(await isConfinedToVersions(runtimeRoot, target))) {
+    await rm(target, { recursive: true, force: true }).catch(() => {});
+    throw new Error("staged runtime resolved outside the managed versions root, install aborted");
   }
 }
 

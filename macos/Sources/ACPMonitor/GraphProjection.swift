@@ -250,10 +250,9 @@ struct GraphProjection: Sendable {
     }
 
     private static func eventOrder(_ lhs: MonitorEvent, _ rhs: MonitorEvent) -> Bool {
-        if (lhs.sequence ?? Int.max) != (rhs.sequence ?? Int.max) {
-            return (lhs.sequence ?? Int.max) < (rhs.sequence ?? Int.max)
-        }
-        return (lhs.timestamp ?? "") < (rhs.timestamp ?? "")
+        // Canonical within-session ordering (Models.swift); lanes are scoped
+        // to a single session's events.
+        withinSessionEventOrder(lhs, rhs)
     }
 
     private static func boundedPrefix(_ value: String, limit: Int) -> String {

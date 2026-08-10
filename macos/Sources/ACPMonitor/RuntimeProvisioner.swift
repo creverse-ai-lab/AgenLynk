@@ -35,58 +35,35 @@ final class RuntimeProvisioner {
 
     /// Returns nil when there is no bundled seed to install (source-tree
     /// development). Throws an actionable error if a seed exists but fails
-    /// to install/verify.
+    /// to install/verify. The shared runner's watchdog bounds a hung seed
+    /// Node — previously a first-install hang pinned startup forever.
     func ensureInstalled() async throws -> InstalledRuntimeInfo? {
         guard let seedRoot = BundledRuntime.seedRuntimeRoot() else { return nil }
-        let nodeURL = seedRoot.appendingPathComponent("node/bin/node")
-        let scriptURL = seedRoot.appendingPathComponent("src/runtime-installer-cli.js")
-        guard FileManager.default.isExecutableFile(atPath: nodeURL.path),
-              FileManager.default.fileExists(atPath: scriptURL.path) else {
-            throw RuntimeProvisionerError.invalidOutput("bundled runtime seed is incomplete: \(seedRoot.path)")
+        let result: SeedNodeProcess.Result
+        do {
+            result = try await SeedNodeProcess.run(
+                seedRoot: seedRoot,
+                script: "src/runtime-installer-cli.js",
+                arguments: ["--seed", seedRoot.path],
+                onSpawn: { [weak self] spawned in self?.process = spawned }
+            )
+            process = nil
+        } catch let error as SeedNodeProcessError {
+            process = nil
+            throw RuntimeProvisionerError.invalidOutput(error.localizedDescription)
         }
 
-        let process = Process()
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.executableURL = nodeURL
-        process.arguments = [scriptURL.path, "--seed", seedRoot.path]
-        process.standardOutput = stdout
-        process.standardError = stderr
-        self.process = process
-
-        try process.run()
-        // Drain both pipes to EOF concurrently before inspecting exit status
-        // so a full final chunk on either stream is never missed/raced.
-        async let stdoutData = Self.readToEndOfFile(stdout.fileHandleForReading)
-        async let stderrData = Self.readToEndOfFile(stderr.fileHandleForReading)
-        let (outData, errData) = await (stdoutData, stderrData)
-        await Self.waitForExit(process)
-        self.process = nil
-
-        guard process.terminationStatus == 0 else {
-            let tail = String(data: errData, encoding: .utf8) ?? ""
-            throw RuntimeProvisionerError.processExited(process.terminationStatus, String(tail.suffix(2_000)))
+        guard result.terminationStatus == 0 else {
+            throw RuntimeProvisionerError.processExited(result.terminationStatus, result.stderrTail)
         }
-        let outputText = String(data: outData, encoding: .utf8) ?? ""
-        guard let info = Self.parse(outputText) else {
-            throw RuntimeProvisionerError.invalidOutput(String(outputText.suffix(2_000)))
+        guard let info = Self.parse(result.stdoutText) else {
+            throw RuntimeProvisionerError.invalidOutput(String(result.stdoutText.suffix(2_000)))
         }
         return info
     }
 
     func cancel() {
         process?.terminate()
-    }
-
-    private static func readToEndOfFile(_ handle: FileHandle) async -> Data {
-        await Task.detached { handle.readDataToEndOfFile() }.value
-    }
-
-    private static func waitForExit(_ process: Process) async {
-        guard process.isRunning else { return }
-        await withCheckedContinuation { continuation in
-            process.terminationHandler = { _ in continuation.resume() }
-        }
     }
 
     /// Pure parsing of runtime-installer-cli.js's single-line JSON result.

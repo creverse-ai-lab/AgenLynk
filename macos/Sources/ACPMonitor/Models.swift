@@ -1177,6 +1177,29 @@ enum MonitorClientError: LocalizedError, Equatable, Sendable {
     }
 }
 
+// ── Canonical MonitorEvent orderings ─────────────────────────────────────
+// Exactly two, because there are exactly two valid scopes. Four ad-hoc
+// comparators with two different rules had grown across the views; which one
+// you need depends only on scope, so the scope is in the name.
+
+/// Order WITHIN one session: the gateway assigns `sequence` monotonically per
+/// session, so it is authoritative there — several events can share one
+/// millisecond timestamp. Sequence-less events sort last.
+func withinSessionEventOrder(_ lhs: MonitorEvent, _ rhs: MonitorEvent) -> Bool {
+    if (lhs.sequence ?? Int.max) != (rhs.sequence ?? Int.max) {
+        return (lhs.sequence ?? Int.max) < (rhs.sequence ?? Int.max)
+    }
+    return (lhs.timestamp ?? "") < (rhs.timestamp ?? "")
+}
+
+/// Order ACROSS sessions: sequences are per-session counters and comparing
+/// them between sessions is meaningless, so wall-clock order decides and
+/// sequence only breaks same-session timestamp ties.
+func crossSessionEventOrder(_ lhs: MonitorEvent, _ rhs: MonitorEvent) -> Bool {
+    if lhs.timestamp != rhs.timestamp { return (lhs.timestamp ?? "") < (rhs.timestamp ?? "") }
+    return (lhs.sequence ?? 0) < (rhs.sequence ?? 0)
+}
+
 /// A warning when the running Gateway daemon serves from a different runtime
 /// root than the monitor — the split-brain state the Node monitor annotates
 /// onto its setup info. Left unsurfaced, the user keeps running old Gateway

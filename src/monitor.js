@@ -23,7 +23,7 @@ import { MONITOR_API_VERSION, MONITOR_SCHEMA_VERSION, MonitorState, queuedSingle
 import { gatewaySocketPath } from "./config.js";
 import { GATEWAY_BUILD_ID, GATEWAY_RUNTIME_ROOT } from "./version.js";
 import { mergeMonitorSessions, projectLocalSnapshot } from "./local-monitor.js";
-import { LocalTranscriptReader } from "./local-transcript.js";
+import { projectCodexTranscript } from "./local-transcript.js";
 import { LocalAgentScanner } from "./local-agents/index.js";
 import {
   activateRuntimeCandidate,
@@ -49,7 +49,6 @@ const EXPECTED_PARENT_PID = optionalPositiveIntegerEnv("ACP_GATEWAY_MONITOR_PARE
 // exists so a scanner fault can never take the Gateway view down with it.
 const LOCAL_SCANNER_ENABLED = (process.env.ACP_MONITOR_LOCAL_SCANNER ?? "on") !== "off";
 const REFRESH_INTERVAL_MS = 3_000;
-const localTranscripts = new LocalTranscriptReader();
 const localScanner = LOCAL_SCANNER_ENABLED ? new LocalAgentScanner() : null;
 
 function numberEnv(name, fallback, minimum) {
@@ -586,10 +585,22 @@ async function readLocalProjection() {
   const sessions = await collectLocalSessions();
   if (!sessions.length) return { sessions: [], events: {} };
   try {
-    // `return await`, not `return`: without the await the promise leaves this
-    // function unresolved and a rejection bypasses this catch entirely,
-    // surfacing as an unhandled rejection that kills the whole sidecar.
-    return await localTranscripts.enrich(projectLocalSnapshot({ sessions }));
+    const projection = projectLocalSnapshot({ sessions });
+    // Events come from the conversation window the codex tailer already
+    // retained during its state pass — the same single read serves both
+    // consumers, instead of a second reader re-tailing the same files.
+    for (const session of projection.sessions) {
+      if (session.provider !== "codex" || !session.localSessionId) continue;
+      const records = localScanner.conversationRecords(session.localSessionId);
+      if (!records.length) continue;
+      const events = projectCodexTranscript(records, {
+        sessionId: session.sessionId,
+        rawSessionId: session.localSessionId,
+        now: Date.now()
+      });
+      if (events.length) projection.events[session.sessionId] = events;
+    }
+    return projection;
   } catch (error) {
     console.error(`Local session projection ignored: ${error.message}`);
     return { sessions: [], events: {} };

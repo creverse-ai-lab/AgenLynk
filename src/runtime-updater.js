@@ -20,6 +20,7 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { GATEWAY_API_VERSION, UnsupportedGatewayApiVersionError } from "./gateway-api-version.js";
 import { activateCurrent, defaultRuntimeRoot, isConfinedToVersions, readCurrentRuntime } from "./runtime-installer.js";
+import { withRuntimeLock } from "./runtime-lock.js";
 import { readManifestFile, verifyRuntimeManifest } from "./runtime-manifest.js";
 
 export { defaultRuntimeRoot };
@@ -303,6 +304,7 @@ export async function inspectRuntime(options) {
 export async function stageRuntimeCandidate(options) {
   return runOperation("stage", async () => {
     const { runtimeRoot = defaultRuntimeRoot(), seedRoot } = options ?? {};
+    return withRuntimeLock(runtimeRoot, async () => {
     if (typeof seedRoot !== "string" || !seedRoot) {
       throw new RuntimeUpdaterError("INVALID_ARGS", "seedRoot is required");
     }
@@ -374,6 +376,7 @@ export async function stageRuntimeCandidate(options) {
       gatewayApiVersion: manifest.gatewayApiVersion,
       alreadyStaged: false
     };
+    });
   });
 }
 
@@ -390,6 +393,7 @@ function versionsRootOf(runtimeRoot) {
 export async function validateRuntimeCandidate(options) {
   return runOperation("validate", async () => {
     const { runtimeRoot = defaultRuntimeRoot(), versionId, smokeCheck } = options ?? {};
+    return withRuntimeLock(runtimeRoot, async () => {
     const target = await resolveExistingVersionTarget(runtimeRoot, versionId);
     const manifest = await readCandidateManifest(target);
     await verifyCandidate(target, manifest);
@@ -404,6 +408,7 @@ export async function validateRuntimeCandidate(options) {
       gatewayApiVersion: manifest.gatewayApiVersion,
       smoke
     };
+    });
   });
 }
 
@@ -417,6 +422,7 @@ export async function validateRuntimeCandidate(options) {
 export async function activateRuntimeCandidate(options) {
   return runOperation("activate", async () => {
     const { runtimeRoot = defaultRuntimeRoot(), versionId, blockers, smokeCheck, healthCheck } = options ?? {};
+    return withRuntimeLock(runtimeRoot, async () => {
 
     const blockerList = normalizeBlockers(blockers);
     if (blockerList.length) {
@@ -471,6 +477,7 @@ export async function activateRuntimeCandidate(options) {
         ? { runtimeRoot: previousBeforeSwitch.runtimeRoot, gatewayVersion: previousBeforeSwitch.gatewayVersion, gatewayBuildId: previousBeforeSwitch.gatewayBuildId }
         : null
     };
+    });
   });
 }
 
@@ -483,6 +490,7 @@ export async function activateRuntimeCandidate(options) {
 export async function rollbackRuntime(options) {
   return runOperation("rollback", async () => {
     const { runtimeRoot = defaultRuntimeRoot(), blockers, smokeCheck, healthCheck } = options ?? {};
+    return withRuntimeLock(runtimeRoot, async () => {
 
     const blockerList = normalizeBlockers(blockers);
     if (blockerList.length) {
@@ -544,6 +552,7 @@ export async function rollbackRuntime(options) {
         ? { runtimeRoot: currentBeforeRollback.runtimeRoot, gatewayVersion: currentBeforeRollback.gatewayVersion, gatewayBuildId: currentBeforeRollback.gatewayBuildId }
         : null
     };
+    });
   });
 }
 
@@ -556,6 +565,7 @@ export async function rollbackRuntime(options) {
 export async function pruneRuntimeVersions(options) {
   return runOperation("prune", async () => {
     const { runtimeRoot = defaultRuntimeRoot(), keep = [] } = options ?? {};
+    return withRuntimeLock(runtimeRoot, async () => {
     if (!Array.isArray(keep)) throw new RuntimeUpdaterError("INVALID_ARGS", "keep must be an array of versionId strings");
 
     const versionsRoot = versionsRootOf(runtimeRoot);
@@ -596,5 +606,6 @@ export async function pruneRuntimeVersions(options) {
     }
 
     return { removed, protected: [...protectedIds], skipped };
+    });
   });
 }

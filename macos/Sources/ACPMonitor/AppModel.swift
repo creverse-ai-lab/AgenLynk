@@ -246,7 +246,7 @@ final class AppModel: ObservableObject {
             .filter { mappedSessionIds.contains($0.key) }
             .values.flatMap { $0 }
             .filter(eventIsVisible)
-            .sorted(by: eventSort)
+            .sorted(by: crossSessionEventOrder)
         allVisibleEventsCache = (key, value)
         return value
     }
@@ -265,7 +265,7 @@ final class AppModel: ObservableObject {
         let value = frontdoor.members
             .flatMap { logEventsBySession[$0.sessionId] ?? [] }
             .filter(eventIsVisible)
-            .sorted(by: eventSort)
+            .sorted(by: crossSessionEventOrder)
         selectedEventsCache = (key, value)
         return value
     }
@@ -933,9 +933,9 @@ final class AppModel: ObservableObject {
             // to run when this batch actually lands out of order (a replay
             // after reconnect). Re-sorting 2000 events per 100ms flush was
             // measurable main-thread time for a case that almost never occurs.
-            let appendedInOrder = zip(fresh, fresh.dropFirst()).allSatisfy { !eventSort($1, $0) }
-                && (tail == nil || fresh.first == nil || !eventSort(fresh.first!, tail!))
-            if logged.count > 1 && !appendedInOrder { logged.sort(by: eventSort) }
+            let appendedInOrder = zip(fresh, fresh.dropFirst()).allSatisfy { !withinSessionEventOrder($1, $0) }
+                && (tail == nil || fresh.first == nil || !withinSessionEventOrder(fresh.first!, tail!))
+            if logged.count > 1 && !appendedInOrder { logged.sort(by: withinSessionEventOrder) }
             nextLogEventsBySession[sessionId] = logged
         }
         if eventsBySession != nextEventsBySession { eventsBySession = nextEventsBySession }
@@ -984,7 +984,7 @@ final class AppModel: ObservableObject {
             var eventsById: [String: MonitorEvent] = [:]
             for event in history { eventsById[event.id] = event }
             for event in live { eventsById[event.id] = event }
-            nextEvents[sessionId] = Array(eventsById.values).sorted(by: eventSort)
+            nextEvents[sessionId] = Array(eventsById.values).sorted(by: withinSessionEventOrder)
         }
         // Sessions that vanished from both sources drop out of the cache.
         for sessionId in nextEvents.keys where nextInputs[sessionId] == nil {
@@ -1087,11 +1087,6 @@ final class AppModel: ObservableObject {
         if !settings.showThoughts, event.type == "agent_thought_chunk" { return false }
         if !settings.showToolEvents, event.type.hasPrefix("tool_call") { return false }
         return true
-    }
-
-    private func eventSort(_ lhs: MonitorEvent, _ rhs: MonitorEvent) -> Bool {
-        if lhs.timestamp != rhs.timestamp { return (lhs.timestamp ?? "") < (rhs.timestamp ?? "") }
-        return (lhs.sequence ?? 0) < (rhs.sequence ?? 0)
     }
 
     private func duration(_ milliseconds: Int?) -> String {

@@ -155,7 +155,11 @@ private struct AgentSession: Decodable, Identifiable, Equatable {
             case "completed": state = "ready"
             case "failed": state = "blocked"
             case "offline": state = "offline"
-            default: state = "idle"
+            case "idle": state = "idle"
+            // An unclassifiable state must demand attention, not doze: the
+            // producer's own legacy mapping renders unknown as blocked, and a
+            // sleeping node for a state nobody understands hides a problem.
+            default: state = "blocked"
             }
         }
     }
@@ -986,6 +990,14 @@ private func selfTest() {
     require(parseContractTimestamp("2026-08-10T12:34:55Z") != nil, "plain ISO8601 must parse as the fallback")
     require(contractSessions.first { $0.id == "worker-1" }?.state == "running")
     require(contractSessions.first { $0.id == "worker-1" }?.delegated == true)
+    // An unknown contract state must surface as blocked (attention), matching
+    // the producer legacy mapping — not doze as idle and hide a problem.
+    let unknownJSON = #"{"contract":"pet-state","version":"1.0.0","sequence":8,"agents":[{"id":"x","parentId":null,"role":"worker","provider":"codex","engine":"e","state":"unknown","task":null,"updatedAt":"2026-08-10T12:34:55.000Z","source":"gateway"}]}"#
+    let unknownState = try! JSONDecoder().decode(PetStateEnvelope.self, from: Data(unknownJSON.utf8))
+    require(
+        AgentSession(contractAgent: unknownState.agents[0], action: "unknown").state == "blocked",
+        "an unknown contract state must map to blocked"
+    )
 
     let root1 = AgentSession(provider: "codex", session: "a-root", state: "running", time: now)
     let frontdoor = AgentSession(provider: "codex", session: "frontdoor", state: "running", role: "frontdoor", time: now)

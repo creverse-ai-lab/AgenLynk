@@ -30,9 +30,11 @@ export function projectLocalSnapshot(snapshot) {
   const allRawSessions = Array.isArray(snapshot?.sessions)
     ? snapshot.sessions.filter((session) => session?.session)
     : [];
-  // Gateway-owned records are not displayed twice, but they must remain in
-  // the ancestry index. A local grandchild can be spawned by an ACP worker;
-  // dropping that intermediate record would split it into a false Frontdoor.
+  // `delegated` is back-compat defense only: no scanner source emits it since
+  // the Gateway-session producer was deleted (the monitor holds those over
+  // RPC). The LIVE dedupe against gateway-owned sessions is ownedWorkerIds in
+  // mergeMonitorSessions below — do not "clean up" that one; the scanner can
+  // legitimately detect a gateway worker's own transcript on disk.
   const byRawId = new Map(allRawSessions.map((session) => [session.session, session]));
   const rawSessions = allRawSessions.filter((session) => session.delegated !== true);
   const sessions = [];
@@ -99,6 +101,10 @@ export function projectLocalSnapshot(snapshot) {
 }
 
 export function mergeMonitorSessions(gatewaySessions, localSessions) {
+  // ownedWorkerIds is LOAD-BEARING even though the scanner no longer produces
+  // Gateway sessions itself: an ACP claude worker writes a transcript under
+  // ~/.claude/projects like any other claude session, so the local scanner
+  // detects it — this set is what stops it appearing twice.
   const gateway = Array.isArray(gatewaySessions) ? gatewaySessions : [];
   const gatewaySessionIdByProviderId = new Map(gateway.flatMap((session) => [
     [session?.sessionId, session?.sessionId],

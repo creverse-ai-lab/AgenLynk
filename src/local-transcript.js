@@ -1,110 +1,8 @@
-import { open, stat } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { selectAll, withReadOnlyDatabase } from "./local-agents/sqlite.js";
-
-const SESSION_ID = /^[A-Za-z0-9_-]{1,160}$/;
+// Pure projection of Codex conversation records into monitor events. The
+// records themselves come from the local-agents codex tailer, which retains a
+// conversation window from the same single read that produces session state —
+// there is deliberately no file reader here anymore.
 const DEFAULT_HISTORY_MS = 65 * 60 * 1000;
-
-export class LocalTranscriptReader {
-  constructor({
-    databasePath = join(homedir(), ".codex", "state_5.sqlite"),
-    historyMs = DEFAULT_HISTORY_MS,
-    initialTailBytes = 12 * 1024 * 1024
-  } = {}) {
-    this.databasePath = databasePath;
-    this.historyMs = historyMs;
-    this.initialTailBytes = initialTailBytes;
-    this.paths = new Map();
-    this.files = new Map();
-  }
-
-  async enrich(projection) {
-    const codexSessions = projection.sessions.filter((session) =>
-      session.source === "local" && session.provider === "codex" && SESSION_ID.test(session.localSessionId ?? "")
-    );
-    await this.resolvePaths(codexSessions.map((session) => session.localSessionId));
-    for (const session of codexSessions) {
-      const path = this.paths.get(session.localSessionId);
-      if (!path) continue;
-      const records = await this.readRecords(path);
-      const events = projectCodexTranscript(records, {
-        sessionId: session.sessionId,
-        rawSessionId: session.localSessionId,
-        now: Date.now(),
-        historyMs: this.historyMs
-      });
-      if (events.length) projection.events[session.sessionId] = events;
-    }
-    return projection;
-  }
-
-  async resolvePaths(sessionIds) {
-    const unknown = [...new Set(sessionIds)].filter((id) => !this.paths.has(id));
-    if (!unknown.length) return;
-    // Read Codex's database directly instead of shelling out to a `sqlite3`
-    // binary: that CLI is not guaranteed on a user's machine, and whichever one
-    // is first on PATH (conda, homebrew) could disappear at any time.
-    const rows = await withReadOnlyDatabase(this.databasePath, (database) => selectAll(
-      database,
-      `SELECT id, rollout_path FROM threads WHERE id IN (${unknown.map(() => "?").join(",")})`,
-      unknown
-    ), []);
-    for (const row of rows) {
-      if (SESSION_ID.test(row?.id ?? "") && typeof row?.rollout_path === "string") {
-        this.paths.set(row.id, row.rollout_path);
-      }
-    }
-  }
-
-  async readRecords(path) {
-    let metadata;
-    try {
-      metadata = await stat(path);
-    } catch {
-      return [];
-    }
-    let cached = this.files.get(path);
-    // Same size AND same mtime means unchanged. Size alone misses an atomic
-    // replace with same-sized content, which would then never be re-read.
-    if (cached && cached.size === metadata.size && cached.mtimeMs === metadata.mtimeMs) return cached.records;
-    if (!cached || metadata.size < cached.size
-      || (metadata.size === cached.size && cached.mtimeMs !== metadata.mtimeMs)) {
-      cached = { size: Math.max(0, metadata.size - this.initialTailBytes), mtimeMs: 0, remainder: "", records: [] };
-    }
-    const start = cached.size;
-    const length = Math.max(0, metadata.size - start);
-    if (!length) return cached.records;
-    const handle = await open(path, "r");
-    try {
-      const buffer = Buffer.alloc(length);
-      await handle.read(buffer, 0, length, start);
-      let text = cached.remainder + buffer.toString("utf8");
-      if (!cached.records.length && start > 0) {
-        const firstNewline = text.indexOf("\n");
-        text = firstNewline >= 0 ? text.slice(firstNewline + 1) : "";
-      }
-      const lines = text.split("\n");
-      cached.remainder = lines.pop() ?? "";
-      for (const line of lines) {
-        try {
-          const record = JSON.parse(line);
-          if (isConversationRecord(record)) cached.records.push(record);
-        } catch {
-          // Ignore a racing or malformed transcript line.
-        }
-      }
-      const cutoff = Date.now() - this.historyMs;
-      cached.records = cached.records.filter((record) => Date.parse(record.timestamp ?? "") >= cutoff);
-      cached.size = metadata.size;
-      cached.mtimeMs = metadata.mtimeMs;
-      this.files.set(path, cached);
-      return cached.records;
-    } finally {
-      await handle.close();
-    }
-  }
-}
 
 export function projectCodexTranscript(records, {
   sessionId,
@@ -178,7 +76,7 @@ export function projectCodexTranscript(records, {
   return events;
 }
 
-function isConversationRecord(record) {
+export function isConversationRecord(record) {
   const type = record?.payload?.type;
   return (record?.type === "response_item" && [
     "message", "custom_tool_call", "function_call", "custom_tool_call_output", "function_call_output"

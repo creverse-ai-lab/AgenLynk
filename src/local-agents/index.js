@@ -74,6 +74,18 @@ export class LocalAgentScanner {
     this.lastDiscovery = 0;
   }
 
+  /**
+   * Conversation records the codex tailer retained for one session — the
+   * event projection's input, served from the same single read that produced
+   * the session's state.
+   */
+  conversationRecords(sessionId) {
+    for (const cursor of this.cursors.values()) {
+      if (cursor.session === sessionId) return cursor.conversation;
+    }
+    return [];
+  }
+
   /** Every known local session, shaped like the old watcher's snapshot entries. */
   async scan(now = Date.now() / 1000) {
     if (now - this.lastDiscovery >= this.discoveryIntervalSeconds) {

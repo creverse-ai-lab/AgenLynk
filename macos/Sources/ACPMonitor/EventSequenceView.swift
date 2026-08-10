@@ -400,9 +400,8 @@ private func makeSequenceLanes(sessions: [GatewaySession], events: [MonitorEvent
     return lanes
 }
 
+// Delegates to the canonical within-session ordering in Models.swift; the
+// call sites here compare events of one session at a time.
 private func sequenceEventSort(_ left: MonitorEvent, _ right: MonitorEvent) -> Bool {
-    if let leftSequence = left.sequence, let rightSequence = right.sequence, leftSequence != rightSequence {
-        return leftSequence < rightSequence
-    }
-    return (left.timestamp ?? "") < (right.timestamp ?? "")
+    withinSessionEventOrder(left, right)
 }
