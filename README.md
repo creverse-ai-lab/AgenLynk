@@ -275,12 +275,17 @@ flowchart LR
 Gateway를 지나가는 중간 과정을 네이티브 SwiftUI 화면에서 실시간으로 확인하고 공식 ACP Agent 연결을 관리하는 앱입니다. 기존 HTML UI와 `WKWebView`는 사용하지 않습니다.
 
 ```bash
+npm run test:quick
+npm test
 npm run macos:test
 npm run macos:build
 npm run macos:dmg
 npm run macos:verify
+npm run macos:clean
 npm run macos:run
 ```
+
+`test:quick`은 일상 개발용 빠른 회귀 검사이고, `npm test`는 느린 socket/runtime 설치 검증까지 포함한 전체 release gate입니다. `macos:clean`은 재생성 가능한 Swift 빌드·테스트 캐시만 제거하며 `Lynk.app`, DMG, checksum, release manifest와 추출된 Node runtime은 보존합니다.
 
 `npm run macos:dmg`가 만드는 `Lynk.app`은 Apple Silicon Node 22+ 배포판 전체(`node`/`npm`/`npx`), `src/`, `package.json`/`node_modules`, `skills/agent-delegator`를 `Contents/Resources/runtime/`에 **설치용 seed**로 포함해 시스템 Node나 저장소 checkout 없이 실행됩니다. 이 seed는 앱에서 직접 실행되지 않고, 최초 실행 시 `~/.acp-gateway/runtime/versions/<버전>-<빌드ID>/`로 복사·검증된 뒤에만 그 설치본이 실행됩니다(`~/.acp-gateway/install.json`의 기존 Control identity는 그대로 유지). `npm run macos:dmg`는 공식 Node 배포판을 자동 준비하고 그 결과를 `Applications` 심볼릭 링크와 함께 `build/Lynk.dmg`로 패키징한 뒤, read-only 마운트·코드서명·runtime SHA-256 inventory·번들 Node 실행을 검증하고 `build/Lynk.dmg.sha256`과 `build/Lynk.release.json`을 생성합니다. `npm run macos:verify`로 완성된 산출물을 다시 검증할 수 있습니다(`npm run macos:build` 단독 실행은 Node를 번들하지 않는 개발용 빠른 빌드로 남습니다). 설치된 runtime이 없거나 무효한 첫 실행에서는 대시보드 대신 Frontdoor 선택 설치 화면이 먼저 나타나며, 설치된 runtime의 `acp-gateway-bootstrap --install-all`이 Gateway 상태 확인까지 마쳐야 모니터링을 시작합니다. 자세한 서명/notarization 파라미터와 설치 경로 경계는 `macos/README.md`를 참고하세요.
 

@@ -2,17 +2,19 @@
 set -eu
 
 REPO_ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
-SCRATCH="$REPO_ROOT/build/macos-swift"
+CACHE_ROOT="$REPO_ROOT/build/cache"
+SCRATCH="$CACHE_ROOT/swift-build"
 APP="$REPO_ROOT/build/Lynk.app"
 LEGACY_APP="$REPO_ROOT/build/ACP Monitor.app"
 CONTENTS="$APP/Contents"
 SDK=${ACP_MONITOR_SDKROOT:-/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk}
-MODULE_CACHE="$REPO_ROOT/build/clang-module-cache"
+MODULE_CACHE="$CACHE_ROOT/clang-module-cache"
+SWIFTPM_CACHE="$CACHE_ROOT/swiftpm-module-cache"
 
 mkdir -p "$MODULE_CACHE"
-env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" SWIFTPM_MODULECACHE_OVERRIDE="$REPO_ROOT/build/swiftpm-module-cache" \
+env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" SWIFTPM_MODULECACHE_OVERRIDE="$SWIFTPM_CACHE" \
   swift build --package-path "$REPO_ROOT/macos" --scratch-path "$SCRATCH" -c release
-BIN_DIR=$(env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" SWIFTPM_MODULECACHE_OVERRIDE="$REPO_ROOT/build/swiftpm-module-cache" \
+BIN_DIR=$(env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" SWIFTPM_MODULECACHE_OVERRIDE="$SWIFTPM_CACHE" \
   swift build --package-path "$REPO_ROOT/macos" --scratch-path "$SCRATCH" -c release --show-bin-path)
 
 rm -rf "$APP" "$LEGACY_APP"
@@ -34,7 +36,7 @@ if [ -n "${ACP_LYNK_BUILD_NUMBER:-}" ]; then
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $ACP_LYNK_BUILD_NUMBER" "$CONTENTS/Info.plist"
 fi
 
-ICONSET="$REPO_ROOT/build/AppIcon.iconset"
+ICONSET="$CACHE_ROOT/AppIcon.iconset"
 rm -rf "$ICONSET"
 mkdir -p "$ICONSET"
 for SIZE in 16 32 128 256 512; do

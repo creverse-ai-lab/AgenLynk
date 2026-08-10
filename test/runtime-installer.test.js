@@ -1,38 +1,14 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readdir, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { buildRuntimeManifest } from "../src/runtime-manifest.js";
 import { ensureRuntimeInstalled, readCurrentRuntime } from "../src/runtime-installer.js";
+import { writeRuntimeSeed } from "./fixtures/runtime-seed.js";
 
-async function writeFixtureSeed(root, { gatewayVersion = "1.3.1", gatewayBuildId = "abc123", nodeVersion = "22.14.0" } = {}) {
-  await mkdir(join(root, "src"), { recursive: true });
-  await mkdir(join(root, "skills/agent-delegator"), { recursive: true });
-  await mkdir(join(root, "node_modules/@agentclientprotocol/claude-agent-acp"), { recursive: true });
-  await mkdir(join(root, "node_modules/@modelcontextprotocol/sdk"), { recursive: true });
-  await mkdir(join(root, "node/bin"), { recursive: true });
-
-  await writeFile(join(root, "package.json"), JSON.stringify({ type: "module" }));
-  await writeFile(join(root, "package-lock.json"), "{}\n");
-  await writeFile(
-    join(root, "src/version.js"),
-    `export const GATEWAY_VERSION = ${JSON.stringify(gatewayVersion)};\nexport const GATEWAY_BUILD_ID = ${JSON.stringify(gatewayBuildId)};\n`
-  );
-  await writeFile(join(root, "src/gateway-api-version.js"), "export const GATEWAY_API_VERSION = 1;\n");
-  for (const name of ["index.js", "guide.js", "bootstrap.js", "monitor.js", "installer.js"]) {
-    await writeFile(join(root, "src", name), "export default {};\n");
-  }
-  await writeFile(join(root, "skills/agent-delegator/SKILL.md"), "# fixture skill\n");
-  await writeFile(join(root, "node_modules/@agentclientprotocol/claude-agent-acp/package.json"), "{}\n");
-  await writeFile(join(root, "node_modules/@modelcontextprotocol/sdk/package.json"), "{}\n");
-
-  for (const [name, output] of [["node", `v${nodeVersion}`], ["npm", "10.9.0"], ["npx", "10.9.0"]]) {
-    const path = join(root, "node/bin", name);
-    await writeFile(path, `#!/bin/sh\necho "${output}"\n`);
-    await chmod(path, 0o755);
-  }
-
+async function writeFixtureSeed(root, options = {}) {
+  await writeRuntimeSeed(root, options);
   const manifest = await buildRuntimeManifest(root);
   await writeFile(join(root, "runtime-manifest.json"), JSON.stringify(manifest));
   return manifest;

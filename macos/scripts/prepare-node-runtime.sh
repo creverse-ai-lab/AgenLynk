@@ -34,6 +34,7 @@ if [ ! -x "$DIST_DIR/bin/node" ] || [ ! -x "$DIST_DIR/bin/npm" ] || [ ! -x "$DIS
   fi
   rm -rf "$DIST_DIR"
   tar -xJf "$ARCHIVE_PATH" -C "$CACHE_ROOT"
+  rm -f "$ARCHIVE_PATH"
 fi
 
 printf '%s\n' "$DIST_DIR"

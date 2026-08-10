@@ -13,12 +13,17 @@ The app provides four native surfaces:
 Monitoring remains read-only through Gateway's `observer` access. Explicit Gateway settings and official-agent actions use authenticated, short-lived mutation paths. Agent-update toggles apply live on a current daemon; lifecycle and resource-limit changes are staged until the user chooses safe restart. Agent Off applies to new session use without uninstalling the agent or terminating active work. Restart is blocked while sessions, Tasks, or Inbox requests are active. Closing the app stops only its Node sidecar, not Gateway or Workers.
 
 ```bash
+npm run test:quick
+npm test
 npm run macos:test
 npm run macos:build
 npm run macos:dmg
 npm run macos:verify
+npm run macos:clean
 npm run macos:run
 ```
+
+Use `test:quick` while iterating; `npm test` remains the complete release gate. `macos:clean` removes only reproducible Swift build/test intermediates under `build/cache/` (plus legacy cache paths) and preserves `Lynk.app`, the DMG/checksum/release manifest, and the extracted Node runtime cache.
 
 ## Self-contained build
 
