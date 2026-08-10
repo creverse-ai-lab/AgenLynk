@@ -5,11 +5,12 @@
 // app bundle itself is seed input only (see TODO.md's fixed runtime
 // boundary). install.json (Control identity/state) is never touched here;
 // existing installs keep their identity untouched.
-import { randomBytes } from "node:crypto";
-import { mkdir, readFile, realpath, rename, rm, writeFile, cp } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { readManifestFile, verifyRuntimeManifest } from "./runtime-manifest.js";
+import { CURRENT_POINTER_FILE, readPointerFile, writePointerFile } from "./runtime-pointer.js";
+import { stageVerifiedRuntime } from "./runtime-staging.js";
 import { withRuntimeLock } from "./runtime-lock.js";
 
 export function defaultRuntimeRoot() {
@@ -112,37 +113,18 @@ async function isValid(root, manifest) {
 }
 
 async function stageAndActivate(seedRoot, runtimeRoot, target, manifest) {
-  const stagingRoot = join(runtimeRoot, "staging");
-  await mkdir(stagingRoot, { recursive: true });
-  const staging = join(stagingRoot, `${manifest.gatewayVersion}-${manifest.gatewayBuildId}-${randomBytes(6).toString("hex")}`);
-  await rm(staging, { recursive: true, force: true });
-  try {
-    // Preserve relative link text exactly. Node's default (`false`) resolves
-    // relative links against the source and rewrites them as absolute paths;
-    // that both changes the manifest checksum and can make a copied link
-    // escape the staging root.
-    await cp(seedRoot, staging, { recursive: true, verbatimSymlinks: true });
-    await verifyRuntimeManifest(staging, manifest);
-    await mkdir(join(runtimeRoot, "versions"), { recursive: true });
-    await rm(target, { recursive: true, force: true });
-    await rename(staging, target);
-  } catch (error) {
-    await rm(staging, { recursive: true, force: true }).catch(() => {});
-    throw new Error(`runtime seed failed validation, install aborted: ${error.message}`);
-  }
-  // Same post-rename realpath re-check the updater's stage performs: the
-  // lexical checks above cannot see a symlink introduced on the path between
-  // verification and rename. The two staging paths must not diverge on a
-  // confinement guard.
-  if (!(await isConfinedToVersions(runtimeRoot, target))) {
-    await rm(target, { recursive: true, force: true }).catch(() => {});
-    throw new Error("staged runtime resolved outside the managed versions root, install aborted");
-  }
+  await stageVerifiedRuntime({
+    seedRoot,
+    runtimeRoot,
+    target,
+    manifest,
+    isConfined: isConfinedToVersions,
+    onFailure: (error) => new Error(`runtime seed failed validation, install aborted: ${error.message}`),
+    onConfinementViolation: () => new Error("staged runtime resolved outside the managed versions root, install aborted")
+  });
 }
 
 export async function activateCurrent(runtimeRoot, target, manifest) {
-  await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
-  const currentPath = join(runtimeRoot, "current.json");
   const payload = {
     formatVersion: 1,
     runtimeRoot: target,
@@ -150,19 +132,10 @@ export async function activateCurrent(runtimeRoot, target, manifest) {
     gatewayBuildId: manifest.gatewayBuildId,
     activatedAt: new Date().toISOString()
   };
-  const temporary = join(runtimeRoot, `current.json.${process.pid}.tmp`);
-  await writeFile(temporary, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
-  await rename(temporary, currentPath);
+  await writePointerFile(runtimeRoot, CURRENT_POINTER_FILE, payload);
   return payload;
 }
 
 export async function readCurrentRuntime(runtimeRoot = defaultRuntimeRoot()) {
-  try {
-    const raw = JSON.parse(await readFile(join(runtimeRoot, "current.json"), "utf8"));
-    if (raw?.formatVersion !== 1 || typeof raw.runtimeRoot !== "string" || !raw.runtimeRoot) return null;
-    return raw;
-  } catch (error) {
-    if (error?.code === "ENOENT") return null;
-    throw error;
-  }
+  return readPointerFile(runtimeRoot, CURRENT_POINTER_FILE);
 }

@@ -60,27 +60,22 @@ struct GraphProjection: Sendable {
     var workerLaneCount: Int { lanes.filter { !$0.session.isFrontdoorRecord }.count }
 
     private static let maxTurns = 120
-    private static let maxEventsPerSession = 600
     private static let maxEventsPerTurn = 160
     private static let maxPromptCharacters = 4_000
     private static let maxResponseCharacters = 12_000
 
+    /// Projects what is running *right now*: each active session contributes its
+    /// current turn and nothing else. There is no history window — the popover
+    /// is the only renderer, and it shows live work.
     static func make(
         sessions: [GatewaySession],
-        eventsBySession: [String: [MonitorEvent]],
-        windowMinutes: Int,
-        currentTurnsOnly: Bool = false,
-        now: Date = Date()
+        eventsBySession: [String: [MonitorEvent]]
     ) -> GraphProjection {
-        let start = now.addingTimeInterval(-Double(windowMinutes * 60))
-        let startTimestamp = monitorTimestamp(start)
         var turnsBySession: [String: [GraphTurnPoint]] = [:]
         for session in sessions {
-            let scoped = scopedEvents(
+            let scoped = currentTurnEvents(
                 eventsBySession[session.sessionId] ?? [],
-                startTimestamp: startTimestamp,
-                activeTurnId: session.isActive ? session.turnId : nil,
-                currentTurnOnly: currentTurnsOnly
+                activeTurnId: session.isActive ? session.turnId : nil
             )
             turnsBySession[session.sessionId] = makeTurns(events: scoped)
         }
@@ -146,52 +141,23 @@ struct GraphProjection: Sendable {
         return GraphProjection(groups: groups, lanes: lanes, width: max(x, 760))
     }
 
-    private static func scopedEvents(
-        _ events: [MonitorEvent],
-        startTimestamp: String,
-        activeTurnId: String?,
-        currentTurnOnly: Bool
-    ) -> [MonitorEvent] {
-        if currentTurnOnly {
-            guard let activeTurnId else { return [] }
-            // Live may receive thousands of token chunks. Walk backwards and retain only
-            // the detail budget instead of filtering/copying the entire session on every chunk.
-            var recent: [MonitorEvent] = []
-            recent.reserveCapacity(maxEventsPerTurn)
-            var startEvent: MonitorEvent?
-            for event in events.reversed() where event.turnId == activeTurnId {
-                if event.type == "turn_start" {
-                    startEvent = event
-                    break
-                }
-                if recent.count < maxEventsPerTurn - 1 { recent.append(event) }
+    private static func currentTurnEvents(_ events: [MonitorEvent], activeTurnId: String?) -> [MonitorEvent] {
+        guard let activeTurnId else { return [] }
+        // Live may receive thousands of token chunks. Walk backwards and retain only
+        // the detail budget instead of filtering/copying the entire session on every chunk.
+        var recent: [MonitorEvent] = []
+        recent.reserveCapacity(maxEventsPerTurn)
+        var startEvent: MonitorEvent?
+        for event in events.reversed() where event.turnId == activeTurnId {
+            if event.type == "turn_start" {
+                startEvent = event
+                break
             }
-            recent.reverse()
-            if let startEvent { recent.insert(startEvent, at: 0) }
-            return recent.sorted(by: eventOrder)
+            if recent.count < maxEventsPerTurn - 1 { recent.append(event) }
         }
-        let recentTurnIds = Set(events.compactMap { event -> String? in
-            guard let timestamp = event.timestamp, timestamp >= startTimestamp else { return nil }
-            return event.turnId
-        })
-        var byId: [String: MonitorEvent] = [:]
-        for event in events {
-            let isRecent = event.timestamp.map { $0 >= startTimestamp } ?? false
-            if isRecent || event.turnId.map(recentTurnIds.contains) == true
-                || (activeTurnId != nil && event.turnId == activeTurnId) {
-                byId[event.id] = event
-            }
-        }
-        var scoped = Array(byId.values).sorted(by: eventOrder)
-        guard scoped.count > maxEventsPerSession else { return scoped }
-        let suffix = Array(scoped.suffix(maxEventsPerSession))
-        if let activeTurnId,
-           let startEvent = scoped.first(where: { $0.turnId == activeTurnId && $0.type == "turn_start" }),
-           !suffix.contains(where: { $0.id == startEvent.id }) {
-            scoped = [startEvent] + Array(suffix.dropFirst())
-            return scoped.sorted(by: eventOrder)
-        }
-        return suffix
+        recent.reverse()
+        if let startEvent { recent.insert(startEvent, at: 0) }
+        return recent.sorted(by: eventOrder)
     }
 
     private static func makeTurns(events: [MonitorEvent]) -> [GraphTurnPoint] {

@@ -467,14 +467,7 @@ final class AppModel: ObservableObject {
         // The updater trusts the blockers it is handed, so an unknown Gateway
         // state must count as a blocker, not as an all-clear.
         guard case .connected = phase else { return ["Gateway 상태 확인 불가 (연결 안 됨)"] }
-        let activeSessions = sessions.filter { !$0.isLocalSource && $0.isActive }.count
-        let activeTasks = tasks.filter { ["working", "input_required"].contains($0.status ?? "") }.count
-        let pending = inbox.filter { $0.status == "pending" }.count
-        return [
-            activeSessions > 0 ? "진행 중 세션 \(activeSessions)개" : nil,
-            activeTasks > 0 ? "진행 중 Task \(activeTasks)개" : nil,
-            pending > 0 ? "미응답 Inbox \(pending)개" : nil
-        ].compactMap { $0 }
+        return restartBlockerLabels(sessions: sessions, tasks: tasks, inbox: inbox)
     }
 
     func loadRuntimeInspection() async {

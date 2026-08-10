@@ -1,3 +1,4 @@
+import ACPShared
 import Foundation
 
 enum JSONValue: Equatable, Sendable {
@@ -1237,18 +1238,22 @@ func decodeJSONValue(_ data: Data) throws -> JSONValue {
     JSONValue(any: try JSONSerialization.jsonObject(with: data))
 }
 
-private let fractionalISO8601Formatter: ISO8601DateFormatter = {
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    return formatter
-}()
-
-private let standardISO8601Formatter = ISO8601DateFormatter()
-
-func parseTimestamp(_ value: String) -> Date? {
-    fractionalISO8601Formatter.date(from: value) ?? standardISO8601Formatter.date(from: value)
+/// Work that must finish before the Gateway runtime may be swapped or rolled
+/// back. `MonitorState.restartBlockers()` in src/monitor-state.js decides the
+/// same thing from the Gateway's own state, and the updater refuses to activate
+/// whenever either hands it a non-empty list — so the two must agree exactly.
+/// test/fixtures/restart-blockers.json is replayed against both.
+///
+/// Local sessions are excluded: they never run through the Gateway runtime, so
+/// restarting it cannot interrupt them.
+func restartBlockerLabels(sessions: [GatewaySession], tasks: [MonitorRecord], inbox: [MonitorRecord]) -> [String] {
+    let activeSessions = sessions.filter { !$0.isLocalSource && $0.isActive }.count
+    let activeTasks = tasks.filter { ["working", "input_required"].contains($0.status ?? "") }.count
+    let pendingInbox = inbox.filter { $0.status == "pending" }.count
+    return [
+        activeSessions > 0 ? "진행 중 세션 \(activeSessions)개" : nil,
+        activeTasks > 0 ? "진행 중 Task \(activeTasks)개" : nil,
+        pendingInbox > 0 ? "미응답 Inbox \(pendingInbox)개" : nil
+    ].compactMap { $0 }
 }
 
-func monitorTimestamp(_ date: Date) -> String {
-    fractionalISO8601Formatter.string(from: date)
-}

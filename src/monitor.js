@@ -11,13 +11,14 @@
 // use separate short-lived control connections.
 
 import { randomBytes } from "node:crypto";
-import { access, mkdir, readFile, rm } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { pathIsMissing } from "./fs-paths.js";
 import { GatewayRpcClient } from "./socket-rpc.js";
 import { MONITOR_API_VERSION, MONITOR_SCHEMA_VERSION, MonitorState, queuedSingleFlight } from "./monitor-state.js";
 import { gatewaySocketPath } from "./config.js";
@@ -25,14 +26,6 @@ import { GATEWAY_BUILD_ID, GATEWAY_RUNTIME_ROOT } from "./version.js";
 import { mergeMonitorSessions, projectLocalSnapshot } from "./local-monitor.js";
 import { projectCodexTranscript } from "./local-transcript.js";
 import { LocalAgentScanner } from "./local-agents/index.js";
-import {
-  activateRuntimeCandidate,
-  inspectRuntime,
-  pruneRuntimeVersions,
-  rollbackRuntime,
-  stageRuntimeCandidate,
-  validateRuntimeCandidate
-} from "./runtime-updater.js";
 import { defaultGatewaySettings, gatewaySettingsSnapshot, updateGatewaySettings } from "./gateway-settings.js";
 import {
   installOfficialAgent,
@@ -451,39 +444,6 @@ async function main() {
       sendJson(response, await controlCall("retention_preview", args));
       return;
     }
-    // Runtime updater, exposed so the app drives the same operations as
-    // runtime-updater-cli.js and receives the library's own JSON envelopes
-    // unchanged — one contract, two front ends.
-    if (url.pathname === "/api/runtime" && request.method === "GET") {
-      sendJson(response, await inspectRuntime({ deep: url.searchParams.get("deep") === "1" }));
-      return;
-    }
-    if (url.pathname.startsWith("/api/runtime/") && request.method === "POST") {
-      const operation = url.pathname.slice("/api/runtime/".length);
-      const body = await readJsonBody(request);
-      // The app never supplies blockers: active work is the monitor's own
-      // knowledge, so it cannot be argued away by the caller.
-      const blockers = state.restartBlockers();
-      const operations = {
-        stage: () => stageRuntimeCandidate({ seedRoot: body.seedRoot }),
-        validate: () => validateRuntimeCandidate({ versionId: body.versionId }),
-        activate: () => activateRuntimeCandidate({ versionId: body.versionId, blockers }),
-        rollback: () => rollbackRuntime({ blockers }),
-        prune: () => pruneRuntimeVersions({ keep: Array.isArray(body.keep) ? body.keep : [] })
-      };
-      const run = operations[operation];
-      if (!run) {
-        const error = new Error(`Unknown runtime operation: ${operation}`);
-        error.statusCode = 404;
-        error.code = "monitor_not_found";
-        throw error;
-      }
-      const result = await run();
-      // The library reports expected failures in the envelope rather than by
-      // throwing; keep that shape and let the status code carry the outcome.
-      sendJson(response, result, result.ok ? 200 : 409);
-      return;
-    }
     if (url.pathname === "/api/gateway-restart" && request.method === "POST") {
       const blockers = state.restartBlockers();
       if (blockers.length) throw restartBlockedError(blockers);
@@ -579,8 +539,6 @@ async function main() {
   process.on("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
 }
 
-
-
 async function readLocalProjection() {
   const sessions = await collectLocalSessions();
   if (!sessions.length) return { sessions: [], events: {} };
@@ -620,15 +578,6 @@ async function collectLocalSessions() {
     // Local monitoring is a nicety; the Gateway view must survive its failure.
     console.error(`Local agent scan failed: ${error.message}`);
     return [];
-  }
-}
-async function pathIsMissing(path) {
-  try {
-    await access(path);
-    return false;
-  } catch (error) {
-    if (error?.code === "ENOENT") return true;
-    throw error;
   }
 }
 

@@ -95,11 +95,9 @@ export async function snapshotSessions(states, database = null) {
   };
 
   for (const item of sessions) {
-    // Only processes Codex plausibly spawned. Interactive Claude Code sessions
-    // (claude-cli) and gateway-owned sessions (delegated — linked via their
-    // real owner) are roots of their own.
+    // Only processes Codex plausibly spawned. Interactive Claude Code
+    // sessions (claude-cli) are roots of their own.
     const eligible = !item.parent
-      && item.delegated !== true
       && item.engine !== "claude-cli"
       && (item.provider !== "codex" || subagents.has(item.session));
     if (eligible) {

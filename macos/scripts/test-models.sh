@@ -7,10 +7,22 @@ CACHE_ROOT="$REPO_ROOT/build/cache"
 CHECK_ROOT="$CACHE_ROOT/checks"
 MODULE_CACHE="$CACHE_ROOT/clang-module-cache"
 OUT="$CHECK_ROOT/models"
-mkdir -p "$CHECK_ROOT" "$MODULE_CACHE"
+SHARED_DIR="$CACHE_ROOT/shared"
+mkdir -p "$CHECK_ROOT" "$MODULE_CACHE" "$SHARED_DIR"
 
+# ACPShared is a real SwiftPM library target, so these standalone check binaries
+# have to build and link it the same way `swift build` does.
 env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 \
+  -emit-module -emit-library -static -parse-as-library \
+  -module-name ACPShared \
+  -emit-module-path "$SHARED_DIR/ACPShared.swiftmodule" \
+  -o "$SHARED_DIR/libACPShared.a" \
+  "$REPO_ROOT/macos/Sources/ACPShared/Timestamp.swift"
+SHARED_FLAGS="-I $SHARED_DIR -L $SHARED_DIR -lACPShared"
+
+env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
+  swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 $SHARED_FLAGS \
   "$REPO_ROOT/macos/Sources/ACPMonitor/Models.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/GraphProjection.swift" \
   "$REPO_ROOT/macos/Tests/ACPMonitorTests/MonitorModelTests.swift" \
@@ -29,7 +41,7 @@ env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
 
 PET_CONTROLLER_OUT="$CHECK_ROOT/pet-controller"
 env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
-  swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 \
+  swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 $SHARED_FLAGS \
   "$REPO_ROOT/macos/Sources/ACPMonitor/Models.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/PetController.swift" \
   "$REPO_ROOT/macos/Tests/ACPMonitorTests/PetControllerTests.swift" \

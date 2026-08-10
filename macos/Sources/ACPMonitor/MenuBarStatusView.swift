@@ -102,16 +102,8 @@ struct MenuBarStatusView: View {
         }
     }
 
-    /// The Monitoring window's live projection, restricted to sessions that are
-    /// running right now — the same `windowMinutes: 1, currentTurnsOnly` scope
-    /// the window uses.
     private var liveProjection: GraphProjection {
-        GraphProjection.make(
-            sessions: model.realtimeSessions,
-            eventsBySession: model.eventsBySession,
-            windowMinutes: 1,
-            currentTurnsOnly: true
-        )
+        GraphProjection.make(sessions: model.realtimeSessions, eventsBySession: model.eventsBySession)
     }
 
     private func activitySection(now: Date) -> some View {

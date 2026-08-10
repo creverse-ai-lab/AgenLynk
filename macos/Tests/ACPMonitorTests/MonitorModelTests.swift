@@ -33,6 +33,7 @@ enum MonitorModelChecks {
         try graphProjectionBuildsPromptReturnTurnsAndUsesCanvasHeight()
         try graphProjectionFollowsOnlyTheCurrentLiveTurn()
         try graphProjectionBoundsLargeLiveHistories()
+        try restartBlockersMatchTheSharedGatewayContract()
         print("Swift model checks passed")
     }
 
@@ -511,7 +512,7 @@ enum MonitorModelChecks {
         try check(petRoot?.engine == "gpt-local", "Pet root should preserve the local model")
         try check(!pet.sessions.contains(where: { $0.role == "worker" && $0.session == root.sessionId }), "local root must not be emitted as a worker")
 
-        let projection = GraphProjection.make(sessions: [root, gatewayWorker], eventsBySession: [:], windowMinutes: 10)
+        let projection = GraphProjection.make(sessions: [root, gatewayWorker], eventsBySession: [:])
         try check(projection.groups.count == 1, "Branch should keep one Frontdoor trunk")
         try check(projection.workerLaneCount == 1, "Branch worker count must exclude the local root lane")
 
@@ -751,19 +752,17 @@ enum MonitorModelChecks {
     private static func graphProjectionGroupsFrontdoorsAndAssignsWorkerLanes() throws {
         let sessionValue = JSONValue.object([
             "sessionId": .string("s1"), "provider": .string("codex"), "status": .string("running"),
-            "cwd": .string("/tmp/project"), "opener": .string("grok"), "createdAt": .string("2026-08-07T00:00:00.000Z")
+            "cwd": .string("/tmp/project"), "opener": .string("grok"), "createdAt": .string("2026-08-07T00:00:00.000Z"),
+            "turnId": .string("t1")
         ])
         let eventValue = JSONValue.object([
             "sessionId": .string("s1"), "sequence": .number(0), "type": .string("turn_start"),
-            "ts": .string("2026-08-07T00:05:00.000Z")
+            "ts": .string("2026-08-07T00:05:00.000Z"), "turnId": .string("t1")
         ])
-        guard let session = GatewaySession(sessionValue), let event = MonitorEvent(eventValue),
-              let now = parseTimestamp("2026-08-07T00:10:00.000Z") else {
+        guard let session = GatewaySession(sessionValue), let event = MonitorEvent(eventValue) else {
             throw CheckError.failed("fixture creation failed")
         }
-        let projection = GraphProjection.make(
-            sessions: [session], eventsBySession: ["s1": [event]], windowMinutes: 15, now: now
-        )
+        let projection = GraphProjection.make(sessions: [session], eventsBySession: ["s1": [event]])
         try check(projection.groups.count == 1, "frontdoor grouping failed")
         try check(projection.groups.first?.opener == "grok", "frontdoor opener failed")
         try check(projection.lanes.first?.turns.count == 1, "turn projection failed")
@@ -771,34 +770,43 @@ enum MonitorModelChecks {
     }
 
     private static func graphProjectionBuildsPromptReturnTurnsAndUsesCanvasHeight() throws {
-        let sessionValue = JSONValue.object([
-            "sessionId": .string("s1"), "provider": .string("codex"), "status": .string("idle"),
-            "cwd": .string("/tmp/project"), "opener": .string("codex")
-        ])
-        let fixtures: [[String: JSONValue]] = [
+        // Two sessions running concurrently: each contributes its own live turn,
+        // which is how more than one node ever reaches the canvas at once.
+        func running(_ id: String, turnId: String) -> JSONValue {
+            .object([
+                "sessionId": .string(id), "provider": .string("codex"), "status": .string("running"),
+                "cwd": .string("/tmp/project"), "opener": .string("codex"),
+                "openerInstanceId": .string("main-1"), "turnId": .string(turnId)
+            ])
+        }
+        let firstFixtures: [[String: JSONValue]] = [
             ["sequence": .number(0), "type": .string("turn_start"), "ts": .string("2026-08-07T00:09:00.000Z"), "turnId": .string("t1"), "text": .string("first prompt")],
             ["sequence": .number(1), "type": .string("agent_message_chunk"), "ts": .string("2026-08-07T00:09:01.000Z"), "turnId": .string("t1"), "text": .string("progress")],
             ["sequence": .number(2), "type": .string("tool_call"), "ts": .string("2026-08-07T00:09:02.000Z"), "turnId": .string("t1")],
             ["sequence": .number(3), "type": .string("agent_message_chunk"), "ts": .string("2026-08-07T00:09:03.000Z"), "turnId": .string("t1"), "text": .string("final answer")],
-            ["sequence": .number(4), "type": .string("turn_end"), "ts": .string("2026-08-07T00:09:04.000Z"), "turnId": .string("t1")],
-            ["sequence": .number(5), "type": .string("turn_start"), "ts": .string("2026-08-07T00:09:30.000Z"), "turnId": .string("t2"), "text": .string("second prompt")],
-            ["sequence": .number(6), "type": .string("agent_message_chunk"), "ts": .string("2026-08-07T00:09:31.000Z"), "turnId": .string("t2"), "text": .string("second return")],
-            ["sequence": .number(7), "type": .string("turn_end"), "ts": .string("2026-08-07T00:09:32.000Z"), "turnId": .string("t2")]
+            ["sequence": .number(4), "type": .string("tool_call_update"), "ts": .string("2026-08-07T00:09:04.000Z"), "turnId": .string("t1")]
         ]
-        guard let session = GatewaySession(sessionValue),
-              let now = parseTimestamp("2026-08-07T00:10:00.000Z") else {
+        let secondFixtures: [[String: JSONValue]] = [
+            ["sequence": .number(5), "type": .string("turn_start"), "ts": .string("2026-08-07T00:09:30.000Z"), "turnId": .string("t2"), "text": .string("second prompt")],
+            ["sequence": .number(6), "type": .string("agent_message_chunk"), "ts": .string("2026-08-07T00:09:31.000Z"), "turnId": .string("t2"), "text": .string("second return")]
+        ]
+        guard let first = GatewaySession(running("s1", turnId: "t1")),
+              let second = GatewaySession(running("s2", turnId: "t2")) else {
             throw CheckError.failed("turn fixture creation failed")
         }
-        let events = fixtures.compactMap { fixture -> MonitorEvent? in
-            var value = fixture
-            value["sessionId"] = .string("s1")
-            return MonitorEvent(.object(value))
+        func events(_ fixtures: [[String: JSONValue]], sessionId: String) -> [MonitorEvent] {
+            fixtures.compactMap { fixture in
+                var value = fixture
+                value["sessionId"] = .string(sessionId)
+                return MonitorEvent(.object(value))
+            }
         }
         let projection = GraphProjection.make(
-            sessions: [session], eventsBySession: ["s1": events], windowMinutes: 15, now: now
+            sessions: [first, second],
+            eventsBySession: ["s1": events(firstFixtures, sessionId: "s1"), "s2": events(secondFixtures, sessionId: "s2")]
         )
-        let turns = projection.lanes.first?.turns ?? []
-        try check(turns.count == 2, "events should collapse into two human-readable turns")
+        let turns = projection.lanes.flatMap(\.turns)
+        try check(turns.count == 2, "each live session should collapse into one human-readable turn")
         try check(turns[0].prompt == "first prompt", "prompt should come from turn_start")
         try check(turns[0].response == "final answer", "return should keep the final segment after a tool boundary")
         try check(turns[0].events.count == 5, "a turn should retain every event for node detail inspection")
@@ -818,8 +826,7 @@ enum MonitorModelChecks {
             ["sequence": .number(3), "type": .string("turn_start"), "ts": .string("2026-08-07T00:59:00.000Z"), "turnId": .string("recent-history"), "text": .string("must stay out of Live")],
             ["sequence": .number(4), "type": .string("turn_end"), "ts": .string("2026-08-07T00:59:01.000Z"), "turnId": .string("recent-history")]
         ]
-        guard let session = GatewaySession(sessionValue),
-              let now = parseTimestamp("2026-08-07T01:00:00.000Z") else {
+        guard let session = GatewaySession(sessionValue) else {
             throw CheckError.failed("live turn fixture creation failed")
         }
         let events = fixtures.compactMap { fixture -> MonitorEvent? in
@@ -828,10 +835,7 @@ enum MonitorModelChecks {
             return MonitorEvent(.object(value))
         }
 
-        let projection = GraphProjection.make(
-            sessions: [session], eventsBySession: ["s1": events], windowMinutes: 15,
-            currentTurnsOnly: true, now: now
-        )
+        let projection = GraphProjection.make(sessions: [session], eventsBySession: ["s1": events])
         let turns = projection.lanes.first?.turns ?? []
         try check(turns.count == 1, "live branch should contain only the current turn")
         try check(turns.first?.turnId == "current", "live branch should follow the Gateway session turn id")
@@ -844,8 +848,7 @@ enum MonitorModelChecks {
             "cwd": .string("/tmp/project"), "opener": .string("codex"),
             "openerInstanceId": .string("main-large"), "turnId": .string("active")
         ])
-        guard let session = GatewaySession(sessionValue),
-              let now = parseTimestamp("2026-08-07T00:10:00.000Z") else {
+        guard let session = GatewaySession(sessionValue) else {
             throw CheckError.failed("large graph fixture creation failed")
         }
         var values: [MonitorEvent] = []
@@ -873,9 +876,7 @@ enum MonitorModelChecks {
             if let event = MonitorEvent(value) { values.append(event) }
         }
 
-        let projection = GraphProjection.make(
-            sessions: [session], eventsBySession: ["large": values], windowMinutes: 15, now: now
-        )
+        let projection = GraphProjection.make(sessions: [session], eventsBySession: ["large": values])
         try check(projection.turnCount <= 120, "live projection should cap the rendered turn count")
         guard let active = projection.lanes.first?.turns.first(where: { $0.turnId == "active" }) else {
             throw CheckError.failed("large active turn should stay pinned")
@@ -883,6 +884,46 @@ enum MonitorModelChecks {
         try check(active.events.count <= 160, "a live turn should cap retained detail events")
         try check(active.prompt.count <= 4_001, "a live prompt should be bounded")
         try check(active.response.count <= 12_001, "a live response should be bounded")
+    }
+
+    /// Replays test/fixtures/restart-blockers.json — the same file
+    /// test/monitor-control.test.js feeds to MonitorState.restartBlockers().
+    /// The updater refuses to activate whenever either side reports a blocker,
+    /// so the two must produce byte-identical strings for identical input.
+    private static func restartBlockersMatchTheSharedGatewayContract() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let fixtureURL = repoRoot.appendingPathComponent("test/fixtures/restart-blockers.json")
+        guard let data = try? Data(contentsOf: fixtureURL),
+              let cases = try? decodeJSONValue(data).objectValue?.array("cases"), !cases.isEmpty else {
+            throw CheckError.failed("shared restart-blocker fixture is missing or unreadable at \(fixtureURL.path)")
+        }
+
+        for entry in cases {
+            guard let fixture = entry.objectValue,
+                  let name = fixture.string("name"),
+                  let expected = fixture.array("expected")?.compactMap(\.stringValue) else {
+                throw CheckError.failed("malformed restart-blocker fixture case")
+            }
+            let sessions = (fixture.array("sessions") ?? []).compactMap { value -> GatewaySession? in
+                guard var object = value.objectValue else { return nil }
+                // The fixture states only what the rule reads; the rest is
+                // whatever a decoded Gateway record would otherwise carry.
+                object["provider"] = object["provider"] ?? .string("codex")
+                object["cwd"] = object["cwd"] ?? .string("/tmp/project")
+                return GatewaySession(.object(object))
+            }
+            let records: ([JSONValue]?, String) -> [MonitorRecord] = { values, kind in
+                (values ?? []).enumerated().map { MonitorRecord($0.element, fallbackKind: kind, index: $0.offset) }
+            }
+            let blockers = restartBlockerLabels(
+                sessions: sessions,
+                tasks: records(fixture.array("tasks"), "task"),
+                inbox: records(fixture.array("inbox"), "inbox")
+            )
+            try check(blockers == expected, "restart blockers diverged from the Gateway contract (\(name)): got \(blockers), expected \(expected)")
+        }
     }
 
     private static func check(_ condition: @autoclosure () -> Bool, _ message: String) throws {

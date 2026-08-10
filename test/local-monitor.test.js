@@ -33,17 +33,17 @@ test("local snapshot projects a real frontdoor and nested local workers", () => 
     { provider: "codex", session: "main", state: "running", event: "task_started", time: 100, engine: "gpt", cwd: "/work" },
     { provider: "codex", session: "child", parent: "main", state: "running", event: "agent", time: 101, engine: "gpt", cwd: "/work" },
     { provider: "claude", session: "grandchild", parent: "gateway-owned", state: "needs_input", event: "approval", time: 102, engine: "sonnet", cwd: "/work" },
-    { provider: "grok", session: "gateway-owned", parent: "child", state: "running", time: 103, delegated: true }
+    { provider: "grok", session: "gateway-owned", parent: "child", state: "running", time: 103 }
   ] });
 
-  assert.equal(projected.sessions.length, 3);
+  assert.equal(projected.sessions.length, 4);
   const root = projected.sessions.find((session) => session.localSessionId === "main");
   const grandchild = projected.sessions.find((session) => session.localSessionId === "grandchild");
   assert.equal(root.sessionId, "local:codex:main");
   assert.equal(root.role, "frontdoor");
   assert.equal(root.openerInstanceId, "main");
   assert.equal(grandchild.role, "worker");
-  assert.equal(grandchild.openerInstanceId, "main", "a delegated intermediate parent must not create a false Frontdoor");
+  assert.equal(grandchild.openerInstanceId, "main", "an intermediate parent must not create a false Frontdoor");
   assert.equal(grandchild.status, "waiting_input");
   assert.equal(projected.events[root.sessionId][0].type, "turn_start");
 });
@@ -51,7 +51,10 @@ test("local snapshot projects a real frontdoor and nested local workers", () => 
 test("gateway-owned provider sessions are deduplicated by ACP or Gateway id", () => {
   const local = projectLocalSnapshot({ sessions: [
     { provider: "codex", session: "main", state: "running", time: 100 },
-    { provider: "claude", session: "provider-worker", parent: "main", state: "running", time: 101, delegated: true },
+    // No marker flag: a Gateway-owned claude worker writes an ordinary
+    // transcript, so the scanner reports it like any other local session.
+    // ownedWorkerIds in mergeMonitorSessions is what must dedupe it.
+    { provider: "claude", session: "provider-worker", parent: "main", state: "running", time: 101 },
     { provider: "grok", session: "nested-worker", parent: "provider-worker", state: "running", time: 102 }
   ] });
   const merged = mergeMonitorSessions([

@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { accessSync, constants } from "node:fs";
-import { access, chmod, cp, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { pathExists } from "./fs-paths.js";
 import { detectProviders } from "./providers.js";
 import {
   defaultProviderRegistryPath,
@@ -854,16 +855,6 @@ async function readInstallState(path) {
   } catch (error) {
     if (error?.code === "ENOENT") return null;
     throw new Error(`Cannot read installer state ${path}: ${error.message}`);
-  }
-}
-
-async function pathExists(path) {
-  try {
-    await access(path);
-    return true;
-  } catch (error) {
-    if (error?.code === "ENOENT") return false;
-    throw error;
   }
 }
 

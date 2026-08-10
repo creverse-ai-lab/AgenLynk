@@ -9,12 +9,19 @@ let package = Package(
         .executable(name: "LynkPet", targets: ["LynkPet"])
     ],
     targets: [
+        // Contract-level code both executables must agree on byte-for-byte.
+        .target(
+            name: "ACPShared",
+            path: "Sources/ACPShared"
+        ),
         .executableTarget(
             name: "ACPMonitor",
+            dependencies: ["ACPShared"],
             path: "Sources/ACPMonitor"
         ),
         .executableTarget(
             name: "LynkPet",
+            dependencies: ["ACPShared"],
             path: "Sources/LynkPet",
             resources: [.process("Resources")]
         )

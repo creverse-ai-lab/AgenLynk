@@ -30,13 +30,11 @@ export function projectLocalSnapshot(snapshot) {
   const allRawSessions = Array.isArray(snapshot?.sessions)
     ? snapshot.sessions.filter((session) => session?.session)
     : [];
-  // `delegated` is back-compat defense only: no scanner source emits it since
-  // the Gateway-session producer was deleted (the monitor holds those over
-  // RPC). The LIVE dedupe against gateway-owned sessions is ownedWorkerIds in
-  // mergeMonitorSessions below — do not "clean up" that one; the scanner can
-  // legitimately detect a gateway worker's own transcript on disk.
+  // Ancestry index over every raw session: a local grandchild can be spawned
+  // through an intermediate the Gateway owns, and losing that link would
+  // split the grandchild off as a false Frontdoor.
   const byRawId = new Map(allRawSessions.map((session) => [session.session, session]));
-  const rawSessions = allRawSessions.filter((session) => session.delegated !== true);
+  const rawSessions = allRawSessions;
   const sessions = [];
   const events = {};
 

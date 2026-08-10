@@ -70,32 +70,6 @@ actor MonitorClient {
         return try GatewayConfigSnapshot.decode(data)
     }
 
-    func inspectRuntime(endpoint: MonitorEndpoint) async throws -> RuntimeInspection {
-        let request = endpoint.request(path: "api/runtime", method: "GET")
-        let (data, response) = try await URLSession.shared.data(for: request)
-        try validate(response: response, data: data)
-        return try RuntimeInspection.decode(data)
-    }
-
-    /// Runs one updater operation. An expected updater failure comes back as a
-    /// decoded `ok: false` result rather than a thrown error, so the UI can
-    /// show the library's own reason instead of a generic HTTP message.
-    func runtimeOperation(
-        endpoint: MonitorEndpoint,
-        operation: String,
-        body: [String: Any] = [:]
-    ) async throws -> RuntimeOperationResult {
-        var request = endpoint.request(path: "api/runtime/\(operation)", method: "POST")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
-        // 409 carries a well-formed updater envelope; anything else is a real
-        // transport/auth failure and keeps the shared validation path.
-        if http.statusCode != 409 { try validate(response: response, data: data) }
-        return try RuntimeOperationResult.decode(data)
-    }
-
     func retentionPreview(
         endpoint: MonitorEndpoint,
         sessionRetentionMs: Int?,

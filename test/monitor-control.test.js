@@ -7,8 +7,28 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readFile } from "node:fs/promises";
 import { GatewayRpcClient } from "../src/socket-rpc.js";
+import { MonitorState } from "../src/monitor-state.js";
 import { annotateRuntimeSplit, restartBlockedError } from "../src/monitor.js";
+
+// The Swift half of this contract lives in MonitorModelTests.swift
+// (restartBlockersMatchTheSharedGatewayContract) and replays the same file.
+// Both sides feed the updater, which refuses to activate on any blocker, so a
+// divergence either blocks a safe update or lets an unsafe one through.
+test("restartBlockers matches the shared blocker contract the Settings UI also implements", async () => {
+  const fixtureUrl = new URL("./fixtures/restart-blockers.json", import.meta.url);
+  const { cases } = JSON.parse(await readFile(fixtureUrl, "utf8"));
+  assert.ok(cases.length > 0, "fixture must define at least one case");
+
+  for (const { name, sessions, tasks, inbox, expected } of cases) {
+    const state = new MonitorState();
+    state.setSessions(sessions.map((session) => ({ provider: "codex", cwd: "/tmp/project", ...session })));
+    state.tasks = tasks;
+    state.inbox = inbox;
+    assert.deepEqual(state.restartBlockers(), expected, name);
+  }
+});
 
 test("restartBlockedError reports the stable monitor_restart_blocked code and the blocker detail", () => {
   const error = restartBlockedError(["진행 중 세션 1개", "미응답 Inbox 1개"]);
@@ -273,75 +293,6 @@ test("native monitor exposes /api/meta, versioned snapshot, and stable error cod
       monitor.kill("SIGTERM");
       await exited;
     }
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("native monitor exposes the runtime updater with the same envelopes as the CLI", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "acp-monitor-updater-"));
-  const runtimeRoot = join(directory, "runtime");
-  const env = {
-    ...process.env,
-    ACP_GATEWAY_SOCKET: join(directory, "gateway.sock"),
-    ACP_GATEWAY_CONTROL_TOKEN: "test-control-token-at-least-24-characters",
-    ACP_GATEWAY_ROOT_ID: "main-monitor-updater-test",
-    ACP_GATEWAY_RUNTIME_ROOT: runtimeRoot,
-    ACP_GATEWAY_MONITOR_PORT: "0",
-    ACP_GATEWAY_MONITOR_AUTOSTART: "0"
-  };
-  const monitor = spawn(process.execPath, [fileURLToPath(new URL("../src/monitor.js", import.meta.url))], {
-    env,
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  try {
-    const lines = createInterface({ input: monitor.stdout });
-    const ready = await Promise.race([
-      new Promise((resolve, reject) => lines.once("line", (line) => {
-        try { resolve(JSON.parse(line)); } catch (error) { reject(error); }
-      })),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("monitor ready timeout")), 15_000))
-    ]);
-    const headers = { authorization: `Bearer ${ready.apiToken}` };
-
-    // inspect answers even when nothing has ever been installed.
-    const inspected = await fetchJson(`${ready.url}/api/runtime`, { headers });
-    assert.equal(inspected.ok, true);
-    assert.equal(inspected.op, "inspect");
-    assert.equal(inspected.current, null);
-    assert.deepEqual(inspected.versions, []);
-
-    // Expected failures keep the library envelope instead of becoming a
-    // generic HTTP error, so the app can branch on error.code like the CLI.
-    const staged = await fetch(`${ready.url}/api/runtime/stage`, {
-      method: "POST",
-      headers: { ...headers, "content-type": "application/json" },
-      body: JSON.stringify({ seedRoot: join(directory, "missing-seed") })
-    });
-    assert.equal(staged.status, 409, "an expected updater failure is not a 500");
-    const stagedBody = await staged.json();
-    assert.equal(stagedBody.ok, false);
-    assert.equal(stagedBody.op, "stage");
-    assert.equal(typeof stagedBody.error.code, "string");
-
-    const rolledBack = await fetch(`${ready.url}/api/runtime/rollback`, {
-      method: "POST",
-      headers: { ...headers, "content-type": "application/json" },
-      body: "{}"
-    });
-    const rollbackBody = await rolledBack.json();
-    assert.equal(rollbackBody.ok, false);
-    assert.equal(rollbackBody.error.code, "NO_PREVIOUS_TARGET");
-
-    const unknown = await fetch(`${ready.url}/api/runtime/frobnicate`, {
-      method: "POST",
-      headers: { ...headers, "content-type": "application/json" },
-      body: "{}"
-    });
-    assert.equal(unknown.status, 404);
-    assert.equal((await unknown.json()).code, "monitor_not_found");
-  } finally {
-    monitor.kill("SIGTERM");
-    await once(monitor, "exit").catch(() => {});
     await rm(directory, { recursive: true, force: true });
   }
 });

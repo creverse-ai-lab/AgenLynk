@@ -13,20 +13,21 @@
 // intentional (see TODO.md's fixed runtime boundary) and separate from
 // developer `git pull` workflows, which never touch this file.
 import { execFile } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { access, cp, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rm } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { pathExists } from "./fs-paths.js";
 import { GATEWAY_API_VERSION, UnsupportedGatewayApiVersionError } from "./gateway-api-version.js";
 import { activateCurrent, defaultRuntimeRoot, isConfinedToVersions, readCurrentRuntime } from "./runtime-installer.js";
 import { withRuntimeLock } from "./runtime-lock.js";
 import { readManifestFile, verifyRuntimeManifest } from "./runtime-manifest.js";
+import { PREVIOUS_POINTER_FILE, readPointerFile, writePointerFile } from "./runtime-pointer.js";
+import { stageVerifiedRuntime } from "./runtime-staging.js";
 
 export { defaultRuntimeRoot };
 
 const execFileAsync = promisify(execFile);
-const PREVIOUS_POINTER_FILE = "previous.json";
 
 /** Carries a stable machine-readable `code` (+ optional details) into the JSON envelope's `error` field. */
 class RuntimeUpdaterError extends Error {
@@ -67,15 +68,6 @@ function normalizeBlockers(blockers) {
       .map(([key, value]) => `${key}:${value}`);
   }
   return [];
-}
-
-async function pathExists(path) {
-  try {
-    await access(path);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /** Lexical-only confinement check: usable before a candidate exists on disk (stage) as well as after. */
@@ -194,17 +186,6 @@ async function runSmokeCheck(check, target, manifest) {
   }
 }
 
-async function readPointerFile(runtimeRoot, fileName) {
-  try {
-    const raw = JSON.parse(await readFile(join(runtimeRoot, fileName), "utf8"));
-    if (raw?.formatVersion !== 1 || typeof raw.runtimeRoot !== "string" || !raw.runtimeRoot) return null;
-    return raw;
-  } catch (error) {
-    if (error?.code === "ENOENT") return null;
-    throw error;
-  }
-}
-
 async function assertKnownGoodPointer(runtimeRoot, pointer, label) {
   if (!pointer) return null;
   if (!(await isConfinedToVersions(runtimeRoot, pointer.runtimeRoot))) {
@@ -226,15 +207,6 @@ async function assertKnownGoodPointer(runtimeRoot, pointer, label) {
     );
   }
   return pointer;
-}
-
-/** Copies an existing current.json/previous.json-shaped payload verbatim — preserves its original activatedAt. */
-async function writePointerFile(runtimeRoot, fileName, payload) {
-  await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
-  const finalPath = join(runtimeRoot, fileName);
-  const temporary = join(runtimeRoot, `${fileName}.${process.pid}.tmp`);
-  await writeFile(temporary, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
-  await rename(temporary, finalPath);
 }
 
 export async function readPreviousRuntime(runtimeRoot = defaultRuntimeRoot()) {
@@ -347,26 +319,17 @@ export async function stageRuntimeCandidate(options) {
       }
     }
 
-    const stagingRoot = join(runtimeRoot, "staging");
-    await mkdir(stagingRoot, { recursive: true });
-    const staging = join(stagingRoot, `${versionId}-${randomBytes(6).toString("hex")}`);
-    await rm(staging, { recursive: true, force: true });
-    try {
-      // verbatimSymlinks: preserve relative link text exactly, same reasoning
-      // as runtime-installer.js's stageAndActivate.
-      await cp(seedRoot, staging, { recursive: true, verbatimSymlinks: true });
-      await verifyRuntimeManifest(staging, manifest);
-      await mkdir(versionsRootOf(runtimeRoot), { recursive: true });
-      await rm(target, { recursive: true, force: true });
-      await rename(staging, target);
-    } catch (error) {
-      await rm(staging, { recursive: true, force: true }).catch(() => {});
-      throw new RuntimeUpdaterError("STAGING_FAILED", `candidate failed validation, staging aborted: ${error.message}`);
-    }
-    if (!(await isConfinedToVersions(runtimeRoot, target))) {
-      await rm(target, { recursive: true, force: true }).catch(() => {});
-      throw new RuntimeUpdaterError("PATH_CONFINEMENT_VIOLATION", `staged candidate resolved outside the managed versions root: ${versionId}`);
-    }
+    await stageVerifiedRuntime({
+      seedRoot,
+      runtimeRoot,
+      target,
+      manifest,
+      isConfined: isConfinedToVersions,
+      onFailure: (error) =>
+        new RuntimeUpdaterError("STAGING_FAILED", `candidate failed validation, staging aborted: ${error.message}`),
+      onConfinementViolation: () =>
+        new RuntimeUpdaterError("PATH_CONFINEMENT_VIOLATION", `staged candidate resolved outside the managed versions root: ${versionId}`)
+    });
 
     return {
       versionId,
