@@ -1170,6 +1170,39 @@ enum MonitorClientError: LocalizedError, Equatable, Sendable {
     }
 }
 
+/// A warning when the running Gateway daemon serves from a different runtime
+/// root than the monitor — the split-brain state the Node monitor annotates
+/// onto its setup info. Left unsurfaced, the user keeps running old Gateway
+/// code with no visible sign; a safe restart respawns from the monitor's
+/// runtime and heals it.
+func runtimeSplitWarning(gateway: JSONValue?) -> String? {
+    guard let split = gateway?.objectValue?.object("runtimeSplit"),
+          let daemonRoot = split.string("daemonRuntimeRoot") else { return nil }
+    return "실행 중인 Gateway가 다른 runtime(\(daemonRoot))에서 동작하고 있습니다. Gateway 구성에서 '적용 및 안전 재시작'을 실행하면 현재 runtime으로 전환됩니다."
+}
+
+/// User-facing guidance per stable monitor failure code. The codes come from
+/// both sides of the wire — the Node monitor's HTTP bodies and the Swift
+/// client's own classification — and this is the single place that turns a
+/// code into "what should the user actually do", so every surface (dashboard,
+/// menu bar, settings) explains a failure the same way.
+func monitorFailureGuidance(code: String?) -> String? {
+    switch code {
+    case "monitor_not_installed":
+        "Gateway runtime이 설치되어 있지 않습니다. 설정 > 버전·업데이트에서 이 앱의 runtime을 설치하세요."
+    case "monitor_api_incompatible":
+        "설치된 Gateway runtime이 이 앱과 호환되지 않습니다. 설정 > 버전·업데이트에서 runtime을 업데이트하세요."
+    case "monitor_update_required":
+        "이 앱이 설치된 runtime보다 오래되었습니다. 새 버전의 Lynk로 업데이트하세요."
+    case "monitor_unauthorized":
+        "Monitor 인증이 유효하지 않습니다. '다시 연결'을 눌러 세션을 새로 만드세요."
+    case "monitor_restart_blocked":
+        "진행 중인 세션·Task·미응답 요청이 끝나면 다시 시도하세요."
+    default:
+        nil
+    }
+}
+
 func decodeJSONValue(_ data: Data) throws -> JSONValue {
     JSONValue(any: try JSONSerialization.jsonObject(with: data))
 }

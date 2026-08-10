@@ -10,6 +10,8 @@ enum MonitorModelChecks {
         try monitorMetaDecodesGatewayIdentityAndToleratesNullSetupValues()
         try monitorMetaRejectsMissingMonitorApiVersion()
         try monitorClientErrorDecodesCodeAndErrorFromHTTPBody()
+        try everyStableFailureCodeCarriesDistinctActionableGuidance()
+        try runtimeSplitAnnotationSurfacesAsAWarning()
         try agentCatalogDecodesInstallAndEnabledState()
         try gatewayConfigDecodesAllControlMetadata()
         try gatewayConfigRepresentsAllKnownSettingIds()
@@ -520,6 +522,47 @@ enum MonitorModelChecks {
         try check(Set(stacked.map(\.id)).count == stacked.count, "stacked lane order must not duplicate a lane")
         try check(stacked.first?.session.isFrontdoorRecord == true, "each group's Frontdoor root must lead its workers")
         try check(stacked.last?.session.sessionId == gatewayWorker.sessionId, "workers must follow their Frontdoor root")
+    }
+
+    /// G6: 인증 실패, 미설치, API 비호환, 업데이트 필요, restart blocked가
+    /// 서로 다른, 실행 가능한 안내로 구분되어야 한다.
+    private static func everyStableFailureCodeCarriesDistinctActionableGuidance() throws {
+        let codes = [
+            "monitor_not_installed",
+            "monitor_api_incompatible",
+            "monitor_update_required",
+            "monitor_unauthorized",
+            "monitor_restart_blocked"
+        ]
+        var seen = Set<String>()
+        for code in codes {
+            guard let guidance = monitorFailureGuidance(code: code) else {
+                throw CheckError.failed("stable code \(code) must map to user guidance")
+            }
+            try check(seen.insert(guidance).inserted, "guidance for \(code) must be distinct, not shared")
+        }
+        try check(monitorFailureGuidance(code: "monitor_internal") == nil, "internal errors carry no user action")
+        try check(monitorFailureGuidance(code: nil) == nil, "an uncoded failure has no synthetic guidance")
+
+        // The client-side classification feeding those codes.
+        try check(MonitorDecodeError.updateRequired("x").stableCode == "monitor_update_required", "update-required decode failures must keep their code")
+        try check(MonitorDecodeError.apiIncompatible("x").stableCode == "monitor_api_incompatible", "incompatible decode failures must keep their code")
+    }
+
+    private static func runtimeSplitAnnotationSurfacesAsAWarning() throws {
+        let split = JSONValue.object([
+            "gatewayVersion": .string("1.3.1"),
+            "runtimeSplit": .object([
+                "daemonRuntimeRoot": .string("/Users/x/dev/checkout"),
+                "monitorRuntimeRoot": .string("/Users/x/.acp-gateway/runtime/versions/1.3.1-new")
+            ])
+        ])
+        guard let warning = runtimeSplitWarning(gateway: split) else {
+            throw CheckError.failed("an annotated split must produce a user warning")
+        }
+        try check(warning.contains("/Users/x/dev/checkout"), "the warning must name the foreign runtime root")
+        try check(runtimeSplitWarning(gateway: .object(["gatewayVersion": .string("1.3.1")])) == nil, "no annotation, no warning")
+        try check(runtimeSplitWarning(gateway: nil) == nil, "no gateway info, no warning")
     }
 
     private static func agentCatalogDecodesInstallAndEnabledState() throws {

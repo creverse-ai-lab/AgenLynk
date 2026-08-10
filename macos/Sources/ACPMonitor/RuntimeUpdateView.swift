@@ -34,6 +34,12 @@ struct RuntimeUpdateView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    if let warning = runtimeSplitWarning(gateway: model.gateway) {
+                        Label(warning, systemImage: "exclamationmark.triangle.fill")
+                            .font(.callout)
+                            .foregroundStyle(.orange)
+                            .textSelection(.enabled)
+                    }
                     versionSection
                     installedSection
                     if let notice = model.runtimeNotice {

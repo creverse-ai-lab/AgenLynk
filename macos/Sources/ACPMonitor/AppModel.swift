@@ -639,6 +639,27 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The stable failure code of any error the monitor path can throw.
+    /// Lives here rather than in Models.swift because the error types span
+    /// files that the check harness compiles as separate units.
+    nonisolated static func monitorFailureCode(_ error: Error) -> String? {
+        switch error {
+        case let decode as MonitorDecodeError: decode.stableCode
+        case let client as MonitorClientError: client.code
+        case let sidecar as SidecarError: sidecar.stableCode
+        case let runtime as BundledRuntimeError: runtime.stableCode
+        default: nil
+        }
+    }
+
+    /// A disconnect message with its actionable guidance attached, when the
+    /// failure maps to a stable code the user can do something about.
+    private func describeConnectFailure(_ error: Error) -> String {
+        let base = error.localizedDescription
+        guard let guidance = monitorFailureGuidance(code: Self.monitorFailureCode(error)) else { return base }
+        return "\(base) \(guidance)"
+    }
+
     private func connect(restartSidecar: Bool = false) async {
         phase = .starting
         reconciliationTask?.cancel()
@@ -671,7 +692,7 @@ final class AppModel: ObservableObject {
             gatewayConnected = false
             gatewayStreaming = false
             sidecarStreamConnected = false
-            phase = .disconnected(error.localizedDescription)
+            phase = .disconnected(describeConnectFailure(error))
         }
     }
 

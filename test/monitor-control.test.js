@@ -8,7 +8,7 @@ import { createInterface } from "node:readline";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { GatewayRpcClient } from "../src/socket-rpc.js";
-import { restartBlockedError } from "../src/monitor.js";
+import { annotateRuntimeSplit, restartBlockedError } from "../src/monitor.js";
 
 test("restartBlockedError reports the stable monitor_restart_blocked code and the blocker detail", () => {
   const error = restartBlockedError(["진행 중 세션 1개", "미응답 Inbox 1개"]);
@@ -19,6 +19,39 @@ test("restartBlockedError reports the stable monitor_restart_blocked code and th
   const withNoBlockers = restartBlockedError([]);
   assert.equal(withNoBlockers.code, "monitor_restart_blocked");
   assert.equal(withNoBlockers.message, "Gateway를 안전하게 재시작할 수 없습니다: ");
+});
+
+test("a daemon serving from a different runtime root is flagged as a split brain", () => {
+  const monitorRoot = "/Users/x/.acp-gateway/runtime/versions/1.3.1-new";
+  const foreign = annotateRuntimeSplit(
+    { gatewayVersion: "1.3.1", runtimeRoot: "/Users/x/dev/checkout" },
+    monitorRoot
+  );
+  assert.deepEqual(foreign.runtimeSplit, {
+    daemonRuntimeRoot: "/Users/x/dev/checkout",
+    monitorRuntimeRoot: monitorRoot
+  });
+
+  const same = annotateRuntimeSplit({ runtimeRoot: monitorRoot }, monitorRoot);
+  assert.equal(same.runtimeSplit, undefined, "matching roots are not a split");
+
+  // A daemon with neither field proves nothing, and a null setup passes through.
+  assert.equal(annotateRuntimeSplit({ gatewayVersion: "1.0.0" }, monitorRoot, "build-a").runtimeSplit, undefined);
+  assert.equal(annotateRuntimeSplit(null, monitorRoot), null, "a null setup passes through");
+
+  // Build-id mismatch is a split even without runtimeRoot (old daemons) or
+  // with an equal root (a checkout daemon started before a git pull).
+  const oldDaemon = annotateRuntimeSplit({ gatewayBuildId: "build-old" }, monitorRoot, "build-new");
+  assert.deepEqual(oldDaemon.runtimeSplit, { daemonBuildId: "build-old", monitorBuildId: "build-new" });
+  const stalePull = annotateRuntimeSplit(
+    { runtimeRoot: monitorRoot, gatewayBuildId: "build-old" }, monitorRoot, "build-new"
+  );
+  assert.deepEqual(stalePull.runtimeSplit, { daemonBuildId: "build-old", monitorBuildId: "build-new" });
+  assert.equal(
+    annotateRuntimeSplit({ runtimeRoot: monitorRoot, gatewayBuildId: "build-new" }, monitorRoot, "build-new").runtimeSplit,
+    undefined,
+    "matching root and build is healthy"
+  );
 });
 
 test("native monitor controls Gateway config and safely restarts into pending values", async () => {

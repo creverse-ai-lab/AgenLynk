@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { GatewayRpcClient } from "./socket-rpc.js";
 import { MONITOR_API_VERSION, MONITOR_SCHEMA_VERSION, MonitorState, queuedSingleFlight } from "./monitor-state.js";
 import { gatewaySocketPath } from "./config.js";
+import { GATEWAY_BUILD_ID, GATEWAY_RUNTIME_ROOT } from "./version.js";
 import { mergeMonitorSessions, projectLocalSnapshot } from "./local-monitor.js";
 import { LocalTranscriptReader } from "./local-transcript.js";
 import { LocalAgentScanner } from "./local-agents/index.js";
@@ -212,7 +213,7 @@ async function main() {
 
   async function refreshGatewayInfo() {
     try {
-      const gateway = await rpc.call("setup", {});
+      const gateway = annotateRuntimeSplit(await rpc.call("setup", {}), GATEWAY_RUNTIME_ROOT);
       if (state.setGateway(gateway)) state.broadcast({ kind: "gateway", gateway });
     } catch {
       // setup is best-effort metadata; session/event flow works without it.
@@ -639,6 +640,35 @@ function monitorCapabilities(state) {
 // Stable-code contract for a blocked Gateway restart. A pure function of the
 // blocker list (produced by MonitorState.restartBlockers) so it's testable
 // without a running server: the HTTP handler throws exactly this shape.
+/**
+ * Marks a setup response whose daemon runs from a different runtime root than
+ * this monitor — a split brain. It happens when a dev-checkout daemon holds
+ * the socket while the installed runtime's monitor connects (or vice versa):
+ * the socket's single-owner race means the stale daemon keeps winning, so the
+ * user runs old Gateway code without any visible sign. Detection is the fix's
+ * first half; a safe Gateway restart respawns from this monitor's runtime and
+ * heals the split.
+ */
+export function annotateRuntimeSplit(gateway, monitorRuntimeRoot, monitorBuildId = GATEWAY_BUILD_ID) {
+  if (!gateway || typeof gateway !== "object") return gateway;
+  const daemonRoot = gateway.runtimeRoot;
+  if (typeof daemonRoot === "string" && daemonRoot && monitorRuntimeRoot && daemonRoot !== monitorRuntimeRoot) {
+    return { ...gateway, runtimeSplit: { daemonRuntimeRoot: daemonRoot, monitorRuntimeRoot } };
+  }
+  // A healthy pair always runs identical code (the monitor spawns the daemon
+  // from its own runtime), so a differing build id is a split even when the
+  // root matches or is absent: daemons predating the runtimeRoot field, a dev
+  // checkout daemon started before a `git pull`, and the post-update window
+  // where current.json already points at the new runtime but the daemon still
+  // runs the old one until a restart.
+  const daemonBuildId = gateway.gatewayBuildId;
+  if (typeof daemonBuildId === "string" && daemonBuildId
+    && monitorBuildId && daemonBuildId !== monitorBuildId) {
+    return { ...gateway, runtimeSplit: { daemonBuildId, monitorBuildId } };
+  }
+  return gateway;
+}
+
 export function restartBlockedError(blockers) {
   const error = new Error(`Gateway를 안전하게 재시작할 수 없습니다: ${blockers.join(", ")}`);
   error.statusCode = 409;

@@ -73,7 +73,7 @@ Monitor activity projection
 - [x] Dashboard, 메뉴바 popover, session detail window가 같은 실시간 snapshot을 사용한다.
 - [x] `monitor_ready`와 `/api/meta`에 `monitorApiVersion`, Gateway identity, capabilities를 제공한다.
 - [x] `/api/snapshot`과 모든 SSE envelope에 `schemaVersion`과 `monitorApiVersion`을 추가한다.
-- [ ] 인증 실패, 미설치, API 비호환, 업데이트 필요, restart blocked를 안정된 error code로 구분한다. `monitor.js`에 `monitor_unauthorized`, `monitor_not_found`, `monitor_internal`, `monitor_restart_blocked`만 있고 미설치/API 비호환/업데이트 필요 코드가 없다.
+- [x] 인증 실패, 미설치, API 비호환, 업데이트 필요, restart blocked를 안정된 error code로 구분한다. 5개 코드 각각이 서로 다른 실행 가능한 안내로 매핑되고(`monitorFailureGuidance`), 연결 실패 시 안내가 함께 표시된다 (`AppModel.monitorFailureCode`, `MonitorModelTests`).
 - [x] Swift가 시작 handshake, snapshot과 SSE에서 지원하지 않는 schema/API major를 부분 decode하지 않고 업데이트 안내 오류로 전환한다.
 - [x] `MenuBarExtra` 기반 메뉴바 진입점을 추가한다.
 - [x] 메뉴바 클릭만으로 Gateway 상태, 활성 세션, 대기 요청, 최근 진행 상태를 작은 popover에서 확인한다.
@@ -120,13 +120,13 @@ Monitor activity projection
 - [x] 개발자 절대 Pet 프로젝트 경로 기본값을 제거한다.
 - [x] 로컬 세션 감지를 외부 Python watcher에서 monitor 내장 Node 스캐너로 대체했다. 사용자 설정·`python3`·`sqlite3` CLI 의존이 모두 사라졌고, 별도 프로세스와 JSON 파일 IPC도 없다 (`src/local-agents/`).
 - [x] 기본 Pet은 하나의 renderer일 뿐이며 사용자가 같은 JSON 계약으로 다른 UI를 연결할 수 있게 한다. 번들 `Contents/Helpers/LynkPet.app`이 기본값이고 `monitor.petExecutablePath`로 교체한다 (`AppSettings.BundledPet`, `PetController`).
-- [ ] Pet 경계의 atomic `0600` 쓰기와 renderer 환경 제한에 Swift 자동 테스트를 추가한다. 현재 `PetControllerTests.swift`는 빈 경로 거부 한 건만 검사한다.
+- [x] Pet 경계의 atomic `0600` 쓰기와 renderer 환경 제한을 실제 자식 프로세스로 검증한다. 계약 파일 0600/디렉터리 0700, state/actions 시퀀스 동기, 내부 필드 미유출, secret 환경변수 미전달, stop() 시 자식 종료까지 확인한다 (`PetControllerTests.swift`).
 
 ## P1 — v1 안정화와 유지보수
 
 - [ ] Gateway setup, Monitor meta/snapshot/SSE의 JSON fixture를 만들고 Node와 Swift가 같은 fixture를 decode한다.
 - [ ] 이전 minor, unknown additive field, 필수 필드 누락과 잘못된 major 호환성 테스트를 추가한다.
-- [ ] socket을 점유한 daemon의 `runtimeRoot`와 current runtime을 비교해 split-brain spawn을 차단한다.
+- [x] socket을 점유한 daemon의 runtime과 monitor의 runtime을 비교해 split-brain을 감지한다. runtimeRoot 불일치와 buildId 불일치(구형 daemon, git pull 이전에 뜬 checkout daemon, 업데이트 후 재시작 전 구간) 모두 `runtimeSplit`으로 표시되고, 버전·업데이트 화면이 안전 재시작 안내를 띄운다 (`annotateRuntimeSplit`, `runtimeSplitWarning`). 실제 8/7 구형 daemon에 대해 감지 동작을 확인했다.
 - [ ] runtime 경로 계산과 실행 entrypoint 선택을 공통 resolver로 모은다.
 - [ ] `GatewayRuntimeManaging`과 `MonitorTransporting` 경계는 테스트 대역이나 호환성 처리에 필요한 최소 범위로만 도입한다.
 - [x] 선택 가능한 번들 sample renderer를 제공한다. `verify-dmg.sh`가 번들 Pet의 `--self-test`와 코드서명을 release gate에서 검증한다.
@@ -150,8 +150,8 @@ Monitor activity projection
 - [ ] **G3 Fresh install** — Node와 기존 Gateway가 없는 깨끗한 Mac에서 DMG만으로 onboarding과 live monitoring이 완료된다.
 - [ ] **G4 Existing install** — migration/dry-run 구현과 실제 기존 CLI 설치 acceptance가 모두 통과하고 identity, MCP, provider와 session data가 보존된다.
 - [x] **G5 Config safety** — 안전 config 18개의 list/set/reset, env lock과 active-work restart blocker가 자동 테스트를 통과한다.
-- [ ] **G6 Monitor/menu bar** — versioned Monitor API와 메뉴바 popover가 재연결·비호환 상태를 포함해 동작한다.
-- [ ] **G7 Pet boundary** — 제3자 renderer가 두 JSON 파일만으로 동작하고 secret/control 권한을 얻지 못한다.
+- [x] **G6 Monitor/menu bar** — versioned Monitor API와 메뉴바 popover가 재연결·비호환 상태를 포함해 동작한다. 5개 안정 error code가 구분된 안내로 매핑되고 자동 테스트를 통과한다.
+- [x] **G7 Pet boundary** — 제3자 renderer가 두 JSON 파일만으로 동작하고 secret/control 권한을 얻지 못한다. 실제 자식 프로세스 기반 경계 테스트가 env 격리·0600·종료를 검증한다.
 - [x] **G8 Update/rollback** — bad stage는 current를 바꾸지 않고 post-activation health 실패는 previous로 복구한다. 2026-08-10 `test/runtime-updater.test.js` 자동 테스트로 확인했다. Swift UI 연동과 기존 CLI migration은 남아 있다.
 
 ## v1 비범위

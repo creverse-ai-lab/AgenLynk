@@ -29,11 +29,17 @@ final class PetController {
     /// Monotonic for the app process's lifetime; never reset by start/stop.
     private var sequence = 0
 
-    init(fileManager: FileManager = .default) {
+    /// `stateDirectory` is injectable so boundary tests can observe the real
+    /// files and the real child process without touching Application Support.
+    init(fileManager: FileManager = .default, stateDirectory: URL? = nil) {
         self.fileManager = fileManager
-        let applicationSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-        stateDirectory = applicationSupport.appendingPathComponent("ACPMonitor", isDirectory: true)
+        if let stateDirectory {
+            self.stateDirectory = stateDirectory
+        } else {
+            let applicationSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+                ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            self.stateDirectory = applicationSupport.appendingPathComponent("ACPMonitor", isDirectory: true)
+        }
     }
 
     var isRunning: Bool { process?.isRunning == true }
