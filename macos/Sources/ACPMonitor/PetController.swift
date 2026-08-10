@@ -2,25 +2,29 @@ import Foundation
 import Darwin
 
 enum PetControllerError: LocalizedError {
-    case projectDirectoryNotFound(String)
     case executableNotFound(String)
 
     var errorDescription: String? {
         switch self {
-        case let .projectDirectoryNotFound(path):
-            "Pet 프로젝트 경로를 찾지 못했습니다: \(path)"
         case let .executableNotFound(path):
-            "Pet 실행 파일을 찾지 못했습니다: \(path) (pet-ctl.sh build를 먼저 실행하세요.)"
+            "Pet 실행 파일을 찾지 못했습니다: \(path)"
         }
     }
 }
 
+/// Launches and feeds a user-selected Pet/user-renderer executable. The
+/// renderer is output-only: it is given an explicit executable path (no
+/// project-directory or `.build` assumptions), a benign environment
+/// allowlist, and read-only `pet-state.json`/`pet-actions.json` contract
+/// files — never a mutation/control channel back into the Gateway.
 @MainActor
 final class PetController {
     private let fileManager: FileManager
     private let stateDirectory: URL
     private(set) var process: Process?
     private var logHandle: FileHandle?
+    /// Monotonic for the app process's lifetime; never reset by start/stop.
+    private var sequence = 0
 
     init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
@@ -30,44 +34,39 @@ final class PetController {
     }
 
     var isRunning: Bool { process?.isRunning == true }
-    var snapshotURL: URL { stateDirectory.appendingPathComponent("pet-state.json") }
+    var stateFileURL: URL { stateDirectory.appendingPathComponent("pet-state.json") }
+    var actionsFileURL: URL { stateDirectory.appendingPathComponent("pet-actions.json") }
 
     func start(
-        projectPath: String,
-        snapshot: PetSnapshot,
+        executablePath: String,
+        projection: PetActivityProjection,
         onTermination: @escaping @MainActor (Int32) -> Void
     ) throws {
         stop()
-        let projectURL = URL(fileURLWithPath: projectPath, isDirectory: true).standardizedFileURL
-        var isDirectory: ObjCBool = false
-        guard fileManager.fileExists(atPath: projectURL.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            throw PetControllerError.projectDirectoryNotFound(projectURL.path)
-        }
-        let executableURL = projectURL.appendingPathComponent(".build/release/CodexPet")
+        let executableURL = URL(fileURLWithPath: executablePath).standardizedFileURL
         guard fileManager.isExecutableFile(atPath: executableURL.path) else {
             throw PetControllerError.executableNotFound(executableURL.path)
         }
 
-        try write(snapshot)
+        try write(projection)
         let logURL = stateDirectory.appendingPathComponent("pet.log")
         if !fileManager.fileExists(atPath: logURL.path) {
             fileManager.createFile(atPath: logURL.path, contents: nil)
         }
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: logURL.path)
         let logHandle = try FileHandle(forWritingTo: logURL)
         try logHandle.seekToEnd()
 
         let process = Process()
         process.executableURL = executableURL
-        process.currentDirectoryURL = projectURL
+        process.currentDirectoryURL = executableURL.deletingLastPathComponent()
         process.standardOutput = logHandle
         process.standardError = logHandle
-        process.environment = ProcessInfo.processInfo.environment.merging([
-            "PET_STATE_FILE": snapshotURL.path,
-            "PET_PARENT_PID": String(ProcessInfo.processInfo.processIdentifier),
-            // ACP Monitor owns the complete snapshot. Do not merge the proxy/watcher
-            // directory, which would duplicate the same Gateway sessions.
-            "PET_AGENT_STATE_DIR": stateDirectory.appendingPathComponent("unused-agent-states").path
-        ]) { _, appValue in appValue }
+        process.environment = PetChildEnvironment.make(
+            from: ProcessInfo.processInfo.environment,
+            stateFilePath: stateFileURL.path,
+            actionsFilePath: actionsFileURL.path
+        )
         process.terminationHandler = { [weak self] finished in
             Task { @MainActor in
                 guard let self, self.process === finished else { return }
@@ -87,8 +86,8 @@ final class PetController {
         self.process = process
     }
 
-    func update(_ snapshot: PetSnapshot) throws {
-        try write(snapshot)
+    func update(_ projection: PetActivityProjection) throws {
+        try write(projection)
     }
 
     func stop() {
@@ -112,11 +111,22 @@ final class PetController {
         logHandle = nil
     }
 
-    private func write(_ snapshot: PetSnapshot) throws {
+    /// Both files are derived from one projection/update so they always
+    /// describe the same moment, and share the same monotonic sequence.
+    private func write(_ projection: PetActivityProjection) throws {
         try fileManager.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
+        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: stateDirectory.path)
+        sequence += 1
+        let generatedAt = Date()
+        try writeAtomically(PetStateEnvelope.make(projection: projection, sequence: sequence, generatedAt: generatedAt), to: stateFileURL)
+        try writeAtomically(PetActionsEnvelope.make(projection: projection, sequence: sequence, generatedAt: generatedAt), to: actionsFileURL)
+    }
+
+    private func writeAtomically(_ value: some Encodable, to url: URL) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        try encoder.encode(snapshot).write(to: snapshotURL, options: .atomic)
+        try encoder.encode(value).write(to: url, options: .atomic)
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     deinit {

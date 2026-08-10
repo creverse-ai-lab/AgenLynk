@@ -47,12 +47,12 @@ struct SettingsView: View {
     private var petConfiguration: some View {
         Form {
             ACPLogoLockup(subtitle: "Agent status pet")
-            Section("Cursor overlay") {
+            Section("Renderer") {
                 Toggle("Agent status pet 사용", isOn: Binding(
                     get: { settings.petEnabled },
                     set: { model.setPetEnabled($0) }
                 ))
-                TextField("Pet 프로젝트 경로", text: $settings.petProjectPath)
+                TextField("Pet 실행 파일 경로", text: $settings.petExecutablePath)
                     .disabled(model.petRunning)
                 LabeledContent("상태", value: model.petStatus)
                 if let error = model.petError {
@@ -64,14 +64,17 @@ struct SettingsView: View {
                 Button(model.petRunning ? "Pet 다시 시작" : "Pet 시작") {
                     model.restartPet()
                 }
-                .disabled(settings.petProjectPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(settings.petExecutablePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
-            Section("상태 공유") {
-                Label("Lynk가 Gateway(ACP)와 로컬 watcher 세션을 하나의 snapshot으로 Pet에 전달합니다.", systemImage: "dot.radiowaves.left.and.right")
-                Text("각 Worker를 연 최초 에이전트는 Frontdoor 루트로 합성되어 작업 트리의 시작점으로 함께 표시됩니다.")
+            Section("로컬 세션 감지 (선택)") {
+                TextField("로컬 watcher 프로젝트 경로", text: $settings.petWatcherProjectPath)
+                Text("codex_app_watcher.py가 있는 프로젝트 경로를 지정하면 ACP를 통하지 않고 직접 실행한 Codex·Claude·Grok 세션도 Monitor와 Pet에 LOCAL로 표시됩니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text("Pet 프로젝트의 codex_app_watcher.py가 있으면 ACP를 통하지 않고 직접 실행한 Codex·Claude·Grok 세션도 Monitor와 Pet에 LOCAL로 표시됩니다.")
+            }
+            Section("상태 공유") {
+                Label("Lynk가 Gateway(ACP)와 로컬 watcher 세션을 하나의 상태로 요약해 pet-state.json/pet-actions.json에 기록하면, 지정한 실행 파일이 그 두 파일만 읽어 표시합니다.", systemImage: "dot.radiowaves.left.and.right")
+                Text("각 Worker를 연 최초 에이전트는 Frontdoor 루트로 합성되어 작업 트리의 시작점으로 함께 표시됩니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

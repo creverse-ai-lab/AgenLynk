@@ -175,6 +175,184 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
     }
 }
 
+// MARK: - Pet contract v1
+
+/// Normalized agent activity state for the Pet/user-renderer JSON contract
+/// (`contracts/pet/v1/pet-state.schema.json`). This vocabulary is frozen by
+/// the contract and is intentionally distinct from `PetSnapshot`'s in-app
+/// graph state strings, which back the existing Agent Map view.
+enum PetAgentState: String, Encodable, Equatable, Sendable {
+    case offline, idle, starting, running, waiting, completed, failed, unknown
+}
+
+/// Presentation action a Pet/user-renderer is asked to play, per
+/// `contracts/pet/v1/pet-actions.schema.json`.
+enum PetPresentationAction: String, Encodable, Equatable, Sendable {
+    case sleep, wake, think, useTool, waitForUser, celebrate, error, disconnect, unknown
+}
+
+/// One Frontdoor or Worker agent projected for the Pet contract. `cwd`,
+/// `inboxPending`, and `memberStates` are internal-only: they back the
+/// legacy `PetSnapshot`/Agent Map projection and are never encoded into
+/// `pet-state.json`/`pet-actions.json`, which only expose the fields their
+/// schema declares.
+struct PetAgentActivity: Equatable, Sendable {
+    let id: String
+    let parentId: String?
+    let role: String
+    let provider: String
+    let engine: String
+    let state: PetAgentState
+    let action: PetPresentationAction
+    let task: String?
+    let updatedAt: Date
+    let source: String
+    let cwd: String?
+    let inboxPending: Int
+    /// Frontdoor entries only: every raw member's own (non-aggregated)
+    /// contract state, so a legacy aggregation can be re-run without
+    /// re-classifying raw Gateway statuses.
+    let memberStates: [PetAgentState]
+}
+
+/// The common activity projection both `pet-state.json`/`pet-actions.json`
+/// and the legacy `PetSnapshot` (Agent Map) are derived from, so every
+/// consumer classifies a raw Gateway/local-monitor status exactly once.
+struct PetActivityProjection: Equatable, Sendable {
+    let agents: [PetAgentActivity]
+
+    static func make(
+        sessions: [GatewaySession],
+        inbox: [MonitorRecord],
+        now: Date = Date()
+    ) -> PetActivityProjection {
+        let pendingBySession = Dictionary(grouping: inbox.filter {
+            $0.status == "pending" && $0.payload.objectValue?.string("sessionId") != nil
+        }, by: {
+            $0.payload.objectValue!.string("sessionId")!
+        }).mapValues(\.count)
+
+        let groups = Dictionary(grouping: sessions) { gatewaySession in
+            FrontdoorKey(
+                provider: normalizedFrontdoor(gatewaySession.opener),
+                cwd: gatewaySession.cwd,
+                instanceId: gatewaySession.openerInstanceId
+            )
+        }
+        var agents: [PetAgentActivity] = []
+        for key in groups.keys.sorted(by: { lhs, rhs in
+            lhs.provider == rhs.provider ? lhs.cwd < rhs.cwd : lhs.provider < rhs.provider
+        }) {
+            guard let group = groups[key] else { continue }
+            let root = group.filter(\.isFrontdoorRecord)
+                .max { ($0.updatedAt ?? "") < ($1.updatedAt ?? "") }
+            let workers = group.filter { !$0.isFrontdoorRecord }
+            let frontdoorId = key.instanceId ?? petFrontdoorId(key)
+            let latest = group.max { lhs, rhs in
+                petTimestamp(lhs.updatedAt, fallback: now) < petTimestamp(rhs.updatedAt, fallback: now)
+            }
+            let memberStates = group.map { session in
+                petContractState(for: session.status, hasPendingInbox: (pendingBySession[session.sessionId] ?? 0) > 0)
+            }
+            let frontdoorState = frontdoorContractState(memberStates)
+            let frontdoorCwd = root?.cwd ?? key.cwd
+            agents.append(PetAgentActivity(
+                id: frontdoorId,
+                parentId: nil,
+                role: "frontdoor",
+                provider: root?.provider ?? key.provider,
+                engine: root?.model ?? "\(key.provider)-frontdoor",
+                state: frontdoorState,
+                action: petContractAction(for: frontdoorState),
+                task: boundedTaskText(root?.title ?? "Frontdoor"),
+                updatedAt: Date(timeIntervalSince1970: petTimestamp(root?.updatedAt ?? latest?.updatedAt, fallback: now)),
+                source: root?.source ?? (group.allSatisfy(\.isLocalSource) ? "local" : "gateway"),
+                cwd: frontdoorCwd.isEmpty ? nil : frontdoorCwd,
+                inboxPending: 0,
+                memberStates: memberStates
+            ))
+            agents.append(contentsOf: workers.map { gatewaySession in
+                let pending = pendingBySession[gatewaySession.sessionId] ?? 0
+                let state = petContractState(for: gatewaySession.status, hasPendingInbox: pending > 0)
+                return PetAgentActivity(
+                    id: gatewaySession.sessionId,
+                    parentId: frontdoorId,
+                    role: "worker",
+                    provider: gatewaySession.provider,
+                    engine: gatewaySession.model ?? gatewaySession.provider,
+                    state: state,
+                    action: petContractAction(for: state),
+                    task: boundedTaskText(gatewaySession.title),
+                    updatedAt: Date(timeIntervalSince1970: petTimestamp(gatewaySession.updatedAt, fallback: now)),
+                    source: gatewaySession.source,
+                    cwd: gatewaySession.cwd.isEmpty ? nil : gatewaySession.cwd,
+                    inboxPending: pending,
+                    memberStates: []
+                )
+            })
+        }
+        return PetActivityProjection(agents: agents)
+    }
+}
+
+/// Maps a raw Gateway/local-monitor session status onto the contract's
+/// frozen 8-value state vocabulary. Covers every literal status produced by
+/// `src/gateway-service.js` and `src/local-monitor.js`. This is the single
+/// classifier both the Pet contract and the legacy `PetSnapshot` derive
+/// their per-agent state from — a cancelled or errored turn is never
+/// reported as `.completed`.
+private func petContractState(for status: String, hasPendingInbox: Bool) -> PetAgentState {
+    if hasPendingInbox { return .waiting }
+    switch status {
+    case "running", "cancelling": return .running
+    case "restoring": return .starting
+    case "waiting_permission", "waiting_input": return .waiting
+    case "idle": return .idle
+    case "ready": return .completed
+    case "disconnected", "closed": return .offline
+    case "cancelled", "error", "unavailable": return .failed
+    default: return .unknown
+    }
+}
+
+/// A Frontdoor root is only as settled as its least-settled member; the
+/// first matching state in this priority order wins.
+private func frontdoorContractState(_ memberStates: [PetAgentState]) -> PetAgentState {
+    let priority: [PetAgentState] = [.waiting, .running, .starting, .failed, .idle, .completed, .offline]
+    for state in priority where memberStates.contains(state) { return state }
+    return .unknown
+}
+
+/// The contract carries no per-event tool-call evidence, so a running
+/// agent is presented as thinking rather than assumed to be using a tool.
+/// `useTool` stays a valid, frozen enum value for a future projection that
+/// does have that evidence.
+private func petContractAction(for state: PetAgentState) -> PetPresentationAction {
+    switch state {
+    case .offline: .disconnect
+    case .idle: .sleep
+    case .starting: .wake
+    case .running: .think
+    case .waiting: .waitForUser
+    case .completed: .celebrate
+    case .failed: .error
+    case .unknown: .unknown
+    }
+}
+
+/// Trims and bounds task text before it leaves the process boundary — the
+/// Pet renderer must never receive a full prompt or unbounded event text.
+private func boundedTaskText(_ text: String?) -> String? {
+    guard let text else { return nil }
+    let collapsed = text.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !collapsed.isEmpty else { return nil }
+    return String(collapsed.prefix(200))
+}
+
+/// The Agent Map's legacy state/graph projection. Unchanged in shape and
+/// behavior from before the v1 Pet contract; now derived from the same
+/// `PetActivityProjection` classifier instead of a second copy of the
+/// status-mapping logic.
 struct PetSnapshot: Encodable, Equatable, Sendable {
     struct Session: Encodable, Equatable, Sendable {
         let provider: String
@@ -203,67 +381,51 @@ struct PetSnapshot: Encodable, Equatable, Sendable {
         inbox: [MonitorRecord],
         now: Date = Date()
     ) -> PetSnapshot {
-        let pendingBySession = Dictionary(grouping: inbox.filter {
-            $0.status == "pending" && $0.payload.objectValue?.string("sessionId") != nil
-        }, by: {
-            $0.payload.objectValue!.string("sessionId")!
-        }).mapValues(\.count)
-
-        let groups = Dictionary(grouping: sessions) { gatewaySession in
-            FrontdoorKey(
-                provider: normalizedFrontdoor(gatewaySession.opener),
-                cwd: gatewaySession.cwd,
-                instanceId: gatewaySession.openerInstanceId
+        let projection = PetActivityProjection.make(sessions: sessions, inbox: inbox, now: now)
+        let projected = projection.agents.map { agent -> Session in
+            let legacyState = agent.role == "frontdoor"
+                ? legacyAggregate(agent.memberStates.map(legacyPetState))
+                : legacyPetState(agent.state)
+            return Session(
+                provider: agent.provider,
+                session: agent.id,
+                state: legacyState,
+                parent: agent.parentId,
+                engine: agent.engine,
+                time: agent.updatedAt.timeIntervalSince1970,
+                inboxPending: agent.inboxPending,
+                cwd: agent.cwd,
+                task: agent.task,
+                delegated: agent.role == "worker",
+                role: agent.role,
+                source: agent.source
             )
-        }
-        var projected: [Session] = []
-        for key in groups.keys.sorted(by: { lhs, rhs in
-            lhs.provider == rhs.provider ? lhs.cwd < rhs.cwd : lhs.provider < rhs.provider
-        }) {
-            guard let group = groups[key] else { continue }
-            let root = group.filter(\.isFrontdoorRecord)
-                .max { ($0.updatedAt ?? "") < ($1.updatedAt ?? "") }
-            let workers = group.filter { !$0.isFrontdoorRecord }
-            let frontdoorId = key.instanceId ?? petFrontdoorId(key)
-            let latest = group.max { lhs, rhs in
-                petTimestamp(lhs.updatedAt, fallback: now) < petTimestamp(rhs.updatedAt, fallback: now)
-            }
-            projected.append(Session(
-                provider: root?.provider ?? key.provider,
-                session: frontdoorId,
-                state: frontdoorPetState(group, pendingBySession: pendingBySession),
-                parent: nil,
-                engine: root?.model ?? "\(key.provider)-frontdoor",
-                time: petTimestamp(root?.updatedAt ?? latest?.updatedAt, fallback: now),
-                inboxPending: 0,
-                cwd: (root?.cwd ?? key.cwd).isEmpty ? nil : (root?.cwd ?? key.cwd),
-                task: root?.title ?? "Frontdoor",
-                delegated: false,
-                role: "frontdoor",
-                source: root?.source ?? (group.allSatisfy(\.isLocalSource) ? "local" : "gateway")
-            ))
-            projected.append(contentsOf: workers.map { gatewaySession in
-                let pending = pendingBySession[gatewaySession.sessionId] ?? 0
-                return Session(
-                    provider: gatewaySession.provider,
-                    // Gateway session ids are unique across providers. Provider-side
-                    // ACP ids are not guaranteed to be, and Pet keys nodes by this value.
-                    session: gatewaySession.sessionId,
-                    state: petState(for: gatewaySession.status, hasPendingInbox: pending > 0),
-                    parent: frontdoorId,
-                    engine: gatewaySession.model ?? gatewaySession.provider,
-                    time: petTimestamp(gatewaySession.updatedAt, fallback: now),
-                    inboxPending: pending,
-                    cwd: gatewaySession.cwd.isEmpty ? nil : gatewaySession.cwd,
-                    task: gatewaySession.title,
-                    delegated: true,
-                    role: "worker",
-                    source: gatewaySession.source
-                )
-            })
         }
         return PetSnapshot(sessions: projected)
     }
+}
+
+/// Reverse-maps the contract's per-agent state onto the Agent Map's
+/// pre-v1-contract vocabulary. A pure function of `PetAgentState`, not the
+/// raw status, so classification stays centralized in `petContractState`.
+private func legacyPetState(_ state: PetAgentState) -> String {
+    switch state {
+    case .running, .starting: "running"
+    case .waiting: "needs_input"
+    case .idle: "idle"
+    case .completed: "ready"
+    case .offline: "offline"
+    case .failed, .unknown: "blocked"
+    }
+}
+
+/// The Agent Map's original Frontdoor roll-up rule, unchanged: any
+/// busy-or-needs-attention member keeps the whole tree "running".
+private func legacyAggregate(_ states: [String]) -> String {
+    if states.contains(where: { $0 == "running" || $0 == "needs_input" }) { return "running" }
+    if states.contains("blocked") { return "blocked" }
+    if states.contains("idle") { return "idle" }
+    return "offline"
 }
 
 private struct FrontdoorKey: Hashable {
@@ -293,34 +455,106 @@ private func petFrontdoorId(_ key: FrontdoorKey) -> String {
     return "frontdoor:\(Data(identity.utf8).base64EncodedString())"
 }
 
-private func frontdoorPetState(
-    _ sessions: [GatewaySession],
-    pendingBySession: [String: Int]
-) -> String {
-    let states = sessions.map { session in
-        petState(for: session.status, hasPendingInbox: (pendingBySession[session.sessionId] ?? 0) > 0)
-    }
-    if states.contains(where: { $0 == "running" || $0 == "needs_input" }) { return "running" }
-    if states.contains("blocked") { return "blocked" }
-    if states.contains("idle") { return "idle" }
-    return "offline"
-}
-
-private func petState(for status: String, hasPendingInbox: Bool) -> String {
-    if hasPendingInbox { return "needs_input" }
-    switch status {
-    case "running", "cancelling", "restoring": return "running"
-    case "waiting_permission", "waiting_input": return "needs_input"
-    case "disconnected", "closed": return "offline"
-    case "idle": return "idle"
-    case "ready": return "ready"
-    default: return "blocked"
-    }
-}
-
 private func petTimestamp(_ value: String?, fallback: Date) -> TimeInterval {
     guard let value else { return fallback.timeIntervalSince1970 }
     return parseTimestamp(value)?.timeIntervalSince1970 ?? fallback.timeIntervalSince1970
+}
+
+/// `contracts/pet/v1/pet-state.schema.json` envelope.
+struct PetStateEnvelope: Encodable, Equatable, Sendable {
+    struct Agent: Encodable, Equatable, Sendable {
+        let id: String
+        let parentId: String?
+        let role: String
+        let provider: String
+        let engine: String
+        let state: PetAgentState
+        let task: String?
+        let updatedAt: String
+        let source: String
+    }
+
+    let contract: String
+    let version: String
+    let generatedAt: String
+    let producer: String
+    let sequence: Int
+    let agents: [Agent]
+
+    static func make(
+        projection: PetActivityProjection,
+        sequence: Int,
+        producer: String = "lynk-monitor",
+        generatedAt: Date = Date()
+    ) -> PetStateEnvelope {
+        PetStateEnvelope(
+            contract: "pet-state",
+            version: "1.0.0",
+            generatedAt: monitorTimestamp(generatedAt),
+            producer: producer,
+            sequence: sequence,
+            agents: projection.agents.map { agent in
+                Agent(
+                    id: agent.id,
+                    parentId: agent.parentId,
+                    role: agent.role,
+                    provider: agent.provider,
+                    engine: agent.engine,
+                    state: agent.state,
+                    task: agent.task,
+                    updatedAt: monitorTimestamp(agent.updatedAt),
+                    source: agent.source
+                )
+            }
+        )
+    }
+}
+
+/// `contracts/pet/v1/pet-actions.schema.json` envelope.
+struct PetActionsEnvelope: Encodable, Equatable, Sendable {
+    struct Action: Encodable, Equatable, Sendable {
+        let id: String
+        let parentId: String?
+        let action: PetPresentationAction
+    }
+
+    let contract: String
+    let version: String
+    let generatedAt: String
+    let producer: String
+    let sequence: Int
+    let actions: [Action]
+
+    static func make(
+        projection: PetActivityProjection,
+        sequence: Int,
+        producer: String = "lynk-monitor",
+        generatedAt: Date = Date()
+    ) -> PetActionsEnvelope {
+        PetActionsEnvelope(
+            contract: "pet-actions",
+            version: "1.0.0",
+            generatedAt: monitorTimestamp(generatedAt),
+            producer: producer,
+            sequence: sequence,
+            actions: projection.agents.map { Action(id: $0.id, parentId: $0.parentId, action: $0.action) }
+        )
+    }
+}
+
+/// The Pet renderer is output-only: it must never receive Gateway control
+/// tokens, Monitor auth, session prompts, or the app's own environment.
+/// Only a small, benign OS allowlist plus the two contract file paths are
+/// passed to the child process.
+enum PetChildEnvironment {
+    static let allowlistedKeys: Set<String> = ["HOME", "PATH", "TMPDIR", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL"]
+
+    static func make(from source: [String: String], stateFilePath: String, actionsFilePath: String) -> [String: String] {
+        var result = source.filter { allowlistedKeys.contains($0.key) }
+        result["PET_STATE_FILE"] = stateFilePath
+        result["PET_ACTIONS_FILE"] = actionsFilePath
+        return result
+    }
 }
 
 struct MonitorEvent: Identifiable, Equatable, Sendable {

@@ -37,7 +37,7 @@ Monitor activity projection
 - [x] 안전하게 공개 가능한 Gateway runtime config 17개를 UI에서 조회·저장·초기화하고 안전 재시작한다 (`src/gateway-settings.js`, `SettingsView.swift`).
 - [x] 환경변수로 잠긴 config는 읽기 전용으로 표시하고 token/identity 같은 secret은 config 응답에 포함하지 않는다 (`test/gateway-settings.test.js`).
 - [x] 공식 ACP agent catalog 조회, targeted install, On/Off와 adapter update 상태를 UI에서 관리한다.
-- [x] 기존 CodexPet 프로젝트를 실행하고 현재 session/Inbox snapshot을 atomic `pet-state.json`으로 전달하는 prototype이 있다 (`PetController.swift`).
+- [x] 사용자 지정 renderer 실행 파일에 versioned `pet-state.json`/`pet-actions.json`을 atomic `0600`으로 전달하는 read-only 경계가 있다 (`PetController.swift`, `contracts/pet/v1/`).
 - [x] Apple Silicon Node, Gateway seed, Swift 앱과 Applications 링크를 포함한 ad-hoc DMG를 생성·마운트 검증한다.
 - [x] DMG checksum과 `Lynk.release.json`을 생성하고 runtime manifest, 코드서명, 번들 Node/npm/npx 실행을 검증한다.
 - [x] 빠른 개발 suite와 전체 release suite를 분리하고 재생성 가능한 Swift/Node 파생 캐시 정리 명령을 제공한다.
@@ -73,10 +73,10 @@ Monitor activity projection
 - [x] `/api/snapshot`과 모든 SSE envelope에 `schemaVersion`과 `monitorApiVersion`을 추가한다.
 - [ ] 인증 실패, 미설치, API 비호환, 업데이트 필요, restart blocked를 안정된 error code로 구분한다.
 - [x] Swift가 시작 handshake, snapshot과 SSE에서 지원하지 않는 schema/API major를 부분 decode하지 않고 업데이트 안내 오류로 전환한다.
-- [ ] `MenuBarExtra` 또는 동등한 `NSStatusItem` 기반 메뉴바 진입점을 추가한다.
-- [ ] 메뉴바 클릭만으로 Gateway 상태, 활성 세션, 대기 요청, 최근 진행 상태를 작은 popover에서 확인한다.
-- [ ] popover에서 선택한 세션의 기존 상세 창과 전체 Monitoring 창을 열 수 있다.
-- [ ] 메뉴바 앱을 닫아도 Gateway daemon과 Worker는 유지하고 앱이 소유한 sidecar/Pet만 종료한다.
+- [x] `MenuBarExtra` 기반 메뉴바 진입점을 추가한다.
+- [x] 메뉴바 클릭만으로 Gateway 상태, 활성 세션, 대기 요청, 최근 진행 상태를 작은 popover에서 확인한다.
+- [x] popover에서 선택한 세션의 기존 상세 창과 전체 Monitoring 창을 열 수 있다.
+- [x] 개별 창을 닫아도 Gateway daemon과 Worker는 유지하고 실제 앱 종료 시에만 앱이 소유한 sidecar/Pet을 종료한다.
 
 ### 4. 세션 기억과 연결 관계
 
@@ -102,16 +102,16 @@ Monitor activity projection
 ### 6. Pet / 사용자 renderer JSON 계약
 
 - [x] prototype Pet이 Lynk가 만든 session/Inbox snapshot을 읽고 Frontdoor/Worker 관계를 표시한다.
-- [ ] `contracts/pet/v1/pet-state.schema.json`과 최소·전체 example을 추가한다.
-- [ ] `contracts/pet/v1/pet-actions.schema.json`과 최소·전체 example을 추가한다.
-- [ ] envelope를 `contract`, `version`, `generatedAt`, `producer`, `sequence`로 버전화한다.
-- [ ] agent state를 `offline`, `idle`, `starting`, `running`, `waiting`, `completed`, `failed`, `unknown`으로 정규화한다.
-- [ ] presentation action을 `sleep`, `wake`, `think`, `useTool`, `waitForUser`, `celebrate`, `error`, `disconnect`, `unknown`으로 고정한다.
-- [ ] Swift private mapping을 공통 activity projection으로 옮기고 `pet-state.json`과 `pet-actions.json`을 atomic `0600`으로 쓴다.
-- [ ] renderer 실행 계약을 executable path와 `PET_STATE_FILE`, `PET_ACTIONS_FILE`로 제한한다.
-- [ ] renderer에 Monitor/Gateway token, 전체 prompt, cwd 같은 private data를 기본 전달하지 않는다.
-- [ ] renderer가 만든 파일을 앱이 control 입력으로 읽지 않으며 Pet에서 Gateway mutation을 수행할 수 없게 한다.
-- [ ] 개발자 절대 Pet 프로젝트 경로 기본값을 제거한다.
+- [x] `contracts/pet/v1/pet-state.schema.json`과 최소·전체 example을 추가한다.
+- [x] `contracts/pet/v1/pet-actions.schema.json`과 최소·전체 example을 추가한다.
+- [x] envelope를 `contract`, `version`, `generatedAt`, `producer`, `sequence`로 버전화한다.
+- [x] agent state를 `offline`, `idle`, `starting`, `running`, `waiting`, `completed`, `failed`, `unknown`으로 정규화한다.
+- [x] presentation action을 `sleep`, `wake`, `think`, `useTool`, `waitForUser`, `celebrate`, `error`, `disconnect`, `unknown`으로 고정한다.
+- [x] Swift 상태 분류를 공통 activity projection으로 옮기고 `pet-state.json`과 `pet-actions.json`을 atomic `0600`으로 쓴다.
+- [x] renderer 실행 계약을 명시적 executable path와 `PET_STATE_FILE`, `PET_ACTIONS_FILE` 중심의 최소 환경으로 제한한다.
+- [x] renderer에 Monitor/Gateway token, 전체 prompt, agent cwd 같은 private data를 전달하지 않는다.
+- [x] renderer가 만든 파일을 앱이 control 입력으로 읽지 않으며 Pet에서 Gateway mutation을 수행할 수 없게 한다.
+- [x] 개발자 절대 Pet 프로젝트 경로 기본값을 제거한다.
 - [ ] 기본 Pet은 하나의 renderer일 뿐이며 사용자가 같은 JSON 계약으로 다른 UI를 연결할 수 있게 한다.
 
 ## P1 — v1 안정화와 유지보수

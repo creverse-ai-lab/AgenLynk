@@ -510,7 +510,7 @@ final class AppModel: ObservableObject {
         do {
             let endpoint = try await sidecar.start(
                 nodeOverride: settings.nodePath,
-                localWatcherProjectPath: settings.petProjectPath
+                localWatcherProjectPath: settings.petWatcherProjectPath
             )
             self.endpoint = endpoint
             sidecarStreamConnected = false
@@ -744,8 +744,8 @@ final class AppModel: ObservableObject {
     private func startPet() {
         do {
             try pet.start(
-                projectPath: settings.petProjectPath,
-                snapshot: PetSnapshot.make(sessions: realtimeSessions, inbox: realtimeInbox)
+                executablePath: settings.petExecutablePath,
+                projection: PetActivityProjection.make(sessions: realtimeSessions, inbox: realtimeInbox)
             ) { [weak self] status in
                 guard let self else { return }
                 self.petRunning = false
@@ -764,7 +764,7 @@ final class AppModel: ObservableObject {
     private func syncPetSnapshot() {
         guard settings.petEnabled, petRunning else { return }
         do {
-            try pet.update(PetSnapshot.make(sessions: realtimeSessions, inbox: realtimeInbox))
+            try pet.update(PetActivityProjection.make(sessions: realtimeSessions, inbox: realtimeInbox))
             if petRunning { petError = nil }
         } catch {
             petError = "Pet 상태 공유 실패: \(error.localizedDescription)"

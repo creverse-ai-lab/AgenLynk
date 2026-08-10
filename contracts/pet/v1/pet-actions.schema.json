@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp-gateway.dev/contracts/pet/v1/pet-actions.schema.json",
+  "title": "Pet actions v1",
+  "description": "Read-only presentation-action hints Lynk (the Monitor) writes alongside pet-state.json, derived from the same activity projection, so a Pet/user-renderer can animate each agent without inferring behavior itself.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "version", "generatedAt", "producer", "sequence", "actions"],
+  "properties": {
+    "contract": {
+      "const": "pet-actions"
+    },
+    "version": {
+      "type": "string",
+      "description": "Semantic version of this contract payload.",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When this envelope was produced. Matches the pet-state.json envelope it was derived alongside."
+    },
+    "producer": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Identifier of the process that produced this envelope, e.g. \"lynk-monitor\"."
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonically increasing counter for the producer's process lifetime. Matches the pet-state.json envelope it was derived alongside."
+    },
+    "actions": {
+      "type": "array",
+      "description": "One entry per agent id also present in pet-state.json.",
+      "items": { "$ref": "#/$defs/action" }
+    }
+  },
+  "$defs": {
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "parentId", "action"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The agent id this action applies to; matches an id in pet-state.json's agents array."
+        },
+        "parentId": {
+          "type": ["string", "null"],
+          "description": "The id of the Frontdoor root this Worker was delegated from. Null for a Frontdoor root itself."
+        },
+        "action": {
+          "type": "string",
+          "enum": ["sleep", "wake", "think", "useTool", "waitForUser", "celebrate", "error", "disconnect", "unknown"]
+        }
+      }
+    }
+  }
+}

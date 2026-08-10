@@ -1,0 +1,12 @@
+{
+  "contract": "pet-actions",
+  "version": "1.0.0",
+  "generatedAt": "2026-08-10T12:34:56.789Z",
+  "producer": "lynk-monitor",
+  "sequence": 42,
+  "actions": [
+    { "id": "codex-main-1", "parentId": null, "action": "waitForUser" },
+    { "id": "gateway-session-7", "parentId": "codex-main-1", "action": "waitForUser" },
+    { "id": "gateway-session-8", "parentId": "codex-main-1", "action": "celebrate" }
+  ]
+}

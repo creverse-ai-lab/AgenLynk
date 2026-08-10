@@ -17,6 +17,9 @@ enum MonitorModelChecks {
         try sessionConfigDecodesUnavailableSnapshot()
         try petSnapshotMapsGatewayStateAndPendingInbox()
         try petSnapshotSeparatesFrontdoorInstancesAndParsesLegacyTimestamps()
+        try petActivityProjectionMapsStatusesToContractStatesAndActions()
+        try petStateAndActionsEnvelopesShareMetadataAndSequence()
+        try petChildEnvironmentAllowsOnlyBenignKeysPlusContractFiles()
         try realtimeSessionsRequireAnActiveFrontdoorIdentity()
         try frontdoorSessionsAggregateWorkersAndExcludeLegacyRecords()
         try localFrontdoorIsNotDuplicatedAsAWorker()
@@ -95,6 +98,112 @@ enum MonitorModelChecks {
             sessions: [try session(id: "legacy", instanceId: nil)], inbox: [], now: Date(timeIntervalSince1970: 1)
         )
         try check(legacy.sessions.first { $0.role == "frontdoor" }?.provider == "codex", "legacy sessions should use opener/cwd fallback")
+    }
+
+    private static func petActivityProjectionMapsStatusesToContractStatesAndActions() throws {
+        func session(id: String, status: String, title: String? = nil) throws -> GatewaySession {
+            guard let session = GatewaySession(.object([
+                "sessionId": .string(id), "provider": .string("claude"), "model": .string("sonnet"),
+                "status": .string(status), "cwd": .string("/tmp/project"),
+                "opener": .string("codex"), "openerInstanceId": .string("codex-main-1"),
+                "title": .string(title ?? "task \(id)"), "updatedAt": .string("2026-08-07T00:00:00.000Z")
+            ])) else { throw CheckError.failed("pet contract fixture creation failed") }
+            return session
+        }
+        let running = try session(id: "s-running", status: "running")
+        let waiting = try session(id: "s-waiting", status: "waiting_permission")
+        let failed = try session(id: "s-failed", status: "error")
+        let cancelled = try session(id: "s-cancelled", status: "cancelled")
+        let completed = try session(id: "s-completed", status: "ready")
+        let closed = try session(id: "s-closed", status: "closed")
+        let offline = try session(
+            id: "s-offline", status: "disconnected",
+            title: "line one\nline two " + String(repeating: "x", count: 220)
+        )
+
+        let projection = PetActivityProjection.make(
+            sessions: [running, waiting, failed, cancelled, completed, closed, offline],
+            inbox: [], now: Date(timeIntervalSince1970: 0)
+        )
+        func agent(_ id: String) throws -> PetAgentActivity {
+            guard let agent = projection.agents.first(where: { $0.id == id }) else {
+                throw CheckError.failed("expected \(id) in the pet activity projection")
+            }
+            return agent
+        }
+        let runningAgent = try agent("s-running")
+        try check(runningAgent.state == .running, "a running status must map to .running")
+        try check(runningAgent.action == .think, "a running worker should think without tool-call evidence")
+        let waitingAgent = try agent("s-waiting")
+        try check(waitingAgent.state == .waiting, "waiting_permission must map to .waiting")
+        try check(waitingAgent.action == .waitForUser, "a waiting worker asks the renderer to wait for the user")
+        let failedAgent = try agent("s-failed")
+        try check(failedAgent.state == .failed, "an error status must map to .failed")
+        try check(failedAgent.action == .error, "a failed worker should play the error action")
+        let cancelledAgent = try agent("s-cancelled")
+        try check(cancelledAgent.state == .failed, "a cancelled turn must not be reported as .completed")
+        try check(cancelledAgent.action != .celebrate, "a cancelled turn must never celebrate")
+        let completedAgent = try agent("s-completed")
+        try check(completedAgent.state == .completed, "a ready status must map to .completed")
+        try check(completedAgent.action == .celebrate, "a completed worker should celebrate")
+        let closedAgent = try agent("s-closed")
+        try check(closedAgent.state == .offline, "a closed session must map to .offline, matching the legacy Agent Map")
+
+        let offlineAgent = try agent("s-offline")
+        try check(offlineAgent.state == .offline, "a disconnected status must map to .offline")
+        try check(offlineAgent.action == .disconnect, "an offline worker should disconnect")
+        try check((offlineAgent.task?.count ?? 0) <= 200, "task text must be bounded to a display-safe length")
+        try check(offlineAgent.task?.contains("\n") == false, "task text must not carry raw newlines")
+
+        let frontdoor = try agent("codex-main-1")
+        try check(frontdoor.role == "frontdoor", "the opener should be projected as a frontdoor root")
+        try check(frontdoor.parentId == nil, "a frontdoor root has no parent")
+        try check(offlineAgent.parentId == "codex-main-1", "workers must link back to their frontdoor root")
+        try check(frontdoor.state == .waiting, "a waiting worker should surface as waiting on the frontdoor root")
+    }
+
+    private static func petStateAndActionsEnvelopesShareMetadataAndSequence() throws {
+        let projection = PetActivityProjection(agents: [
+            PetAgentActivity(
+                id: "codex-main-1", parentId: nil, role: "frontdoor", provider: "codex",
+                engine: "codex-frontdoor", state: .running, action: .think, task: "Ship v1",
+                updatedAt: Date(timeIntervalSince1970: 10), source: "gateway",
+                cwd: "/tmp/secret-project-path", inboxPending: 3, memberStates: [.running]
+            )
+        ])
+        let generatedAt = Date(timeIntervalSince1970: 100)
+        let state = PetStateEnvelope.make(projection: projection, sequence: 7, generatedAt: generatedAt)
+        let actions = PetActionsEnvelope.make(projection: projection, sequence: 7, generatedAt: generatedAt)
+        try check(state.contract == "pet-state", "the state envelope must declare its contract name")
+        try check(actions.contract == "pet-actions", "the actions envelope must declare its contract name")
+        try check(state.version == "1.0.0" && actions.version == "1.0.0", "both envelopes must be versioned")
+        try check(state.sequence == actions.sequence, "both envelopes from one update must share the same sequence")
+        try check(state.generatedAt == actions.generatedAt, "both envelopes from one update must share the same timestamp")
+        try check(state.agents.first?.id == actions.actions.first?.id, "both envelopes must describe the same agent id")
+        try check(state.agents.first?.parentId == nil, "the root agent has no parent id")
+        let encoded = String(decoding: try JSONEncoder().encode(state), as: UTF8.self)
+        try check(!encoded.contains("secret-project-path"), "pet-state.json must never leak the agent's raw cwd")
+        try check(!encoded.contains("inbox"), "pet-state.json must never leak inbox counts")
+    }
+
+    private static func petChildEnvironmentAllowsOnlyBenignKeysPlusContractFiles() throws {
+        let source = [
+            "HOME": "/Users/test",
+            "PATH": "/usr/bin",
+            "ACP_GATEWAY_CONTROL_TOKEN": "secret-token",
+            "MONITOR_API_TOKEN": "another-secret",
+            "SOME_RANDOM_VAR": "leak-me"
+        ]
+        let environment = PetChildEnvironment.make(
+            from: source, stateFilePath: "/tmp/pet-state.json", actionsFilePath: "/tmp/pet-actions.json"
+        )
+        try check(environment["HOME"] == "/Users/test", "a benign HOME should pass through")
+        try check(environment["PATH"] == "/usr/bin", "a benign PATH should pass through")
+        try check(environment["ACP_GATEWAY_CONTROL_TOKEN"] == nil, "the Gateway control token must never reach the renderer")
+        try check(environment["MONITOR_API_TOKEN"] == nil, "monitor auth must never reach the renderer")
+        try check(environment["SOME_RANDOM_VAR"] == nil, "arbitrary app environment must not leak to the renderer")
+        try check(environment["PET_STATE_FILE"] == "/tmp/pet-state.json", "the state file path must be provided")
+        try check(environment["PET_ACTIONS_FILE"] == "/tmp/pet-actions.json", "the actions file path must be provided")
     }
 
     private static func snapshotDecodesSessionsEventsTasksAndInbox() throws {

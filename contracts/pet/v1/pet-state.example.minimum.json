@@ -1,0 +1,8 @@
+{
+  "contract": "pet-state",
+  "version": "1.0.0",
+  "generatedAt": "2026-08-10T00:00:00.000Z",
+  "producer": "lynk-monitor",
+  "sequence": 1,
+  "agents": []
+}

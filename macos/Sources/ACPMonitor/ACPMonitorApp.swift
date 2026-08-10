@@ -35,5 +35,12 @@ struct ACPMonitorApp: App {
         Settings {
             SettingsView().environmentObject(model).environmentObject(model.settings)
         }
+
+        MenuBarExtra("Lynk", systemImage: "point.3.connected.trianglepath.dotted") {
+            MenuBarStatusView()
+                .environmentObject(model)
+                .environmentObject(model.settings)
+        }
+        .menuBarExtraStyle(.window)
     }
 }

@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp-gateway.dev/contracts/pet/v1/pet-state.schema.json",
+  "title": "Pet state v1",
+  "description": "Read-only agent activity snapshot Lynk (the Monitor) writes for a Pet/user-renderer to display. Contains only bounded, display-safe fields: no prompts, tokens, full event payloads, or arbitrary environment.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "version", "generatedAt", "producer", "sequence", "agents"],
+  "properties": {
+    "contract": {
+      "const": "pet-state"
+    },
+    "version": {
+      "type": "string",
+      "description": "Semantic version of this contract payload.",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When this envelope was produced."
+    },
+    "producer": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Identifier of the process that produced this envelope, e.g. \"lynk-monitor\"."
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonically increasing counter for the producer's process lifetime. A renderer can use this to detect and ignore stale reads."
+    },
+    "agents": {
+      "type": "array",
+      "description": "One entry per Frontdoor root or Worker session currently known to the Monitor.",
+      "items": { "$ref": "#/$defs/agent" }
+    }
+  },
+  "$defs": {
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "parentId", "role", "provider", "engine", "state", "task", "updatedAt", "source"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable identifier for this agent. Unique across the whole snapshot."
+        },
+        "parentId": {
+          "type": ["string", "null"],
+          "description": "The id of the Frontdoor root this Worker was delegated from. Null for a Frontdoor root itself."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["frontdoor", "worker"]
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "description": "ACP provider/agent name, e.g. \"codex\" or \"claude\"."
+        },
+        "engine": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Model or engine label backing this agent."
+        },
+        "state": {
+          "type": "string",
+          "enum": ["offline", "idle", "starting", "running", "waiting", "completed", "failed", "unknown"]
+        },
+        "task": {
+          "type": ["string", "null"],
+          "maxLength": 200,
+          "description": "Bounded, display-safe description of the current task. Never a full prompt or event payload."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "source": {
+          "type": "string",
+          "enum": ["local", "gateway"]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "contract": "pet-state",
+  "version": "1.0.0",
+  "generatedAt": "2026-08-10T12:34:56.789Z",
+  "producer": "lynk-monitor",
+  "sequence": 42,
+  "agents": [
+    {
+      "id": "codex-main-1",
+      "parentId": null,
+      "role": "frontdoor",
+      "provider": "codex",
+      "engine": "codex-frontdoor",
+      "state": "waiting",
+      "task": "Review pull request #482",
+      "updatedAt": "2026-08-10T12:34:55.000Z",
+      "source": "gateway"
+    },
+    {
+      "id": "gateway-session-7",
+      "parentId": "codex-main-1",
+      "role": "worker",
+      "provider": "claude",
+      "engine": "sonnet",
+      "state": "waiting",
+      "task": "Apply the requested review permission",
+      "updatedAt": "2026-08-10T12:34:55.000Z",
+      "source": "gateway"
+    },
+    {
+      "id": "gateway-session-8",
+      "parentId": "codex-main-1",
+      "role": "worker",
+      "provider": "codex",
+      "engine": "gpt-5",
+      "state": "completed",
+      "task": "Run test suite",
+      "updatedAt": "2026-08-10T12:30:12.000Z",
+      "source": "local"
+    }
+  ]
+}
