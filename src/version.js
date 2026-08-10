@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { basename, dirname, extname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const GATEWAY_VERSION = "1.3.1";
@@ -24,21 +24,43 @@ export const GATEWAY_RUNTIME_ROOT = dirname(dirname(fileURLToPath(import.meta.ur
 export const GATEWAY_RUNTIME_SOURCE =
   basename(dirname(GATEWAY_RUNTIME_ROOT)) === "versions" ? "installed" : "source-checkout";
 
-function gatewayBuildId() {
-  const sourceRoot = dirname(fileURLToPath(import.meta.url));
-  const hash = createHash("sha256");
-  const files = readdirSync(sourceRoot, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && [".js", ".html"].includes(extname(entry.name)))
-    .map((entry) => entry.name)
-    .sort();
-  for (const name of files) {
-    const data = readFileSync(join(sourceRoot, name));
-    hash.update(`src/${name}`);
+// Hashes every shipped file under `root`, depth-first in sorted order so the
+// digest is stable across machines and filesystems. Entries are keyed by their
+// path relative to the runtime root, so moving a file changes the build id.
+function hashPayloadTree(hash, root, prefix) {
+  if (!existsSync(root)) return;
+  const entries = readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isFile() || entry.isDirectory())
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  for (const entry of entries) {
+    const path = join(root, entry.name);
+    const relativePath = `${prefix}/${entry.name}`;
+    if (entry.isDirectory()) {
+      hashPayloadTree(hash, path, relativePath);
+      continue;
+    }
+    hash.update(relativePath);
     hash.update("\0");
-    hash.update(data);
+    hash.update(readFileSync(path));
     hash.update("\0");
   }
-  const packageRoot = dirname(sourceRoot);
+}
+
+/**
+ * The build id for a runtime rooted at `packageRoot`. Exported so tests can
+ * assert that a nested payload file is actually covered — an id that ignored
+ * one would let an installed runtime look current while missing files.
+ */
+export function computeGatewayBuildId(packageRoot) {
+  const sourceRoot = join(packageRoot, "src");
+  const hash = createHash("sha256");
+  // The whole of src/ and skills/, not just top-level scripts: the runtime
+  // payload also carries nested assets (e.g. src/local-agents/), and a build
+  // id that ignored them would leave an already-installed runtime looking
+  // current while missing files the app just shipped.
+  hashPayloadTree(hash, sourceRoot, "src");
+  hashPayloadTree(hash, join(packageRoot, "skills"), "skills");
+  // node_modules is pinned by the lockfile rather than hashed directly.
   for (const name of ["package.json", "package-lock.json"]) {
     const path = join(packageRoot, name);
     if (!existsSync(path)) continue;
@@ -48,4 +70,8 @@ function gatewayBuildId() {
     hash.update("\0");
   }
   return hash.digest("hex").slice(0, 16);
+}
+
+function gatewayBuildId() {
+  return computeGatewayBuildId(dirname(dirname(fileURLToPath(import.meta.url))));
 }

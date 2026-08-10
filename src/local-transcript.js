@@ -1,10 +1,8 @@
-import { execFile } from "node:child_process";
 import { open, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
+import { selectAll, withReadOnlyDatabase } from "./local-agents/sqlite.js";
 
-const execFileAsync = promisify(execFile);
 const SESSION_ID = /^[A-Za-z0-9_-]{1,160}$/;
 const DEFAULT_HISTORY_MS = 65 * 60 * 1000;
 
@@ -44,21 +42,18 @@ export class LocalTranscriptReader {
   async resolvePaths(sessionIds) {
     const unknown = [...new Set(sessionIds)].filter((id) => !this.paths.has(id));
     if (!unknown.length) return;
-    const quoted = unknown.map((id) => `'${id}'`).join(",");
-    try {
-      const { stdout } = await execFileAsync("sqlite3", [
-        "-json",
-        this.databasePath,
-        `select id, rollout_path from threads where id in (${quoted})`
-      ], { maxBuffer: 1024 * 1024 });
-      for (const row of JSON.parse(stdout || "[]")) {
-        if (SESSION_ID.test(row.id ?? "") && typeof row.rollout_path === "string") {
-          this.paths.set(row.id, row.rollout_path);
-        }
+    // Read Codex's database directly instead of shelling out to a `sqlite3`
+    // binary: that CLI is not guaranteed on a user's machine, and whichever one
+    // is first on PATH (conda, homebrew) could disappear at any time.
+    const rows = await withReadOnlyDatabase(this.databasePath, (database) => selectAll(
+      database,
+      `SELECT id, rollout_path FROM threads WHERE id IN (${unknown.map(() => "?").join(",")})`,
+      unknown
+    ), []);
+    for (const row of rows) {
+      if (SESSION_ID.test(row?.id ?? "") && typeof row?.rollout_path === "string") {
+        this.paths.set(row.id, row.rollout_path);
       }
-    } catch {
-      // Local monitoring continues with status-only events when sqlite3 or the
-      // Codex database is unavailable.
     }
   }
 

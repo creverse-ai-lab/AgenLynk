@@ -7,6 +7,9 @@ SCRATCH="$CACHE_ROOT/swift-build"
 APP="$REPO_ROOT/build/Lynk.app"
 LEGACY_APP="$REPO_ROOT/build/ACP Monitor.app"
 CONTENTS="$APP/Contents"
+PET_APP="$CONTENTS/Helpers/LynkPet.app"
+PET_CONTENTS="$PET_APP/Contents"
+PET_EXECUTABLE="$PET_CONTENTS/MacOS/LynkPet"
 SDK=${ACP_MONITOR_SDKROOT:-/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk}
 MODULE_CACHE="$CACHE_ROOT/clang-module-cache"
 SWIFTPM_CACHE="$CACHE_ROOT/swiftpm-module-cache"
@@ -18,10 +21,18 @@ BIN_DIR=$(env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" SWIFTPM_MOD
   swift build --package-path "$REPO_ROOT/macos" --scratch-path "$SCRATCH" -c release --show-bin-path)
 
 rm -rf "$APP" "$LEGACY_APP"
-mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources/runtime/src"
+mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources/runtime/src" "$PET_CONTENTS/MacOS" "$PET_CONTENTS/Resources"
 cp "$BIN_DIR/ACPMonitor" "$CONTENTS/MacOS/ACPMonitor"
 cp "$REPO_ROOT/macos/Resources/Info.plist" "$CONTENTS/Info.plist"
 cp "$REPO_ROOT/macos/Resources/ACPLogo.svg" "$CONTENTS/Resources/ACPLogo.svg"
+cp "$BIN_DIR/LynkPet" "$PET_EXECUTABLE"
+cp "$REPO_ROOT/macos/Resources/LynkPet-Info.plist" "$PET_CONTENTS/Info.plist"
+PET_RESOURCE_BUNDLE="$BIN_DIR/ACPMonitor_LynkPet.bundle"
+if [ ! -d "$PET_RESOURCE_BUNDLE" ]; then
+  echo "error: bundled Pet resources not found at $PET_RESOURCE_BUNDLE" >&2
+  exit 1
+fi
+cp -R "$PET_RESOURCE_BUNDLE" "$PET_CONTENTS/Resources/ACPMonitor_LynkPet.bundle"
 
 # Optional build-time version overrides. The checked-in Info.plist stays the
 # source of truth (still pre-1.0 — see macos/Resources/Info.plist) until
@@ -31,9 +42,11 @@ cp "$REPO_ROOT/macos/Resources/ACPLogo.svg" "$CONTENTS/Resources/ACPLogo.svg"
 # what keeps the app bundle and release manifest from ever disagreeing.
 if [ -n "${ACP_LYNK_APP_VERSION:-}" ]; then
   /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $ACP_LYNK_APP_VERSION" "$CONTENTS/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $ACP_LYNK_APP_VERSION" "$PET_CONTENTS/Info.plist"
 fi
 if [ -n "${ACP_LYNK_BUILD_NUMBER:-}" ]; then
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $ACP_LYNK_BUILD_NUMBER" "$CONTENTS/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $ACP_LYNK_BUILD_NUMBER" "$PET_CONTENTS/Info.plist"
 fi
 
 ICONSET="$CACHE_ROOT/AppIcon.iconset"
@@ -48,8 +61,18 @@ for SIZE in 16 32 128 256 512; do
 done
 iconutil -c icns "$ICONSET" -o "$CONTENTS/Resources/AppIcon.icns"
 
-for FILE in "$REPO_ROOT"/src/*.js; do
-  cp "$FILE" "$CONTENTS/Resources/runtime/src/$(basename "$FILE")"
+# Copy src/ wholesale rather than enumerating file types or subdirectories.
+# Everything under src/ is runtime payload, and src/version.js hashes the same
+# tree to derive gatewayBuildId — a seed that omitted part of it would compute a
+# different build id once installed, and nested additions would silently never
+# ship.
+rm -rf "$CONTENTS/Resources/runtime/src"
+cp -R "$REPO_ROOT/src" "$CONTENTS/Resources/runtime/src"
+for REQUIRED in src/monitor.js src/index.js src/local-agents/index.js; do
+  if [ ! -f "$CONTENTS/Resources/runtime/$REQUIRED" ]; then
+    echo "error: $REQUIRED is missing from the runtime seed" >&2
+    exit 1
+  fi
 done
 
 # Bundle package metadata and the agent-delegator skill so the installed
@@ -149,6 +172,20 @@ if [ -x "$CONTENTS/Resources/runtime/node/bin/node" ]; then
   fi
   "$BUILD_NODE" "$REPO_ROOT/src/build-runtime-manifest-cli.js" "$CONTENTS/Resources/runtime"
 fi
+
+# LynkPet is a nested LSUIElement helper app. Validate its pure contract/layout
+# checks and resources, then sign inside-out before sealing the parent app.
+for PET_ASSET in chatgpt.jpg claude.jpg grok.jpg; do
+  if [ ! -f "$PET_CONTENTS/Resources/ACPMonitor_LynkPet.bundle/$PET_ASSET" ]; then
+    echo "error: bundled Pet asset is missing: $PET_ASSET" >&2
+    exit 1
+  fi
+done
+"$PET_EXECUTABLE" --self-test
+# shellcheck disable=SC2086
+codesign --force $SIGN_FLAGS --sign "$CODESIGN_IDENTITY" "$PET_EXECUTABLE"
+# shellcheck disable=SC2086
+codesign --force $SIGN_FLAGS --sign "$CODESIGN_IDENTITY" "$PET_APP"
 
 # shellcheck disable=SC2086
 codesign --force $SIGN_FLAGS --sign "$CODESIGN_IDENTITY" "$CONTENTS/MacOS/ACPMonitor"

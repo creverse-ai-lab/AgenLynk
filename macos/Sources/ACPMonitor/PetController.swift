@@ -2,10 +2,13 @@ import Foundation
 import Darwin
 
 enum PetControllerError: LocalizedError {
+    case executablePathRequired
     case executableNotFound(String)
 
     var errorDescription: String? {
         switch self {
+        case .executablePathRequired:
+            "Pet 실행 파일 경로를 먼저 선택하세요."
         case let .executableNotFound(path):
             "Pet 실행 파일을 찾지 못했습니다: \(path)"
         }
@@ -43,8 +46,15 @@ final class PetController {
         onTermination: @escaping @MainActor (Int32) -> Void
     ) throws {
         stop()
-        let executableURL = URL(fileURLWithPath: executablePath).standardizedFileURL
-        guard fileManager.isExecutableFile(atPath: executableURL.path) else {
+        let trimmedPath = executablePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPath.isEmpty else {
+            throw PetControllerError.executablePathRequired
+        }
+        let executableURL = URL(fileURLWithPath: trimmedPath).standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: executableURL.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue,
+              fileManager.isExecutableFile(atPath: executableURL.path) else {
             throw PetControllerError.executableNotFound(executableURL.path)
         }
 

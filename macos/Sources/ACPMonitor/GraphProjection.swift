@@ -36,6 +36,25 @@ struct GraphProjection: Sendable {
     let lanes: [GraphLane]
     let width: Double
 
+    /// Lanes flattened into a single top-to-bottom reading order: each group's
+    /// Frontdoor root first, then its workers. The window graph gets this
+    /// ordering for free from its X layout; a stacked lane list has to ask for
+    /// it explicitly.
+    var lanesOrderedByTrunk: [GraphLane] {
+        groups
+            .sorted { $0.trunkX < $1.trunkX }
+            .flatMap { group in
+                lanes
+                    .filter { $0.trunkX == group.trunkX }
+                    .sorted { lhs, rhs in
+                        if lhs.session.isFrontdoorRecord != rhs.session.isFrontdoorRecord {
+                            return lhs.session.isFrontdoorRecord
+                        }
+                        return lhs.laneX < rhs.laneX
+                    }
+            }
+    }
+
     var turnCount: Int { lanes.reduce(0) { $0 + $1.turns.count } }
     var activeTurnCount: Int { lanes.reduce(0) { $0 + $1.turns.filter { !$0.completed }.count } }
     var workerLaneCount: Int { lanes.filter { !$0.session.isFrontdoorRecord }.count }

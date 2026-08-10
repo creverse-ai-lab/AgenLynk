@@ -8,6 +8,18 @@ import { createInterface } from "node:readline";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { GatewayRpcClient } from "../src/socket-rpc.js";
+import { restartBlockedError } from "../src/monitor.js";
+
+test("restartBlockedError reports the stable monitor_restart_blocked code and the blocker detail", () => {
+  const error = restartBlockedError(["진행 중 세션 1개", "미응답 Inbox 1개"]);
+  assert.equal(error.statusCode, 409);
+  assert.equal(error.code, "monitor_restart_blocked");
+  assert.equal(error.message, "Gateway를 안전하게 재시작할 수 없습니다: 진행 중 세션 1개, 미응답 Inbox 1개");
+
+  const withNoBlockers = restartBlockedError([]);
+  assert.equal(withNoBlockers.code, "monitor_restart_blocked");
+  assert.equal(withNoBlockers.message, "Gateway를 안전하게 재시작할 수 없습니다: ");
+});
 
 test("native monitor controls Gateway config and safely restarts into pending values", async () => {
   const directory = await mkdtemp(join(tmpdir(), "acp-monitor-control-"));
@@ -56,7 +68,7 @@ test("native monitor controls Gateway config and safely restarts into pending va
     ]);
     const headers = { authorization: `Bearer ${ready.apiToken}` };
     const initial = await fetchJson(`${ready.url}/api/gateway-config`, { headers });
-    assert.equal(initial.options.length, 17);
+    assert.equal(initial.options.length, 18);
 
     const staged = await fetchJson(`${ready.url}/api/gateway-config`, {
       method: "POST",

@@ -20,11 +20,8 @@ struct ACPMonitorApp: App {
         }
         .defaultSize(width: 1420, height: 880)
 
-        Window("Lynk Monitoring", id: "live-graph") {
-            LiveGraphView().environmentObject(model).environmentObject(model.settings)
-        }
-        .defaultSize(width: 1320, height: 820)
-
+        // Live monitoring is the menu-bar popover now; a separate Monitoring
+        // window showed the same projection twice.
         WindowGroup("Session", id: "session-detail", for: String.self) { sessionId in
             SessionDetailView(sessionId: sessionId.wrappedValue)
                 .environmentObject(model)
@@ -36,10 +33,13 @@ struct ACPMonitorApp: App {
             SettingsView().environmentObject(model).environmentObject(model.settings)
         }
 
-        MenuBarExtra("Lynk", systemImage: "point.3.connected.trianglepath.dotted") {
+        MenuBarExtra {
             MenuBarStatusView()
                 .environmentObject(model)
                 .environmentObject(model.settings)
+        } label: {
+            Image(nsImage: ACPMenuBarIcon.image)
+                .accessibilityLabel("Lynk")
         }
         .menuBarExtraStyle(.window)
     }

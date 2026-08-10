@@ -1586,3 +1586,91 @@ async function waitForInboxCount(service, expected) {
   }
   throw new Error(`Gateway inbox did not reach ${expected} pending items`);
 }
+
+test("artifact retention applies a session-count rule alongside the age rule", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-gateway-artifact-count-"));
+  const service = new GatewayService({
+    gcIntervalMs: 0,
+    resultRetentionMs: 60_000,
+    artifactSessionLimit: 2,
+    artifactRoot: join(directory, "artifacts")
+  });
+  try {
+    const made = [];
+    for (const name of ["oldest", "middle", "newest"]) {
+      const session = service.store.create({
+        provider: "mock", acpSessionId: name, cwd: "/", ownerRootId: "main-a",
+        permissionPolicy: "ask", turnId: `turn-${name}`
+      });
+      session.status = "idle";
+      session.updatedAt = new Date(Date.parse("2026-01-01T00:00:00.000Z") + made.length * 60_000).toISOString();
+      made.push({ session, artifact: service.store.spillText(session.id, "final", `body-${name}`).path });
+    }
+    const [oldest, middle, newest] = made;
+
+    // Every artifact is brand new, so the age rule alone would keep them all.
+    await service.runMaintenance(Date.now());
+    assert.equal(existsSync(oldest.artifact), false, "a session outside the most-recent window loses its artifacts");
+    assert.equal(existsSync(middle.artifact), true, "the most-recent window is kept");
+    assert.equal(existsSync(newest.artifact), true, "the most-recent window is kept");
+
+    // Pinning outranks the count rule: it is the user saying "keep this".
+    const pinnedSession = service.store.create({
+      provider: "mock", acpSessionId: "pinned", cwd: "/", ownerRootId: "main-a",
+      permissionPolicy: "ask", turnId: "turn-pinned"
+    });
+    pinnedSession.status = "idle";
+    pinnedSession.pinned = true;
+    pinnedSession.updatedAt = new Date(Date.parse("2025-01-01T00:00:00.000Z")).toISOString();
+    const pinnedArtifact = service.store.spillText(pinnedSession.id, "final", "body-pinned").path;
+    await service.runMaintenance(Date.now());
+    assert.equal(existsSync(pinnedArtifact), true, "a pinned session keeps its artifacts regardless of rank");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("retention preview counts what a change would delete without deleting it", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-gateway-retention-preview-"));
+  const service = new GatewayService({
+    gcIntervalMs: 0,
+    sessionRetentionMs: 7 * 24 * 60 * 60_000,
+    artifactRoot: join(directory, "artifacts")
+  });
+  try {
+    const old = service.store.create({
+      provider: "mock", acpSessionId: "old", cwd: "/", ownerRootId: "main-a",
+      permissionPolicy: "ask", turnId: "turn-old"
+    });
+    old.status = "idle";
+    old.completedAt = new Date(Date.now() - 3 * 24 * 60 * 60_000).toISOString();
+
+    const pinned = service.store.create({
+      provider: "mock", acpSessionId: "pinned", cwd: "/", ownerRootId: "main-a",
+      permissionPolicy: "ask", turnId: "turn-pinned"
+    });
+    pinned.status = "idle";
+    pinned.pinned = true;
+    pinned.completedAt = old.completedAt;
+
+    const active = service.store.create({
+      provider: "mock", acpSessionId: "active", cwd: "/", ownerRootId: "main-a",
+      permissionPolicy: "ask", turnId: "turn-active"
+    });
+    active.status = "running";
+    active.completedAt = old.completedAt;
+
+    const before = service.store.list().length;
+    assert.equal(service.retentionPreview({}).sessions, 0, "nothing expires under the current 7-day setting");
+
+    // Lowering to one day expires the finished session only.
+    const lowered = service.retentionPreview({ sessionRetentionMs: 24 * 60 * 60_000 });
+    assert.equal(lowered.sessions, 1, "only the finished, unpinned session would go");
+    assert.equal(service.store.list().length, before, "a preview must not delete anything");
+
+    // Raising the value never destroys data, so it reports zero.
+    assert.equal(service.retentionPreview({ sessionRetentionMs: 30 * 24 * 60 * 60_000 }).sessions, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

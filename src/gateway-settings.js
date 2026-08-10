@@ -16,6 +16,7 @@ export const GATEWAY_SETTING_DEFINITIONS = Object.freeze([
   numberSetting("maxInlineResultBytes", "resourceLimits", "Inline result", "Maximum result bytes returned inline before using an artifact.", "ACP_GATEWAY_MAX_INLINE_RESULT_BYTES", 64 * 1024, 1, "bytes"),
   numberSetting("maxArtifactBytes", "resourceLimits", "Artifact file", "Maximum bytes allowed for one artifact.", "ACP_GATEWAY_MAX_ARTIFACT_BYTES", 100 * 1024 * 1024, 1, "bytes"),
   numberSetting("maxArtifactTotalBytes", "resourceLimits", "Artifact storage", "Maximum total artifact storage managed by Gateway.", "ACP_GATEWAY_MAX_ARTIFACT_TOTAL_BYTES", 512 * 1024 * 1024, 1, "bytes"),
+  numberSetting("artifactSessionLimit", "resourceLimits", "Artifact sessions", "Keep artifacts for this many most-recent sessions; older sessions' artifacts are removed even before the retention period ends.", "ACP_GATEWAY_ARTIFACT_SESSION_LIMIT", 10, 1, "count"),
   numberSetting("maxTerminalsPerSession", "resourceLimits", "Terminals per session", "Maximum retained terminal handles for a Worker session.", "ACP_GATEWAY_MAX_TERMINALS_PER_SESSION", 16, 1, "count"),
   numberSetting("maxPendingRequestsPerSession", "resourceLimits", "Pending requests", "Maximum concurrent unanswered Worker requests per session.", "ACP_GATEWAY_MAX_PENDING_REQUESTS_PER_SESSION", 64, 1, "count"),
   numberSetting("maxFrameBytes", "resourceLimits", "RPC frame", "Maximum bytes accepted in one Gateway NDJSON frame.", "ACP_GATEWAY_MAX_FRAME_BYTES", 32 * 1024 * 1024, 1024, "bytes"),

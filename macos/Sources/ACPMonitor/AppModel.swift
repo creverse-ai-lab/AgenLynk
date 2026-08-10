@@ -82,6 +82,23 @@ final class AppModel: ObservableObject {
         gateway?.objectValue?.string("gatewayBuildId") ?? "—"
     }
 
+    /// Wall-clock time of the last message received from the Monitor stream,
+    /// regardless of kind. This is the liveness signal the menu bar shows: it
+    /// keeps ticking while agents are idle, so "no active agent" and "no data
+    /// arriving" stay distinguishable.
+    @Published private(set) var lastStreamMessageAt: Date?
+    /// Time of the last agent event, as opposed to a state/heartbeat message.
+    @Published private(set) var lastAgentEventAt: Date?
+
+    var streamingLive: Bool { gatewayConnected && gatewayStreaming }
+
+    /// Every known Frontdoor and Worker with its normalized contract state.
+    /// Uses the same `PetActivityProjection` the Pet renderer consumes, so the
+    /// menu bar and the Pet can never disagree about an agent's state.
+    var activityProjection: PetActivityProjection {
+        PetActivityProjection.make(sessions: sessions.filter { !$0.isInternalReview }, inbox: inbox)
+    }
+
     var connectionDetail: String {
         switch phase {
         case .idle: "Sidecar 대기"
@@ -385,6 +402,23 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
+    /// What the Gateway would delete if these retention values were applied.
+    /// Returns nil when the Gateway cannot be asked, in which case the caller
+    /// must not claim that nothing would be lost.
+    func retentionPreview(sessionRetentionMs: Int?, artifactSessionLimit: Int?) async -> RetentionPreview? {
+        guard let endpoint else { return nil }
+        do {
+            return try await client.retentionPreview(
+                endpoint: endpoint,
+                sessionRetentionMs: sessionRetentionMs,
+                artifactSessionLimit: artifactSessionLimit
+            )
+        } catch {
+            gatewayConfigError = error.localizedDescription
+            return nil
+        }
+    }
+
     func saveGatewayConfig(values: [String: JSONValue]) async -> Bool {
         guard let endpoint else {
             gatewayConfigError = "Gateway monitor가 아직 연결되지 않았습니다."
@@ -508,10 +542,7 @@ final class AppModel: ObservableObject {
         reconciliationTask = nil
         if restartSidecar { sidecar.stop() }
         do {
-            let endpoint = try await sidecar.start(
-                nodeOverride: settings.nodePath,
-                localWatcherProjectPath: settings.petWatcherProjectPath
-            )
+            let endpoint = try await sidecar.start(nodeOverride: settings.nodePath)
             self.endpoint = endpoint
             sidecarStreamConnected = false
             // Authenticated compatibility handshake before any normal
@@ -561,6 +592,7 @@ final class AppModel: ObservableObject {
     }
 
     private func apply(_ snapshot: MonitorSnapshot) {
+        lastStreamMessageAt = Date()
         var logCacheChanged = false
         if gateway != snapshot.gateway { gateway = snapshot.gateway }
         if sessions != snapshot.sessions { sessions = snapshot.sessions; logCacheChanged = true }
@@ -585,9 +617,13 @@ final class AppModel: ObservableObject {
 
     private func apply(streamMessage value: JSONValue) {
         guard let message = value.objectValue, let kind = message.string("kind") else { return }
+        lastStreamMessageAt = Date()
         switch kind {
         case "event":
-            if let eventValue = message["event"], let event = MonitorEvent(eventValue) { enqueue(event) }
+            if let eventValue = message["event"], let event = MonitorEvent(eventValue) {
+                lastAgentEventAt = Date()
+                enqueue(event)
+            }
         case "state":
             var logCacheChanged = false
             if let values = message.array("sessions") {
@@ -744,7 +780,7 @@ final class AppModel: ObservableObject {
     private func startPet() {
         do {
             try pet.start(
-                executablePath: settings.petExecutablePath,
+                executablePath: settings.resolvedPetExecutablePath,
                 projection: PetActivityProjection.make(sessions: realtimeSessions, inbox: realtimeInbox)
             ) { [weak self] status in
                 guard let self else { return }

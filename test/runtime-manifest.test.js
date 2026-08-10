@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { RUNTIME_MANIFEST_FORMAT_VERSION, buildRuntimeManifest, verifyRuntimeManifest } from "../src/runtime-manifest.js";
+import { computeGatewayBuildId } from "../src/version.js";
 import { writeRuntimeSeed as writeFixtureSeed } from "./fixtures/runtime-seed.js";
 
 test("buildRuntimeManifest captures gatewayVersion/gatewayBuildId/nodeVersion from the seed's own files", async () => {
@@ -24,6 +25,28 @@ test("buildRuntimeManifest captures gatewayVersion/gatewayBuildId/nodeVersion fr
     assert.equal(typeof result.verificationMs, "number");
     assert.ok(result.verificationMs >= 0);
   } finally {
+    await rm(seed, { recursive: true, force: true });
+  }
+});
+
+test("verifyRuntimeManifest runs bundled npm and npx when the inherited PATH has no Node", async () => {
+  const seed = await mkdtemp(join(tmpdir(), "acp-runtime-manifest-"));
+  const inheritedPath = process.env.PATH;
+  try {
+    await writeFixtureSeed(seed);
+    // Match the official Node distribution: npm/npx locate `node` through
+    // /usr/bin/env rather than by an absolute path in their shebang.
+    await writeFile(join(seed, "node/bin/npm"), "#!/usr/bin/env node\n");
+    await writeFile(join(seed, "node/bin/npx"), "#!/usr/bin/env node\n");
+    await chmod(join(seed, "node/bin/npm"), 0o755);
+    await chmod(join(seed, "node/bin/npx"), 0o755);
+    const manifest = await buildRuntimeManifest(seed);
+
+    process.env.PATH = join(seed, "path-without-node");
+    await verifyRuntimeManifest(seed, manifest);
+  } finally {
+    if (inheritedPath === undefined) delete process.env.PATH;
+    else process.env.PATH = inheritedPath;
     await rm(seed, { recursive: true, force: true });
   }
 });
@@ -192,5 +215,33 @@ test("verifyRuntimeManifest rejects a manifest payload with an unsafe declared p
     await assert.rejects(() => verifyRuntimeManifest(seed, duplicate), /duplicate path/);
   } finally {
     await rm(seed, { recursive: true, force: true });
+  }
+});
+
+test("gatewayBuildId covers nested payload files, not just top-level src scripts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "acp-build-id-"));
+  try {
+    await mkdir(join(root, "src", "local-agents"), { recursive: true });
+    await writeFile(join(root, "package.json"), JSON.stringify({ name: "acp-gateway", version: "1.3.1" }));
+    await writeFile(join(root, "src", "version.js"), "export const GATEWAY_VERSION = \"1.3.1\";\n");
+    await writeFile(join(root, "src", "local-agents", "nested.js"), "# original\n");
+    const original = computeGatewayBuildId(root);
+
+    // The regression this guards: a nested payload file changed while the id
+    // stayed put, so an already-installed runtime looked current even though
+    // the app had just shipped different files.
+    await writeFile(join(root, "src", "local-agents", "nested.js"), "# changed\n");
+    assert.notEqual(computeGatewayBuildId(root), original, "a nested payload change must change the build id");
+
+    await writeFile(join(root, "src", "local-agents", "nested.js"), "# original\n");
+    assert.equal(computeGatewayBuildId(root), original, "restoring the payload must restore the build id");
+
+    await mkdir(join(root, "skills", "agent-delegator"), { recursive: true });
+    await writeFile(join(root, "skills", "agent-delegator", "SKILL.md"), "# skill\n");
+    assert.notEqual(computeGatewayBuildId(root), original, "a shipped skill must be covered by the build id");
+
+    assert.equal(computeGatewayBuildId(root), computeGatewayBuildId(root), "the build id must be deterministic");
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

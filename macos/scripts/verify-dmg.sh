@@ -54,6 +54,23 @@ if [ "$APPLICATIONS_TARGET" != "/Applications" ]; then
 fi
 printf '%s\n' "Lynk.app and an /Applications symlink are both present"
 
+PET_APP="$APP/Contents/Helpers/LynkPet.app"
+PET_EXECUTABLE="$PET_APP/Contents/MacOS/LynkPet"
+PET_RESOURCES="$PET_APP/Contents/Resources/ACPMonitor_LynkPet.bundle"
+if [ ! -x "$PET_EXECUTABLE" ]; then
+  echo "error: bundled default Pet executable is missing" >&2
+  exit 1
+fi
+for PET_ASSET in chatgpt.jpg claude.jpg grok.jpg; do
+  if [ ! -f "$PET_RESOURCES/$PET_ASSET" ]; then
+    echo "error: bundled default Pet asset is missing: $PET_ASSET" >&2
+    exit 1
+  fi
+done
+"$PET_EXECUTABLE" --self-test
+codesign --verify --deep --strict "$PET_APP"
+printf '%s\n' "Bundled default Pet self-test and code signature passed"
+
 RUNTIME_DIR="$APP/Contents/Resources/runtime"
 if [ ! -f "$RUNTIME_DIR/src/index.js" ] || [ ! -f "$RUNTIME_DIR/package.json" ]; then
   echo "error: $RUNTIME_DIR does not look like a bundled runtime seed" >&2

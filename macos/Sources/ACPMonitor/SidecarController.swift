@@ -12,6 +12,19 @@ enum SidecarError: LocalizedError {
             "Monitor sidecar가 올바른 준비 메시지를 보내지 않았습니다."
         }
     }
+
+    /// Same `monitor_*` stable-code vocabulary as `MonitorDecodeError`/
+    /// `MonitorClientError` (see Models.swift). A handshake line that never
+    /// parsed into a well-formed `monitor_ready` message is the same
+    /// malformed/missing-contract situation as a decode failure; an exit
+    /// with no ready message at all carries no version information to
+    /// classify, so it stays uncoded.
+    var stableCode: String? {
+        switch self {
+        case .invalidReadyMessage: "monitor_api_incompatible"
+        case .processExited: nil
+        }
+    }
 }
 
 final class SidecarController {
@@ -24,7 +37,7 @@ final class SidecarController {
     /// `monitor_ready` message. Never carries the `apiToken`.
     private(set) var meta: MonitorMeta?
 
-    func start(nodeOverride: String = "", localWatcherProjectPath: String = "") async throws -> MonitorEndpoint {
+    func start(nodeOverride: String = "") async throws -> MonitorEndpoint {
         stop()
         generation += 1
         let startGeneration = generation
@@ -35,11 +48,14 @@ final class SidecarController {
         let output = Pipe()
 
         process.executableURL = nodeURL
-        process.arguments = [scriptURL.path]
+        // The monitor reads Codex's SQLite database through node:sqlite, which
+        // is still flagged experimental in Node 22. Silence that one warning
+        // rather than every warning, so real ones still reach the log.
+        process.arguments = ["--disable-warning=ExperimentalWarning", scriptURL.path]
         process.standardOutput = output
         process.standardError = FileHandle.standardError
         let path = BundledRuntime.launchPath(nodeDirectory: nodeURL.deletingLastPathComponent())
-        var monitorEnvironment = [
+        let monitorEnvironment = [
             "ACP_GATEWAY_MONITOR_PORT": "0",
             "ACP_GATEWAY_MONITOR_AUTOSTART": "1",
             "ACP_GATEWAY_MONITOR_PARENT_PID": String(ProcessInfo.processInfo.processIdentifier),
@@ -49,15 +65,6 @@ final class SidecarController {
             "NPM_CONFIG_PREFIX": FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".npm-global").path
         ]
-        let watcherScript = URL(fileURLWithPath: localWatcherProjectPath, isDirectory: true)
-            .appendingPathComponent("codex_app_watcher.py")
-        if FileManager.default.fileExists(atPath: watcherScript.path) {
-            let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-                ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            monitorEnvironment["ACP_MONITOR_LOCAL_WATCHER_SCRIPT"] = watcherScript.path
-            monitorEnvironment["ACP_MONITOR_LOCAL_STATE"] = applicationSupport
-                .appendingPathComponent("ACPMonitor/local-agent-state.json").path
-        }
         process.environment = ProcessInfo.processInfo.environment.merging(monitorEnvironment) { _, appValue in appValue }
 
         try process.run()

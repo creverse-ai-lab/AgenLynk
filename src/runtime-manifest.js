@@ -16,7 +16,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { access, readFile, readdir, readlink } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -82,7 +82,16 @@ export async function readGatewayApiVersion(root) {
 }
 
 async function readExecutableVersion(binaryPath, args = ["--version"]) {
-  const { stdout } = await execFileAsync(binaryPath, args);
+  // npm/npx use `#!/usr/bin/env node`. Finder-launched apps commonly inherit
+  // a PATH without Node, so executing the bundled shim directly is not
+  // sufficient: make its sibling bundled Node discoverable explicitly.
+  const runtimeBin = dirname(binaryPath);
+  const inheritedPath = process.env.PATH ?? "";
+  const env = {
+    ...process.env,
+    PATH: inheritedPath ? `${runtimeBin}${delimiter}${inheritedPath}` : runtimeBin
+  };
+  const { stdout } = await execFileAsync(binaryPath, args, { env });
   return stdout.trim().replace(/^v/, "");
 }
 

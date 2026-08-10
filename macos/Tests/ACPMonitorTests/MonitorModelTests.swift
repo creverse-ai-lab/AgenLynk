@@ -5,13 +5,15 @@ enum MonitorModelChecks {
     static func main() throws {
         try snapshotDecodesSessionsEventsTasksAndInbox()
         try snapshotRejectsUnsupportedSchemaMajorWithoutPartialDecode()
+        try compatibilityDistinguishesIncompatibleFromUpdateRequired()
         try monitorApiVersionParsesMajorMinorAndRejectsMalformedStrings()
         try monitorMetaDecodesGatewayIdentityAndToleratesNullSetupValues()
         try monitorMetaRejectsMissingMonitorApiVersion()
         try monitorClientErrorDecodesCodeAndErrorFromHTTPBody()
         try agentCatalogDecodesInstallAndEnabledState()
         try gatewayConfigDecodesAllControlMetadata()
-        try gatewayConfigRepresentsAllSeventeenSettingIds()
+        try gatewayConfigRepresentsAllKnownSettingIds()
+        try retentionPreviewDecodesCountsAndSummarisesOnlyNonZeroOnes()
         try sessionConfigDecodesSelectBooleanAndFlattensNestedChoices()
         try sessionConfigPreservesUnknownTypeInsteadOfDropping()
         try sessionConfigDecodesUnavailableSnapshot()
@@ -19,6 +21,7 @@ enum MonitorModelChecks {
         try petSnapshotSeparatesFrontdoorInstancesAndParsesLegacyTimestamps()
         try petActivityProjectionMapsStatusesToContractStatesAndActions()
         try petStateAndActionsEnvelopesShareMetadataAndSequence()
+        try progressOrderingPutsInFlightAgentsFirstThenNewest()
         try petChildEnvironmentAllowsOnlyBenignKeysPlusContractFiles()
         try realtimeSessionsRequireAnActiveFrontdoorIdentity()
         try frontdoorSessionsAggregateWorkersAndExcludeLegacyRecords()
@@ -186,6 +189,40 @@ enum MonitorModelChecks {
         try check(!encoded.contains("inbox"), "pet-state.json must never leak inbox counts")
     }
 
+    /// The menu-bar status list ranks agents with this shared ordering, so a
+    /// running or waiting agent can never be pushed below a stale idle one.
+    private static func progressOrderingPutsInFlightAgentsFirstThenNewest() throws {
+        func agent(_ id: String, _ state: PetAgentState, _ updatedAt: TimeInterval) -> PetAgentActivity {
+            PetAgentActivity(
+                id: id, parentId: nil, role: "frontdoor", provider: "codex",
+                engine: "codex-frontdoor", state: state, action: .unknown,
+                task: id, updatedAt: Date(timeIntervalSince1970: updatedAt), source: "gateway",
+                cwd: nil, inboxPending: 0, memberStates: [state]
+            )
+        }
+        let projection = PetActivityProjection(agents: [
+            agent("idle-newest", .idle, 900),
+            agent("completed", .completed, 500),
+            agent("running-oldest", .running, 100),
+            agent("waiting", .waiting, 400),
+            agent("failed", .failed, 300),
+            agent("idle-older", .idle, 200),
+            agent("running-newer", .running, 200)
+        ])
+        let ordered = projection.orderedByProgress.map(\.id)
+        try check(
+            ordered == [
+                "running-newer", "running-oldest", "waiting", "failed",
+                "completed", "idle-newest", "idle-older"
+            ],
+            "in-flight agents must sort ahead of finished and idle ones, newest first within a state"
+        )
+        try check(
+            projection.orderedByProgress.count == projection.agents.count,
+            "progress ordering must not drop or duplicate agents"
+        )
+    }
+
     private static func petChildEnvironmentAllowsOnlyBenignKeysPlusContractFiles() throws {
         let source = [
             "HOME": "/Users/test",
@@ -248,17 +285,63 @@ enum MonitorModelChecks {
             throw CheckError.failed("an unsupported schema major must be rejected, not partially decoded")
         } catch let error as MonitorDecodeError {
             guard case .updateRequired = error else {
-                throw CheckError.failed("rejection should use the stable update-required error")
+                throw CheckError.failed("a well-formed but unsupported schema major should use the stable update-required error")
             }
+            try check(error.stableCode == "monitor_update_required", "the stable code should be monitor_update_required")
         }
 
+        // A missing monitorApiVersion is a malformed/missing contract, not a
+        // recognizable-but-outdated one: it must reject as incompatible, not
+        // update-required.
         let missingApiVersion = Data(#"{"schemaVersion":1,"connected":true,"sessions":[]}"#.utf8)
         do {
             _ = try MonitorSnapshot.decode(missingApiVersion)
             throw CheckError.failed("a missing monitorApiVersion must be rejected, not defaulted")
         } catch let error as MonitorDecodeError {
-            guard case .updateRequired = error else {
-                throw CheckError.failed("rejection should use the stable update-required error")
+            guard case .apiIncompatible = error else {
+                throw CheckError.failed("a missing monitorApiVersion should use the stable api-incompatible error")
+            }
+            try check(error.stableCode == "monitor_api_incompatible", "the stable code should be monitor_api_incompatible")
+        }
+    }
+
+    /// `MonitorCompatibility.validate` must distinguish a malformed/missing
+    /// version field (this build cannot tell what it's looking at) from a
+    /// well-formed field naming an unsupported version (this build knows
+    /// exactly what it's looking at, and knows it's too old for it).
+    private static func compatibilityDistinguishesIncompatibleFromUpdateRequired() throws {
+        let malformedCases = [
+            #"{"monitorApiVersion":"1.0"}"#, // missing schemaVersion entirely
+            #"{"schemaVersion":"1","monitorApiVersion":"1.0"}"#, // schemaVersion is not a number
+            #"{"schemaVersion":1}"#, // missing monitorApiVersion entirely
+            #"{"schemaVersion":1,"monitorApiVersion":"bad"}"#, // unparseable version string
+            #"{"schemaVersion":1,"monitorApiVersion":"1"}"# // missing minor component
+        ]
+        for json in malformedCases {
+            do {
+                _ = try MonitorMeta.decode(Data(json.utf8))
+                throw CheckError.failed("expected \(json) to be rejected as api-incompatible")
+            } catch let error as MonitorDecodeError {
+                guard case .apiIncompatible = error else {
+                    throw CheckError.failed("\(json) should decode a malformed/missing contract as api-incompatible, got \(error)")
+                }
+                try check(error.stableCode == "monitor_api_incompatible", "stable code mismatch for \(json)")
+            }
+        }
+
+        let updateRequiredCases = [
+            #"{"schemaVersion":2,"monitorApiVersion":"1.0"}"#, // well-formed but unsupported schema major
+            #"{"schemaVersion":1,"monitorApiVersion":"2.0"}"# // well-formed but unsupported API major
+        ]
+        for json in updateRequiredCases {
+            do {
+                _ = try MonitorMeta.decode(Data(json.utf8))
+                throw CheckError.failed("expected \(json) to be rejected as update-required")
+            } catch let error as MonitorDecodeError {
+                guard case .updateRequired = error else {
+                    throw CheckError.failed("\(json) should decode a well-formed but unsupported version as update-required, got \(error)")
+                }
+                try check(error.stableCode == "monitor_update_required", "stable code mismatch for \(json)")
             }
         }
     }
@@ -299,9 +382,10 @@ enum MonitorModelChecks {
             _ = try MonitorMeta.decode(data)
             throw CheckError.failed("a missing monitorApiVersion must be rejected, not defaulted")
         } catch let error as MonitorDecodeError {
-            guard case .updateRequired = error else {
-                throw CheckError.failed("rejection should use the stable update-required error")
+            guard case .apiIncompatible = error else {
+                throw CheckError.failed("a missing monitorApiVersion should use the stable api-incompatible error")
             }
+            try check(error.stableCode == "monitor_api_incompatible", "the stable code should be monitor_api_incompatible")
         }
     }
 
@@ -314,6 +398,15 @@ enum MonitorModelChecks {
         let fallback = MonitorClientError.decode(data: Data(), statusCode: 500)
         try check(fallback.code == nil, "a body without a code should decode with no code rather than crash")
         try check(fallback.errorDescription == "Monitor request failed (HTTP 500)", "a missing error body should fall back to a readable status message")
+
+        // An explicit server code for a blocked restart must be preserved
+        // verbatim, never erased or re-inferred client-side.
+        let restartBlocked = MonitorClientError.decode(
+            data: Data(#"{"error":"Gateway를 안전하게 재시작할 수 없습니다: 진행 중 세션 1개","code":"monitor_restart_blocked"}"#.utf8),
+            statusCode: 409
+        )
+        try check(restartBlocked.code == "monitor_restart_blocked", "an explicit restart-blocked server code must be preserved")
+        try check(restartBlocked.errorDescription == "Gateway를 안전하게 재시작할 수 없습니다: 진행 중 세션 1개", "the blocker detail message must be preserved")
     }
 
     private static func realtimeSessionsRequireAnActiveFrontdoorIdentity() throws {
@@ -418,6 +511,14 @@ enum MonitorModelChecks {
         let projection = GraphProjection.make(sessions: [root, gatewayWorker], eventsBySession: [:], windowMinutes: 10)
         try check(projection.groups.count == 1, "Branch should keep one Frontdoor trunk")
         try check(projection.workerLaneCount == 1, "Branch worker count must exclude the local root lane")
+
+        // The menu-bar popover stacks these lanes vertically instead of laying
+        // them out along X, so it needs the trunk order made explicit.
+        let stacked = projection.lanesOrderedByTrunk
+        try check(stacked.count == projection.lanes.count, "stacked lane order must keep every lane exactly once")
+        try check(Set(stacked.map(\.id)).count == stacked.count, "stacked lane order must not duplicate a lane")
+        try check(stacked.first?.session.isFrontdoorRecord == true, "each group's Frontdoor root must lead its workers")
+        try check(stacked.last?.session.sessionId == gatewayWorker.sessionId, "workers must follow their Frontdoor root")
     }
 
     private static func agentCatalogDecodesInstallAndEnabledState() throws {
@@ -457,12 +558,12 @@ enum MonitorModelChecks {
         try check(snapshot.options[0].environment == "ACP_GATEWAY_MAX_EVENTS", "gateway environment metadata decode failed")
     }
 
-    private static func gatewayConfigRepresentsAllSeventeenSettingIds() throws {
+    private static func gatewayConfigRepresentsAllKnownSettingIds() throws {
         let lifecycleIds = ["gcIntervalMs", "idleUnloadMs", "orphanGraceMs", "resultRetentionMs", "inboxRetentionMs", "sessionRetentionMs"]
-        let resourceLimitIds = ["maxEvents", "maxTextBytes", "maxInlineResultBytes", "maxArtifactBytes", "maxArtifactTotalBytes", "maxTerminalsPerSession", "maxPendingRequestsPerSession", "maxFrameBytes"]
+        let resourceLimitIds = ["maxEvents", "maxTextBytes", "maxInlineResultBytes", "maxArtifactBytes", "maxArtifactTotalBytes", "artifactSessionLimit", "maxTerminalsPerSession", "maxPendingRequestsPerSession", "maxFrameBytes"]
         let agentUpdateIds = ["agentAutoUpdate", "agentUpdateNotifications", "agentUpdateIntervalMs"]
         let allIds = lifecycleIds + resourceLimitIds + agentUpdateIds
-        try check(allIds.count == 17, "fixture must cover exactly the 17 known Gateway setting ids")
+        try check(allIds.count == 18, "fixture must cover exactly the 18 known Gateway setting ids")
 
         func option(_ id: String, group: String, type: String) -> [String: JSONValue] {
             [
@@ -480,8 +581,27 @@ enum MonitorModelChecks {
         let root = JSONValue.object(["ok": .bool(true), "pendingRestart": .bool(false), "pendingLiveApply": .bool(false), "options": .array(options)])
         let data = try JSONSerialization.data(withJSONObject: root.foundationValue)
         let snapshot = try GatewayConfigSnapshot.decode(data)
-        try check(snapshot.options.count == 17, "all 17 Gateway setting ids must decode")
+        try check(snapshot.options.count == 18, "all 18 Gateway setting ids must decode")
         try check(Set(snapshot.options.map(\.id)) == Set(allIds), "decoded ids must match every known Gateway setting id")
+    }
+
+    /// The confirmation prompt is only trustworthy if a failed or empty
+    /// preview cannot be mistaken for "nothing will be deleted".
+    private static func retentionPreviewDecodesCountsAndSummarisesOnlyNonZeroOnes() throws {
+        let data = Data(#"{"ok":true,"sessions":3,"tasks":0,"inbox":2,"artifacts":11}"#.utf8)
+        let preview = try RetentionPreview.decode(data)
+        try check(preview.sessions == 3 && preview.inbox == 2 && preview.artifacts == 11, "counts must decode")
+        try check(!preview.isEmpty, "a preview with counts is not empty")
+        try check(preview.summary.contains("세션 3개"), "the summary must name sessions")
+        try check(!preview.summary.contains("태스크"), "a zero count must be left out of the summary")
+
+        let empty = try RetentionPreview.decode(Data(#"{"ok":true,"sessions":0,"tasks":0,"inbox":0,"artifacts":0}"#.utf8))
+        try check(empty.isEmpty, "an all-zero preview means the save destroys nothing")
+        try check(empty.summary.isEmpty, "an all-zero preview has no summary")
+
+        // Missing fields decode as zero rather than throwing, but a malformed
+        // body must not silently become an empty preview.
+        try check(RetentionPreview(.string("nope")) == nil, "a non-object body must not decode")
     }
 
     private static func sessionConfigDecodesSelectBooleanAndFlattensNestedChoices() throws {

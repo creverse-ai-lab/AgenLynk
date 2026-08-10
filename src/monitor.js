@@ -17,11 +17,13 @@ import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { GatewayRpcClient } from "./socket-rpc.js";
 import { MONITOR_API_VERSION, MONITOR_SCHEMA_VERSION, MonitorState, queuedSingleFlight } from "./monitor-state.js";
 import { gatewaySocketPath } from "./config.js";
 import { mergeMonitorSessions, projectLocalSnapshot } from "./local-monitor.js";
 import { LocalTranscriptReader } from "./local-transcript.js";
+import { LocalAgentScanner } from "./local-agents/index.js";
 import { defaultGatewaySettings, gatewaySettingsSnapshot, updateGatewaySettings } from "./gateway-settings.js";
 import {
   installOfficialAgent,
@@ -34,10 +36,12 @@ const MONITOR_PORT = numberEnv("ACP_GATEWAY_MONITOR_PORT", 8642, 0);
 const MAX_EVENTS_PER_SESSION = numberEnv("ACP_GATEWAY_MONITOR_MAX_EVENTS", 2000, 1);
 const AUTO_START_GATEWAY = booleanEnv("ACP_GATEWAY_MONITOR_AUTOSTART", true);
 const EXPECTED_PARENT_PID = optionalPositiveIntegerEnv("ACP_GATEWAY_MONITOR_PARENT_PID");
-const LOCAL_WATCHER_SCRIPT = process.env.ACP_MONITOR_LOCAL_WATCHER_SCRIPT ?? "";
-const LOCAL_STATE_PATH = process.env.ACP_MONITOR_LOCAL_STATE ?? "";
+// Local agent scanning is on unless explicitly disabled; the kill switch
+// exists so a scanner fault can never take the Gateway view down with it.
+const LOCAL_SCANNER_ENABLED = (process.env.ACP_MONITOR_LOCAL_SCANNER ?? "on") !== "off";
 const REFRESH_INTERVAL_MS = 3_000;
 const localTranscripts = new LocalTranscriptReader();
+const localScanner = LOCAL_SCANNER_ENABLED ? new LocalAgentScanner() : null;
 
 function numberEnv(name, fallback, minimum) {
   const raw = process.env[name];
@@ -97,7 +101,6 @@ async function main() {
   });
   const state = new MonitorState({ maxEventsPerSession: MAX_EVENTS_PER_SESSION });
   const apiToken = randomBytes(32).toString("base64url");
-  const localWatcher = await startLocalWatcher();
   let gatewaySessions = [];
   let subscriptionActive = false;
   let subscriptionAttempt = null;
@@ -421,14 +424,19 @@ async function main() {
       sendJson(response, result);
       return;
     }
+    // What a retention change would delete, counted without deleting it. The
+    // app asks before saving a value that destroys data.
+    if (url.pathname === "/api/retention-preview" && request.method === "POST") {
+      const body = await readJsonBody(request);
+      const args = {};
+      if (Number.isFinite(body.sessionRetentionMs)) args.sessionRetentionMs = body.sessionRetentionMs;
+      if (Number.isFinite(body.artifactSessionLimit)) args.artifactSessionLimit = body.artifactSessionLimit;
+      sendJson(response, await controlCall("retention_preview", args));
+      return;
+    }
     if (url.pathname === "/api/gateway-restart" && request.method === "POST") {
       const blockers = state.restartBlockers();
-      if (blockers.length) {
-        const error = new Error(`Gateway를 안전하게 재시작할 수 없습니다: ${blockers.join(", ")}`);
-        error.statusCode = 409;
-        error.code = "monitor_restart_blocked";
-        throw error;
-      }
+      if (blockers.length) throw restartBlockedError(blockers);
       await restartGateway();
       sendJson(response, { ok: true, gateway: state.gateway });
       return;
@@ -508,7 +516,6 @@ async function main() {
     if (parentWatch) clearInterval(parentWatch);
     for (const client of state.sseClients) client.end();
     rpc.close();
-    await stopLocalWatcher(localWatcher);
     await new Promise((resolve) => server.close(resolve));
   };
   if (EXPECTED_PARENT_PID) {
@@ -522,50 +529,34 @@ async function main() {
   process.on("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
 }
 
-async function startLocalWatcher() {
-  if (!LOCAL_WATCHER_SCRIPT || !LOCAL_STATE_PATH) return null;
-  try {
-    await access(LOCAL_WATCHER_SCRIPT);
-    await mkdir(dirname(LOCAL_STATE_PATH), { recursive: true });
-    await rm(LOCAL_STATE_PATH, { force: true });
-  } catch (error) {
-    console.error(`Local monitor unavailable: ${error.message}`);
-    return null;
-  }
-  const child = spawn(process.env.ACP_MONITOR_PYTHON || "python3", [
-    LOCAL_WATCHER_SCRIPT,
-    "--signals", LOCAL_STATE_PATH,
-    "--ready-after", "3"
-  ], {
-    env: process.env,
-    stdio: ["ignore", "ignore", "inherit"]
-  });
-  child.on("error", (error) => console.error(`Local monitor failed: ${error.message}`));
-  child.on("exit", (code, signal) => {
-    if (code === 0 || signal === "SIGTERM") return;
-    console.error(`Local monitor exited (${signal ?? code})`);
-  });
-  return child;
-}
 
-async function stopLocalWatcher(child) {
-  if (!child || child.exitCode != null || child.signalCode != null) return;
-  const exited = new Promise((resolve) => child.once("exit", resolve));
-  child.kill("SIGTERM");
-  await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 1_000))]);
-  if (child.exitCode == null && child.signalCode == null) child.kill("SIGKILL");
-}
 
 async function readLocalProjection() {
-  if (!LOCAL_STATE_PATH) return { sessions: [], events: {} };
+  const sessions = await collectLocalSessions();
+  if (!sessions.length) return { sessions: [], events: {} };
   try {
-    return localTranscripts.enrich(projectLocalSnapshot(JSON.parse(await readFile(LOCAL_STATE_PATH, "utf8"))));
+    return localTranscripts.enrich(projectLocalSnapshot({ sessions }));
   } catch (error) {
-    if (error?.code !== "ENOENT") console.error(`Local monitor snapshot ignored: ${error.message}`);
+    console.error(`Local session projection ignored: ${error.message}`);
     return { sessions: [], events: {} };
   }
 }
 
+/**
+ * Sessions the Gateway never sees. The scanner runs in this process, so there
+ * is no snapshot file to read and no Gateway sessions to filter back out — the
+ * monitor already holds those over RPC.
+ */
+async function collectLocalSessions() {
+  if (!localScanner) return [];
+  try {
+    return await localScanner.scan();
+  } catch (error) {
+    // Local monitoring is a nicety; the Gateway view must survive its failure.
+    console.error(`Local agent scan failed: ${error.message}`);
+    return [];
+  }
+}
 async function pathIsMissing(path) {
   try {
     await access(path);
@@ -590,6 +581,16 @@ function gatewayIdentity(state, identity) {
 
 function monitorCapabilities(state) {
   return state.gateway?.capabilities ?? {};
+}
+
+// Stable-code contract for a blocked Gateway restart. A pure function of the
+// blocker list (produced by MonitorState.restartBlockers) so it's testable
+// without a running server: the HTTP handler throws exactly this shape.
+export function restartBlockedError(blockers) {
+  const error = new Error(`Gateway를 안전하게 재시작할 수 없습니다: ${blockers.join(", ")}`);
+  error.statusCode = 409;
+  error.code = "monitor_restart_blocked";
+  return error;
 }
 
 function sendJson(response, value, status = 200) {
@@ -629,7 +630,12 @@ async function readJsonBody(request) {
   }
 }
 
-main().catch((error) => {
-  console.error(error.message);
-  process.exit(1);
-});
+// Guarded so importing this module for its pure helpers (e.g. in tests)
+// never starts the sidecar; only running it directly (`node monitor.js`,
+// which is how the Swift app and monitor-control tests spawn it) does.
+if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error.message);
+    process.exit(1);
+  });
+}

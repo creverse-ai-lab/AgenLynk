@@ -75,7 +75,7 @@ async function currentRuntimeIfValid(runtimeRoot) {
  * candidate's path can make it resolve outside versions/ while still
  * *looking* like it's inside.
  */
-async function isConfinedToVersions(runtimeRoot, candidate) {
+export async function isConfinedToVersions(runtimeRoot, candidate) {
   if (typeof candidate !== "string" || !candidate) return false;
   const versionsRoot = join(runtimeRoot, "versions");
   if (!isRelativelyConfined(versionsRoot, candidate)) return false;
@@ -122,7 +122,7 @@ async function stageAndActivate(seedRoot, runtimeRoot, target, manifest) {
   }
 }
 
-async function activateCurrent(runtimeRoot, target, manifest) {
+export async function activateCurrent(runtimeRoot, target, manifest) {
   await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
   const currentPath = join(runtimeRoot, "current.json");
   const payload = {

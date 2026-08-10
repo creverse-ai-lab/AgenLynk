@@ -34,6 +34,8 @@ test-results/
 junit.xml
 dist/
 build/
+# SwiftPM's derived build directory for the macOS app
+macos/.build/
 .cache/
 tmp/
 temp/

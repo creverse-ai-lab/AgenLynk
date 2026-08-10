@@ -52,7 +52,8 @@ struct SettingsView: View {
                     get: { settings.petEnabled },
                     set: { model.setPetEnabled($0) }
                 ))
-                TextField("Pet 실행 파일 경로", text: $settings.petExecutablePath)
+                LabeledContent("현재 renderer", value: settings.usesBundledPet ? "Lynk 기본 Pet" : "사용자 지정")
+                TextField("사용자 renderer 경로 (비우면 기본 Pet)", text: $settings.petExecutablePath)
                     .disabled(model.petRunning)
                 LabeledContent("상태", value: model.petStatus)
                 if let error = model.petError {
@@ -64,16 +65,15 @@ struct SettingsView: View {
                 Button(model.petRunning ? "Pet 다시 시작" : "Pet 시작") {
                     model.restartPet()
                 }
-                .disabled(settings.petExecutablePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(settings.resolvedPetExecutablePath.isEmpty)
             }
-            Section("로컬 세션 감지 (선택)") {
-                TextField("로컬 watcher 프로젝트 경로", text: $settings.petWatcherProjectPath)
-                Text("codex_app_watcher.py가 있는 프로젝트 경로를 지정하면 ACP를 통하지 않고 직접 실행한 Codex·Claude·Grok 세션도 Monitor와 Pet에 LOCAL로 표시됩니다.")
+            Section("로컬 세션 감지") {
+                Label("ACP를 통하지 않고 직접 실행한 Codex·Claude·Grok 세션과 그 하위 sub-agent를 자동으로 감지해 LOCAL로 표시합니다. Monitor에 내장되어 있어 별도 설정이나 설치가 필요하지 않습니다.", systemImage: "rectangle.stack.badge.person.crop")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             Section("상태 공유") {
-                Label("Lynk가 Gateway(ACP)와 로컬 watcher 세션을 하나의 상태로 요약해 pet-state.json/pet-actions.json에 기록하면, 지정한 실행 파일이 그 두 파일만 읽어 표시합니다.", systemImage: "dot.radiowaves.left.and.right")
+                Label("Lynk가 Gateway(ACP)와 로컬 세션을 하나의 상태로 요약해 pet-state.json/pet-actions.json에 기록하면, 지정한 실행 파일이 그 두 파일만 읽어 표시합니다.", systemImage: "dot.radiowaves.left.and.right")
                 Text("각 Worker를 연 최초 에이전트는 Frontdoor 루트로 합성되어 작업 트리의 시작점으로 함께 표시됩니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -91,8 +91,21 @@ private struct GatewayConfigurationView: View {
     @State private var originalNumberValues: [String: Int] = [:]
     @State private var originalBooleanValues: [String: Bool] = [:]
     @State private var confirmRestart = false
+    @State private var pendingDestructiveSave: DestructiveSave?
 
     private static let knownGroups = ["agentUpdates", "lifecycle", "resourceLimits"]
+
+    /// Settings whose lower values destroy stored history. Raising them is
+    /// always safe, so only a decrease needs confirming.
+    private static let destructiveIds = ["sessionRetentionMs", "artifactSessionLimit"]
+
+    /// A save the user has to confirm because it deletes data, carrying the
+    /// counts the Gateway reported for exactly these values.
+    private struct DestructiveSave: Identifiable {
+        let id = UUID()
+        let preview: RetentionPreview
+        let andRestart: Bool
+    }
 
     /// Known groups render first in a fixed, familiar order; any group the
     /// Gateway advertises beyond those (future settings) is appended in a
@@ -152,6 +165,16 @@ private struct GatewayConfigurationView: View {
             }
         } message: {
             Text("진행 중 세션·Task·미응답 Inbox가 있으면 서버가 재시작을 차단합니다. 유휴 세션 기록은 보존되고 Worker는 다음 요청에서 복원됩니다.")
+        }
+        .alert("기록이 삭제됩니다", isPresented: destructiveSavePresented, presenting: pendingDestructiveSave) { save in
+            Button("취소", role: .cancel) { pendingDestructiveSave = nil }
+            Button("삭제하고 저장", role: .destructive) {
+                let andRestart = save.andRestart
+                pendingDestructiveSave = nil
+                Task { _ = await commitDrafts(andRestart: andRestart) }
+            }
+        } message: { save in
+            Text("보존 기준을 줄이면 \(save.preview.summary)가 삭제됩니다. 고정(pinned)했거나 진행 중인 세션은 삭제되지 않습니다. 계속할까요?")
         }
     }
 
@@ -260,16 +283,52 @@ private struct GatewayConfigurationView: View {
         originalBooleanValues = booleans
     }
 
-    private func saveDrafts() async -> Bool {
+    private var destructiveSavePresented: Binding<Bool> {
+        Binding(
+            get: { pendingDestructiveSave != nil },
+            set: { if !$0 { pendingDestructiveSave = nil } }
+        )
+    }
+
+    /// Values being lowered, among the settings that destroy history.
+    private var loweredRetentionValues: [String: Int] {
+        var lowered: [String: Int] = [:]
+        for id in Self.destructiveIds {
+            guard let next = numberDrafts[id], let current = originalNumberValues[id], next < current else { continue }
+            lowered[id] = next
+        }
+        return lowered
+    }
+
+    private func saveDrafts(andRestart: Bool = false) async -> Bool {
         guard !draftValues.isEmpty else { return true }
+        let lowered = loweredRetentionValues
+        if !lowered.isEmpty {
+            // Ask the Gateway what these exact values would delete before
+            // writing them. A failed preview must not be read as "nothing".
+            guard let preview = await model.retentionPreview(
+                sessionRetentionMs: lowered["sessionRetentionMs"],
+                artifactSessionLimit: lowered["artifactSessionLimit"]
+            ) else { return false }
+            if !preview.isEmpty {
+                pendingDestructiveSave = DestructiveSave(preview: preview, andRestart: andRestart)
+                return false
+            }
+        }
+        return await commitDrafts(andRestart: andRestart)
+    }
+
+    private func commitDrafts(andRestart: Bool) async -> Bool {
         let saved = await model.saveGatewayConfig(values: draftValues)
         if saved { syncDrafts() }
-        return saved
+        guard saved, andRestart else { return saved }
+        return await model.restartGateway()
     }
 
     private func saveAndRestart() async {
-        guard await saveDrafts() else { return }
-        if await model.restartGateway() { syncDrafts() }
+        // saveDrafts owns the restart when it commits, so a confirmation
+        // prompt can carry the restart intent across the user's decision.
+        _ = await saveDrafts(andRestart: true)
     }
 
     private func numberBinding(_ option: GatewayConfigOption) -> Binding<Int> {
@@ -311,6 +370,20 @@ private struct GatewayRuntimeConfigRow: View {
     let onReset: (() -> Void)?
     let resetDisabled: Bool
 
+    /// Millisecond settings a person naturally thinks about in days. The wire
+    /// format stays milliseconds; only the editor changes.
+    private static let dayScaledIds: Set<String> = ["sessionRetentionMs"]
+    private static let millisecondsPerDay = 24 * 60 * 60 * 1_000
+
+    /// Rounds up so a sub-day value can never display as "0 days" and then be
+    /// saved back as zero retention.
+    private var dayBinding: Binding<Int> {
+        Binding(
+            get: { max(1, Int((Double(numberValue) / Double(Self.millisecondsPerDay)).rounded(.up))) },
+            set: { numberValue = max(1, $0) * Self.millisecondsPerDay }
+        )
+    }
+
     var body: some View {
         HStack(alignment: .center, spacing: 14) {
             VStack(alignment: .leading, spacing: 3) {
@@ -350,6 +423,15 @@ private struct GatewayRuntimeConfigRow: View {
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .disabled(!option.editable)
+        case "number" where Self.dayScaledIds.contains(option.id):
+            // 604800000 ms means nothing to a reader; the value this one
+            // setting expresses is "how many days of history to keep".
+            TextField("값", value: dayBinding, format: .number.grouping(.never))
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 145)
+                .disabled(!option.editable)
+            Text("일").font(.caption).foregroundStyle(.secondary).frame(width: 42, alignment: .leading)
         case "number":
             TextField("값", value: $numberValue, format: .number.grouping(.never))
                 .textFieldStyle(.roundedBorder)

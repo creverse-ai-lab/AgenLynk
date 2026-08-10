@@ -38,6 +38,7 @@ export class GatewayService {
     maxInlineResultBytes = 64 * 1024,
     maxArtifactBytes = 100 * 1024 * 1024,
     maxArtifactTotalBytes = 512 * 1024 * 1024,
+    artifactSessionLimit = 10,
     maxTerminalsPerSession = 16,
     maxPendingRequestsPerSession = 64,
     maxFrameBytes = 32 * 1024 * 1024,
@@ -78,6 +79,7 @@ export class GatewayService {
       maxInlineResultBytes,
       maxArtifactBytes,
       maxArtifactTotalBytes,
+      artifactSessionLimit,
       maxTerminalsPerSession,
       maxPendingRequestsPerSession,
       maxFrameBytes
@@ -208,7 +210,8 @@ export class GatewayService {
       task_list: () => this.taskList(context),
       task_result: () => this.taskResult(args, context),
       task_cancel: () => this.taskCancel(args, context),
-      inbox: () => this.inboxManage(args, context)
+      inbox: () => this.inboxManage(args, context),
+      retention_preview: () => this.retentionPreview(args)
     };
     const handler = handlers[method];
     if (!handler) throw new Error(`Unknown gateway method: ${method}`);
@@ -1350,20 +1353,10 @@ export class GatewayService {
 
   async #runMaintenance(now) {
     let changed = this.pruneTasks();
-    // Artifacts still referenced by a live session outlive the age-based
-    // prune; they disappear when their session record does.
-    const keepPaths = new Set();
-    for (const session of this.store.list()) {
-      if (session.resultArtifact?.path) keepPaths.add(session.resultArtifact.path);
-      if (session.resultFinalArtifact?.path) keepPaths.add(session.resultFinalArtifact.path);
-      for (const segment of session.resultInspection ?? []) {
-        if (segment.artifact?.path) keepPaths.add(segment.artifact.path);
-      }
-      for (const event of session.events) {
-        if (event.dataArtifact?.path) keepPaths.add(event.dataArtifact.path);
-      }
-    }
-    if (this.artifactStore.prune(this.lifecycle.resultRetentionMs, now, keepPaths) > 0) changed = true;
+    const keepPaths = this.#artifactKeepPaths();
+    if (this.artifactStore.prune(
+      this.lifecycle.resultRetentionMs, now, keepPaths, this.#artifactSessionIds()
+    ) > 0) changed = true;
 
     for (const [id, item] of this.inbox) {
       if (item.status === "pending") continue;
@@ -1445,6 +1438,80 @@ export class GatewayService {
 
     if (changed) this.schedulePersist();
     return { ok: true, sessions: this.store.list().length, tasks: this.tasks.size, inbox: this.inbox.size };
+  }
+
+  /**
+   * Artifacts still referenced by a live session outlive the age-based prune;
+   * they disappear when their session record does.
+   */
+  #artifactKeepPaths() {
+    const keepPaths = new Set();
+    for (const session of this.store.list()) {
+      if (session.resultArtifact?.path) keepPaths.add(session.resultArtifact.path);
+      if (session.resultFinalArtifact?.path) keepPaths.add(session.resultFinalArtifact.path);
+      for (const segment of session.resultInspection ?? []) {
+        if (segment.artifact?.path) keepPaths.add(segment.artifact.path);
+      }
+      for (const event of session.events) {
+        if (event.dataArtifact?.path) keepPaths.add(event.dataArtifact.path);
+      }
+    }
+    return keepPaths;
+  }
+
+  /**
+   * Session ids whose artifacts survive the count rule: the most recently
+   * touched `artifactSessionLimit` sessions, plus anything pinned or still
+   * working. Pinning is the user saying "keep this", so it must not be aged
+   * out by a burst of newer sessions.
+   */
+  #artifactSessionIds(limit = this.resourceLimits.artifactSessionLimit) {
+    if (!Number.isFinite(limit) || limit < 1) return null;
+    const sessions = this.store.list();
+    const keep = new Set();
+    for (const session of sessions) {
+      if (session.pinned || ACTIVE_STATUSES.has(session.status)) keep.add(session.id);
+    }
+    const ranked = [...sessions].sort((a, b) =>
+      Date.parse(b.updatedAt ?? b.createdAt ?? 0) - Date.parse(a.updatedAt ?? a.createdAt ?? 0));
+    for (const session of ranked.slice(0, limit)) keep.add(session.id);
+    return keep;
+  }
+
+  /**
+   * Counts what a retention change would delete, without deleting anything.
+   * Backs the confirmation prompt in the app: lowering a retention value
+   * destroys data, so the user is told how much before it happens.
+   */
+  retentionPreview(args = {}) {
+    const now = this.now();
+    const sessionRetentionMs = Number.isFinite(args.sessionRetentionMs)
+      ? args.sessionRetentionMs
+      : this.lifecycle.sessionRetentionMs;
+    const artifactSessionLimit = Number.isFinite(args.artifactSessionLimit)
+      ? args.artifactSessionLimit
+      : this.resourceLimits.artifactSessionLimit;
+
+    let sessions = 0;
+    let tasks = 0;
+    let inbox = 0;
+    const doomedSessionIds = new Set();
+    for (const session of this.store.list()) {
+      const recordSince = session.completedAt ?? session.updatedAt;
+      if (session.pinned || ACTIVE_STATUSES.has(session.status)) continue;
+      if (!isExpired(recordSince, sessionRetentionMs, now)) continue;
+      sessions += 1;
+      doomedSessionIds.add(session.id);
+    }
+    for (const task of this.tasks.values()) if (doomedSessionIds.has(task.sessionId)) tasks += 1;
+    for (const item of this.inbox.values()) if (doomedSessionIds.has(item.sessionId)) inbox += 1;
+
+    const keepSessionIds = this.#artifactSessionIds(artifactSessionLimit);
+    for (const id of doomedSessionIds) keepSessionIds?.delete(id);
+    const artifacts = this.artifactStore.countPrunable(
+      this.lifecycle.resultRetentionMs, now, this.#artifactKeepPaths(), keepSessionIds
+    );
+    return { ok: true, sessions, tasks, inbox, artifacts, sessionRetentionMs, artifactSessionLimit };
   }
 
   interruptSessionInbox(session, resolution) {

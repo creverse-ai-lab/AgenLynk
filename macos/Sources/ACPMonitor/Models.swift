@@ -293,6 +293,36 @@ struct PetActivityProjection: Equatable, Sendable {
         }
         return PetActivityProjection(agents: agents)
     }
+
+    /// Agents ordered for a progress-at-a-glance surface: anything in flight
+    /// first, then newest-first so a just-finished turn stays visible. Shared
+    /// so the menu bar and any other status surface rank states identically.
+    var orderedByProgress: [PetAgentActivity] {
+        agents.sorted { lhs, rhs in
+            let lhsRank = lhs.state.progressRank
+            let rhsRank = rhs.state.progressRank
+            if lhsRank != rhsRank { return lhsRank < rhsRank }
+            return lhs.updatedAt > rhs.updatedAt
+        }
+    }
+}
+
+extension PetAgentState {
+    /// Lower ranks are more "in progress". Ordering only — the contract
+    /// state values themselves stay exactly as `pet-state.schema.json`
+    /// declares them.
+    var progressRank: Int {
+        switch self {
+        case .running: 0
+        case .waiting: 1
+        case .starting: 2
+        case .failed: 3
+        case .completed: 4
+        case .idle: 5
+        case .offline: 6
+        case .unknown: 7
+        }
+    }
 }
 
 /// Maps a raw Gateway/local-monitor session status onto the contract's
@@ -642,13 +672,24 @@ enum MonitorCompatibility {
     static let supportedSchemaVersion = 1
     static let supportedApiMajor = 1
 
+    /// A missing/malformed version field means the message isn't even a
+    /// message this build understands the shape of (`monitor_api_incompatible`);
+    /// a well-formed field naming an unsupported major means the shape is
+    /// understood but this build is simply too old (`monitor_update_required`).
     static func validate(_ object: [String: JSONValue]) throws {
-        guard let schemaVersion = object.int("schemaVersion"), schemaVersion == supportedSchemaVersion else {
+        guard let schemaVersion = object.int("schemaVersion") else {
+            throw MonitorDecodeError.apiIncompatible("Monitor 응답에 schemaVersion이 없거나 형식이 올바르지 않습니다.")
+        }
+        guard schemaVersion == supportedSchemaVersion else {
             throw MonitorDecodeError.updateRequired("Monitor schema version이 호환되지 않습니다. 앱을 업데이트하세요.")
         }
-        guard let rawApiVersion = object.string("monitorApiVersion"),
-              let apiVersion = MonitorApiVersion(rawApiVersion),
-              apiVersion.major == supportedApiMajor else {
+        guard let rawApiVersion = object.string("monitorApiVersion") else {
+            throw MonitorDecodeError.apiIncompatible("Monitor 응답에 monitorApiVersion이 없습니다.")
+        }
+        guard let apiVersion = MonitorApiVersion(rawApiVersion) else {
+            throw MonitorDecodeError.apiIncompatible("Monitor API version 형식이 올바르지 않습니다: \(rawApiVersion)")
+        }
+        guard apiVersion.major == supportedApiMajor else {
             throw MonitorDecodeError.updateRequired("Monitor API version이 호환되지 않습니다. 앱을 업데이트하세요.")
         }
     }
@@ -799,6 +840,51 @@ struct ACPAgentCatalogSnapshot: Sendable {
     }
 }
 
+/// How many sessions/tasks/inbox records/artifacts a retention change would
+/// delete. Counted by the Gateway without deleting anything, so the app can
+/// ask before a destructive save.
+struct RetentionPreview: Equatable, Sendable {
+    let sessions: Int
+    let tasks: Int
+    let inbox: Int
+    let artifacts: Int
+
+    var isEmpty: Bool { sessions == 0 && tasks == 0 && inbox == 0 && artifacts == 0 }
+
+    /// A human-readable list of only the non-zero counts.
+    var summary: String {
+        var parts: [String] = []
+        if sessions > 0 { parts.append("세션 \(sessions)개") }
+        if tasks > 0 { parts.append("태스크 \(tasks)개") }
+        if inbox > 0 { parts.append("요청 \(inbox)개") }
+        if artifacts > 0 { parts.append("첨부 파일 \(artifacts)개") }
+        return parts.joined(separator: ", ")
+    }
+
+    init?(_ value: JSONValue) {
+        guard let object = value.objectValue else { return nil }
+        sessions = object.int("sessions") ?? 0
+        tasks = object.int("tasks") ?? 0
+        inbox = object.int("inbox") ?? 0
+        artifacts = object.int("artifacts") ?? 0
+    }
+
+    init(sessions: Int, tasks: Int, inbox: Int, artifacts: Int) {
+        self.sessions = sessions
+        self.tasks = tasks
+        self.inbox = inbox
+        self.artifacts = artifacts
+    }
+
+    static func decode(_ data: Data) throws -> RetentionPreview {
+        let raw = try JSONSerialization.jsonObject(with: data)
+        guard let preview = RetentionPreview(JSONValue(any: raw)) else {
+            throw MonitorDecodeError.invalidMessage
+        }
+        return preview
+    }
+}
+
 struct GatewayConfigOption: Identifiable, Equatable, Sendable {
     let id: String
     let group: String
@@ -937,23 +1023,41 @@ struct SessionConfigSnapshot: Sendable {
     }
 }
 
+/// Local decode/compatibility failures. `stableCode` mirrors the same
+/// `monitor_api_incompatible` / `monitor_update_required` wire vocabulary
+/// `MonitorClientError.code` carries for server-originated failures, so both
+/// error surfaces are testable against the identical stable-code contract:
+/// malformed or missing version fields (`invalidRoot`, `invalidMessage`,
+/// `apiIncompatible`) can never be decoded at all, while `updateRequired` is
+/// a well-formed message this build is simply too old to understand.
 enum MonitorDecodeError: LocalizedError {
     case invalidRoot
     case invalidMessage
+    case apiIncompatible(String)
     case updateRequired(String)
 
     var errorDescription: String? {
         switch self {
         case .invalidRoot: "Monitor snapshot is not a JSON object."
         case .invalidMessage: "Monitor stream delivered an invalid message."
+        case let .apiIncompatible(message): message
         case let .updateRequired(message): message
+        }
+    }
+
+    var stableCode: String {
+        switch self {
+        case .invalidRoot, .invalidMessage, .apiIncompatible: "monitor_api_incompatible"
+        case .updateRequired: "monitor_update_required"
         }
     }
 }
 
 /// A Node Monitor HTTP error response, `{error, code}`. `code` is a stable
 /// identifier callers can branch on (auth failure, incompatible API,
-/// restart blocked, ...); `error` stays the human-readable message.
+/// restart blocked, ...); `error` stays the human-readable message. An
+/// explicit server `code` (e.g. `monitor_unauthorized`, `monitor_restart_blocked`)
+/// is always preserved verbatim, never inferred or overwritten.
 enum MonitorClientError: LocalizedError, Equatable, Sendable {
     case server(code: String?, message: String)
 

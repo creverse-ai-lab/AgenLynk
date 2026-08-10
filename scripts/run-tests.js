@@ -12,6 +12,7 @@ const slowFiles = new Set([
   "monitor-control.test.js",
   "runtime-installer.test.js",
   "runtime-manifest.test.js",
+  "runtime-updater.test.js",
   "socket.test.js"
 ]);
 

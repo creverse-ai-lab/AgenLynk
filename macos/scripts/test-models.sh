@@ -27,6 +27,16 @@ env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
 
 "$SETTINGS_OUT"
 
+PET_CONTROLLER_OUT="$CHECK_ROOT/pet-controller"
+env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
+  swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/Models.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/PetController.swift" \
+  "$REPO_ROOT/macos/Tests/ACPMonitorTests/PetControllerTests.swift" \
+  -o "$PET_CONTROLLER_OUT"
+
+"$PET_CONTROLLER_OUT"
+
 ONBOARDING_OUT="$CHECK_ROOT/onboarding"
 env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 \

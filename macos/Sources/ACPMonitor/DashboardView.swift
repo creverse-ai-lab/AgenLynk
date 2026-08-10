@@ -3,7 +3,6 @@ import SwiftUI
 struct DashboardView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Group {
@@ -54,9 +53,8 @@ struct DashboardView: View {
                 SettingsLink {
                     Label("설정", systemImage: "gearshape")
                 }
-                Button("Agent Monitoring", systemImage: "point.3.connected.trianglepath.dotted") {
-                    openWindow(id: "live-graph")
-                }
+                // Live monitoring now lives in the menu-bar popover; a second
+                // entry point here was the same window twice.
                 Button("다시 연결", systemImage: "arrow.clockwise") { model.reconnect() }
             }
         }

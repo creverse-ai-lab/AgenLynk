@@ -13,7 +13,27 @@ enum OnboardingLogicChecks {
         try checkBootstrapResultParsing()
         try checkCurrentRuntimeParsing()
         try checkRuntimeProvisionerResultParsing()
+        try checkBundledRuntimeErrorStableCodes()
         print("Swift onboarding logic checks passed")
+    }
+
+    /// A missing installed Gateway runtime is the one `BundledRuntimeError`
+    /// case with a stable `monitor_*` code (see Models.swift for the same
+    /// vocabulary on the decode/HTTP error paths); every other case is a
+    /// local Node-discovery failure with no server-side equivalent.
+    static func checkBundledRuntimeErrorStableCodes() throws {
+        guard BundledRuntimeError.runtimeNotInstalled.stableCode == "monitor_not_installed" else {
+            throw CheckError.failed("expected runtimeNotInstalled to carry the monitor_not_installed stable code")
+        }
+        guard BundledRuntimeError.runtimeNotInstalled.errorDescription == "설치된 Gateway runtime을 찾지 못했습니다. Lynk를 다시 시작해 설치를 완료하세요." else {
+            throw CheckError.failed("expected runtimeNotInstalled to keep its existing localized description")
+        }
+        guard BundledRuntimeError.nodeNotFound.stableCode == nil else {
+            throw CheckError.failed("expected nodeNotFound to carry no stable code")
+        }
+        guard BundledRuntimeError.resourceNotFound("src/monitor.js").stableCode == nil else {
+            throw CheckError.failed("expected resourceNotFound to carry no stable code")
+        }
     }
 
     static func checkStableApplicationPath() throws {

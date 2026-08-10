@@ -32,6 +32,18 @@ enum BundledRuntimeError: LocalizedError {
             "설치된 Gateway runtime을 찾지 못했습니다. Lynk를 다시 시작해 설치를 완료하세요."
         }
     }
+
+    /// Same `monitor_*` stable-code vocabulary `MonitorClientError`/
+    /// `MonitorDecodeError` use (see Models.swift): only the one case that
+    /// means "the installed Gateway runtime is missing" maps to a code —
+    /// the others are local Node-discovery failures with no server-side
+    /// equivalent.
+    var stableCode: String? {
+        switch self {
+        case .runtimeNotInstalled: "monitor_not_installed"
+        case .nodeNotFound, .nodeVersionTooOld, .nodeVersionCheckFailed, .resourceNotFound: nil
+        }
+    }
 }
 
 struct InstalledRuntimePointer: Equatable {

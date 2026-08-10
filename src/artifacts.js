@@ -27,24 +27,54 @@ export class ArtifactStore {
     return new ArtifactWriter(this, sessionId, kind);
   }
 
-  prune(retentionMs, now = Date.now(), keepPaths = null) {
-    if (retentionMs < 0) return 0;
+  /**
+   * Two independent rules, either of which can remove an artifact:
+   *   - age: older than `retentionMs`, unless still referenced (`keepPaths`),
+   *   - session count: belongs to a session outside `keepSessionIds`, which is
+   *     removed immediately regardless of age.
+   * Time alone cannot bound a burst of activity inside the retention window,
+   * and a count alone would keep one ancient session forever; together they do.
+   */
+  prune(retentionMs, now = Date.now(), keepPaths = null, keepSessionIds = null) {
     let removed = 0;
-    for (const entry of safeEntries(this.root)) {
-      if (!entry.isFile() || !entry.name.startsWith(ARTIFACT_PREFIX)) continue;
-      const path = join(this.root, entry.name);
-      if (keepPaths?.has(path)) continue;
+    for (const { path, size } of this.#prunable(retentionMs, now, keepPaths, keepSessionIds)) {
       try {
-        const info = statSync(path);
-        if (info.mtimeMs + retentionMs > now) continue;
         unlinkSync(path);
-        this.usedBytes = Math.max(0, this.usedBytes - info.size);
+        this.usedBytes = Math.max(0, this.usedBytes - size);
         removed += 1;
       } catch (error) {
         if (error?.code !== "ENOENT") throw error;
       }
     }
     return removed;
+  }
+
+  /** How many artifacts `prune` would remove for the same arguments. */
+  countPrunable(retentionMs, now = Date.now(), keepPaths = null, keepSessionIds = null) {
+    let count = 0;
+    for (const _ of this.#prunable(retentionMs, now, keepPaths, keepSessionIds)) count += 1;
+    return count;
+  }
+
+  *#prunable(retentionMs, now, keepPaths, keepSessionIds) {
+    if (retentionMs < 0 && !keepSessionIds) return;
+    for (const entry of safeEntries(this.root)) {
+      if (!entry.isFile() || !entry.name.startsWith(ARTIFACT_PREFIX)) continue;
+      const path = join(this.root, entry.name);
+      // The count rule overrides a live reference: once a session falls out of
+      // the most-recent window its artifacts go, however recently written.
+      const beyondSessionLimit = keepSessionIds != null && !belongsToSession(entry.name, keepSessionIds);
+      if (!beyondSessionLimit && keepPaths?.has(path)) continue;
+      let info;
+      try {
+        info = statSync(path);
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+        continue;
+      }
+      if (!beyondSessionLimit && (retentionMs < 0 || info.mtimeMs + retentionMs > now)) continue;
+      yield { path, size: info.size };
+    }
   }
 
   reserve(requested, fileBytes) {
@@ -143,6 +173,16 @@ class ArtifactWriter {
     }
     this.fd = null;
   }
+}
+
+// Artifacts are named `acp-artifact-<sessionId>-<kind>-<uuid>.txt`, and a
+// session id contains dashes of its own, so membership is tested by prefix
+// rather than by splitting the filename apart.
+function belongsToSession(name, sessionIds) {
+  for (const sessionId of sessionIds) {
+    if (name.startsWith(`${ARTIFACT_PREFIX}${sessionId}-`)) return true;
+  }
+  return false;
 }
 
 function safeEntries(path) {

@@ -70,6 +70,22 @@ actor MonitorClient {
         return try GatewayConfigSnapshot.decode(data)
     }
 
+    func retentionPreview(
+        endpoint: MonitorEndpoint,
+        sessionRetentionMs: Int?,
+        artifactSessionLimit: Int?
+    ) async throws -> RetentionPreview {
+        var request = endpoint.request(path: "api/retention-preview", method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var body: [String: Any] = [:]
+        if let sessionRetentionMs { body["sessionRetentionMs"] = sessionRetentionMs }
+        if let artifactSessionLimit { body["artifactSessionLimit"] = artifactSessionLimit }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response: response, data: data)
+        return try RetentionPreview.decode(data)
+    }
+
     func resetGatewayConfig(endpoint: MonitorEndpoint, ids: [String]) async throws -> GatewayConfigSnapshot {
         var request = endpoint.request(path: "api/gateway-config", method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
