@@ -73,6 +73,33 @@ actor MonitorClient {
         return try GatewayConfigSnapshot.decode(data)
     }
 
+    func fetchSessionConfig(endpoint: MonitorEndpoint, sessionId: String) async throws -> SessionConfigSnapshot {
+        var components = URLComponents(url: endpoint.baseURL.appendingPathComponent("api/session-config"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "sessionId", value: sessionId)]
+        var request = endpoint.request(path: "api/session-config")
+        request.url = components.url
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response: response, data: data)
+        let snapshot = try SessionConfigSnapshot.decode(data)
+        guard snapshot.sessionId == sessionId else { throw MonitorDecodeError.invalidMessage }
+        return snapshot
+    }
+
+    func setSessionConfig(endpoint: MonitorEndpoint, sessionId: String, configId: String, value: JSONValue) async throws -> SessionConfigSnapshot {
+        var request = endpoint.request(path: "api/session-config", method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "sessionId": sessionId,
+            "configId": configId,
+            "value": value.foundationValue
+        ])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response: response, data: data)
+        let snapshot = try SessionConfigSnapshot.decode(data)
+        guard snapshot.sessionId == sessionId else { throw MonitorDecodeError.invalidMessage }
+        return snapshot
+    }
+
     func restartGateway(endpoint: MonitorEndpoint) async throws {
         let request = endpoint.request(path: "api/gateway-restart", method: "POST")
         let (data, response) = try await URLSession.shared.data(for: request)

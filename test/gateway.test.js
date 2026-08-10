@@ -654,13 +654,18 @@ test("Main lists and controls Worker-advertised session parameters", async () =>
       { rootId: "main-a" }
     );
     assert.deepEqual(listed.configOptions.map((option) => option.id), ["model", "thought_level", "auto_compact"]);
+    const thoughtLevelOptions = listed.configOptions.find((option) => option.id === "thought_level").options;
+    assert.ok(
+      thoughtLevelOptions.some((item) => Array.isArray(item.options) && item.options.some((leaf) => leaf.value === "high")),
+      "Gateway must pass a Worker's one-level nested choice groups through untouched"
+    );
 
     const thought = await service.call(
       "config",
       { action: "set", sessionId: opened.sessionId, configId: "thought_level", value: "high" },
       { rootId: "main-a" }
     );
-    assert.equal(thought.changed.value, "high");
+    assert.equal(thought.changed.value, "high", "a value nested inside a choice group must still validate and apply");
     assert.equal(thought.configOptions.find((option) => option.id === "thought_level").currentValue, "high");
 
     const compact = await service.call(

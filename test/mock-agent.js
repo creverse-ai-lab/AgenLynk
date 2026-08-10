@@ -36,10 +36,13 @@ function configOptions(sessionId) {
       name: "Thought level",
       category: "thought_level",
       currentValue: values.thought_level,
+      // One level of nested choice groups, as the Gateway's config validation
+      // and the native UI both accept: a group has no "value" of its own and
+      // wraps a flat list of selectable leaves.
       options: [
         { value: "low", name: "Low" },
         { value: "medium", name: "Medium" },
-        { value: "high", name: "High" }
+        { name: "Advanced", options: [{ value: "high", name: "High" }] }
       ]
     },
     {

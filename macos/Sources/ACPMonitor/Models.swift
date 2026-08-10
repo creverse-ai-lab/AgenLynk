@@ -540,6 +540,86 @@ struct GatewayConfigSnapshot: Sendable {
     }
 }
 
+/// A single selectable value inside a Worker-advertised `select` config
+/// option. The Gateway accepts one level of nested choice groups (an
+/// `options` array whose items may themselves carry a nested `options`
+/// array); this is already flattened to leaves, with `groupName` set when a
+/// leaf came from a nested group so the UI can still show that context.
+struct SessionConfigOptionChoice: Identifiable, Equatable, Sendable {
+    let value: String
+    let name: String
+    let groupName: String?
+
+    var id: String { value }
+}
+
+/// A Worker-advertised per-session config option (ACP `session/config`).
+/// Only `select` and `boolean` are understood; any other advertised type is
+/// preserved as `.unknown(type)` so the UI can show it as a disabled,
+/// informational row instead of dropping or crashing on it.
+struct SessionConfigOption: Identifiable, Equatable, Sendable {
+    enum Kind: Equatable, Sendable {
+        case select(choices: [SessionConfigOptionChoice])
+        case boolean
+        case unknown(String)
+    }
+
+    let id: String
+    let name: String
+    let category: String?
+    let kind: Kind
+    let currentValue: JSONValue
+
+    init?(_ value: JSONValue) {
+        guard let object = value.objectValue,
+              let id = object.string("id"),
+              let type = object.string("type") else { return nil }
+        self.id = id
+        name = object.string("name") ?? id
+        category = object.string("category")
+        currentValue = object["currentValue"] ?? .null
+        switch type {
+        case "boolean":
+            kind = .boolean
+        case "select":
+            kind = .select(choices: Self.flattenChoices(object.array("options") ?? []))
+        default:
+            kind = .unknown(type)
+        }
+    }
+
+    private static func flattenChoices(_ raw: [JSONValue]) -> [SessionConfigOptionChoice] {
+        raw.flatMap { item -> [SessionConfigOptionChoice] in
+            guard let object = item.objectValue else { return [] }
+            if let nested = object.array("options") {
+                let groupName = object.string("name")
+                return nested.compactMap { leaf -> SessionConfigOptionChoice? in
+                    guard let leafObject = leaf.objectValue, let value = leafObject.string("value") else { return nil }
+                    return SessionConfigOptionChoice(value: value, name: leafObject.string("name") ?? value, groupName: groupName)
+                }
+            }
+            guard let value = object.string("value") else { return [] }
+            return [SessionConfigOptionChoice(value: value, name: object.string("name") ?? value, groupName: nil)]
+        }
+    }
+}
+
+struct SessionConfigSnapshot: Sendable {
+    let sessionId: String
+    let options: [SessionConfigOption]
+    let unavailableReason: String?
+
+    static func decode(_ data: Data) throws -> SessionConfigSnapshot {
+        let raw = try JSONSerialization.jsonObject(with: data)
+        guard let root = JSONValue(any: raw).objectValue else { throw MonitorDecodeError.invalidMessage }
+        return SessionConfigSnapshot(
+            sessionId: root.string("sessionId") ?? "",
+            options: (root.array("configOptions") ?? []).compactMap(SessionConfigOption.init),
+            unavailableReason: root.string("unavailableReason")
+        )
+    }
+}
+
 enum MonitorDecodeError: LocalizedError {
     case invalidRoot
     case invalidMessage

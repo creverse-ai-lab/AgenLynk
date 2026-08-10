@@ -89,7 +89,16 @@ private struct GatewayConfigurationView: View {
     @State private var originalBooleanValues: [String: Bool] = [:]
     @State private var confirmRestart = false
 
-    private let groups = ["agentUpdates", "lifecycle", "resourceLimits"]
+    private static let knownGroups = ["agentUpdates", "lifecycle", "resourceLimits"]
+
+    /// Known groups render first in a fixed, familiar order; any group the
+    /// Gateway advertises beyond those (future settings) is appended in a
+    /// deterministic (sorted) order instead of being silently dropped.
+    private var groups: [String] {
+        let present = Set(model.gatewayConfigOptions.map(\.group))
+        let unknown = present.subtracting(Self.knownGroups).sorted()
+        return (Self.knownGroups + unknown).filter(present.contains)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -172,7 +181,9 @@ private struct GatewayConfigurationView: View {
                     GatewayRuntimeConfigRow(
                         option: option,
                         numberValue: numberBinding(option),
-                        booleanValue: booleanBinding(option)
+                        booleanValue: booleanBinding(option),
+                        onReset: resettable(option) ? { Task { await resetOption(option.id) } } : nil,
+                        resetDisabled: model.gatewayConfigSaving || model.gatewayRestarting
                     )
                     if index < options.count - 1 { Divider().padding(.leading, 8) }
                 }
@@ -180,6 +191,17 @@ private struct GatewayConfigurationView: View {
         } label: {
             Label(groupTitle(group), systemImage: groupSymbol(group)).font(.headline)
         }
+    }
+
+    /// Only offer per-row reset when the setting is editable (not locked by
+    /// an environment variable) and actually has a stored override to clear —
+    /// resetting a value already at default would be a no-op.
+    private func resettable(_ option: GatewayConfigOption) -> Bool {
+        option.editable && option.storedValue != nil
+    }
+
+    private func resetOption(_ id: String) async {
+        if await model.resetGatewayConfig(ids: [id]) { syncDrafts() }
     }
 
     private var actionBar: some View {
@@ -283,6 +305,8 @@ private struct GatewayRuntimeConfigRow: View {
     let option: GatewayConfigOption
     @Binding var numberValue: Int
     @Binding var booleanValue: Bool
+    let onReset: (() -> Void)?
+    let resetDisabled: Bool
 
     var body: some View {
         HStack(alignment: .center, spacing: 14) {
@@ -302,22 +326,38 @@ private struct GatewayRuntimeConfigRow: View {
                 }
             }
             Spacer(minLength: 16)
-            if option.type == "boolean" {
-                Toggle("", isOn: $booleanValue)
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .disabled(!option.editable)
-            } else {
-                TextField("값", value: $numberValue, format: .number.grouping(.never))
-                    .textFieldStyle(.roundedBorder)
-                    .multilineTextAlignment(.trailing)
-                    .frame(width: 145)
-                    .disabled(!option.editable)
-                Text(option.unit ?? "").font(.caption.monospaced()).foregroundStyle(.secondary).frame(width: 42, alignment: .leading)
+            control
+            if let onReset {
+                Button("기본값으로 초기화", systemImage: "arrow.uturn.backward") { onReset() }
+                    .buttonStyle(.borderless)
+                    .labelStyle(.iconOnly)
+                    .disabled(resetDisabled)
+                    .help("저장된 값을 지우고 기본값으로 되돌립니다")
             }
         }
         .padding(.vertical, 9)
         .opacity(option.editable ? 1 : 0.72)
+    }
+
+    @ViewBuilder
+    private var control: some View {
+        switch option.type {
+        case "boolean":
+            Toggle("", isOn: $booleanValue)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .disabled(!option.editable)
+        case "number":
+            TextField("값", value: $numberValue, format: .number.grouping(.never))
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 145)
+                .disabled(!option.editable)
+            Text(option.unit ?? "").font(.caption.monospaced()).foregroundStyle(.secondary).frame(width: 42, alignment: .leading)
+        default:
+            Text("지원되지 않는 설정 형식 (\(option.type))")
+                .font(.caption).foregroundStyle(.secondary)
+        }
     }
 
     private var sourceBadge: some View {

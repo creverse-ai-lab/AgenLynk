@@ -6,6 +6,10 @@ enum MonitorModelChecks {
         try snapshotDecodesSessionsEventsTasksAndInbox()
         try agentCatalogDecodesInstallAndEnabledState()
         try gatewayConfigDecodesAllControlMetadata()
+        try gatewayConfigRepresentsAllSeventeenSettingIds()
+        try sessionConfigDecodesSelectBooleanAndFlattensNestedChoices()
+        try sessionConfigPreservesUnknownTypeInsteadOfDropping()
+        try sessionConfigDecodesUnavailableSnapshot()
         try petSnapshotMapsGatewayStateAndPendingInbox()
         try petSnapshotSeparatesFrontdoorInstancesAndParsesLegacyTimestamps()
         try realtimeSessionsRequireAnActiveFrontdoorIdentity()
@@ -251,6 +255,104 @@ enum MonitorModelChecks {
         try check(snapshot.options[0].configuredValue.intValue == 400, "gateway number config decode failed")
         try check(snapshot.options[1].configuredValue.boolValue == false, "gateway boolean config decode failed")
         try check(snapshot.options[0].environment == "ACP_GATEWAY_MAX_EVENTS", "gateway environment metadata decode failed")
+    }
+
+    private static func gatewayConfigRepresentsAllSeventeenSettingIds() throws {
+        let lifecycleIds = ["gcIntervalMs", "idleUnloadMs", "orphanGraceMs", "resultRetentionMs", "inboxRetentionMs", "sessionRetentionMs"]
+        let resourceLimitIds = ["maxEvents", "maxTextBytes", "maxInlineResultBytes", "maxArtifactBytes", "maxArtifactTotalBytes", "maxTerminalsPerSession", "maxPendingRequestsPerSession", "maxFrameBytes"]
+        let agentUpdateIds = ["agentAutoUpdate", "agentUpdateNotifications", "agentUpdateIntervalMs"]
+        let allIds = lifecycleIds + resourceLimitIds + agentUpdateIds
+        try check(allIds.count == 17, "fixture must cover exactly the 17 known Gateway setting ids")
+
+        func option(_ id: String, group: String, type: String) -> [String: JSONValue] {
+            [
+                "id": .string(id), "group": .string(group), "type": .string(type),
+                "label": .string(id), "description": .string(""),
+                "defaultValue": type == "boolean" ? .bool(true) : .number(0),
+                "currentValue": type == "boolean" ? .bool(true) : .number(0),
+                "source": .string("default"), "environment": .string("ACP_GATEWAY_\(id.uppercased())"),
+                "editable": .bool(true), "requiresRestart": .bool(true), "pending": .bool(false)
+            ]
+        }
+        let options: [JSONValue] = lifecycleIds.map { .object(option($0, group: "lifecycle", type: "number")) }
+            + resourceLimitIds.map { .object(option($0, group: "resourceLimits", type: "number")) }
+            + agentUpdateIds.map { .object(option($0, group: "agentUpdates", type: $0 == "agentUpdateIntervalMs" ? "number" : "boolean")) }
+        let root = JSONValue.object(["ok": .bool(true), "pendingRestart": .bool(false), "pendingLiveApply": .bool(false), "options": .array(options)])
+        let data = try JSONSerialization.data(withJSONObject: root.foundationValue)
+        let snapshot = try GatewayConfigSnapshot.decode(data)
+        try check(snapshot.options.count == 17, "all 17 Gateway setting ids must decode")
+        try check(Set(snapshot.options.map(\.id)) == Set(allIds), "decoded ids must match every known Gateway setting id")
+    }
+
+    private static func sessionConfigDecodesSelectBooleanAndFlattensNestedChoices() throws {
+        let data = Data(#"""
+        {
+          "ok": true,
+          "sessionId": "s1",
+          "configOptions": [
+            {
+              "type": "select", "id": "model", "name": "Model", "category": "model", "currentValue": "mock-pro",
+              "options": [
+                { "value": "mock-default", "name": "Mock Default" },
+                {
+                  "name": "Preview",
+                  "options": [
+                    { "value": "mock-pro", "name": "Mock Pro" },
+                    { "value": "mock-ultra", "name": "Mock Ultra" }
+                  ]
+                }
+              ]
+            },
+            { "type": "boolean", "id": "auto_compact", "name": "Auto compact", "currentValue": false }
+          ]
+        }
+        """#.utf8)
+        let snapshot = try SessionConfigSnapshot.decode(data)
+        try check(snapshot.sessionId == "s1", "session config sessionId decode failed")
+        try check(snapshot.unavailableReason == nil, "an available snapshot must not carry an unavailable reason")
+        try check(snapshot.options.count == 2, "both select and boolean options should decode")
+
+        guard case let .select(choices)? = snapshot.options.first(where: { $0.id == "model" })?.kind else {
+            throw CheckError.failed("select option should decode as .select")
+        }
+        try check(choices.count == 3, "one level of nested choice groups must flatten to leaf values")
+        try check(choices.map(\.value) == ["mock-default", "mock-pro", "mock-ultra"], "flattened choices must preserve backend order")
+        try check(choices.first { $0.value == "mock-pro" }?.groupName == "Preview", "a flattened leaf should keep its nested group name")
+        try check(choices.first { $0.value == "mock-default" }?.groupName == nil, "a top-level leaf should have no group name")
+
+        guard case .boolean? = snapshot.options.first(where: { $0.id == "auto_compact" })?.kind else {
+            throw CheckError.failed("boolean option should decode as .boolean")
+        }
+        try check(snapshot.options.first(where: { $0.id == "auto_compact" })?.currentValue.boolValue == false, "boolean currentValue decode failed")
+    }
+
+    private static func sessionConfigPreservesUnknownTypeInsteadOfDropping() throws {
+        let data = Data(#"""
+        {
+          "ok": true, "sessionId": "s1",
+          "configOptions": [
+            { "type": "multi_select", "id": "tags", "name": "Tags", "currentValue": null }
+          ]
+        }
+        """#.utf8)
+        let snapshot = try SessionConfigSnapshot.decode(data)
+        try check(snapshot.options.count == 1, "an option with an unrecognized type must still decode, not be dropped")
+        guard case let .unknown(type)? = snapshot.options.first?.kind else {
+            throw CheckError.failed("unrecognized config option type should decode as .unknown")
+        }
+        try check(type == "multi_select", "the unknown option should retain its raw type name for a disabled row label")
+    }
+
+    private static func sessionConfigDecodesUnavailableSnapshot() throws {
+        let data = Data(#"""
+        {
+          "ok": true, "sessionId": "s1", "configOptions": [],
+          "unavailableReason": "Worker 연결이 끊긴 세션입니다. 세션을 resume한 뒤 설정을 다시 불러오세요."
+        }
+        """#.utf8)
+        let snapshot = try SessionConfigSnapshot.decode(data)
+        try check(snapshot.options.isEmpty, "a disconnected session should report no config options")
+        try check(snapshot.unavailableReason != nil, "a disconnected session should surface an unavailable reason")
     }
 
     private static func graphProjectionGroupsFrontdoorsAndAssignsWorkerLanes() throws {

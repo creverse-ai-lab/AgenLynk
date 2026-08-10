@@ -49,6 +49,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var gatewayConfigSaving = false
     @Published private(set) var gatewayRestarting = false
     @Published private(set) var gatewayConfigError: String?
+    @Published private(set) var sessionConfigSessionId: String?
+    @Published private(set) var sessionConfigOptions: [SessionConfigOption] = []
+    @Published private(set) var sessionConfigLoading = false
+    @Published private(set) var sessionConfigSaving = false
+    @Published private(set) var sessionConfigError: String?
+    @Published private(set) var sessionConfigUnavailableReason: String?
     @Published private(set) var petRunning = false
     @Published private(set) var petError: String?
 
@@ -435,6 +441,63 @@ final class AppModel: ObservableObject {
             gatewayConfigError = error.localizedDescription
             gatewayRestarting = false
             updateConnectionPhase()
+            return false
+        }
+    }
+
+    /// Loads the Worker-advertised config options for one session (ACP
+    /// `session/config` via `/api/session-config`). There is no reset/default
+    /// action in ACP for these — only whatever the Worker currently reports.
+    func loadSessionConfig(sessionId: String) async {
+        sessionConfigSessionId = sessionId
+        sessionConfigOptions = []
+        sessionConfigLoading = true
+        sessionConfigSaving = false
+        sessionConfigError = nil
+        sessionConfigUnavailableReason = nil
+        if endpoint == nil { await ensureStarted() }
+        guard !Task.isCancelled, sessionConfigSessionId == sessionId else { return }
+        guard let endpoint else {
+            sessionConfigError = "Gateway monitor가 아직 연결되지 않았습니다."
+            sessionConfigLoading = false
+            return
+        }
+        do {
+            let snapshot = try await client.fetchSessionConfig(endpoint: endpoint, sessionId: sessionId)
+            guard !Task.isCancelled, sessionConfigSessionId == sessionId else { return }
+            sessionConfigOptions = snapshot.options
+            sessionConfigUnavailableReason = snapshot.unavailableReason
+        } catch is CancellationError {
+            return
+        } catch {
+            guard sessionConfigSessionId == sessionId else { return }
+            sessionConfigError = error.localizedDescription
+        }
+        if sessionConfigSessionId == sessionId { sessionConfigLoading = false }
+    }
+
+    @discardableResult
+    func setSessionConfig(sessionId: String, configId: String, value: JSONValue) async -> Bool {
+        guard sessionConfigSessionId == sessionId, !sessionConfigLoading, !sessionConfigSaving else { return false }
+        guard let endpoint else {
+            sessionConfigError = "Gateway monitor가 아직 연결되지 않았습니다."
+            return false
+        }
+        sessionConfigSaving = true
+        sessionConfigError = nil
+        do {
+            let snapshot = try await client.setSessionConfig(endpoint: endpoint, sessionId: sessionId, configId: configId, value: value)
+            guard !Task.isCancelled, sessionConfigSessionId == sessionId else { return false }
+            sessionConfigOptions = snapshot.options
+            sessionConfigUnavailableReason = snapshot.unavailableReason
+            sessionConfigSaving = false
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            guard sessionConfigSessionId == sessionId else { return false }
+            sessionConfigError = error.localizedDescription
+            sessionConfigSaving = false
             return false
         }
     }
