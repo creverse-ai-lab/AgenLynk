@@ -271,6 +271,9 @@ export async function inspectRuntime(options) {
         summary.gatewayVersion = manifest.gatewayVersion;
         summary.gatewayBuildId = manifest.gatewayBuildId;
         summary.gatewayApiVersion = manifest.gatewayApiVersion;
+        // Surfaced so the app can show which Node each installed runtime
+        // carries without opening the manifest a second time.
+        summary.nodeVersion = manifest.nodeVersion;
         summary.apiCompatible = manifest.gatewayApiVersion === GATEWAY_API_VERSION;
         if (deep) {
           try {

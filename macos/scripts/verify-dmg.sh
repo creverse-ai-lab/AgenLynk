@@ -71,6 +71,23 @@ done
 codesign --verify --deep --strict "$PET_APP"
 printf '%s\n' "Bundled default Pet self-test and code signature passed"
 
+# A binary that still points at the build machine's scratch directory resolves
+# something through a path no user has. SwiftPM's generated Bundle.module does
+# exactly this, which once made the Pet trap on every Mac but the one that
+# built it; the Pet's self-test proves its own resources load, and this proves
+# nothing else acquired the same dependency.
+# Plain `strings` (not `strings -`) deliberately: the debug map lists every
+# .o file by absolute path, and those are symbol references, not something the
+# program resolves at run time.
+for BINARY in "$APP/Contents/MacOS/ACPMonitor" "$PET_EXECUTABLE"; do
+  if strings "$BINARY" | grep -qE '/\.build/|/swift-build/'; then
+    echo "error: $(basename "$BINARY") references a build-machine path:" >&2
+    strings "$BINARY" | grep -E '/\.build/|/swift-build/' | sort -u | head -5 >&2
+    exit 1
+  fi
+done
+printf '%s\n' "No shipped binary resolves through a build-machine path"
+
 RUNTIME_DIR="$APP/Contents/Resources/runtime"
 if [ ! -f "$RUNTIME_DIR/src/index.js" ] || [ ! -f "$RUNTIME_DIR/package.json" ]; then
   echo "error: $RUNTIME_DIR does not look like a bundled runtime seed" >&2

@@ -57,6 +57,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var sessionConfigUnavailableReason: String?
     @Published private(set) var petRunning = false
     @Published private(set) var petError: String?
+    @Published private(set) var runtimeInspection: RuntimeInspection?
+    @Published private(set) var runtimeLoading = false
+    @Published private(set) var runtimeBusy = false
+    @Published private(set) var runtimeError: String?
+    @Published private(set) var runtimeNotice: String?
 
     let settings = AppSettings()
     private let sidecar = SidecarController()
@@ -64,6 +69,7 @@ final class AppModel: ObservableObject {
     private let pet = PetController()
     private let installer = InstallerController()
     private let runtimeProvisioner = RuntimeProvisioner()
+    private let runtimeUpdater = RuntimeUpdaterController()
     private var startupCheckStarted = false
     private var startTask: Task<Void, Never>?
     private var reconciliationTask: Task<Void, Never>?
@@ -77,6 +83,9 @@ final class AppModel: ObservableObject {
     var gatewayVersion: String {
         gateway?.objectValue?.string("gatewayVersion") ?? "—"
     }
+
+    /// The Monitor API version the sidecar reported at handshake.
+    var monitorApiVersionText: String { sidecar.meta?.monitorApiVersion ?? "—" }
 
     var gatewayBuild: String {
         gateway?.objectValue?.string("gatewayBuildId") ?? "—"
@@ -401,7 +410,93 @@ final class AppModel: ObservableObject {
         gatewayConfigLoading = false
     }
 
-    @discardableResult
+    /// Mirrors `MonitorState.restartBlockers()`. Activation and rollback are
+    /// held back for exactly the same reasons a safe restart is.
+    var runtimeActivationBlockers: [String] {
+        let activeSessions = sessions.filter { !$0.isLocalSource && $0.isActive }.count
+        let activeTasks = tasks.filter { ["working", "input_required"].contains($0.status ?? "") }.count
+        let pending = inbox.filter { $0.status == "pending" }.count
+        return [
+            activeSessions > 0 ? "진행 중 세션 \(activeSessions)개" : nil,
+            activeTasks > 0 ? "진행 중 Task \(activeTasks)개" : nil,
+            pending > 0 ? "미응답 Inbox \(pending)개" : nil
+        ].compactMap { $0 }
+    }
+
+    func loadRuntimeInspection() async {
+        guard runtimeUpdater.isAvailable else { return }
+        runtimeLoading = true
+        defer { runtimeLoading = false }
+        do {
+            let value = try await runtimeUpdater.run("inspect")
+            runtimeInspection = RuntimeInspection(value)
+            runtimeError = nil
+        } catch {
+            runtimeError = error.localizedDescription
+        }
+    }
+
+    /// Installs the runtime this app shipped and makes it live. Staging is
+    /// idempotent, so this is safe to press when already up to date.
+    func updateRuntimeFromAppSeed() async {
+        guard let seedRoot = BundledRuntime.seedRuntimeRoot()?.path else {
+            runtimeError = "이 빌드에는 설치할 Gateway runtime seed가 없습니다."
+            return
+        }
+        runtimeBusy = true
+        defer { runtimeBusy = false }
+        runtimeError = nil
+        runtimeNotice = nil
+        do {
+            let staged = RuntimeOperationResult(try await runtimeUpdater.run("stage", arguments: ["--seed", seedRoot]))
+            guard staged.ok, let versionId = staged.versionId else {
+                runtimeError = staged.errorMessage ?? "runtime staging에 실패했습니다."
+                return
+            }
+            if runtimeInspection?.currentVersionId == versionId {
+                runtimeNotice = "이미 최신 runtime(\(versionId))을 사용 중입니다."
+                await loadRuntimeInspection()
+                return
+            }
+            let activated = RuntimeOperationResult(try await runtimeUpdater.run(
+                "activate", arguments: ["--version", versionId], blockers: runtimeActivationBlockers
+            ))
+            await finishRuntimeChange(activated, successNotice: "\(versionId)로 전환했습니다. Gateway를 다시 시작하면 적용됩니다.")
+        } catch {
+            runtimeError = error.localizedDescription
+        }
+    }
+
+    func rollbackRuntime() async {
+        runtimeBusy = true
+        defer { runtimeBusy = false }
+        runtimeError = nil
+        runtimeNotice = nil
+        do {
+            let result = RuntimeOperationResult(try await runtimeUpdater.run(
+                "rollback", blockers: runtimeActivationBlockers
+            ))
+            await finishRuntimeChange(result, successNotice: "이전 runtime으로 되돌렸습니다. Gateway를 다시 시작하면 적용됩니다.")
+        } catch {
+            runtimeError = error.localizedDescription
+        }
+    }
+
+    private func finishRuntimeChange(_ result: RuntimeOperationResult, successNotice: String) async {
+        if result.ok {
+            runtimeNotice = successNotice
+        } else if result.errorCode == "ACTIVATION_BLOCKED" || result.errorCode == "ROLLBACK_BLOCKED" {
+            // Deferred, not failed: the same blocker rule a safe restart uses.
+            let detail = runtimeActivationBlockers.joined(separator: ", ")
+            runtimeError = "진행 중인 작업이 있어 적용을 보류했습니다\(detail.isEmpty ? "" : " (\(detail))"). 끝난 뒤 다시 시도하세요."
+        } else if result.errorCode == "NO_PREVIOUS_TARGET" {
+            runtimeError = "되돌릴 이전 runtime이 없습니다."
+        } else {
+            runtimeError = result.errorMessage ?? "runtime 적용에 실패했습니다."
+        }
+        await loadRuntimeInspection()
+    }
+
     /// What the Gateway would delete if these retention values were applied.
     /// Returns nil when the Gateway cannot be asked, in which case the caller
     /// must not claim that nothing would be lost.
@@ -419,6 +514,7 @@ final class AppModel: ObservableObject {
         }
     }
 
+    @discardableResult
     func saveGatewayConfig(values: [String: JSONValue]) async -> Bool {
         guard let endpoint else {
             gatewayConfigError = "Gateway monitor가 아직 연결되지 않았습니다."

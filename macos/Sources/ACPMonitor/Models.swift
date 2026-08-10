@@ -840,6 +840,96 @@ struct ACPAgentCatalogSnapshot: Sendable {
     }
 }
 
+/// One installed Gateway runtime, as `runtime-updater.js` reports it.
+struct RuntimeVersionSummary: Identifiable, Equatable, Sendable {
+    let versionId: String
+    let runtimeRoot: String
+    let isCurrent: Bool
+    let isPrevious: Bool
+    let gatewayVersion: String?
+    let gatewayBuildId: String?
+    let gatewayApiVersion: Int?
+    let apiCompatible: Bool?
+    let nodeVersion: String?
+    /// Present when the version's manifest could not be read at all.
+    let manifestError: String?
+
+    var id: String { versionId }
+
+    init?(_ value: JSONValue) {
+        guard let object = value.objectValue, let versionId = object.string("versionId") else { return nil }
+        self.versionId = versionId
+        runtimeRoot = object.string("runtimeRoot") ?? ""
+        isCurrent = object.bool("isCurrent") ?? false
+        isPrevious = object.bool("isPrevious") ?? false
+        gatewayVersion = object.string("gatewayVersion")
+        gatewayBuildId = object.string("gatewayBuildId")
+        gatewayApiVersion = object.int("gatewayApiVersion")
+        apiCompatible = object.bool("apiCompatible")
+        nodeVersion = object.string("nodeVersion")
+        manifestError = object.string("manifestError")
+    }
+}
+
+/// The updater's `inspect` result: what is installed and which one is live.
+struct RuntimeInspection: Equatable, Sendable {
+    let runtimeRoot: String
+    let currentVersionId: String?
+    let currentGatewayVersion: String?
+    let currentGatewayBuildId: String?
+    let previousVersionId: String?
+    let versions: [RuntimeVersionSummary]
+
+    var current: RuntimeVersionSummary? { versions.first(where: \.isCurrent) }
+    var previous: RuntimeVersionSummary? { versions.first(where: \.isPrevious) }
+    var canRollback: Bool { previous != nil }
+
+    init?(_ value: JSONValue) {
+        guard let root = value.objectValue else { return nil }
+        let current = root.object("current")
+        runtimeRoot = root.string("runtimeRoot") ?? ""
+        currentVersionId = current?.string("runtimeRoot").map { ($0 as NSString).lastPathComponent }
+        currentGatewayVersion = current?.string("gatewayVersion")
+        currentGatewayBuildId = current?.string("gatewayBuildId")
+        previousVersionId = root.object("previous")?.string("runtimeRoot").map { ($0 as NSString).lastPathComponent }
+        versions = (root.array("versions") ?? []).compactMap(RuntimeVersionSummary.init)
+    }
+
+    static func decode(_ data: Data) throws -> RuntimeInspection {
+        let raw = try JSONSerialization.jsonObject(with: data)
+        guard let inspection = RuntimeInspection(JSONValue(any: raw)) else {
+            throw MonitorDecodeError.invalidMessage
+        }
+        return inspection
+    }
+}
+
+/// A single updater operation's outcome. The library reports expected failures
+/// inside the envelope, so an unsuccessful result is still a decoded value.
+struct RuntimeOperationResult: Equatable, Sendable {
+    let ok: Bool
+    let op: String
+    let versionId: String?
+    let errorCode: String?
+    let errorMessage: String?
+
+    init(_ value: JSONValue) {
+        let root = value.objectValue ?? [:]
+        let error = root.object("error")
+        ok = root.bool("ok") ?? false
+        op = root.string("op") ?? ""
+        versionId = root.string("versionId") ?? root.object("activated")?.string("versionId")
+        errorCode = error?.string("code")
+        errorMessage = error?.string("message")
+    }
+
+    static func decode(_ data: Data) throws -> RuntimeOperationResult {
+        let raw = try JSONSerialization.jsonObject(with: data)
+        guard JSONValue(any: raw).objectValue != nil else { throw MonitorDecodeError.invalidMessage }
+        return RuntimeOperationResult(JSONValue(any: raw))
+    }
+}
+
 /// How many sessions/tasks/inbox records/artifacts a retention change would
 /// delete. Counted by the Gateway without deleting anything, so the app can
 /// ask before a destructive save.

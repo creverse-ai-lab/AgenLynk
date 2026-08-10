@@ -66,7 +66,10 @@ enum BundledRuntime {
         }
 
         // Source-tree development fallback only: no bundled runtime shipped,
-        // so an explicit override or a PATH Node is the only option.
+        // so an explicit override or a PATH Node is the only option. A shipped
+        // .app must not silently borrow a Homebrew Node the user may not have.
+        guard !isApplicationBundle() else { throw BundledRuntimeError.runtimeNotInstalled }
+
         let environmentOverride = ProcessInfo.processInfo.environment["ACP_GATEWAY_NODE"] ?? ""
         if let explicit = [override, environmentOverride].first(where: { !$0.isEmpty }),
            FileManager.default.isExecutableFile(atPath: explicit) {
@@ -162,6 +165,13 @@ enum BundledRuntime {
             return resolved
         }
 
+        // The source-tree fallback below is compiled with this machine's own
+        // #filePath. Inside a distributed .app that path belongs to whoever
+        // built it and cannot exist on the user's Mac, so a shipped app must
+        // never take it — it would report a stranger's directory instead of
+        // the real problem, which is that no runtime is installed.
+        guard !isApplicationBundle() else { throw BundledRuntimeError.runtimeNotInstalled }
+
         var source = URL(fileURLWithPath: #filePath)
         for _ in 0..<4 { source.deleteLastPathComponent() }
         let development = source.appendingPathComponent(relativePath)
@@ -169,6 +179,12 @@ enum BundledRuntime {
             throw BundledRuntimeError.resourceNotFound(development.path)
         }
         return development
+    }
+
+    /// True when this process runs from a `.app`, i.e. anything a user
+    /// installed rather than a `swift run` from a checkout.
+    static func isApplicationBundle() -> Bool {
+        Bundle.main.bundleURL.pathExtension == "app"
     }
 
     static func validateVersion(at nodeURL: URL) throws {

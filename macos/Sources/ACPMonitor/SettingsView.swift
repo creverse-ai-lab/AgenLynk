@@ -39,6 +39,9 @@ struct SettingsView: View {
             petConfiguration
                 .tabItem { Label("Pet", systemImage: "pawprint") }
 
+            RuntimeUpdateView()
+                .tabItem { Label("버전·업데이트", systemImage: "arrow.down.circle") }
+
         }
         .frame(width: 780, height: 640)
         .task { await model.ensureStarted() }

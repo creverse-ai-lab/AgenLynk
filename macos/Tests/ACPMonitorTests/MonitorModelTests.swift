@@ -14,6 +14,7 @@ enum MonitorModelChecks {
         try gatewayConfigDecodesAllControlMetadata()
         try gatewayConfigRepresentsAllKnownSettingIds()
         try retentionPreviewDecodesCountsAndSummarisesOnlyNonZeroOnes()
+        try runtimeInspectionAndOperationEnvelopesDecode()
         try sessionConfigDecodesSelectBooleanAndFlattensNestedChoices()
         try sessionConfigPreservesUnknownTypeInsteadOfDropping()
         try sessionConfigDecodesUnavailableSnapshot()
@@ -602,6 +603,35 @@ enum MonitorModelChecks {
         // Missing fields decode as zero rather than throwing, but a malformed
         // body must not silently become an empty preview.
         try check(RetentionPreview(.string("nope")) == nil, "a non-object body must not decode")
+    }
+
+    /// The updater screen must read the library's own envelopes, including the
+    /// failure shape, so the app and the CLI can never disagree.
+    private static func runtimeInspectionAndOperationEnvelopesDecode() throws {
+        let inspectJSON = #"""
+        {"ok":true,"op":"inspect","runtimeRoot":"/Users/x/.acp-gateway/runtime",
+         "current":{"runtimeRoot":"/Users/x/.acp-gateway/runtime/versions/1.3.1-aaa","gatewayVersion":"1.3.1","gatewayBuildId":"aaa"},
+         "previous":{"runtimeRoot":"/Users/x/.acp-gateway/runtime/versions/1.3.1-bbb","gatewayVersion":"1.3.1","gatewayBuildId":"bbb"},
+         "versions":[
+           {"versionId":"1.3.1-aaa","runtimeRoot":"/Users/x/.acp-gateway/runtime/versions/1.3.1-aaa","isCurrent":true,"isPrevious":false,"gatewayVersion":"1.3.1","gatewayBuildId":"aaa","gatewayApiVersion":1,"apiCompatible":true,"nodeVersion":"22.23.2"},
+           {"versionId":"1.3.1-bbb","runtimeRoot":"/Users/x/.acp-gateway/runtime/versions/1.3.1-bbb","isCurrent":false,"isPrevious":true,"gatewayVersion":"1.3.1","gatewayBuildId":"bbb","gatewayApiVersion":2,"apiCompatible":false,"nodeVersion":"22.14.0"},
+           {"versionId":"broken","runtimeRoot":"/Users/x/.acp-gateway/runtime/versions/broken","isCurrent":false,"isPrevious":false,"manifestError":"missing manifest"}
+         ]}
+        """#
+        let inspection = try RuntimeInspection.decode(Data(inspectJSON.utf8))
+        try check(inspection.currentVersionId == "1.3.1-aaa", "the current pointer resolves to a version id")
+        try check(inspection.current?.nodeVersion == "22.23.2", "the current runtime reports its Node version")
+        try check(inspection.canRollback, "a recorded previous target enables rollback")
+        try check(inspection.versions.count == 3, "every installed version decodes, including a broken one")
+        try check(inspection.versions[1].apiCompatible == false, "an incompatible API version is flagged")
+        try check(inspection.versions[2].manifestError == "missing manifest", "an unreadable manifest is reported, not dropped")
+
+        let activated = try RuntimeOperationResult.decode(Data(#"{"ok":true,"op":"activate","activated":{"versionId":"1.3.1-aaa"}}"#.utf8))
+        try check(activated.ok && activated.versionId == "1.3.1-aaa", "activation reports the version it switched to")
+
+        // An expected updater refusal is a decoded result, not a thrown error.
+        let blocked = try RuntimeOperationResult.decode(Data(#"{"ok":false,"op":"activate","error":{"code":"ACTIVATION_BLOCKED","message":"activation deferred: active work is in progress","blockers":["진행 중 세션 1개"]}}"#.utf8))
+        try check(!blocked.ok && blocked.errorCode == "ACTIVATION_BLOCKED", "a blocked activation keeps the library's stable code")
     }
 
     private static func sessionConfigDecodesSelectBooleanAndFlattensNestedChoices() throws {

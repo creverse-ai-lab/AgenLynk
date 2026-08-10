@@ -679,9 +679,33 @@ private func stateColor(_ state: String) -> Color {
     }
 }
 
+/// Artwork bundle, resolved for the layout this binary actually ships in.
+///
+/// SwiftPM's generated `Bundle.module` looks beside `Bundle.main.bundleURL`
+/// and then at an absolute path from the machine that built it — inside
+/// `LynkPet.app` the first misses (resources live in `Contents/Resources`) and
+/// the second only exists on a developer's own Mac, so `Bundle.module` traps
+/// on any other machine. Resolve it here instead, and return nil rather than
+/// trapping: missing artwork must degrade to a plain node, never kill the Pet.
+let petResourceBundle: Bundle? = {
+    let bundleName = "ACPMonitor_LynkPet.bundle"
+    let candidates = [
+        Bundle.main.resourceURL?.appendingPathComponent(bundleName),
+        // `swift run` and the test harness leave it beside the executable.
+        Bundle.main.bundleURL.appendingPathComponent(bundleName),
+        Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent(bundleName)
+    ]
+    for case let url? in candidates {
+        if let bundle = Bundle(url: url) { return bundle }
+    }
+    return nil
+}()
+
+let providerLogoNames = ["codex": "chatgpt", "chatgpt": "chatgpt", "claude": "claude", "grok": "grok"]
+
 private let providerLogos: [String: NSImage] = {
-    ["codex": "chatgpt", "chatgpt": "chatgpt", "claude": "claude", "grok": "grok"].compactMapValues { name in
-        guard let url = Bundle.module.url(forResource: name, withExtension: "jpg") else { return nil }
+    providerLogoNames.compactMapValues { name in
+        guard let url = petResourceBundle?.url(forResource: name, withExtension: "jpg") else { return nil }
         return NSImage(contentsOf: url)
     }
 }()
@@ -882,19 +906,46 @@ private struct TreeFlowScene: View {
 
 // MARK: - Self test
 
+/// Fails the self-test in release builds too. `assert` is compiled out under
+/// `-O`, which is exactly how this binary ships, so anything the release gate
+/// must actually catch has to be checked with this instead.
+private func require(
+    _ condition: Bool,
+    _ message: @autoclosure () -> String = "check failed",
+    line: UInt = #line
+) {
+    guard condition else {
+        fputs("LynkPet self-test failed at line \(line): \(message())\n", stderr)
+        exit(1)
+    }
+}
+
+/// Proves the shipped app can find its own artwork. This is the check that was
+/// missing when `Bundle.module` silently resolved through the build machine's
+/// absolute path and the Pet then trapped on every other Mac.
+private func verifyBundledResources() {
+    require(petResourceBundle != nil, "resource bundle not found next to \(Bundle.main.bundleURL.path)")
+    for name in Set(providerLogoNames.values).sorted() {
+        let url = petResourceBundle?.url(forResource: name, withExtension: "jpg")
+        require(url != nil, "missing artwork \(name).jpg in \(petResourceBundle?.bundlePath ?? "-")")
+        require(NSImage(contentsOf: url!) != nil, "unreadable artwork \(name).jpg")
+    }
+}
+
 private func selfTest() {
+    verifyBundledResources()
     let now = Date().timeIntervalSince1970
     let stateJSON = #"{"contract":"pet-state","version":"1.0.0","sequence":7,"agents":[{"id":"frontdoor-1","parentId":null,"role":"frontdoor","provider":"codex","engine":"codex","state":"waiting","task":"Approve","updatedAt":"2026-08-10T12:34:55.000Z","source":"gateway"},{"id":"worker-1","parentId":"frontdoor-1","role":"worker","provider":"claude","engine":"sonnet","state":"running","task":"Implement","updatedAt":"2026-08-10T12:34:55.000Z","source":"gateway"}]}"#
     let actionsJSON = #"{"contract":"pet-actions","version":"1.0.0","sequence":7,"actions":[{"id":"frontdoor-1","parentId":null,"action":"waitForUser"},{"id":"worker-1","parentId":"frontdoor-1","action":"useTool"}]}"#
     let contractState = try! JSONDecoder().decode(PetStateEnvelope.self, from: Data(stateJSON.utf8))
     let contractActions = try! JSONDecoder().decode(PetActionsEnvelope.self, from: Data(actionsJSON.utf8))
-    assert(contractState.isSupported && contractActions.isSupported && contractState.sequence == contractActions.sequence)
+    require(contractState.isSupported && contractActions.isSupported && contractState.sequence == contractActions.sequence)
     let actionByID = Dictionary(uniqueKeysWithValues: contractActions.actions.map { ($0.id, $0.action) })
     let contractSessions = contractState.agents.map { AgentSession(contractAgent: $0, action: actionByID[$0.id]) }
-    assert(contractSessions.first { $0.id == "frontdoor-1" }?.state == "needs_input")
-    assert(contractSessions.first { $0.id == "frontdoor-1" }?.delegated == false)
-    assert(contractSessions.first { $0.id == "worker-1" }?.state == "running")
-    assert(contractSessions.first { $0.id == "worker-1" }?.delegated == true)
+    require(contractSessions.first { $0.id == "frontdoor-1" }?.state == "needs_input")
+    require(contractSessions.first { $0.id == "frontdoor-1" }?.delegated == false)
+    require(contractSessions.first { $0.id == "worker-1" }?.state == "running")
+    require(contractSessions.first { $0.id == "worker-1" }?.delegated == true)
 
     let root1 = AgentSession(provider: "codex", session: "a-root", state: "running", time: now)
     let frontdoor = AgentSession(provider: "codex", session: "frontdoor", state: "running", role: "frontdoor", time: now)
@@ -906,57 +957,57 @@ private func selfTest() {
     let doneOld = AgentSession(provider: "grok", session: "f-done", state: "ready", time: now - 10)
     let doneNew = AgentSession(provider: "grok", session: "g-done", state: "ready", time: now)
 
-    assert(!isWarm(root1, now: now))
-    assert(isFrontdoor(frontdoor))
-    assert(!isFrontdoor(root1))
+    require(!isWarm(root1, now: now))
+    require(isFrontdoor(frontdoor))
+    require(!isFrontdoor(root1))
     let frontdoorTree = layoutTargets([frontdoor, frontdoorChild], now: now)
-    assert(frontdoorTree.first { $0.agent.id == "frontdoor-child" }?.depth == 1)
+    require(frontdoorTree.first { $0.agent.id == "frontdoor-child" }?.depth == 1)
     let warmFrontdoor = AgentSession(provider: "codex", session: "warm-frontdoor", state: "idle", role: "frontdoor", time: now)
     let warmFrontdoorChild = AgentSession(provider: "claude", session: "warm-frontdoor-child", state: "idle", parent: "warm-frontdoor", time: now)
     let warmFrontdoorTree = layoutTargets([warmFrontdoor, warmFrontdoorChild], now: now)
-    assert(warmFrontdoorTree.first { $0.agent.id == "warm-frontdoor" }?.parentID == nil)
-    assert(warmFrontdoorTree.first { $0.agent.id == "warm-frontdoor-child" }?.parentID == "warm-frontdoor")
-    assert(isWarm(idle, now: now))
-    assert(isWarm(doneOld, now: now))
-    assert(!isWarm(doneNew, now: now))
+    require(warmFrontdoorTree.first { $0.agent.id == "warm-frontdoor" }?.parentID == nil)
+    require(warmFrontdoorTree.first { $0.agent.id == "warm-frontdoor-child" }?.parentID == "warm-frontdoor")
+    require(isWarm(idle, now: now))
+    require(isWarm(doneOld, now: now))
+    require(!isWarm(doneNew, now: now))
 
     let targets = layoutTargets([root1, root2, child, grand, idle, doneOld], now: now)
     let byID = Dictionary(uniqueKeysWithValues: targets.map { ($0.agent.id, $0) })
-    assert(abs(byID["a-root"]!.angle) <= .pi + 0.001)
-    assert(abs(byID["b-root"]!.angle) <= .pi + 0.001)
-    assert(byID["a-root"]!.angle != byID["b-root"]!.angle)
-    assert(byID["c-child"]!.depth == 1 && byID["d-grand"]!.depth == 2)
-    assert(byID["d-grand"]!.distance > byID["c-child"]!.distance)
-    assert(byID["c-child"]!.distance > byID["a-root"]!.distance)
-    assert(byID["c-child"]!.parentID == "a-root")
-    assert(abs(byID["c-child"]!.angle - byID["a-root"]!.angle) <= coneHalfAngle + 0.001)
-    assert(abs(byID["d-grand"]!.angle - byID["c-child"]!.angle) <= coneHalfAngle + 0.001)
-    assert(byID["e-idle"]!.warm && abs(byID["e-idle"]!.angle - .pi) < 1)
-    assert(byID["f-done"]!.warm && byID["f-done"]!.distance == parkDistance)
+    require(abs(byID["a-root"]!.angle) <= .pi + 0.001)
+    require(abs(byID["b-root"]!.angle) <= .pi + 0.001)
+    require(byID["a-root"]!.angle != byID["b-root"]!.angle)
+    require(byID["c-child"]!.depth == 1 && byID["d-grand"]!.depth == 2)
+    require(byID["d-grand"]!.distance > byID["c-child"]!.distance)
+    require(byID["c-child"]!.distance > byID["a-root"]!.distance)
+    require(byID["c-child"]!.parentID == "a-root")
+    require(abs(byID["c-child"]!.angle - byID["a-root"]!.angle) <= coneHalfAngle + 0.001)
+    require(abs(byID["d-grand"]!.angle - byID["c-child"]!.angle) <= coneHalfAngle + 0.001)
+    require(byID["e-idle"]!.warm && abs(byID["e-idle"]!.angle - .pi) < 1)
+    require(byID["f-done"]!.warm && byID["f-done"]!.distance == parkDistance)
 
     // Narrow span (near a screen edge) keeps roots inside the arc.
     let narrow = layoutTargets([root1, root2, child, grand], now: now, span: 1.0)
-    assert(narrow.filter { $0.depth == 0 }.allSatisfy { abs($0.angle) <= 0.5 + 0.001 })
+    require(narrow.filter { $0.depth == 0 }.allSatisfy { abs($0.angle) <= 0.5 + 0.001 })
 
     // A crowded first ring pushes outward instead of overlapping.
     let many = (0..<12).map { AgentSession(provider: "codex", session: "m-\($0)", state: "running", time: now) }
     let ring = layoutTargets(many, now: now)
-    assert(ring.first!.distance > firstRingDistance)
-    assert(Set(ring.map(\.angle)).count == ring.count)
+    require(ring.first!.distance > firstRingDistance)
+    require(Set(ring.map(\.angle)).count == ring.count)
 
     // Self-parented and cyclic sessions must still be placed, never dropped or hung.
     let selfParent = AgentSession(provider: "codex", session: "s-self", state: "running", parent: "s-self", time: now)
     let selfTargets = layoutTargets([selfParent], now: now)
-    assert(selfTargets.count == 1 && selfTargets[0].depth == 0 && selfTargets[0].parentID == nil)
+    require(selfTargets.count == 1 && selfTargets[0].depth == 0 && selfTargets[0].parentID == nil)
     let cycleA = AgentSession(provider: "codex", session: "p-a", state: "running", parent: "q-b", time: now)
     let cycleB = AgentSession(provider: "claude", session: "q-b", state: "running", parent: "p-a", time: now)
     let cycleTargets = layoutTargets([cycleA, cycleB], now: now)
-    assert(cycleTargets.count == 2)
+    require(cycleTargets.count == 2)
 
     let orphan = AgentSession(provider: "claude", session: "h-orphan", state: "running", parent: "e-idle", time: now)
     let orphanTargets = layoutTargets([idle, orphan], now: now)
     let placedOrphan = orphanTargets.first { $0.agent.id == "h-orphan" }!
-    assert(placedOrphan.depth == 0 && placedOrphan.parentID == nil && !placedOrphan.warm)
+    require(placedOrphan.depth == 0 && placedOrphan.parentID == nil && !placedOrphan.warm)
 
     // A warm session with a displayed parent stays attached to the tree instead of parking.
     let warmChild = AgentSession(provider: "claude", session: "i-warm", state: "idle", parent: "a-root", time: now)
@@ -964,32 +1015,32 @@ private func selfTest() {
     let connected = layoutTargets([root1, warmChild, warmGrand], now: now)
     let placedWarm = connected.first { $0.agent.id == "i-warm" }!
     let placedGrandWarm = connected.first { $0.agent.id == "j-warm" }!
-    assert(placedWarm.warm && placedWarm.parentID == "a-root" && placedWarm.depth == 1)
-    assert(abs(placedWarm.angle) <= coneHalfAngle + 0.001)
-    assert(placedGrandWarm.warm && placedGrandWarm.parentID == "i-warm" && placedGrandWarm.depth == 2)
+    require(placedWarm.warm && placedWarm.parentID == "a-root" && placedWarm.depth == 1)
+    require(abs(placedWarm.angle) <= coneHalfAngle + 0.001)
+    require(placedGrandWarm.warm && placedGrandWarm.parentID == "i-warm" && placedGrandWarm.depth == 2)
 
-    assert(edgeMode(for: child, now: now) == .flowingToChild)
-    assert(edgeMode(for: AgentSession(provider: "claude", session: "x", state: "running", time: now - 5), now: now) == .still)
-    assert(edgeMode(for: AgentSession(provider: "grok", session: "y", state: "needs_input", time: now), now: now) == .paused)
-    assert(edgeMode(for: doneNew, now: now) == .flowingToParent)
-    assert(edgeMode(for: doneOld, now: now) == .hidden)
+    require(edgeMode(for: child, now: now) == .flowingToChild)
+    require(edgeMode(for: AgentSession(provider: "claude", session: "x", state: "running", time: now - 5), now: now) == .still)
+    require(edgeMode(for: AgentSession(provider: "grok", session: "y", state: "needs_input", time: now), now: now) == .paused)
+    require(edgeMode(for: doneNew, now: now) == .flowingToParent)
+    require(edgeMode(for: doneOld, now: now) == .hidden)
     let inbound = AgentSession(provider: "grok", session: "z", state: "running", time: now, commDirection: "inbound")
-    assert(edgeMode(for: inbound, now: now) == .flowingToParent)
+    require(edgeMode(for: inbound, now: now) == .flowingToParent)
 
     // Heartbeat only when the human must respond, never for delegated sessions.
     let userWaiting = AgentSession(provider: "codex", session: "u", state: "needs_input", time: now)
     let agentWaiting = AgentSession(provider: "grok", session: "v", state: "needs_input", time: now, delegated: true)
-    assert(demandsAttention(userWaiting))
-    assert(!demandsAttention(agentWaiting))
-    assert(!demandsAttention(root1))
+    require(demandsAttention(userWaiting))
+    require(!demandsAttention(agentWaiting))
+    require(!demandsAttention(root1))
 
     let recentOffline = AgentSession(provider: "grok", session: "recent", state: "offline", parent: "main", engine: "grok", time: 100)
-    assert(shouldDisplayACP(recentOffline, now: 101))
-    assert(!shouldDisplayACP(recentOffline, now: 103))
-    assert(fadeFactor(recentOffline, now: 100) == 1)
-    assert(fadeFactor(recentOffline, now: 101) == 0.5)
-    assert(fadeFactor(recentOffline, now: 103) == 0)
-    assert(fadeFactor(root1, now: now) == 1)
+    require(shouldDisplayACP(recentOffline, now: 101))
+    require(!shouldDisplayACP(recentOffline, now: 103))
+    require(fadeFactor(recentOffline, now: 100) == 1)
+    require(fadeFactor(recentOffline, now: 101) == 0.5)
+    require(fadeFactor(recentOffline, now: 103) == 0)
+    require(fadeFactor(root1, now: now) == 1)
 }
 
 // MARK: - App bootstrap
