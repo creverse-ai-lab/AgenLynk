@@ -6,9 +6,9 @@
 // boundary). install.json (Control identity/state) is never touched here;
 // existing installs keep their identity untouched.
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile, cp } from "node:fs/promises";
+import { mkdir, readFile, realpath, rename, rm, writeFile, cp } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { readManifestFile, verifyRuntimeManifest } from "./runtime-manifest.js";
 
 export function defaultRuntimeRoot() {
@@ -21,8 +21,21 @@ export function defaultRuntimeRoot() {
  * stages a full copy under runtime/staging/<tmp>/, verifies it, and only
  * then renames it into versions/<id>/ (atomic on the same volume) before
  * activating current.json.
+ *
+ * Existing-runtime authority: if `current.json` already points at a
+ * manifest-verified install inside this runtimeRoot's versions/ directory,
+ * that install is returned as-is — the seed is never read, copied, or
+ * activated. This is what lets an already-installed Gateway survive a Lynk
+ * app update: a newer/older seed bundled with the app must not silently
+ * displace a different, still-valid, already-current runtime. The seed is
+ * only consulted (and current.json only repointed) when current is absent,
+ * malformed, outside the managed versions root, or fails its own manifest
+ * verification.
  */
 export async function ensureRuntimeInstalled({ seedRoot, runtimeRoot = defaultRuntimeRoot() }) {
+  const existing = await currentRuntimeIfValid(runtimeRoot);
+  if (existing) return existing;
+
   const manifest = await readManifestFile(seedRoot);
   const versionDir = `${manifest.gatewayVersion}-${manifest.gatewayBuildId}`;
   const target = join(runtimeRoot, "versions", versionDir);
@@ -32,6 +45,51 @@ export async function ensureRuntimeInstalled({ seedRoot, runtimeRoot = defaultRu
   }
   await activateCurrent(runtimeRoot, target, manifest);
   return { runtimeRoot: target, gatewayVersion: manifest.gatewayVersion, gatewayBuildId: manifest.gatewayBuildId };
+}
+
+async function currentRuntimeIfValid(runtimeRoot) {
+  try {
+    // readCurrentRuntime only swallows ENOENT (nothing installed yet); a
+    // malformed current.json (bad JSON, wrong shape) throws, and is treated
+    // here the same as "absent" so it falls through to seed repair below
+    // instead of crashing the caller.
+    const current = await readCurrentRuntime(runtimeRoot);
+    if (!current || !(await isConfinedToVersions(runtimeRoot, current.runtimeRoot))) return null;
+    const ownManifest = await readManifestFile(current.runtimeRoot);
+    if (ownManifest.gatewayVersion !== current.gatewayVersion || ownManifest.gatewayBuildId !== current.gatewayBuildId) {
+      return null;
+    }
+    await verifyRuntimeManifest(current.runtimeRoot, ownManifest);
+    return { runtimeRoot: current.runtimeRoot, gatewayVersion: current.gatewayVersion, gatewayBuildId: current.gatewayBuildId };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Rejects anything not strictly inside `<runtimeRoot>/versions/` — both
+ * lexically (plain `..` traversal in a tampered current.json) and, after
+ * resolving symlinks, by real path (a candidate that lexically sits under
+ * versions/ but is, or is reached through, a symlink pointing elsewhere).
+ * Lexical confinement alone is not enough: a symlink anywhere in the
+ * candidate's path can make it resolve outside versions/ while still
+ * *looking* like it's inside.
+ */
+async function isConfinedToVersions(runtimeRoot, candidate) {
+  if (typeof candidate !== "string" || !candidate) return false;
+  const versionsRoot = join(runtimeRoot, "versions");
+  if (!isRelativelyConfined(versionsRoot, candidate)) return false;
+  try {
+    const [realVersionsRoot, realCandidate] = await Promise.all([realpath(versionsRoot), realpath(candidate)]);
+    return isRelativelyConfined(realVersionsRoot, realCandidate);
+  } catch {
+    return false;
+  }
+}
+
+function isRelativelyConfined(root, candidate) {
+  const relativePath = relative(root, candidate);
+  return relativePath !== "" && relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath);
 }
 
 async function isValid(root, manifest) {

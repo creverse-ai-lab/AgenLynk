@@ -17,7 +17,8 @@ import {
 } from "./acp-registry.js";
 import { GatewayRpcClient } from "./socket-rpc.js";
 import { gatewaySocketPath } from "./config.js";
-import { GATEWAY_BUILD_ID, GATEWAY_VERSION } from "./version.js";
+import { GATEWAY_API_VERSION, UnsupportedGatewayApiVersionError } from "./gateway-api-version.js";
+import { GATEWAY_BUILD_ID, GATEWAY_RUNTIME_ROOT, GATEWAY_VERSION } from "./version.js";
 
 const CONTROL_NAME = "agent-acp";
 const GUIDE_NAME = "agent-acp-guide";
@@ -441,9 +442,17 @@ export async function runInstaller(options, dependencies = {}) {
   let health = { checked: false };
   if (options.installControl && options.healthCheck && !options.dryRun) {
     let result = await gatewaySetup(makeRpc, identity);
+    let compatibility = evaluateGatewayCompatibility(result);
+    assertSupportedGatewayApiVersion(compatibility);
     const versionMatches = result?.gatewayVersion === GATEWAY_VERSION;
     const buildMatches = result?.gatewayBuildId === GATEWAY_BUILD_ID;
-    if (result?.ok === true && (!versionMatches || !buildMatches) && !options.restartDaemon) {
+    // A version/build mismatch alone only means "this is a stale process of
+    // *our own* install that needs restarting to pick up new code" when it is
+    // reporting the same runtimeRoot we are executing from. A different,
+    // still-compatible runtimeRoot is another valid install (e.g. an
+    // independently released UI talking to an already-current Gateway) and
+    // must not be restarted just because its version/build differs from ours.
+    if (result?.ok === true && compatibility.sameRoot && (!versionMatches || !buildMatches) && !options.restartDaemon) {
       actions.push({
         type: "daemon-restart",
         reason: versionMatches ? "build-mismatch" : "version-mismatch",
@@ -458,16 +467,26 @@ export async function runInstaller(options, dependencies = {}) {
         ...await restartGateway({ identity, makeRpc, socketPath: gatewaySocketPath() })
       };
       result = await gatewaySetup(makeRpc, identity);
+      compatibility = evaluateGatewayCompatibility(result);
+      assertSupportedGatewayApiVersion(compatibility);
     }
     health = {
       checked: true,
-      ok: result?.ok === true && result?.gatewayVersion === GATEWAY_VERSION,
+      ok: result?.ok === true,
       version: result?.gatewayVersion,
       buildId: result?.gatewayBuildId ?? null,
+      runtimeRoot: result?.runtimeRoot ?? null,
+      gatewayApiVersion: result?.gatewayApiVersion ?? null,
       agentUpdates: result?.agentUpdates ?? null,
       alerts: result?.alerts ?? []
     };
-    health.ok = health.ok && health.buildId === GATEWAY_BUILD_ID;
+    // Only a same-root daemon is required to match our exact version/build —
+    // that is the "stale process of this install" case above, including
+    // after an attempted automatic restart. A different, compatible root is
+    // healthy as-is.
+    if (compatibility.sameRoot) {
+      health.ok = health.ok && result?.gatewayVersion === GATEWAY_VERSION && result?.gatewayBuildId === GATEWAY_BUILD_ID;
+    }
     if (!health.ok) {
       throw new Error(
         `Gateway health mismatch: expected ${GATEWAY_VERSION} (${GATEWAY_BUILD_ID}), received ${result?.gatewayVersion ?? "unknown"} (${result?.gatewayBuildId ?? "unknown"})`
@@ -933,6 +952,36 @@ async function restartGatewayDaemon({ identity, makeRpc, socketPath }) {
   } finally {
     starter.close();
   }
+}
+
+/**
+ * Legacy `setup` responses (from a Gateway predating this handshake) omit
+ * runtimeRoot/gatewayApiVersion entirely — treated as "same root" and
+ * "supported" so the historical always-restart-on-mismatch dev/source-checkout
+ * behavior keeps working unchanged rather than being newly (and wrongly)
+ * treated as a foreign, do-not-touch install. When gatewayApiVersion *is*
+ * present, only the exact supported major is accepted — a lower major, a
+ * higher major, or a non-integer/malformed value are all unsupported; there
+ * is no partial/forward compatibility within this handshake yet.
+ */
+function evaluateGatewayCompatibility(result) {
+  const reportedRuntimeRoot = result?.runtimeRoot ?? null;
+  const sameRoot = reportedRuntimeRoot == null || reportedRuntimeRoot === GATEWAY_RUNTIME_ROOT;
+  const reportedApiVersion = result?.gatewayApiVersion ?? null;
+  const supportedApiMajor = reportedApiVersion == null || reportedApiVersion === GATEWAY_API_VERSION;
+  const requiredApiVersion = !supportedApiMajor && Number.isInteger(reportedApiVersion) && reportedApiVersion > GATEWAY_API_VERSION
+    ? reportedApiVersion
+    : undefined;
+  return { sameRoot, reportedApiVersion, supportedApiMajor, requiredApiVersion };
+}
+
+function assertSupportedGatewayApiVersion(compatibility) {
+  if (compatibility.supportedApiMajor) return;
+  throw new UnsupportedGatewayApiVersionError({
+    reportedGatewayApiVersion: compatibility.reportedApiVersion,
+    supportedGatewayApiVersion: GATEWAY_API_VERSION,
+    requiredGatewayApiVersion: compatibility.requiredApiVersion
+  });
 }
 
 async function gatewaySetup(makeRpc, identity) {

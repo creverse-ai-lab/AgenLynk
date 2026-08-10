@@ -7,7 +7,8 @@ import { ArtifactStore, defaultArtifactRoot } from "./artifacts.js";
 import { utf8ByteHead } from "./bounded-utf8.js";
 import { currentModelId, detectProviders, providerConfig } from "./providers.js";
 import { publicSession, SessionStore } from "./sessions.js";
-import { GATEWAY_BUILD_ID, GATEWAY_VERSION } from "./version.js";
+import { GATEWAY_API_VERSION } from "./gateway-api-version.js";
+import { GATEWAY_BUILD_ID, GATEWAY_RUNTIME_ROOT, GATEWAY_RUNTIME_SOURCE, GATEWAY_VERSION } from "./version.js";
 
 const ACTIVE_STATUSES = new Set(["running", "waiting_permission", "waiting_input", "cancelling", "restoring"]);
 // Only the start of new work closes a message segment. Progress updates
@@ -302,6 +303,13 @@ export class GatewayService {
       ok: true,
       gatewayVersion: GATEWAY_VERSION,
       gatewayBuildId: GATEWAY_BUILD_ID,
+      gatewayApiVersion: GATEWAY_API_VERSION,
+      runtimeRoot: GATEWAY_RUNTIME_ROOT,
+      runtimeSource: GATEWAY_RUNTIME_SOURCE,
+      // Additive, versioned by gatewayApiVersion: unknown keys are meant to be
+      // ignored by older clients, unknown-to-a-client capabilities treated as
+      // absent. Only features actually implemented today are listed.
+      capabilities: { agentUpdates: true },
       persistence: { healthy: this.persistError == null, error: this.persistError },
       lifecycle: {
         ...this.lifecycle,

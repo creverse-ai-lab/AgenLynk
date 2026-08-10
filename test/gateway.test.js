@@ -7,7 +7,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { AcpClient } from "../src/acp-client.js";
 import { GatewayService, sanitizeWorkerMcpServers } from "../src/gateway-service.js";
-import { GATEWAY_BUILD_ID, GATEWAY_VERSION } from "../src/version.js";
+import { GATEWAY_API_VERSION } from "../src/gateway-api-version.js";
+import { GATEWAY_BUILD_ID, GATEWAY_RUNTIME_ROOT, GATEWAY_RUNTIME_SOURCE, GATEWAY_VERSION } from "../src/version.js";
 
 const mockAgent = fileURLToPath(new URL("./mock-agent.js", import.meta.url));
 const capabilityAgent = fileURLToPath(new URL("./mock-capability-agent.js", import.meta.url));
@@ -34,6 +35,10 @@ test("Gateway setup exposes ACP update health alerts and supports a fresh check"
     assert.equal(refreshCalls, 1);
     assert.equal(health.gatewayVersion, GATEWAY_VERSION);
     assert.equal(health.gatewayBuildId, GATEWAY_BUILD_ID);
+    assert.equal(health.gatewayApiVersion, GATEWAY_API_VERSION);
+    assert.equal(health.runtimeRoot, GATEWAY_RUNTIME_ROOT);
+    assert.equal(health.runtimeSource, GATEWAY_RUNTIME_SOURCE);
+    assert.equal(health.capabilities.agentUpdates, true);
     assert.equal(health.agentUpdates.status, "ready");
     assert.equal(health.alerts[0].code, "acp_agents_auto_updated");
   } finally {

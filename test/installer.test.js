@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { parseInstallerArgs, runInstaller } from "../src/installer.js";
-import { GATEWAY_BUILD_ID, GATEWAY_VERSION } from "../src/version.js";
+import { GATEWAY_API_VERSION, UnsupportedGatewayApiVersionError } from "../src/gateway-api-version.js";
+import { GATEWAY_BUILD_ID, GATEWAY_RUNTIME_ROOT, GATEWAY_VERSION } from "../src/version.js";
 
 const runtime = { nodeVersion: "22.0.0", platform: "darwin" };
 const providers = [
@@ -562,6 +563,290 @@ test("installer update invokes daemon replacement before version health", async 
     assert.equal(healthCalls, 1);
     assert.equal(result.restart.version, GATEWAY_VERSION);
     assert.equal(result.health.ok, true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("install-all does not restart a compatible daemon serving from a different runtimeRoot on version/build mismatch alone", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-installer-cross-root-"));
+  const statePath = join(directory, "install.json");
+  let restartCalls = 0;
+  try {
+    const result = await runInstaller(
+      parseInstallerArgs(["--install-all", "--target", "codex"]),
+      {
+        statePath,
+        runtime,
+        skillRoots: { codex: join(directory, "codex-skills"), default: join(directory, "shared-skills") },
+        detectProviders: async () => providers,
+        registryLoader: emptyRegistryLoader,
+        registryDiscover: async () => [],
+        runCommand: async (_command, args) => {
+          if (args.includes("get")) return { code: 1, stdout: "", stderr: "not found" };
+          if (args.includes("--json")) return { code: 0, stdout: "{\"dependencies\":{}}", stderr: "" };
+          return { code: 0, stdout: "", stderr: "" };
+        },
+        restartGateway: async () => {
+          restartCalls += 1;
+          return { performed: true, wasRunning: true, graceful: true, version: GATEWAY_VERSION };
+        },
+        rpcFactory: () => ({
+          async call(method) {
+            assert.equal(method, "setup");
+            return {
+              ok: true,
+              gatewayVersion: "0.9.0",
+              gatewayBuildId: "other-build",
+              gatewayApiVersion: GATEWAY_API_VERSION,
+              runtimeRoot: "/opt/other-lynk-install/runtime/versions/0.9.0-other-build"
+            };
+          },
+          close() {}
+        })
+      }
+    );
+    assert.equal(restartCalls, 0, "a different, compatible runtimeRoot must never be restarted for version/build mismatch alone");
+    assert.equal(result.health.ok, true);
+    assert.equal(result.health.version, "0.9.0");
+    assert.equal(result.health.runtimeRoot, "/opt/other-lynk-install/runtime/versions/0.9.0-other-build");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+async function runInstallerWithSetupResponse(directory, setupResponse, { restartGateway } = {}) {
+  const statePath = join(directory, "install.json");
+  let restartCalls = 0;
+  const result = runInstaller(
+    parseInstallerArgs(["--install-all", "--target", "codex"]),
+    {
+      statePath,
+      runtime,
+      skillRoots: { codex: join(directory, "codex-skills"), default: join(directory, "shared-skills") },
+      detectProviders: async () => providers,
+      registryLoader: emptyRegistryLoader,
+      registryDiscover: async () => [],
+      runCommand: async (_command, args) => {
+        if (args.includes("get")) return { code: 1, stdout: "", stderr: "not found" };
+        if (args.includes("--json")) return { code: 0, stdout: "{\"dependencies\":{}}", stderr: "" };
+        return { code: 0, stdout: "", stderr: "" };
+      },
+      restartGateway: restartGateway ?? (async () => {
+        restartCalls += 1;
+        return { performed: true, wasRunning: true, graceful: true, version: GATEWAY_VERSION };
+      }),
+      rpcFactory: () => ({
+        async call(method) {
+          assert.equal(method, "setup");
+          return setupResponse;
+        },
+        close() {}
+      })
+    }
+  );
+  return { result, restartCallsRef: () => restartCalls };
+}
+
+test("install-all fails with a structured error (higher major) when the daemon reports an unsupported Gateway API major", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-installer-unsupported-api-higher-"));
+  try {
+    const { result, restartCallsRef } = await runInstallerWithSetupResponse(directory, {
+      ok: true,
+      gatewayVersion: "9.9.9",
+      gatewayBuildId: "future-build",
+      gatewayApiVersion: GATEWAY_API_VERSION + 1,
+      runtimeRoot: "/opt/future-lynk-install/runtime/versions/9.9.9-future-build"
+    });
+    await assert.rejects(result, (error) => {
+      assert.ok(error instanceof UnsupportedGatewayApiVersionError);
+      assert.equal(error.code, "UNSUPPORTED_GATEWAY_API_VERSION");
+      assert.equal(error.reportedGatewayApiVersion, GATEWAY_API_VERSION + 1);
+      assert.equal(error.supportedGatewayApiVersion, GATEWAY_API_VERSION);
+      assert.equal(error.requiredGatewayApiVersion, GATEWAY_API_VERSION + 1);
+      assert.match(error.message, /Gateway API version/);
+      return true;
+    });
+    assert.equal(restartCallsRef(), 0, "an unsupported API major must fail explicitly, not trigger a restart attempt");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("install-all fails with a structured error (lower major) and never restarts", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-installer-unsupported-api-lower-"));
+  try {
+    const { result, restartCallsRef } = await runInstallerWithSetupResponse(directory, {
+      ok: true,
+      gatewayVersion: "0.1.0",
+      gatewayBuildId: "ancient-build",
+      gatewayApiVersion: GATEWAY_API_VERSION - 1,
+      runtimeRoot: "/opt/ancient-lynk-install/runtime/versions/0.1.0-ancient-build"
+    });
+    await assert.rejects(result, (error) => {
+      assert.ok(error instanceof UnsupportedGatewayApiVersionError);
+      assert.equal(error.code, "UNSUPPORTED_GATEWAY_API_VERSION");
+      assert.equal(error.reportedGatewayApiVersion, GATEWAY_API_VERSION - 1);
+      assert.equal(error.supportedGatewayApiVersion, GATEWAY_API_VERSION);
+      // A lower major has no single unambiguous "required" version, so it is omitted.
+      assert.equal(error.requiredGatewayApiVersion, undefined);
+      return true;
+    });
+    assert.equal(restartCallsRef(), 0, "a lower API major must fail explicitly, not trigger a restart attempt");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("install-all fails with a structured error (non-integer/invalid major) and never restarts", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-installer-unsupported-api-invalid-"));
+  try {
+    const { result, restartCallsRef } = await runInstallerWithSetupResponse(directory, {
+      ok: true,
+      gatewayVersion: "1.0.0",
+      gatewayBuildId: "weird-build",
+      gatewayApiVersion: "1",
+      runtimeRoot: "/opt/weird-lynk-install/runtime/versions/1.0.0-weird-build"
+    });
+    await assert.rejects(result, (error) => {
+      assert.ok(error instanceof UnsupportedGatewayApiVersionError);
+      assert.equal(error.code, "UNSUPPORTED_GATEWAY_API_VERSION");
+      assert.equal(error.reportedGatewayApiVersion, "1");
+      assert.equal(error.requiredGatewayApiVersion, undefined);
+      return true;
+    });
+    assert.equal(restartCallsRef(), 0, "a non-integer/invalid API major must fail explicitly, not trigger a restart attempt");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("install-all treats a missing gatewayApiVersion as legacy-compatible (not unsupported)", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-installer-legacy-api-"));
+  try {
+    const { result } = await runInstallerWithSetupResponse(directory, {
+      ok: true,
+      gatewayVersion: GATEWAY_VERSION,
+      gatewayBuildId: GATEWAY_BUILD_ID
+    });
+    const outcome = await result;
+    assert.equal(outcome.health.ok, true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("install-all fails with a structured error when a same-runtimeRoot daemon reports an unsupported major even after an automatic restart", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-installer-unsupported-api-post-restart-"));
+  try {
+    const setupResponses = [
+      {
+        ok: true,
+        gatewayVersion: "0.9.0",
+        gatewayBuildId: "stale-build",
+        gatewayApiVersion: GATEWAY_API_VERSION,
+        runtimeRoot: GATEWAY_RUNTIME_ROOT
+      },
+      {
+        ok: true,
+        gatewayVersion: GATEWAY_VERSION,
+        gatewayBuildId: GATEWAY_BUILD_ID,
+        gatewayApiVersion: GATEWAY_API_VERSION + 1,
+        runtimeRoot: GATEWAY_RUNTIME_ROOT
+      }
+    ];
+    let restartCalls = 0;
+    const result = runInstaller(
+      parseInstallerArgs(["--install-all", "--target", "codex"]),
+      {
+        statePath: join(directory, "install.json"),
+        runtime,
+        skillRoots: { codex: join(directory, "codex-skills"), default: join(directory, "shared-skills") },
+        detectProviders: async () => providers,
+        registryLoader: emptyRegistryLoader,
+        registryDiscover: async () => [],
+        runCommand: async (_command, args) => {
+          if (args.includes("get")) return { code: 1, stdout: "", stderr: "not found" };
+          if (args.includes("--json")) return { code: 0, stdout: "{\"dependencies\":{}}", stderr: "" };
+          return { code: 0, stdout: "", stderr: "" };
+        },
+        restartGateway: async () => {
+          restartCalls += 1;
+          return { performed: true, wasRunning: true, graceful: true, version: GATEWAY_VERSION, buildId: GATEWAY_BUILD_ID };
+        },
+        rpcFactory: () => ({
+          async call(method) {
+            assert.equal(method, "setup");
+            return setupResponses.shift();
+          },
+          close() {}
+        })
+      }
+    );
+    await assert.rejects(result, (error) => {
+      assert.ok(error instanceof UnsupportedGatewayApiVersionError);
+      assert.equal(error.reportedGatewayApiVersion, GATEWAY_API_VERSION + 1);
+      return true;
+    });
+    assert.equal(restartCalls, 1, "the same-root stale daemon is still restarted once before the post-restart response is re-validated");
+    assert.equal(setupResponses.length, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("install-all still replaces a same-runtimeRoot stale daemon on version/build mismatch", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-installer-same-root-"));
+  const statePath = join(directory, "install.json");
+  const setupResponses = [
+    {
+      ok: true,
+      gatewayVersion: "0.9.0",
+      gatewayBuildId: "stale-build",
+      gatewayApiVersion: GATEWAY_API_VERSION,
+      runtimeRoot: GATEWAY_RUNTIME_ROOT
+    },
+    {
+      ok: true,
+      gatewayVersion: GATEWAY_VERSION,
+      gatewayBuildId: GATEWAY_BUILD_ID,
+      gatewayApiVersion: GATEWAY_API_VERSION,
+      runtimeRoot: GATEWAY_RUNTIME_ROOT
+    }
+  ];
+  let restartCalls = 0;
+  try {
+    const result = await runInstaller(
+      parseInstallerArgs(["--install-all", "--target", "codex"]),
+      {
+        statePath,
+        runtime,
+        skillRoots: { codex: join(directory, "codex-skills"), default: join(directory, "shared-skills") },
+        detectProviders: async () => providers,
+        registryLoader: emptyRegistryLoader,
+        registryDiscover: async () => [],
+        runCommand: async (_command, args) => {
+          if (args.includes("get")) return { code: 1, stdout: "", stderr: "not found" };
+          if (args.includes("--json")) return { code: 0, stdout: "{\"dependencies\":{}}", stderr: "" };
+          return { code: 0, stdout: "", stderr: "" };
+        },
+        restartGateway: async () => {
+          restartCalls += 1;
+          return { performed: true, wasRunning: true, graceful: true, version: GATEWAY_VERSION, buildId: GATEWAY_BUILD_ID };
+        },
+        rpcFactory: () => ({
+          async call(method) {
+            assert.equal(method, "setup");
+            return setupResponses.shift();
+          },
+          close() {}
+        })
+      }
+    );
+    assert.equal(restartCalls, 1, "a stale daemon reporting our own runtimeRoot must still be restarted");
+    assert.equal(result.health.ok, true);
+    assert.equal(result.health.version, GATEWAY_VERSION);
+    assert.equal(setupResponses.length, 0);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

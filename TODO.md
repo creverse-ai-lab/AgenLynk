@@ -33,13 +33,13 @@ Monitor activity projection
 
 ### Gateway handshake
 
-- [ ] Gateway `setup` 응답에 `gatewayApiVersion`, `gatewayVersion`, `gatewayBuildId`, `runtimeRoot`, `capabilities`를 추가한다.
-- [ ] `gatewayApiVersion`은 ACP protocol 버전과 별도 상수로 관리한다.
+- [x] Gateway `setup` 응답에 `gatewayApiVersion`, `gatewayVersion`, `gatewayBuildId`, `runtimeRoot`, `capabilities`를 추가한다.
+- [x] `gatewayApiVersion`은 ACP protocol 버전과 별도 상수로 관리한다.
 - [ ] 같은 API major에서 필드 추가는 허용하고, 삭제·이름 변경·의미 변경은 major를 올린다.
-- [ ] 클라이언트는 모르는 capability와 필드를 무시하고, 지원하지 않는 API major만 명시적으로 거부한다.
-- [ ] `gatewayBuildId` 동일성 검사는 같은 `runtimeRoot`의 stale process 판정에만 사용한다.
-- [ ] 독립 릴리스된 UI와 Gateway 사이에서 build ID가 다르다는 이유만으로 재시작하지 않는다.
-- [ ] 호환되지 않는 경우 구조화된 error code와 필요한 최소 버전을 반환한다.
+- [x] 클라이언트는 모르는 capability와 필드를 무시하고, 지원하지 않는 API major만 명시적으로 거부한다.
+- [x] `gatewayBuildId` 동일성 검사는 같은 `runtimeRoot`의 stale process 판정에만 사용한다.
+- [x] 독립 릴리스된 UI와 Gateway 사이에서 build ID가 다르다는 이유만으로 재시작하지 않는다.
+- [x] 호환되지 않는 경우 구조화된 error code와 필요한 최소 버전을 반환한다.
 
 ### Monitor API v1
 
