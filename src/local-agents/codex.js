@@ -18,6 +18,9 @@ function newCursor(session, modified, database) {
     offset: 0,
     session,
     seen: modified,
+    // mtime observed at the last successful read, so a same-sized atomic
+    // rewrite (invisible to the size check) still resets the cursor.
+    lastMtimeMs: 0,
     identified: false,
     database: database ?? null,
     pendingApprovals: new Set()
@@ -96,8 +99,11 @@ export async function poll({ cursors, states, parents, now }) {
       continue;
     }
     const modified = metadata.mtimeMs / 1000;
-    // A shrunken file was rotated or rewritten: start over.
-    if (metadata.size < cursor.offset) {
+    // A shrunken file was rotated or rewritten: start over. A file whose size
+    // matches the cursor but whose mtime moved was atomically replaced with
+    // same-sized content — equally a rewrite, and invisible to the size check.
+    if (metadata.size < cursor.offset
+      || (metadata.size === cursor.offset && cursor.offset > 0 && metadata.mtimeMs !== cursor.lastMtimeMs)) {
       cursor.offset = 0;
       cursor.identified = false;
       cursor.pendingApprovals.clear();
@@ -114,13 +120,17 @@ export async function poll({ cursors, states, parents, now }) {
       handle = await open(path, "r");
       const length = metadata.size - cursor.offset;
       const buffer = Buffer.alloc(length);
-      await handle.read(buffer, 0, length, cursor.offset);
-      const text = buffer.toString("utf8");
+      const { bytesRead } = await handle.read(buffer, 0, length, cursor.offset);
+      // Advance in BYTES, found on the raw buffer. Decoding first and using a
+      // string index would undercount whenever the tail holds multibyte text
+      // (routine in these transcripts), leaving the cursor short and re-reading
+      // — and re-signalling — the same records on every poll forever.
+      const lastNewline = buffer.lastIndexOf(0x0A, bytesRead - 1);
+      const consumed = lastNewline >= 0 && lastNewline < bytesRead ? lastNewline + 1 : 0;
       // Only advance past complete lines; a transcript the agent is still
       // writing must be re-read from the start of its partial last line.
-      const lastNewline = text.lastIndexOf("\n");
-      const consumed = lastNewline >= 0 ? lastNewline + 1 : 0;
-      for (const line of text.slice(0, consumed).split("\n")) {
+      const text = buffer.subarray(0, consumed).toString("utf8");
+      for (const line of text.split("\n")) {
         if (!line) continue;
         const record = readRecord(line);
         if (!record || typeof record !== "object") continue;
@@ -137,6 +147,7 @@ export async function poll({ cursors, states, parents, now }) {
         }
       }
       cursor.offset += consumed;
+      cursor.lastMtimeMs = metadata.mtimeMs;
       cursor.seen = modified;
     } catch {
       cursors.delete(path);

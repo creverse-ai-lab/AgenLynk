@@ -47,7 +47,21 @@ private struct PetActionsEnvelope: Decodable {
     }
 }
 
-private let contractTimestampFormatter = ISO8601DateFormatter()
+// Lynk always writes fractional-seconds ISO8601 (see monitorTimestamp in the
+// app). A default ISO8601DateFormatter rejects fractional input outright, so
+// without the first formatter every contract timestamp parsed to nil and all
+// time-based behaviour (offline fade, ready linger, flowing arrows) was dead.
+private let contractTimestampFormatter: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter
+}()
+
+private let plainTimestampFormatter = ISO8601DateFormatter()
+
+private func parseContractTimestamp(_ value: String) -> Date? {
+    contractTimestampFormatter.date(from: value) ?? plainTimestampFormatter.date(from: value)
+}
 
 private struct AgentSession: Decodable, Identifiable, Equatable {
     let provider: String
@@ -107,7 +121,7 @@ private struct AgentSession: Decodable, Identifiable, Equatable {
         parent = agent.parentId
         role = agent.role
         engine = agent.engine
-        time = contractTimestampFormatter.date(from: agent.updatedAt)?.timeIntervalSince1970
+        time = parseContractTimestamp(agent.updatedAt)?.timeIntervalSince1970
         inboxPending = nil
         cwd = nil
         task = agent.task
@@ -381,8 +395,15 @@ private final class StatusStore: ObservableObject {
            let state = try? JSONDecoder().decode(PetStateEnvelope.self, from: stateData),
            let actions = try? JSONDecoder().decode(PetActionsEnvelope.self, from: actionsData),
            state.isSupported,
-           actions.isSupported,
-           state.sequence == actions.sequence {
+           actions.isSupported {
+            guard state.sequence == actions.sequence else {
+                // State and actions are two separate atomic files sharing one
+                // sequence; a read that lands between the two writes sees a
+                // mismatched pair. That is a timing artifact, not new truth —
+                // keep showing the last good frame and re-read next tick
+                // instead of flashing every node out for 0.5s.
+                return
+            }
             let actionByID = actions.actions.reduce(into: [String: String]()) { result, item in
                 result[item.id] = item.action
             }
@@ -944,6 +965,13 @@ private func selfTest() {
     let contractSessions = contractState.agents.map { AgentSession(contractAgent: $0, action: actionByID[$0.id]) }
     require(contractSessions.first { $0.id == "frontdoor-1" }?.state == "needs_input")
     require(contractSessions.first { $0.id == "frontdoor-1" }?.delegated == false)
+    // Lynk writes fractional-seconds timestamps; a nil here means every
+    // time-based behaviour (fade, linger, arrows) is silently dead.
+    require(
+        contractSessions.first { $0.id == "frontdoor-1" }?.time != nil,
+        "fractional ISO8601 updatedAt must parse to a real time"
+    )
+    require(parseContractTimestamp("2026-08-10T12:34:55Z") != nil, "plain ISO8601 must parse as the fallback")
     require(contractSessions.first { $0.id == "worker-1" }?.state == "running")
     require(contractSessions.first { $0.id == "worker-1" }?.delegated == true)
 

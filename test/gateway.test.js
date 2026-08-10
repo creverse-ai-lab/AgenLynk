@@ -1608,9 +1608,15 @@ test("artifact retention applies a session-count rule alongside the age rule", a
     }
     const [oldest, middle, newest] = made;
 
+    // A file the oldest session still REFERENCES must survive the count rule:
+    // deleting it would leave the live record pointing at an ENOENT path.
+    const referenced = service.store.spillText(oldest.session.id, "final", "still referenced");
+    oldest.session.resultFinalArtifact = { path: referenced.path };
+
     // Every artifact is brand new, so the age rule alone would keep them all.
     await service.runMaintenance(Date.now());
-    assert.equal(existsSync(oldest.artifact), false, "a session outside the most-recent window loses its artifacts");
+    assert.equal(existsSync(oldest.artifact), false, "a session outside the most-recent window loses its unreferenced artifacts");
+    assert.equal(existsSync(referenced.path), true, "a live reference outranks the count rule");
     assert.equal(existsSync(middle.artifact), true, "the most-recent window is kept");
     assert.equal(existsSync(newest.artifact), true, "the most-recent window is kept");
 

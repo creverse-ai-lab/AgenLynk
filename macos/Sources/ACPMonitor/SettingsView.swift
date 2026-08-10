@@ -304,7 +304,12 @@ private struct GatewayConfigurationView: View {
     }
 
     private func saveDrafts(andRestart: Bool = false) async -> Bool {
-        guard !draftValues.isEmpty else { return true }
+        // Nothing to save can still mean something to do: the restart button is
+        // enabled in the "저장됨 · 적용 대기" state, where drafts are empty and
+        // the whole point of the click is the restart itself.
+        guard !draftValues.isEmpty else {
+            return andRestart ? await model.restartGateway() : true
+        }
         let lowered = loweredRetentionValues
         if !lowered.isEmpty {
             // Ask the Gateway what these exact values would delete before

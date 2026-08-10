@@ -49,10 +49,14 @@ export function updatePendingApprovals(record, pending) {
     }
   }
 
-  // ACP permission traffic can be nested anywhere inside a tool result.
-  const visit = (value) => {
+  // ACP permission traffic can be nested anywhere inside a tool result. The
+  // depth cap keeps a pathological transcript blob (a tool echoing deeply
+  // nested JSON) from overflowing the stack and killing the scanner's cursor.
+  const MAX_VISIT_DEPTH = 32;
+  const visit = (value, depth = 0) => {
+    if (depth > MAX_VISIT_DEPTH) return;
     if (Array.isArray(value)) {
-      for (const child of value) visit(child);
+      for (const child of value) visit(child, depth + 1);
       return;
     }
     if (!value || typeof value !== "object") return;
@@ -67,7 +71,7 @@ export function updatePendingApprovals(record, pending) {
     } else if (requestId != null && (eventType === "permission_response" || eventType === "permission_result")) {
       if (pending.delete(`acp:${requestId}`)) changed = true;
     }
-    for (const child of Object.values(value)) visit(child);
+    for (const child of Object.values(value)) visit(child, depth + 1);
   };
   visit(payload?.result);
 

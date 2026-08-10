@@ -494,3 +494,82 @@ test("a missing or malformed codex database degrades to status-only sessions", a
     );
   });
 });
+
+test("reversed reading survives multibyte characters straddling chunk boundaries", async () => {
+  await withTempDirectory(async (root) => {
+    const { reversedRecords } = await import("../src/local-agents/jsonl.js");
+    const path = join(root, "multibyte.jsonl");
+    // Enough Korean text that 64KB chunk boundaries are guaranteed to land
+    // inside multibyte sequences, many times over.
+    const lines = [];
+    for (let index = 0; index < 200; index += 1) {
+      lines.push(JSON.stringify({ index, text: "한글 트랜스크립트 내용 ".repeat(60) }));
+    }
+    await writeFile(path, lines.join("\n") + "\n");
+
+    const seen = [];
+    for await (const record of reversedRecords(path)) seen.push(record.index);
+    assert.equal(seen.length, 200, "no record may be dropped by a boundary-corrupted decode");
+    assert.deepEqual(seen, [...Array(200).keys()].reverse(), "records arrive newest-first, all intact");
+  });
+});
+
+test("codex cursor advances by bytes so multibyte transcripts do not re-parse forever", async () => {
+  await withTempDirectory(async (root) => {
+    const sessions = join(root, "sessions");
+    await mkdir(sessions, { recursive: true });
+    const transcript = join(sessions, "rollout-kr.jsonl");
+    const koreanLine = JSON.stringify({
+      type: "event_msg",
+      payload: { type: "task_started" },
+      text: "한국어 프롬프트 내용입니다 ".repeat(20)
+    });
+    const content = '{"type":"session_meta","payload":{"id":"kr"}}\n' + koreanLine + "\n";
+    await writeFile(transcript, content);
+
+    const cursors = new Map();
+    const retired = new Map();
+    const states = {};
+    const parents = new Map();
+    const now = Date.now() / 1000;
+    await discover({ root: sessions, cursors, retired, staleAfter: 600, now, database: null });
+    await poll({ cursors, states, parents, now });
+    assert.equal(
+      cursors.get(transcript).offset,
+      Buffer.byteLength(content, "utf8"),
+      "the cursor must land on the byte length, not the character count"
+    );
+    // With the cursor converged, an unchanged file reports no change.
+    assert.equal(await poll({ cursors, states, parents, now }), false, "a converged cursor stays quiet");
+  });
+});
+
+test("a transcript atomically replaced with same-sized content is re-read", async () => {
+  await withTempDirectory(async (root) => {
+    const sessions = join(root, "sessions");
+    await mkdir(sessions, { recursive: true });
+    const transcript = join(sessions, "rollout-swap.jsonl");
+    // The trailing space pads "task_started" to the byte length of
+    // "task_complete"; JSON.parse ignores surrounding whitespace.
+    const first = '{"type":"session_meta","payload":{"id":"aa"}}\n{"type":"event_msg","payload":{"type":"task_started"}} \n';
+    await writeFile(transcript, first);
+
+    const cursors = new Map();
+    const retired = new Map();
+    const states = {};
+    const parents = new Map();
+    const now = Date.now() / 1000;
+    await discover({ root: sessions, cursors, retired, staleAfter: 600, now, database: null });
+    await poll({ cursors, states, parents, now });
+    assert.equal(states.aa.state, "running");
+
+    // Same byte length, different content and mtime — the size check alone
+    // would never notice this.
+    const second = '{"type":"session_meta","payload":{"id":"aa"}}\n{"type":"event_msg","payload":{"type":"task_complete"}}\n';
+    assert.equal(Buffer.byteLength(second), Buffer.byteLength(first), "fixture must keep sizes identical");
+    await writeFile(transcript, second);
+    await utimes(transcript, new Date(), new Date(Date.now() + 2000));
+    await poll({ cursors, states, parents, now });
+    assert.equal(states.aa.state, "ready", "the rewrite must be picked up despite the unchanged size");
+  });
+});

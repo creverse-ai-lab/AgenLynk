@@ -4,6 +4,7 @@ enum RuntimeUpdaterError: LocalizedError {
     case seedUnavailable
     case processExited(Int32, String)
     case invalidOutput(String)
+    case timedOut
 
     var errorDescription: String? {
         switch self {
@@ -13,6 +14,8 @@ enum RuntimeUpdaterError: LocalizedError {
             "runtime updater가 종료되었습니다 (exit \(code)). \(detail)"
         case let .invalidOutput(detail):
             "runtime updater 응답을 해석하지 못했습니다: \(detail)"
+        case .timedOut:
+            "runtime updater가 응답하지 않아 중단했습니다. 다시 시도해 주세요."
         }
     }
 }
@@ -62,10 +65,24 @@ final class RuntimeUpdaterController {
         process.standardError = stderr
         try process.run()
 
+        // Watchdog: a hung seed Node (bad seed, FS stall) would otherwise pin
+        // runtimeBusy forever and leave the Settings tab bricked — run() would
+        // never return, so no defer ever resets the state. Stage copies a full
+        // runtime tree, so the ceiling is generous.
+        let timedOut = LockedFlag()
+        let watchdog = Task.detached {
+            try? await Task.sleep(nanoseconds: 120 * 1_000_000_000)
+            guard !Task.isCancelled, process.isRunning else { return }
+            timedOut.set()
+            process.terminate()
+        }
+        defer { watchdog.cancel() }
+
         async let outData = Self.readToEnd(stdout.fileHandleForReading)
         async let errData = Self.readToEnd(stderr.fileHandleForReading)
         let (out, err) = await (outData, errData)
         await Self.waitForExit(process)
+        if timedOut.isSet { throw RuntimeUpdaterError.timedOut }
 
         // The CLI prints exactly one JSON envelope for success and for expected
         // failure alike, and only sets a nonzero exit code alongside it — so a
@@ -81,6 +98,24 @@ final class RuntimeUpdaterController {
             throw RuntimeUpdaterError.invalidOutput(String(text.suffix(500)))
         }
         return .object(value)
+    }
+
+    /// A bool the watchdog task and the awaiting caller can share safely.
+    private final class LockedFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+
+        func set() {
+            lock.lock()
+            value = true
+            lock.unlock()
+        }
+
+        var isSet: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
     }
 
     private static func readToEnd(_ handle: FileHandle) async -> Data {

@@ -1465,9 +1465,13 @@ export class GatewayService {
    * working. Pinning is the user saying "keep this", so it must not be aged
    * out by a burst of newer sessions.
    */
-  #artifactSessionIds(limit = this.resourceLimits.artifactSessionLimit) {
+  #artifactSessionIds(limit = this.resourceLimits.artifactSessionLimit, sessions = this.store.list()) {
     if (!Number.isFinite(limit) || limit < 1) return null;
-    const sessions = this.store.list();
+    // No session records at all (fresh boot, or a persist file that failed to
+    // load) says nothing about which artifacts are stale — disabling the count
+    // rule leaves the age rule's grace period in charge instead of wiping the
+    // whole directory at the first maintenance pass.
+    if (!sessions.length) return null;
     const keep = new Set();
     for (const session of sessions) {
       if (session.pinned || ACTIVE_STATUSES.has(session.status)) keep.add(session.id);
@@ -1506,8 +1510,12 @@ export class GatewayService {
     for (const task of this.tasks.values()) if (doomedSessionIds.has(task.sessionId)) tasks += 1;
     for (const item of this.inbox.values()) if (doomedSessionIds.has(item.sessionId)) inbox += 1;
 
-    const keepSessionIds = this.#artifactSessionIds(artifactSessionLimit);
-    for (const id of doomedSessionIds) keepSessionIds?.delete(id);
+    // Rank with the doomed sessions already excluded, exactly as the store
+    // would look after their deletion. Deleting them from a set ranked with
+    // them present would overcount: survivors that inherit the freed slots
+    // would still be counted as prunable.
+    const survivors = this.store.list().filter((session) => !doomedSessionIds.has(session.id));
+    const keepSessionIds = this.#artifactSessionIds(artifactSessionLimit, survivors);
     const artifacts = this.artifactStore.countPrunable(
       this.lifecycle.resultRetentionMs, now, this.#artifactKeepPaths(), keepSessionIds
     );

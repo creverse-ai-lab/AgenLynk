@@ -413,6 +413,11 @@ final class AppModel: ObservableObject {
     /// Mirrors `MonitorState.restartBlockers()`. Activation and rollback are
     /// held back for exactly the same reasons a safe restart is.
     var runtimeActivationBlockers: [String] {
+        // These lists mirror the monitor stream; when it is not connected they
+        // are empty or stale, which is indistinguishable from "no active work".
+        // The updater trusts the blockers it is handed, so an unknown Gateway
+        // state must count as a blocker, not as an all-clear.
+        guard case .connected = phase else { return ["Gateway 상태 확인 불가 (연결 안 됨)"] }
         let activeSessions = sessions.filter { !$0.isLocalSource && $0.isActive }.count
         let activeTasks = tasks.filter { ["working", "input_required"].contains($0.status ?? "") }.count
         let pending = inbox.filter { $0.status == "pending" }.count
@@ -424,7 +429,7 @@ final class AppModel: ObservableObject {
     }
 
     func loadRuntimeInspection() async {
-        guard runtimeUpdater.isAvailable else { return }
+        guard runtimeUpdater.isAvailable, !runtimeLoading else { return }
         runtimeLoading = true
         defer { runtimeLoading = false }
         do {
@@ -439,6 +444,7 @@ final class AppModel: ObservableObject {
     /// Installs the runtime this app shipped and makes it live. Staging is
     /// idempotent, so this is safe to press when already up to date.
     func updateRuntimeFromAppSeed() async {
+        guard !runtimeBusy else { return }
         guard let seedRoot = BundledRuntime.seedRuntimeRoot()?.path else {
             runtimeError = "이 빌드에는 설치할 Gateway runtime seed가 없습니다."
             return
@@ -468,6 +474,7 @@ final class AppModel: ObservableObject {
     }
 
     func rollbackRuntime() async {
+        guard !runtimeBusy else { return }
         runtimeBusy = true
         defer { runtimeBusy = false }
         runtimeError = nil
@@ -687,8 +694,18 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Advances a heartbeat timestamp at most once per second. The published
+    /// value only drives 1-second-granularity labels, so finer updates are
+    /// pure re-render churn.
+    private func markHeartbeat(_ heartbeat: inout Date?) {
+        let now = Date()
+        if heartbeat.map({ now.timeIntervalSince($0) >= 1 }) ?? true { heartbeat = now }
+    }
+
     private func apply(_ snapshot: MonitorSnapshot) {
-        lastStreamMessageAt = Date()
+        // Deliberately NOT a heartbeat update: snapshots also arrive from the
+        // periodic HTTP reconciliation, which would keep the staleness signal
+        // green forever even after the SSE stream silently died.
         var logCacheChanged = false
         if gateway != snapshot.gateway { gateway = snapshot.gateway }
         if sessions != snapshot.sessions { sessions = snapshot.sessions; logCacheChanged = true }
@@ -713,11 +730,16 @@ final class AppModel: ObservableObject {
 
     private func apply(streamMessage value: JSONValue) {
         guard let message = value.objectValue, let kind = message.string("kind") else { return }
-        lastStreamMessageAt = Date()
+        // The UI shows these at 1-second granularity, but the stream delivers
+        // 30–100 token chunks per second. Publishing every arrival would fire
+        // objectWillChange per chunk and defeat the 100ms event batching by
+        // re-evaluating every observing view anyway; throttle to the precision
+        // the consumers actually display.
+        markHeartbeat(&lastStreamMessageAt)
         switch kind {
         case "event":
             if let eventValue = message["event"], let event = MonitorEvent(eventValue) {
-                lastAgentEventAt = Date()
+                markHeartbeat(&lastAgentEventAt)
                 enqueue(event)
             }
         case "state":

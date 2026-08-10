@@ -194,7 +194,12 @@ async function main() {
   }
   const refresh = queuedSingleFlight(performRefresh);
 
-  async function applySessionSources() {
+  // Single-flight: this is called from the 1s local interval, the 3s refresh,
+  // and event-nudged refreshes. The scanner and transcript reader keep mutable
+  // cursors/caches, so two overlapping passes corrupt offsets (both advance the
+  // same cursor) and duplicate cached transcript records. Overlapping callers
+  // share the in-flight pass; a queued re-run follows for the latecomer.
+  const applySessionSources = queuedSingleFlight(async () => {
     const beforeRevision = state.revision;
     const local = await readLocalProjection();
     const merged = mergeMonitorSessions(gatewaySessions, local.sessions);
@@ -203,7 +208,7 @@ async function main() {
     const removedSessionIds = state.setSessions(merged);
     state.setExternalEvents(events);
     return { removedSessionIds, changed: state.revision !== beforeRevision };
-  }
+  });
 
   async function refreshGatewayInfo() {
     try {
@@ -260,7 +265,11 @@ async function main() {
         sessions: [...state.sessions.values()],
         removedSessionIds
       });
-    })();
+    })().catch((error) => {
+      // Local scanning is a nicety; a fault here must never take the Gateway
+      // view down. Without this catch an unhandled rejection kills the process.
+      console.error(`Local session refresh failed: ${error.message}`);
+    });
   }, 1_000);
   localInterval.unref();
 
@@ -576,7 +585,10 @@ async function readLocalProjection() {
   const sessions = await collectLocalSessions();
   if (!sessions.length) return { sessions: [], events: {} };
   try {
-    return localTranscripts.enrich(projectLocalSnapshot({ sessions }));
+    // `return await`, not `return`: without the await the promise leaves this
+    // function unresolved and a rejection bypasses this catch entirely,
+    // surfacing as an unhandled rejection that kills the whole sidecar.
+    return await localTranscripts.enrich(projectLocalSnapshot({ sessions }));
   } catch (error) {
     console.error(`Local session projection ignored: ${error.message}`);
     return { sessions: [], events: {} };

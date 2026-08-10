@@ -61,10 +61,14 @@ export class ArtifactStore {
     for (const entry of safeEntries(this.root)) {
       if (!entry.isFile() || !entry.name.startsWith(ARTIFACT_PREFIX)) continue;
       const path = join(this.root, entry.name);
-      // The count rule overrides a live reference: once a session falls out of
-      // the most-recent window its artifacts go, however recently written.
+      // A live reference always wins, count rule included. Deleting a file a
+      // session record still points at (resultFinalArtifact, event data) would
+      // hand callers a path that ENOENTs with nothing marking it as pruned.
+      // The count rule therefore only accelerates removal of UNREFERENCED
+      // artifacts once their session falls out of the most-recent window;
+      // referenced ones follow their session's own retention.
+      if (keepPaths?.has(path)) continue;
       const beyondSessionLimit = keepSessionIds != null && !belongsToSession(entry.name, keepSessionIds);
-      if (!beyondSessionLimit && keepPaths?.has(path)) continue;
       let info;
       try {
         info = statSync(path);

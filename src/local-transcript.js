@@ -65,9 +65,12 @@ export class LocalTranscriptReader {
       return [];
     }
     let cached = this.files.get(path);
-    if (cached && cached.size === metadata.size) return cached.records;
-    if (!cached || metadata.size < cached.size) {
-      cached = { size: Math.max(0, metadata.size - this.initialTailBytes), remainder: "", records: [] };
+    // Same size AND same mtime means unchanged. Size alone misses an atomic
+    // replace with same-sized content, which would then never be re-read.
+    if (cached && cached.size === metadata.size && cached.mtimeMs === metadata.mtimeMs) return cached.records;
+    if (!cached || metadata.size < cached.size
+      || (metadata.size === cached.size && cached.mtimeMs !== metadata.mtimeMs)) {
+      cached = { size: Math.max(0, metadata.size - this.initialTailBytes), mtimeMs: 0, remainder: "", records: [] };
     }
     const start = cached.size;
     const length = Math.max(0, metadata.size - start);
@@ -94,6 +97,7 @@ export class LocalTranscriptReader {
       const cutoff = Date.now() - this.historyMs;
       cached.records = cached.records.filter((record) => Date.parse(record.timestamp ?? "") >= cutoff);
       cached.size = metadata.size;
+      cached.mtimeMs = metadata.mtimeMs;
       this.files.set(path, cached);
       return cached.records;
     } finally {
