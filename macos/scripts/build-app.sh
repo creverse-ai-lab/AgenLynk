@@ -117,6 +117,23 @@ if [ -n "$NODE_DIST" ]; then
     exit 1
   fi
   cp -R "$NODE_DIST" "$CONTENTS/Resources/runtime/node"
+
+  # Drop the parts of the official distribution the shipped runtime never
+  # executes. include/node is 62MB of C++ headers for compiling native addons;
+  # node-gyp downloads its own headers into ~/.node-gyp and never reads these.
+  # corepack is the yarn/pnpm shim, and Lynk only ever runs npm/npx. Together
+  # with the docs this is ~64MB of payload that also has to be hashed into the
+  # runtime manifest on every launch. bin/node, bin/npm, and bin/npx (verified
+  # above) and lib/node_modules/npm all stay.
+  for UNUSED in include lib/node_modules/corepack bin/corepack share CHANGELOG.md README.md; do
+    rm -rf "$CONTENTS/Resources/runtime/node/$UNUSED"
+  done
+  for REQUIRED in bin/node bin/npm bin/npx lib/node_modules/npm; do
+    if [ ! -e "$CONTENTS/Resources/runtime/node/$REQUIRED" ]; then
+      echo "error: trimming the bundled Node distribution removed $REQUIRED" >&2
+      exit 1
+    fi
+  done
 fi
 
 # Bundle production dependencies. Reuse the checkout's installed node_modules

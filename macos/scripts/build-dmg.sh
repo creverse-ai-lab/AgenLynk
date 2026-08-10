@@ -45,7 +45,11 @@ mkdir -p "$STAGING"
 cp -R "$APP" "$STAGING/Lynk.app"
 ln -s /Applications "$STAGING/Applications"
 
-hdiutil create -volname Lynk -srcfolder "$STAGING" -ov -format UDZO "$DMG"
+# ULMO (LZMA) rather than the conventional UDZO (zlib): the payload is
+# dominated by a 245MB agent binary and a 107MB Node binary, and LZMA takes the
+# image from ~158MB to ~109MB. It costs about a minute of build time and needs
+# macOS 10.15+ to mount, which is far below the app's own 14.0 minimum.
+hdiutil create -volname Lynk -srcfolder "$STAGING" -ov -format ULMO "$DMG"
 cleanup
 
 if [ "${ACP_LYNK_NOTARIZE:-0}" = "1" ]; then
