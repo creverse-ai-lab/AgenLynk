@@ -1141,13 +1141,65 @@ struct RetentionPreview: Equatable, Sendable {
     }
 }
 
+/// Display scale the Gateway advertises for a millisecond setting. Storage,
+/// validation, and the wire format stay in milliseconds — this only decides
+/// what number the editor shows, so "7" can stand in for 604800000.
+enum GatewayDisplayUnit: String, Equatable, Sendable {
+    case days
+    case hours
+    case minutes
+    case seconds
+
+    var millisecondFactor: Int {
+        switch self {
+        case .days: 24 * 60 * 60 * 1_000
+        case .hours: 60 * 60 * 1_000
+        case .minutes: 60 * 1_000
+        case .seconds: 1_000
+        }
+    }
+
+    var suffix: String {
+        switch self {
+        case .days: "일"
+        case .hours: "시간"
+        case .minutes: "분"
+        case .seconds: "초"
+        }
+    }
+}
+
+/// One value's presentation: divide the stored number by `factor` to show it,
+/// multiply back to store it. `factor == 1` means the stored number is shown
+/// as-is, which is also the exact fallback for values that do not divide
+/// evenly into their display unit.
+struct GatewayValueScale: Equatable, Sendable {
+    let factor: Int
+    let suffix: String
+
+    var isScaled: Bool { factor > 1 }
+
+    func display(_ stored: Int) -> Int { factor > 1 ? stored / factor : stored }
+
+    /// Saturates instead of trapping: a user can type an absurd number of days
+    /// into a text field, and that must not crash the settings window.
+    func stored(_ display: Int) -> Int {
+        guard factor > 1 else { return display }
+        let (product, overflow) = display.multipliedReportingOverflow(by: factor)
+        return overflow ? (display < 0 ? Int.min : Int.max) : product
+    }
+}
+
 struct GatewayConfigOption: Identifiable, Equatable, Sendable {
     let id: String
     let group: String
     let type: String
     let label: String
+    let labelKo: String
     let description: String
+    let descriptionKo: String
     let unit: String?
+    let displayUnit: GatewayDisplayUnit?
     let minimum: Int?
     let defaultValue: JSONValue
     let currentValue: JSONValue
@@ -1168,8 +1220,11 @@ struct GatewayConfigOption: Identifiable, Equatable, Sendable {
         self.group = group
         self.type = type
         label = object.string("label") ?? id
+        labelKo = object.string("labelKo") ?? label
         description = object.string("description") ?? ""
+        descriptionKo = object.string("descriptionKo") ?? description
         unit = object.string("unit")
+        displayUnit = object.string("displayUnit").flatMap(GatewayDisplayUnit.init(rawValue:))
         minimum = object.int("minimum")
         defaultValue = object["defaultValue"] ?? .null
         currentValue = object["currentValue"] ?? .null
@@ -1180,6 +1235,19 @@ struct GatewayConfigOption: Identifiable, Equatable, Sendable {
         editable = object.bool("editable") ?? false
         requiresRestart = object.bool("requiresRestart") ?? true
         pending = object.bool("pending") ?? false
+    }
+
+    /// The scale to edit one concrete stored value in. A millisecond setting
+    /// only uses its display unit when the value divides evenly, so every
+    /// display → stored round-trip is exact; anything else (a legacy stored
+    /// number, an environment override, a value clamped to a minimum that is
+    /// not a whole unit) falls back to raw milliseconds rather than being
+    /// rounded into a different value.
+    func valueScale(for storedValue: Int) -> GatewayValueScale {
+        guard let displayUnit, storedValue % displayUnit.millisecondFactor == 0 else {
+            return GatewayValueScale(factor: 1, suffix: unit ?? "")
+        }
+        return GatewayValueScale(factor: displayUnit.millisecondFactor, suffix: displayUnit.suffix)
     }
 }
 

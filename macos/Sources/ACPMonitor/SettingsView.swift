@@ -375,17 +375,18 @@ private struct GatewayRuntimeConfigRow: View {
     let onReset: (() -> Void)?
     let resetDisabled: Bool
 
-    /// Millisecond settings a person naturally thinks about in days. The wire
-    /// format stays milliseconds; only the editor changes.
-    private static let dayScaledIds: Set<String> = ["sessionRetentionMs"]
-    private static let millisecondsPerDay = 24 * 60 * 60 * 1_000
+    /// The scale this row is currently edited in, decided by the Gateway's
+    /// `displayUnit` and by whether the present value divides evenly into it.
+    /// 604800000 ms means nothing to a reader; "7 일" does.
+    private var scale: GatewayValueScale { option.valueScale(for: numberValue) }
 
-    /// Rounds up so a sub-day value can never display as "0 days" and then be
-    /// saved back as zero retention.
-    private var dayBinding: Binding<Int> {
+    /// Edits happen in display units and are converted straight back to stored
+    /// milliseconds. The result is clamped to the Gateway's own minimum so a
+    /// scaled editor can never submit a value the server would reject.
+    private var scaledBinding: Binding<Int> {
         Binding(
-            get: { max(1, Int((Double(numberValue) / Double(Self.millisecondsPerDay)).rounded(.up))) },
-            set: { numberValue = max(1, $0) * Self.millisecondsPerDay }
+            get: { scale.display(numberValue) },
+            set: { numberValue = max(option.minimum ?? 0, scale.stored($0)) }
         )
     }
 
@@ -393,14 +394,23 @@ private struct GatewayRuntimeConfigRow: View {
         HStack(alignment: .center, spacing: 14) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    Text(option.label).font(.callout.weight(.medium))
+                    Text(option.labelKo).font(.callout.weight(.medium))
+                    // English stays visible as the secondary line: the setting
+                    // ids, environment variables, and docs are all English, so
+                    // the Korean text must not be the only way to find them.
+                    if option.label != option.labelKo {
+                        Text(option.label).font(.caption).foregroundStyle(.secondary)
+                    }
                     sourceBadge
                     if option.pending {
                         Text(option.requiresRestart ? "재시작 대기" : "적용 대기")
                             .font(.caption2).foregroundStyle(.orange)
                     }
                 }
-                Text(option.description).font(.caption).foregroundStyle(.secondary)
+                Text(option.descriptionKo).font(.caption).foregroundStyle(.secondary)
+                if option.description != option.descriptionKo {
+                    Text(option.description).font(.caption2).foregroundStyle(.tertiary)
+                }
                 if !option.editable {
                     Text("\(option.environment)에서 고정됨")
                         .font(.caption2.monospaced()).foregroundStyle(.orange)
@@ -428,22 +438,17 @@ private struct GatewayRuntimeConfigRow: View {
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .disabled(!option.editable)
-        case "number" where Self.dayScaledIds.contains(option.id):
-            // 604800000 ms means nothing to a reader; the value this one
-            // setting expresses is "how many days of history to keep".
-            TextField("값", value: dayBinding, format: .number.grouping(.never))
-                .textFieldStyle(.roundedBorder)
-                .multilineTextAlignment(.trailing)
-                .frame(width: 145)
-                .disabled(!option.editable)
-            Text("일").font(.caption).foregroundStyle(.secondary).frame(width: 42, alignment: .leading)
         case "number":
-            TextField("값", value: $numberValue, format: .number.grouping(.never))
+            TextField("값", value: scaledBinding, format: .number.grouping(.never))
                 .textFieldStyle(.roundedBorder)
                 .multilineTextAlignment(.trailing)
                 .frame(width: 145)
                 .disabled(!option.editable)
-            Text(option.unit ?? "").font(.caption.monospaced()).foregroundStyle(.secondary).frame(width: 42, alignment: .leading)
+                .help(scale.isScaled ? "저장은 \(numberValue) ms로 이루어집니다" : "")
+            Text(scale.suffix)
+                .font(scale.isScaled ? .caption : .caption.monospaced())
+                .foregroundStyle(.secondary)
+                .frame(width: 42, alignment: .leading)
         default:
             Text("지원되지 않는 설정 형식 (\(option.type))")
                 .font(.caption).foregroundStyle(.secondary)

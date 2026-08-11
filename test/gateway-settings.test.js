@@ -35,6 +35,44 @@ test("Gateway settings expose every safe runtime option without secrets", async 
   }
 });
 
+test("Gateway settings describe every option in both languages and in human-scale time units", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-gateway-settings-i18n-"));
+  const statePath = join(directory, "install.json");
+  // Only these display scales exist; a client divides stored milliseconds by
+  // the factor to show a value and multiplies back when the user edits it.
+  const scales = { days: 86_400_000, hours: 3_600_000, minutes: 60_000, seconds: 1_000 };
+  try {
+    await writeFile(statePath, JSON.stringify({ version: 1, managedMcp: {}, agentUpdates: { autoUpdate: true, notifications: true } }));
+    const snapshot = gatewaySettingsSnapshot({ statePath, env: {} });
+    for (const option of snapshot.options) {
+      assert.ok(option.labelKo && option.labelKo !== option.label, `${option.id} needs a Korean label`);
+      assert.ok(option.descriptionKo && option.descriptionKo !== option.description, `${option.id} needs a Korean description`);
+      assert.match(option.labelKo + option.descriptionKo, /[가-힣]/, `${option.id} Korean text must actually be Korean`);
+      assert.ok(option.label && option.description, `${option.id} must keep its English text`);
+      if (option.unit !== "ms") {
+        assert.equal(option.displayUnit, null, `${option.id} is not a duration and must not carry a display unit`);
+        continue;
+      }
+      const factor = scales[option.displayUnit];
+      assert.ok(factor, `${option.id} must pick a display unit instead of raw milliseconds`);
+      // The point of the unit is readability: the default has to land on a
+      // whole, small number rather than a six-digit millisecond count.
+      assert.equal(option.defaultValue % factor, 0, `${option.id} default must be a whole ${option.displayUnit}`);
+      assert.ok(option.defaultValue / factor <= 100, `${option.id} default is still too large in ${option.displayUnit}`);
+    }
+    assert.deepEqual(
+      snapshot.options.map((option) => [option.labelKo, option.descriptionKo, option.displayUnit]),
+      GATEWAY_SETTING_DEFINITIONS.map((definition) => [definition.labelKo, definition.descriptionKo, definition.displayUnit]),
+      "snapshot must pass definition text and display units through untouched"
+    );
+    // Display units are presentation only: stored and effective values stay ms.
+    assert.equal(snapshot.options.find((item) => item.id === "sessionRetentionMs").currentValue, 604_800_000);
+    assert.equal(snapshot.options.find((item) => item.id === "sessionRetentionMs").unit, "ms");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Gateway settings persist atomically, preserve install identity, and reset to defaults", async () => {
   const directory = await mkdtemp(join(tmpdir(), "acp-gateway-settings-persist-"));
   const statePath = join(directory, "install.json");

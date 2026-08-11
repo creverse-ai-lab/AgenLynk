@@ -15,6 +15,8 @@ enum MonitorModelChecks {
         try agentCatalogDecodesInstallAndEnabledState()
         try gatewayConfigDecodesAllControlMetadata()
         try gatewayConfigRepresentsAllKnownSettingIds()
+        try gatewayConfigDecodesBothLanguagesAndFallsBackToEnglish()
+        try gatewayDisplayUnitsRoundTripExactlyAndFallBackToMilliseconds()
         try retentionPreviewDecodesCountsAndSummarisesOnlyNonZeroOnes()
         try runtimeInspectionAndOperationEnvelopesDecode()
         try sessionConfigDecodesSelectBooleanAndFlattensNestedChoices()
@@ -607,11 +609,16 @@ enum MonitorModelChecks {
     }
 
     private static func gatewayConfigRepresentsAllKnownSettingIds() throws {
+        // Mirrors GATEWAY_SETTING_DEFINITIONS in src/gateway-settings.js. When a
+        // setting is added there, add it here too — this is what proves the
+        // Swift decode path accepts the whole catalogue.
         let lifecycleIds = ["gcIntervalMs", "idleUnloadMs", "orphanGraceMs", "resultRetentionMs", "inboxRetentionMs", "sessionRetentionMs"]
         let resourceLimitIds = ["maxEvents", "maxTextBytes", "maxInlineResultBytes", "maxArtifactBytes", "maxArtifactTotalBytes", "artifactSessionLimit", "maxTerminalsPerSession", "maxPendingRequestsPerSession", "maxFrameBytes"]
+        let workerIds = ["workerThoughtStream", "workerSubagentTranscript"]
+        let monitorIds = ["localScannerEnabled", "localScanIntervalMs", "localDiscoveryIntervalMs", "localTranscriptWindowMs", "localTranscriptRecordLimit"]
         let agentUpdateIds = ["agentAutoUpdate", "agentUpdateNotifications", "agentUpdateIntervalMs"]
-        let allIds = lifecycleIds + resourceLimitIds + agentUpdateIds
-        try check(allIds.count == 18, "fixture must cover exactly the 18 known Gateway setting ids")
+        let allIds = lifecycleIds + resourceLimitIds + workerIds + monitorIds + agentUpdateIds
+        try check(allIds.count == 25, "fixture must cover exactly the 25 known Gateway setting ids")
 
         func option(_ id: String, group: String, type: String) -> [String: JSONValue] {
             [
@@ -625,16 +632,92 @@ enum MonitorModelChecks {
         }
         let options: [JSONValue] = lifecycleIds.map { .object(option($0, group: "lifecycle", type: "number")) }
             + resourceLimitIds.map { .object(option($0, group: "resourceLimits", type: "number")) }
+            + workerIds.map { .object(option($0, group: "workers", type: "boolean")) }
+            + monitorIds.map { .object(option($0, group: "monitor", type: $0 == "localScannerEnabled" ? "boolean" : "number")) }
             + agentUpdateIds.map { .object(option($0, group: "agentUpdates", type: $0 == "agentUpdateIntervalMs" ? "number" : "boolean")) }
         let root = JSONValue.object(["ok": .bool(true), "pendingRestart": .bool(false), "pendingLiveApply": .bool(false), "options": .array(options)])
         let data = try JSONSerialization.data(withJSONObject: root.foundationValue)
         let snapshot = try GatewayConfigSnapshot.decode(data)
-        try check(snapshot.options.count == 18, "all 18 Gateway setting ids must decode")
+        try check(snapshot.options.count == 25, "all 25 Gateway setting ids must decode")
         try check(Set(snapshot.options.map(\.id)) == Set(allIds), "decoded ids must match every known Gateway setting id")
     }
 
     /// The confirmation prompt is only trustworthy if a failed or empty
     /// preview cannot be mistaken for "nothing will be deleted".
+    private static func gatewayConfigDecodesBothLanguagesAndFallsBackToEnglish() throws {
+        let data = Data(#"""
+        {
+          "ok":true,
+          "pendingRestart":false,
+          "pendingLiveApply":false,
+          "options":[
+            {"id":"sessionRetentionMs","group":"lifecycle","type":"number","label":"Session retention","labelKo":"세션 보존 기간","description":"How long completed session records are retained.","descriptionKo":"완료된 세션 기록을 보관하는 기간입니다.","unit":"ms","displayUnit":"days","minimum":0,"defaultValue":604800000,"currentValue":604800000,"configuredValue":604800000,"source":"default","environment":"ACP_GATEWAY_SESSION_RETENTION_MS","editable":true,"requiresRestart":true,"pending":false},
+            {"id":"maxEvents","group":"resourceLimits","type":"number","label":"Events per session","labelKo":"세션당 이벤트 수","description":"limit","descriptionKo":"제한","unit":"count","displayUnit":null,"minimum":1,"defaultValue":200,"currentValue":200,"configuredValue":200,"source":"default","environment":"ACP_GATEWAY_MAX_EVENTS","editable":true,"requiresRestart":true,"pending":false},
+            {"id":"futureSetting","group":"lifecycle","type":"number","label":"Future setting","description":"only English","unit":"ms","displayUnit":"fortnights","minimum":0,"defaultValue":1,"currentValue":1,"configuredValue":1,"source":"default","environment":"ACP_GATEWAY_FUTURE","editable":true,"requiresRestart":true,"pending":false}
+          ]
+        }
+        """#.utf8)
+        let options = try GatewayConfigSnapshot.decode(data).options
+        try check(options[0].labelKo == "세션 보존 기간", "Korean label decode failed")
+        try check(options[0].descriptionKo == "완료된 세션 기록을 보관하는 기간입니다.", "Korean description decode failed")
+        try check(options[0].label == "Session retention", "English label must survive alongside Korean")
+        try check(options[0].displayUnit == .days, "display unit decode failed")
+        try check(options[1].displayUnit == nil, "a non-duration setting must have no display unit")
+        // An older Gateway (or a setting added before its translation) must
+        // degrade to English instead of showing an empty row.
+        try check(options[2].labelKo == "Future setting", "missing Korean label must fall back to English")
+        try check(options[2].descriptionKo == "only English", "missing Korean description must fall back to English")
+        // An unknown unit is presentation metadata this build cannot honour;
+        // milliseconds are always a correct way to show the value.
+        try check(options[2].displayUnit == nil, "unknown display unit must not be guessed at")
+    }
+
+    private static func gatewayDisplayUnitsRoundTripExactlyAndFallBackToMilliseconds() throws {
+        func option(_ id: String, unit: String, displayUnit: String?, minimum: Int) throws -> GatewayConfigOption {
+            var fields: [String: JSONValue] = [
+                "id": .string(id), "group": .string("lifecycle"), "type": .string("number"),
+                "label": .string(id), "description": .string(""), "unit": .string(unit),
+                "minimum": .number(Double(minimum)), "defaultValue": .number(0), "currentValue": .number(0),
+                "source": .string("default"), "environment": .string("ACP_TEST"),
+                "editable": .bool(true), "requiresRestart": .bool(true), "pending": .bool(false)
+            ]
+            if let displayUnit { fields["displayUnit"] = .string(displayUnit) }
+            guard let decoded = GatewayConfigOption(.object(fields)) else {
+                throw MonitorDecodeError.invalidMessage
+            }
+            return decoded
+        }
+
+        let retention = try option("sessionRetentionMs", unit: "ms", displayUnit: "days", minimum: 0)
+        let week = retention.valueScale(for: 604_800_000)
+        try check(week.display(604_800_000) == 7, "7 days must display as 7")
+        try check(week.stored(7) == 604_800_000, "7 days must store back as 604800000 ms")
+        try check(week.suffix == "일", "scaled rows must label the display unit, not milliseconds")
+
+        let scan = try option("localScanIntervalMs", unit: "ms", displayUnit: "seconds", minimum: 250)
+        let second = scan.valueScale(for: 1_000)
+        try check(second.display(1_000) == 1 && second.stored(1) == 1_000, "1s ↔ 1000ms round-trip failed")
+
+        // Values that do not divide evenly are shown exactly as stored rather
+        // than rounded into a different setting.
+        let uneven = retention.valueScale(for: 90_000_000)
+        try check(!uneven.isScaled && uneven.suffix == "ms", "an uneven value must fall back to milliseconds")
+        try check(uneven.display(90_000_000) == 90_000_000, "millisecond fallback must not scale the value")
+        try check(uneven.stored(90_000_000) == 90_000_000, "millisecond fallback must round-trip untouched")
+        try check(!scan.valueScale(for: 250).isScaled, "a sub-unit minimum must fall back to milliseconds")
+
+        // Zero divides evenly, and "0 minutes" is exactly what disabling means.
+        try check(retention.valueScale(for: 0).display(0) == 0, "zero must stay zero in display units")
+
+        let counted = try option("maxEvents", unit: "count", displayUnit: nil, minimum: 1)
+        let plain = counted.valueScale(for: 200)
+        try check(!plain.isScaled && plain.suffix == "count", "non-duration settings keep their own unit")
+        try check(plain.display(200) == 200 && plain.stored(200) == 200, "non-duration settings must not be scaled")
+
+        // A typed-in absurd number must saturate, not trap on overflow.
+        try check(week.stored(Int.max) == Int.max, "overflowing display values must saturate")
+    }
+
     private static func retentionPreviewDecodesCountsAndSummarisesOnlyNonZeroOnes() throws {
         let data = Data(#"{"ok":true,"sessions":3,"tasks":0,"inbox":2,"artifacts":11}"#.utf8)
         let preview = try RetentionPreview.decode(data)
