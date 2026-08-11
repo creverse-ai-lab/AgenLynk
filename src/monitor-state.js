@@ -92,15 +92,18 @@ export class MonitorState {
     return true;
   }
 
+  // Returns the sessionIds whose bucket actually changed (an emptied/dropped
+  // bucket included), so a caller can stream just those buckets instead of
+  // re-sending every local transcript on each scan.
   setExternalEvents(groups = {}) {
     const nextIds = new Set(Object.keys(groups));
-    let changed = false;
+    const changedSessionIds = [];
     for (const sessionId of this.externalEventSessionIds) {
       if (nextIds.has(sessionId)) continue;
       this.eventsBySession.delete(sessionId);
       this.eventSequencesBySession.delete(sessionId);
       this.externalEventSignatures.delete(sessionId);
-      changed = true;
+      changedSessionIds.push(sessionId);
     }
     for (const [sessionId, values] of Object.entries(groups)) {
       const events = (Array.isArray(values) ? values : []).slice(-this.maxEventsPerSession);
@@ -112,11 +115,11 @@ export class MonitorState {
         events.map((event) => event.sequence).filter(Number.isFinite)
       ));
       this.externalEventSignatures.set(sessionId, signature);
-      changed = true;
+      changedSessionIds.push(sessionId);
     }
     this.externalEventSessionIds = nextIds;
-    if (changed) this.revision += 1;
-    return changed;
+    if (changedSessionIds.length) this.revision += 1;
+    return changedSessionIds;
   }
 
   snapshot() {

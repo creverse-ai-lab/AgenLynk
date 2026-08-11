@@ -845,6 +845,33 @@ final class AppModel: ObservableObject {
             for sessionId in (message.array("removedSessionIds") ?? []).compactMap(\.stringValue) {
                 if eventsBySession.removeValue(forKey: sessionId) != nil { logCacheChanged = true }
             }
+            // Local (non-Gateway) sessions never produce "event" messages; the
+            // monitor ships their rewritten buckets here instead. Replace whole
+            // buckets rather than appending — the local scanner re-projects a
+            // turn in place, so appending would duplicate every edited turn.
+            if let buckets = message.object("events") {
+                var eventsChanged = false
+                for (sessionId, value) in buckets {
+                    let nextEvents = (value.arrayValue ?? []).compactMap(MonitorEvent.init)
+                    if nextEvents.isEmpty {
+                        // An emptied bucket means the transcript window dropped
+                        // it; /api/snapshot omits the key entirely, so mirror
+                        // that instead of leaving an empty one behind to churn
+                        // the next reconciliation's comparison.
+                        if eventsBySession.removeValue(forKey: sessionId) != nil { eventsChanged = true }
+                        continue
+                    }
+                    if eventsBySession[sessionId] == nextEvents { continue }
+                    eventsBySession[sessionId] = nextEvents
+                    eventsChanged = true
+                }
+                if eventsChanged {
+                    logCacheChanged = true
+                    // Local transcript growth is agent activity, and it is the
+                    // only activity signal a local-only session ever emits.
+                    markHeartbeat(&lastAgentEventAt)
+                }
+            }
             if let values = message.array("tasks") {
                 let nextTasks = values.enumerated().map { MonitorRecord($0.element, fallbackKind: "task", index: $0.offset) }
                 if tasks != nextTasks { tasks = nextTasks }

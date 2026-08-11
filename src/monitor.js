@@ -56,6 +56,17 @@ const localScanner = LOCAL_SCANNER_ENABLED ? new LocalAgentScanner({
   maxConversationRecords: monitorSettings.localTranscriptRecordLimit
 }) : null;
 
+// Token accounting is not timeline content, and a session accumulates one of
+// these per turn. Gateway 1.3.2+ already drops them at ingestion, but a
+// long-lived pre-1.3.2 daemon replays hundreds from its persisted sessions on
+// every subscribe — the monitor cannot assume the daemon it connects to runs
+// its own build, so it drops them again here.
+const IGNORED_EVENT_TYPES = new Set(["usage_update"]);
+
+export function isIgnoredMonitorEvent(event) {
+  return IGNORED_EVENT_TYPES.has(event?.type);
+}
+
 function numberEnv(name, fallback, minimum) {
   const raw = process.env[name];
   if (raw == null || raw === "") return fallback;
@@ -133,6 +144,7 @@ async function main() {
       state.broadcast({ kind: "notice", event });
       return;
     }
+    if (isIgnoredMonitorEvent(event)) return;
     if (!state.pushEvent(event)) return;
     state.broadcast({ kind: "event", event });
     if (event.type === "session_closed") {
@@ -166,7 +178,7 @@ async function main() {
         rpc.call("inbox", { action: "list" })
       ]);
       gatewaySessions = sessions.sessions ?? [];
-      const { removedSessionIds } = await applySessionSources();
+      const { removedSessionIds, localEvents } = await applySessionSources();
       state.tasks = tasks.tasks ?? [];
       state.inbox = inbox.items ?? [];
       state.connected = true;
@@ -179,12 +191,13 @@ async function main() {
           streaming: state.streaming,
           sessions: [...state.sessions.values()],
           removedSessionIds,
+          ...(localEvents ? { events: localEvents } : {}),
           tasks: state.tasks,
           inbox: state.inbox
         });
       }
     } catch (error) {
-      const { removedSessionIds } = await applySessionSources();
+      const { removedSessionIds, localEvents } = await applySessionSources();
       state.connected = false;
       state.lastError = error?.message ?? String(error);
       state.broadcast({
@@ -193,7 +206,8 @@ async function main() {
         streaming: state.streaming,
         error: state.lastError,
         sessions: [...state.sessions.values()],
-        removedSessionIds
+        removedSessionIds,
+        ...(localEvents ? { events: localEvents } : {})
       });
     }
   }
@@ -211,8 +225,17 @@ async function main() {
     const acceptedLocalIds = new Set(merged.filter((session) => session.source === "local").map((session) => session.sessionId));
     const events = Object.fromEntries(Object.entries(local.events).filter(([sessionId]) => acceptedLocalIds.has(sessionId)));
     const removedSessionIds = state.setSessions(merged);
-    state.setExternalEvents(events);
-    return { removedSessionIds, changed: state.revision !== beforeRevision };
+    const changedEventSessionIds = state.setExternalEvents(events);
+    // Local transcripts have no per-event push channel: the scanner only
+    // rewrites whole buckets here, so a state broadcast has to carry them or
+    // the app keeps whatever /api/snapshot returned when its stream connected.
+    // Captured inside the single-flight pass so the payload is the bucket that
+    // the change detection above actually saw.
+    const localEvents = changedEventSessionIds.length
+      ? Object.fromEntries(changedEventSessionIds
+        .map((sessionId) => [sessionId, state.eventsBySession.get(sessionId) ?? []]))
+      : null;
+    return { removedSessionIds, changed: state.revision !== beforeRevision, localEvents };
   });
 
   async function refreshGatewayInfo() {
@@ -232,7 +255,10 @@ async function main() {
         const subscription = await rpc.subscribe({ includeThoughts: true, includeToolEvents: true }, onEvent);
         gatewaySessions = subscription.sessions ?? [];
         await applySessionSources();
-        for (const event of subscription.events ?? []) state.pushEvent(event);
+        for (const event of subscription.events ?? []) {
+          if (isIgnoredMonitorEvent(event)) continue;
+          state.pushEvent(event);
+        }
         subscriptionActive = true;
         state.connected = true;
         state.streaming = true;
@@ -299,14 +325,15 @@ async function main() {
   interval.unref();
   const localInterval = setInterval(() => {
     void (async () => {
-      const { removedSessionIds, changed } = await applySessionSources();
+      const { removedSessionIds, changed, localEvents } = await applySessionSources();
       if (!changed) return;
       state.broadcast({
         kind: "state",
         connected: state.connected,
         streaming: state.streaming,
         sessions: [...state.sessions.values()],
-        removedSessionIds
+        removedSessionIds,
+        ...(localEvents ? { events: localEvents } : {})
       });
     })().catch((error) => {
       // Local scanning is a nicety; a fault here must never take the Gateway
