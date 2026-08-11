@@ -169,7 +169,8 @@ struct DashboardView: View {
             Divider()
             SequenceSelectionContext(
                 frontdoor: model.selectedFrontdoor,
-                session: model.selectedSession
+                session: model.selectedSession,
+                activity: model.selectedSession.map { sessionActivity(for: $0) }
             )
             Divider()
             EventSequenceView(
@@ -179,6 +180,52 @@ struct DashboardView: View {
                 selectedEventId: $model.selectedEventId,
                 followLatestEvent: $settings.followLatestEvent
             )
+        }
+    }
+
+    /// What the clicked agent is doing right now, read from the newest event
+    /// of its session — the selection context leads with this instead of a bare
+    /// status word, because "무엇을 하는 중인가" is the question the top strip is
+    /// there to answer.
+    private func sessionActivity(for session: GatewaySession) -> SessionActivity {
+        let events = model.eventsBySession[session.sessionId] ?? []
+        let latest = events.max(by: withinSessionEventOrder)
+        let detail: String? = {
+            guard let latest else { return session.title }
+            if let merged = mergedChunkBody(for: latest, in: events) { return merged.text }
+            if let body = latest.bodyText { return body }
+            let summary = latest.summary
+            return summary.isEmpty ? session.title : summary
+        }()
+        let type = latest?.type ?? ""
+
+        switch session.status {
+        case "waiting_permission":
+            return SessionActivity(symbol: "hand.raised.fill", color: .orange, headline: "권한 요청 대기 중", detail: detail)
+        case "waiting_input":
+            return SessionActivity(symbol: "keyboard", color: .orange, headline: "사용자 입력 대기 중", detail: detail)
+        default:
+            break
+        }
+        if session.isActive {
+            if type.hasPrefix("tool_call") {
+                return SessionActivity(symbol: "wrench.and.screwdriver.fill", color: .cyan, headline: "도구 실행 중", detail: detail)
+            }
+            if type == "agent_thought_chunk" {
+                return SessionActivity(symbol: "brain.head.profile", color: .purple, headline: "사고 중", detail: detail)
+            }
+            if type == "agent_message_chunk" {
+                return SessionActivity(symbol: "text.bubble.fill", color: .blue, headline: "답변 생성 중", detail: detail)
+            }
+            return SessionActivity(symbol: "bolt.fill", color: .green, headline: "작업 진행 중", detail: detail)
+        }
+        switch session.status {
+        case "ready", "idle", "end_turn", "completed", "closed":
+            return SessionActivity(symbol: "checkmark.circle.fill", color: .green, headline: "최근 작업 완료", detail: detail)
+        case "error":
+            return SessionActivity(symbol: "exclamationmark.triangle.fill", color: .red, headline: "오류로 중단됨", detail: detail)
+        default:
+            return SessionActivity(symbol: "pause.circle", color: .secondary, headline: session.status, detail: detail)
         }
     }
 
@@ -253,9 +300,17 @@ struct DashboardView: View {
     }
 }
 
+struct SessionActivity {
+    let symbol: String
+    let color: Color
+    let headline: String
+    let detail: String?
+}
+
 private struct SequenceSelectionContext: View {
     let frontdoor: FrontdoorSession?
     let session: GatewaySession?
+    var activity: SessionActivity? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
@@ -287,27 +342,46 @@ private struct SequenceSelectionContext: View {
 
             if let session {
                 VStack(alignment: .leading, spacing: 5) {
-                    Label("선택 세션", systemImage: "rectangle.and.hand.point.up.left")
+                    Label("선택 에이전트", systemImage: "rectangle.and.hand.point.up.left")
                         .font(.caption.weight(.semibold))
+                    // What it is doing now, front and centre — the status word
+                    // is demoted to a small pill next to the identity.
+                    if let activity {
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: activity.symbol)
+                                .foregroundStyle(activity.color)
+                                .font(.callout)
+                                .frame(width: 16)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(activity.headline)
+                                    .font(.callout.weight(.semibold))
+                                    .foregroundStyle(activity.color)
+                                if let detail = activity.detail, !detail.isEmpty {
+                                    Text(detail)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                        }
+                    }
                     HStack(spacing: 6) {
                         ContextPill(text: session.sourceLabel, color: session.isLocalSource ? .purple : .blue)
                         ContextPill(text: session.isFrontdoorRecord ? "Frontdoor" : "Worker", color: .secondary)
-                        ContextPill(text: session.status, color: session.isActive ? .green : .secondary)
+                        Text("\(session.provider.capitalized) · \(session.model ?? "default")")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .lineLimit(1)
                     }
-                    Text("\(session.provider.capitalized) · \(session.model ?? "default")")
-                        .font(.caption.weight(.medium))
-                        .textSelection(.enabled)
-                    Text(session.cwd.isEmpty ? session.sessionId : session.cwd)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .lineLimit(1)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             if frontdoor == nil, session == nil {
-                Label("왼쪽 Frontdoor 또는 시퀀스 세션 헤더를 선택하세요", systemImage: "cursorarrow.click")
+                Label("왼쪽 Frontdoor 또는 시퀀스 에이전트를 선택하면 지금 무엇을 하는지 표시됩니다", systemImage: "cursorarrow.click")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
