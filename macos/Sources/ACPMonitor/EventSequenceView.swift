@@ -332,7 +332,9 @@ private func collapseSequenceEvents(_ events: [MonitorEvent]) -> [SequenceEventE
     var result: [SequenceEventEntry] = []
     result.reserveCapacity(events.count)
     for event in events {
-        if event.type == "agent_message_chunk",
+        // Thought chunks stream in runs exactly like message chunks now that
+        // delegated workers request thinking output.
+        if event.type == "agent_message_chunk" || event.type == "agent_thought_chunk",
            let last = result.last,
            last.event.type == event.type,
            last.event.sessionId == event.sessionId,

@@ -13,13 +13,25 @@ struct SessionDetailView: View {
                 sessionConfigPanel(session)
                 Divider()
                 HSplitView {
-                    List(events, selection: $selectedEventId) { event in
-                        EventRow(event: event, session: session).tag(event.id)
+                    // A streamed response is dozens of chunk events; one row
+                    // per fragment reads as noise ("안", "녕", …). Runs collapse
+                    // into one row that previews the merged message — the same
+                    // collapsing the dashboard's sequence diagram applies.
+                    List(collapsedEvents, id: \.event.id, selection: $selectedEventId) { entry in
+                        EventRow(
+                            event: entry.event,
+                            session: session,
+                            collapsedCount: entry.count,
+                            summaryOverride: entry.count > 1
+                                ? mergedChunkBody(for: entry.event, in: events)?.text
+                                : nil
+                        )
+                        .tag(entry.event.id)
                     }
                     .frame(minWidth: 430)
                     ScrollView {
                         if let selectedEvent {
-                            EventBodyView(event: selectedEvent).padding(14)
+                            EventBodyView(event: selectedEvent, siblings: events).padding(14)
                         } else {
                             ContentUnavailableView("이벤트를 선택하세요", systemImage: "doc.text.magnifyingglass")
                         }
@@ -40,6 +52,24 @@ struct SessionDetailView: View {
     private var session: GatewaySession? { model.sessions.first { $0.sessionId == sessionId } }
     private var events: [MonitorEvent] { model.eventsBySession[sessionId ?? ""] ?? [] }
     private var selectedEvent: MonitorEvent? { events.first { $0.id == selectedEventId } }
+
+    /// Consecutive same-turn chunk runs fold into one row, represented by the
+    /// newest fragment (mirrors collapseSequenceEvents in EventSequenceView).
+    private var collapsedEvents: [(event: MonitorEvent, count: Int)] {
+        var result: [(event: MonitorEvent, count: Int)] = []
+        result.reserveCapacity(events.count)
+        for event in events {
+            if event.type == "agent_message_chunk" || event.type == "agent_thought_chunk",
+               let last = result.last,
+               last.event.type == event.type,
+               last.event.turnId == event.turnId {
+                result[result.count - 1] = (event, last.count + 1)
+            } else {
+                result.append((event, 1))
+            }
+        }
+        return result
+    }
 
     private func sessionHeader(_ session: GatewaySession) -> some View {
         HStack(spacing: 14) {
@@ -122,15 +152,25 @@ struct SessionDetailView: View {
 /// dashboard inspector so both explain an event identically.
 struct EventBodyView: View {
     let event: MonitorEvent
+    /// The event's whole session bucket. A streamed response is many chunk
+    /// events, and whichever single one got selected is just a fragment — with
+    /// the bucket in hand the pane can show the message they add up to.
+    var siblings: [MonitorEvent] = []
     /// Narrow inspector columns cut long bodies; a full-width pane scrolls
     /// instead and passes nil.
     var characterLimit: Int?
     var bodyFont: Font = .body
 
     var body: some View {
+        let merged = mergedChunkBody(for: event, in: siblings)
         VStack(alignment: .leading, spacing: 10) {
-            if let body = event.bodyText {
+            if let body = merged?.text ?? event.bodyText {
                 textBlock(body, font: looksLikeCode(body) ? .system(.caption, design: .monospaced) : bodyFont, label: "본문")
+                if let merged {
+                    Text("스트림 조각 \(merged.fragments)개를 합쳐 표시 · 원본 JSON은 선택한 조각의 것")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
                 DisclosureGroup("원본 JSON") {
                     rawPayload.padding(.top, 4)
                 }

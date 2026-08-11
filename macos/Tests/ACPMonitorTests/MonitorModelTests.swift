@@ -36,6 +36,7 @@ enum MonitorModelChecks {
         try eventBodyTextSurfacesReadableTextInsteadOfTheJSONEnvelope()
         try restartBlockersMatchTheSharedGatewayContract()
         try runtimeInspectionSurfacesAPinnedRollback()
+        try mergedChunkBodyRebuildsTheWholeStreamedMessage()
         print("Swift model checks passed")
     }
 
@@ -1036,6 +1037,59 @@ enum MonitorModelChecks {
         try check(pinned.pinnedNotice != nil, "a pinned runtime must explain why updates stopped")
         try check(!unpinned.currentPinned, "an unpinned runtime must not claim to be pinned")
         try check(unpinned.pinnedNotice == nil, "an unpinned runtime must show no pin notice")
+    }
+
+    /// A streamed answer is many chunk events; selecting any single one (the
+    /// sequence diagram's ×N node keeps the *last* fragment) must still show
+    /// the whole message, not its tail.
+    private static func mergedChunkBodyRebuildsTheWholeStreamedMessage() throws {
+        func event(_ fields: [String: JSONValue]) throws -> MonitorEvent {
+            var value = fields
+            value["sessionId"] = .string("s1")
+            value["turnId"] = value["turnId"] ?? .string("t1")
+            value["ts"] = .string("2026-08-07T00:00:00.000Z")
+            guard let event = MonitorEvent(.object(value)) else {
+                throw CheckError.failed("merged chunk fixture creation failed")
+            }
+            return event
+        }
+
+        // Gateway token deltas: joined verbatim, paragraph break at the same
+        // boundaries the gateway's own result logic uses.
+        let bucket = try [
+            event(["sequence": .number(0), "type": .string("turn_start"), "text": .string("인사해")]),
+            event(["sequence": .number(1), "type": .string("agent_message_chunk"), "text": .string("안")]),
+            event(["sequence": .number(2), "type": .string("agent_message_chunk"), "text": .string("녕")]),
+            event(["sequence": .number(3), "type": .string("tool_call"), "text": .string("{}")]),
+            event(["sequence": .number(4), "type": .string("agent_message_chunk"), "text": .string("하세요")])
+        ]
+        guard let merged = mergedChunkBody(for: bucket[2], in: bucket) else {
+            throw CheckError.failed("a multi-fragment stream must merge")
+        }
+        try check(merged.text == "안녕\n\n하세요", "token deltas join verbatim and break at tool boundaries")
+        try check(merged.fragments == 3, "every fragment of the turn counts")
+
+        // Fragments from another turn must not bleed in.
+        let otherTurn = try event(["sequence": .number(9), "type": .string("agent_message_chunk"), "text": .string("다른 턴"), "turnId": .string("t2")])
+        guard let scoped = mergedChunkBody(for: bucket[1], in: bucket + [otherTurn]) else {
+            throw CheckError.failed("turn-scoped merge failed")
+        }
+        try check(!scoped.text.contains("다른 턴"), "merging is scoped to the selected fragment's turn")
+
+        // Local transcript chunks are complete messages: one paragraph each.
+        let localBucket = try [
+            event(["sequence": .number(0), "type": .string("agent_message_chunk"), "source": .string("local-transcript"), "text": .string("첫 메시지")]),
+            event(["sequence": .number(1), "type": .string("agent_message_chunk"), "source": .string("local-transcript"), "text": .string("둘째 메시지")])
+        ]
+        guard let local = mergedChunkBody(for: localBucket[1], in: localBucket) else {
+            throw CheckError.failed("local chunks must merge")
+        }
+        try check(local.text == "첫 메시지\n\n둘째 메시지", "complete local messages must not be smashed together")
+
+        // A lone fragment and a non-chunk event both defer to bodyText.
+        let single = try event(["sequence": .number(0), "type": .string("agent_message_chunk"), "text": .string("혼자")])
+        try check(mergedChunkBody(for: single, in: [single]) == nil, "a lone fragment needs no merging")
+        try check(mergedChunkBody(for: bucket[3], in: bucket) == nil, "non-chunk events never merge")
     }
 
     private static func check(_ condition: @autoclosure () -> Bool, _ message: String) throws {

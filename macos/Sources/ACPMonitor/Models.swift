@@ -732,6 +732,51 @@ private func nonEmptyBody(_ text: String?) -> String? {
     return trimmed
 }
 
+/// The full text a streamed chunk belongs to, rebuilt from its whole turn.
+///
+/// A response arrives as many `agent_message_chunk` fragments, and every
+/// surface that picks one event — the sequence diagram's collapsed ×N node,
+/// follow-latest selection, a list row — lands on a single fragment, so the
+/// pane showed the tail of the answer ("녕") instead of the answer ("안녕").
+///
+/// Joining depends on who produced the chunks: the Gateway streams token
+/// deltas, concatenated verbatim within a run and split into paragraphs at the
+/// same boundaries its own result logic uses (tool/permission/elicitation —
+/// see SEGMENT_BOUNDARY_TYPES in src/gateway-service.js); the local transcript
+/// projector emits one chunk per complete assistant message, so each is its
+/// own paragraph. Returns nil for a lone fragment — `bodyText` already shows
+/// it — and for non-chunk events.
+func mergedChunkBody(for event: MonitorEvent, in siblings: [MonitorEvent]) -> (text: String, fragments: Int)? {
+    guard event.type == "agent_message_chunk" || event.type == "agent_thought_chunk" else { return nil }
+    let boundaries: Set<String> = ["tool_call", "permission_request", "elicitation_request"]
+    let isLocal = event.payload.objectValue?.string("source") == "local-transcript"
+    let turnEvents = siblings
+        .filter { $0.sessionId == event.sessionId && $0.turnId == event.turnId }
+        .sorted(by: withinSessionEventOrder)
+
+    var segments: [String] = []
+    var run = ""
+    var fragments = 0
+    for item in turnEvents {
+        if item.type == event.type {
+            guard let text = item.text, !text.isEmpty else { continue }
+            fragments += 1
+            if isLocal {
+                segments.append(text)
+            } else {
+                run += text
+            }
+        } else if boundaries.contains(item.type), !run.isEmpty {
+            segments.append(run)
+            run = ""
+        }
+    }
+    if !run.isEmpty { segments.append(run) }
+    guard fragments > 1 else { return nil }
+    let text = segments.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    return text.isEmpty ? nil : (text, fragments)
+}
+
 struct MonitorRecord: Identifiable, Equatable, Sendable {
     let id: String
     let kind: String

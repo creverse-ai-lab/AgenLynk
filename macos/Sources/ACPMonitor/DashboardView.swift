@@ -167,8 +167,16 @@ struct DashboardView: View {
                         Divider()
                         // Same body-first treatment as the session detail pane;
                         // this column is an inspector, not an export, so the
-                        // JSON only has to stay reachable, not lead.
-                        EventBodyView(event: event, characterLimit: 4_000, bodyFont: .caption)
+                        // JSON only has to stay reachable, not lead. Siblings
+                        // let a selected stream fragment show its whole message
+                        // — the sequence diagram collapses a chunk run into one
+                        // ×N node whose representative is the *last* fragment.
+                        EventBodyView(
+                            event: event,
+                            siblings: model.eventsBySession[event.sessionId] ?? [],
+                            characterLimit: 4_000,
+                            bodyFont: .caption
+                        )
                     } else {
                         EmptyLabel("이벤트를 선택하세요")
                     }
@@ -344,6 +352,12 @@ struct FrontdoorRow: View {
 struct EventRow: View {
     let event: MonitorEvent
     let session: GatewaySession?
+    /// >1 when this row stands for a whole run of streamed chunks.
+    var collapsedCount: Int = 1
+    /// The run's merged text — the representative event is only its newest
+    /// fragment, so its own summary would show the tail of the message.
+    var summaryOverride: String?
+
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: eventSymbol(event.type))
@@ -351,10 +365,14 @@ struct EventRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
                     Text(event.type.replacingOccurrences(of: "_", with: " ")).font(.callout.weight(.medium))
+                    if collapsedCount > 1 {
+                        Text("×\(collapsedCount)").font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                    }
                     Spacer()
                     Text(shortTime(event.timestamp)).font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
                 }
-                Text(event.summary).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                Text(summaryOverride.map { String($0.replacingOccurrences(of: "\n", with: " ").prefix(140)) } ?? event.summary)
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 if let session { Text(session.displayName).font(.caption2).foregroundStyle(.tertiary) }
             }
         }
