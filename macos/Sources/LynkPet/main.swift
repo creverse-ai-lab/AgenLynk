@@ -802,6 +802,12 @@ private struct TreeFlowScene: View {
         }
     }
 
+    // Every Text here is `verbatim:`: a plain `Text("...")` is a
+    // LocalizedStringKey, and none of these are localizable — a repo directory
+    // name or a session count has no business going through a string table.
+    // (This was tried as a speedup too, since a sample shows Text resolution
+    // dominating this function; it made no measurable difference. The cost is
+    // in resolving to an attributed string, which `verbatim` does not skip.)
     private func drawNode(_ node: RenderNode, time: TimeInterval, in context: inout GraphicsContext) {
         guard node.opacity > 0.02 else { return }
         let center = node.point
@@ -847,7 +853,7 @@ private struct TreeFlowScene: View {
                 layer.translateBy(x: center.x, y: center.y)
                 layer.rotate(by: .radians(angle))
                 layer.draw(
-                    Text(node.agent.provider.prefix(1).uppercased())
+                    Text(verbatim: String(node.agent.provider.prefix(1).uppercased()))
                         .font(.system(size: size * 0.42, weight: .black))
                         .foregroundStyle(.white),
                     at: .zero
@@ -869,7 +875,7 @@ private struct TreeFlowScene: View {
             let corner = CGPoint(x: center.x - size * 0.38, y: center.y - size * 0.38)
             context.fill(circle(diameter: 14, at: corner), with: .color(.cyan.opacity(node.opacity)))
             context.draw(
-                Text("F").font(.system(size: 8, weight: .black)).foregroundStyle(.black),
+                Text(verbatim: "F").font(.system(size: 8, weight: .black)).foregroundStyle(.black),
                 at: corner
             )
         }
@@ -877,7 +883,7 @@ private struct TreeFlowScene: View {
             let corner = CGPoint(x: center.x + size * 0.38, y: center.y + size * 0.38)
             context.fill(circle(diameter: 14, at: corner), with: .color(.purple.opacity(node.opacity)))
             context.draw(
-                Text("\(pending)").font(.system(size: 9, weight: .bold)).foregroundStyle(.white),
+                Text(verbatim: "\(pending)").font(.system(size: 9, weight: .bold)).foregroundStyle(.white),
                 at: corner
             )
         }
@@ -890,7 +896,7 @@ private struct TreeFlowScene: View {
             let anchor = CGPoint(x: center.x, y: center.y + node.size / 2 + 10)
             layer.clip(to: Path(CGRect(x: anchor.x - 46, y: anchor.y - 8, width: 92, height: 16)))
             layer.draw(
-                Text(nodeLabel(node.agent))
+                Text(verbatim: nodeLabel(node.agent))
                     .font(.system(size: 8.5, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.75 * labelOpacity)),
                 at: anchor
@@ -917,7 +923,7 @@ private struct TreeFlowScene: View {
         context.fill(disc, with: .color(.black.opacity(0.55 * opacity)))
         context.stroke(disc, with: .color((attention ? Color.orange : .cyan).opacity(opacity)), lineWidth: 2)
         context.draw(
-            Text("\(active)").font(.system(size: 10, weight: .bold)).foregroundStyle(.white.opacity(opacity)),
+            Text(verbatim: "\(active)").font(.system(size: 10, weight: .bold)).foregroundStyle(.white.opacity(opacity)),
             at: center
         )
         guard warm > 0 else { return }
@@ -926,7 +932,7 @@ private struct TreeFlowScene: View {
         context.fill(small, with: .color(.black.opacity(0.55 * opacity)))
         context.stroke(small, with: .color(.gray.opacity(opacity)), lineWidth: 1.5)
         context.draw(
-            Text("\(warm)").font(.system(size: 8, weight: .semibold)).foregroundStyle(.white.opacity(0.8 * opacity)),
+            Text(verbatim: "\(warm)").font(.system(size: 8, weight: .semibold)).foregroundStyle(.white.opacity(0.8 * opacity)),
             at: corner
         )
     }
