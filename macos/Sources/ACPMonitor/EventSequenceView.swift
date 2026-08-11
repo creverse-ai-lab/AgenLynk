@@ -12,11 +12,8 @@ struct EventSequenceView: View {
     private let timeWidth = 76.0
     private let laneWidth = 220.0
     private let headerHeight = 82.0
-    private let relationRowHeight = 26.0
     private let eventRowHeight = 44.0
     private let bodyTopInset = 10.0
-    /// Six relation rows; beyond that the pinned band scrolls itself.
-    private let maxRelationBandHeight = 156.0
 
     var body: some View {
         // Derived once per body pass. The computed-property forms re-ran
@@ -45,17 +42,23 @@ struct EventSequenceView: View {
                 returned: hasReturned(lane.session, turnEndEventId: turnEndId)
             )
         }
-        // One row per drawn arrow instead of one row per edge: a returned
-        // worker gets its 응답 row directly under its call row, and a worker
-        // that is still running takes a single row. Sharing a row between the
-        // two arrows would collide the two capsule labels.
-        let relations = relationRows(for: edges)
         let nodes = pageEvents(in: diagram).compactMap { entry -> SequenceDiagramNode? in
             guard let index = laneIndex[entry.event.sessionId] else { return nil }
             return SequenceDiagramNode(laneIndex: index, event: entry.event, collapsedCount: entry.count)
         }
-        let relationHeight = max(Double(relations.count) * relationRowHeight, 12)
-        let relationBandHeight = min(relationHeight, maxRelationBandHeight)
+        // The whole point of a sequence diagram: a call/응답 arrow is drawn on
+        // the row of the event that triggered it — a call on the child's first
+        // visible event, a 응답 on its turn_end — so the line sits at the moment
+        // it happened on the shared time axis, next to that event, instead of
+        // floating in a separate band that read as unrelated to the timeline.
+        let callAnchors = Dictionary(edges.compactMap { edge in edge.eventId.map { ($0, edge) } },
+                                     uniquingKeysWith: { first, _ in first })
+        let responseAnchors = Dictionary(edges.compactMap { edge in
+            edge.returned ? edge.returnEventId.map { ($0, edge) } : nil
+        }, uniquingKeysWith: { first, _ in first })
+        let rowY = Dictionary(uniqueKeysWithValues: nodes.enumerated().map { row, node in
+            (node.event.id, bodyTopInset + Double(row) * eventRowHeight + eventRowHeight / 2)
+        })
         let width = max(timeWidth + Double(max(lanes.count, 1)) * laneWidth, 620)
         let bodyHeight = max(bodyTopInset + Double(max(nodes.count, 1)) * eventRowHeight + 16, 240)
         let pages = max(1, (diagram.count + pageSize - 1) / pageSize)
@@ -92,16 +95,18 @@ struct EventSequenceView: View {
             .frame(height: 34)
             Divider()
 
-            // Identity (lane headers + call/응답 relations) is pinned; only the
-            // event rows scroll vertically. The single outer horizontal scroll
-            // view moves both blocks together, so every header stays over its
-            // own lifeline no matter how far right the diagram is panned.
+            // Only the lane headers (provider / model / folder) are pinned —
+            // that identity is what a reader loses when a long session scrolls.
+            // The call/응답 arrows are not here; they live in the timeline below,
+            // on the row of the event that triggered them. The single outer
+            // horizontal scroll moves the headers with the body, so each header
+            // stays over its own lifeline however far the diagram is panned.
             ScrollView(.horizontal) {
                 VStack(spacing: 0) {
                     ZStack(alignment: .topLeading) {
                         Canvas { context, _ in
                             // Lifeline stubs so the headers read as the top of
-                            // the same lines the relation band and body draw.
+                            // the same lines the timeline below draws.
                             for (index, lane) in lanes.enumerated() {
                                 let x = laneX(index)
                                 var lifeline = Path()
@@ -138,104 +143,12 @@ struct EventSequenceView: View {
                     .padding(.top, 10)
                     .background(Color(nsColor: .controlBackgroundColor))
 
-                    // The relation band is pinned too, but it is capped: a
-                    // frontdoor with many workers would otherwise grow the
-                    // fixed block until the scrolling event area had no room
-                    // left. Past the cap the band scrolls inside itself while
-                    // the lane headers above stay put.
+                    // One scrolling time axis: lifelines, event nodes, and the
+                    // call/응답 arrows that connect them all share it, so an
+                    // arrow lands on the same row as the event that caused it.
                     ScrollView(.vertical) {
                         ZStack(alignment: .topLeading) {
                             Canvas { context, _ in
-                                for (index, lane) in lanes.enumerated() {
-                                    let x = laneX(index)
-                                    var lifeline = Path()
-                                    lifeline.move(to: CGPoint(x: x, y: 0))
-                                    lifeline.addLine(to: CGPoint(x: x, y: relationHeight))
-                                    context.stroke(
-                                        lifeline,
-                                        with: .color(providerColor(lane.session.provider).opacity(0.34)),
-                                        style: StrokeStyle(lineWidth: 1.5, dash: [5, 5])
-                                    )
-                                }
-
-                                for row in relations {
-                                    let parentX = laneX(row.edge.parentIndex)
-                                    let childX = laneX(row.edge.childIndex)
-                                    let y = relationY(row.index)
-                                    let color = providerColor(row.edge.child.provider)
-                                    // The call travels parent→child; the 응답
-                                    // travels back, so the head lands on the
-                                    // parent lane and the stroke is dashed.
-                                    let from = row.kind == .call ? parentX : childX
-                                    let to = row.kind == .call ? childX : parentX
-                                    var line = Path()
-                                    line.move(to: CGPoint(x: from, y: y))
-                                    line.addLine(to: CGPoint(x: to, y: y))
-                                    context.stroke(
-                                        line,
-                                        with: .color(color.opacity(row.kind == .call ? 0.72 : 0.6)),
-                                        style: row.kind == .call
-                                            ? StrokeStyle(lineWidth: 1.6)
-                                            : StrokeStyle(lineWidth: 1.4, dash: [4, 3])
-                                    )
-                                    context.stroke(
-                                        arrowHead(at: CGPoint(x: to, y: y), pointingRight: to >= from),
-                                        with: .color(color),
-                                        lineWidth: 1.6
-                                    )
-                                }
-                            }
-                            .accessibilityHidden(true)
-
-                            ForEach(relations) { row in
-                                let parentX = laneX(row.edge.parentIndex)
-                                let childX = laneX(row.edge.childIndex)
-                                let eventId = row.kind == .call ? row.edge.eventId : row.edge.returnEventId
-                                Button {
-                                    followLatestEvent = false
-                                    if let eventId { selectedEventId = eventId }
-                                } label: {
-                                    Label(
-                                        row.kind == .call ? row.edge.childDepthLabel : "응답",
-                                        systemImage: row.kind == .call ? "arrow.right" : "arrow.uturn.left"
-                                    )
-                                        .font(.caption2.weight(.medium))
-                                        .lineLimit(1)
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(.background, in: Capsule())
-                                        .overlay(
-                                            Capsule().stroke(
-                                                providerColor(row.edge.child.provider).opacity(row.kind == .call ? 0.3 : 0.45),
-                                                style: row.kind == .call
-                                                    ? StrokeStyle(lineWidth: 1)
-                                                    : StrokeStyle(lineWidth: 1, dash: [3, 2])
-                                            )
-                                        )
-                                }
-                                .buttonStyle(.plain)
-                                .disabled(eventId == nil)
-                                .position(x: (parentX + childX) / 2, y: relationY(row.index))
-                                .help(
-                                    row.kind == .call
-                                        ? "\(row.edge.child.provider) \(row.edge.child.model ?? "default") 호출"
-                                        : "\(row.edge.child.provider) \(row.edge.child.model ?? "default") 응답 반환"
-                                )
-                            }
-                        }
-                        .frame(width: width, height: relationHeight)
-                        .padding(.horizontal, 10)
-                    }
-                    .frame(height: relationBandHeight)
-                    .background(Color(nsColor: .controlBackgroundColor))
-
-                    Divider()
-
-                    ScrollView(.vertical) {
-                        ZStack(alignment: .topLeading) {
-                            Canvas { context, _ in
-                                // Lifelines now start at the top of the
-                                // scrolling region, right under the pinned stubs.
                                 for (index, lane) in lanes.enumerated() {
                                     let x = laneX(index)
                                     var lifeline = Path()
@@ -247,6 +160,38 @@ struct EventSequenceView: View {
                                         style: StrokeStyle(lineWidth: 1.5, dash: [5, 5])
                                     )
                                 }
+
+                                // A call travels parent→child; a 응답 travels
+                                // back, so its head lands on the parent lane and
+                                // its stroke is dashed. Both are drawn at the y
+                                // of their anchoring event.
+                                func drawArrow(_ edge: SequenceCallEdge, y: Double, response: Bool) {
+                                    let parentX = laneX(edge.parentIndex)
+                                    let childX = laneX(edge.childIndex)
+                                    let from = response ? childX : parentX
+                                    let to = response ? parentX : childX
+                                    let color = providerColor(edge.child.provider)
+                                    var line = Path()
+                                    line.move(to: CGPoint(x: from, y: y))
+                                    line.addLine(to: CGPoint(x: to, y: y))
+                                    context.stroke(
+                                        line,
+                                        with: .color(color.opacity(response ? 0.6 : 0.72)),
+                                        style: response
+                                            ? StrokeStyle(lineWidth: 1.4, dash: [4, 3])
+                                            : StrokeStyle(lineWidth: 1.6)
+                                    )
+                                    context.stroke(
+                                        arrowHead(at: CGPoint(x: to, y: y), pointingRight: to >= from),
+                                        with: .color(color),
+                                        lineWidth: 1.6
+                                    )
+                                }
+                                for node in nodes {
+                                    guard let y = rowY[node.event.id] else { continue }
+                                    if let edge = callAnchors[node.event.id] { drawArrow(edge, y: y, response: false) }
+                                    if let edge = responseAnchors[node.event.id] { drawArrow(edge, y: y, response: true) }
+                                }
                             }
                             .accessibilityHidden(true)
 
@@ -257,6 +202,12 @@ struct EventSequenceView: View {
                                     .foregroundStyle(.tertiary)
                                     .frame(width: timeWidth - 12, alignment: .trailing)
                                     .position(x: (timeWidth - 12) / 2, y: y)
+                                if let edge = callAnchors[node.event.id] {
+                                    relationCapsule(edge, response: false, y: y)
+                                }
+                                if let edge = responseAnchors[node.event.id] {
+                                    relationCapsule(edge, response: true, y: y)
+                                }
                                 Button {
                                     followLatestEvent = false
                                     selectedEventId = node.event.id
@@ -304,22 +255,37 @@ struct EventSequenceView: View {
         timeWidth + laneWidth * (Double(index) + 0.5)
     }
 
-    /// Row centre inside the relation band, whose own origin is the top of the
-    /// band (the lane headers live in a separate fixed block above it).
-    private func relationY(_ index: Int) -> Double {
-        Double(index) * relationRowHeight + relationRowHeight / 2
-    }
-
-    private func relationRows(for edges: [SequenceCallEdge]) -> [SequenceRelationRow] {
-        var rows: [SequenceRelationRow] = []
-        rows.reserveCapacity(edges.count * 2)
-        for edge in edges {
-            rows.append(SequenceRelationRow(edge: edge, kind: .call, index: rows.count))
-            if edge.returned {
-                rows.append(SequenceRelationRow(edge: edge, kind: .response, index: rows.count))
-            }
+    /// The label that sits on a call/응답 arrow at its anchoring event's row.
+    /// Selecting it jumps to the arrow's own event (the call's first event, the
+    /// 응답's turn_end) so the two stay tied together.
+    @ViewBuilder private func relationCapsule(_ edge: SequenceCallEdge, response: Bool, y: Double) -> some View {
+        let midX = (laneX(edge.parentIndex) + laneX(edge.childIndex)) / 2
+        let eventId = response ? edge.returnEventId : edge.eventId
+        Button {
+            followLatestEvent = false
+            if let eventId { selectedEventId = eventId }
+        } label: {
+            Label(response ? "응답" : edge.childDepthLabel, systemImage: response ? "arrow.uturn.left" : "arrow.right")
+                .font(.caption2.weight(.medium))
+                .lineLimit(1)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(.background, in: Capsule())
+                .overlay(
+                    Capsule().stroke(
+                        providerColor(edge.child.provider).opacity(response ? 0.45 : 0.3),
+                        style: response ? StrokeStyle(lineWidth: 1, dash: [3, 2]) : StrokeStyle(lineWidth: 1)
+                    )
+                )
         }
-        return rows
+        .buttonStyle(.plain)
+        .disabled(eventId == nil)
+        .position(x: midX, y: y)
+        .help(
+            response
+                ? "\(edge.child.provider) \(edge.child.model ?? "default") 응답 반환"
+                : "\(edge.child.provider) \(edge.child.model ?? "default") 호출"
+        )
     }
 
     /// A worker counts as returned once it is no longer working *and* a turn
@@ -395,17 +361,6 @@ private struct SequenceCallEdge: Identifiable {
     var childDepthLabel: String { childDepth <= 1 ? "Agent 호출" : "Subagent 호출" }
 }
 
-private struct SequenceRelationRow: Identifiable {
-    enum Kind { case call, response }
-
-    let edge: SequenceCallEdge
-    let kind: Kind
-    /// Row slot within the pinned relation block, assigned in draw order.
-    let index: Int
-
-    var id: String { "\(kind == .call ? "call" : "return"):\(edge.child.sessionId)" }
-}
-
 private struct SequenceEventMarks {
     let firstEventId: [String: String]
     let lastTurnEndId: [String: String]
@@ -468,11 +423,12 @@ private struct SequenceLaneHeader: View {
         return "Subagent L\(lane.depth)"
     }
 
-    /// The frontdoor lane names its working folder instead of the generic
-    /// "Frontdoor" — with several frontdoors open the folder is the only thing
-    /// that tells them apart at a glance. Root ("/") and an unreported cwd
-    /// carry no such information, so those fall back to the generic label.
+    /// The frontdoor lane names itself the way the sidebar does: the title the
+    /// Frontdoor designated, then its working folder, then the generic
+    /// "Frontdoor". Several frontdoors open at once are only tellable apart by
+    /// one of the first two.
     private var frontdoorLabel: String {
+        if let title = lane.session.title, !title.isEmpty { return title }
         let folder = (lane.session.cwd as NSString).lastPathComponent
         return folder.isEmpty || folder == "/" ? "Frontdoor" : folder
     }

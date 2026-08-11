@@ -157,7 +157,23 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
     let root: GatewaySession?
     let workers: [GatewaySession]
 
-    var displayName: String { "\(provider.capitalized) Frontdoor" }
+    /// Prefers a name the Frontdoor itself designated (the root session's
+    /// title — for a local CLI this is its task topic, for a Gateway Main the
+    /// title it opened with), then the working folder, and only then the bare
+    /// "Codex Frontdoor" that made two concurrent Frontdoors indistinguishable.
+    var displayName: String {
+        if let title = root?.title, !title.isEmpty { return title }
+        if let folder = workingFolder { return folder }
+        return "\(provider.capitalized) Frontdoor"
+    }
+    /// Last path component of the Frontdoor's working directory, or nil when no
+    /// member reports one.
+    var workingFolder: String? {
+        let cwd = root?.cwd.isEmpty == false ? root!.cwd : members.first { !$0.cwd.isEmpty }?.cwd
+        guard let cwd, !cwd.isEmpty else { return nil }
+        let name = (cwd as NSString).lastPathComponent
+        return name.isEmpty || name == "/" ? nil : name
+    }
     var members: [GatewaySession] { (root.map { [$0] } ?? []) + workers }
     var isActive: Bool { members.contains(where: \.isActive) }
     var activeWorkerCount: Int { workers.filter(\.isActive).count }

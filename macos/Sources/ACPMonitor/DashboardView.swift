@@ -367,7 +367,9 @@ struct FrontdoorRow: View {
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                if let task = frontdoor.latestTask {
+                // The title is now the row's name; only show the task line
+                // when it says something the name doesn't.
+                if let task = frontdoor.latestTask, task != frontdoor.displayName {
                     Text(task).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 }
             }

@@ -30,6 +30,7 @@ enum MonitorModelChecks {
         try petChildEnvironmentAllowsOnlyBenignKeysPlusContractFiles()
         try realtimeSessionsRequireAnActiveFrontdoorIdentity()
         try frontdoorSessionsAggregateWorkersAndExcludeLegacyRecords()
+        try frontdoorNamePrefersTitleThenFolderThenProvider()
         try localFrontdoorIsNotDuplicatedAsAWorker()
         try graphProjectionGroupsFrontdoorsAndAssignsWorkerLanes()
         try graphProjectionBuildsPromptReturnTurnsAndUsesCanvasHeight()
@@ -472,6 +473,33 @@ enum MonitorModelChecks {
         try check(codex?.workers.count == 2, "workers with the same Frontdoor id should aggregate")
         try check(codex?.activeWorkerCount == 1, "Frontdoor activity should come from its current workers")
         try check(!frontdoors.contains(where: { $0.id == "legacy" }), "legacy sessions without a Frontdoor id must stay out of the UI")
+    }
+
+    /// The sidebar and the sequence lane both name a Frontdoor by what tells
+    /// two of them apart: the title it designated, then its working folder,
+    /// only then the bare "Codex Frontdoor".
+    private static func frontdoorNamePrefersTitleThenFolderThenProvider() throws {
+        func frontdoor(title: String?, cwd: String) throws -> FrontdoorSession {
+            var root: [String: JSONValue] = [
+                "sessionId": .string("root"), "provider": .string("codex"),
+                "status": .string("running"), "cwd": .string(cwd), "role": .string("frontdoor"),
+                "opener": .string("codex"), "openerInstanceId": .string("main-1"),
+                "updatedAt": .string("2026-08-07T00:00:00Z")
+            ]
+            if let title { root["title"] = .string(title) }
+            guard let session = GatewaySession(.object(root)),
+                  let made = FrontdoorSession.make(sessions: [session]).first else {
+                throw CheckError.failed("frontdoor name fixture creation failed")
+            }
+            return made
+        }
+        let titled = try frontdoor(title: "리팩터링 작업", cwd: "/Users/x/Documents/proj")
+        let foldered = try frontdoor(title: nil, cwd: "/Users/x/Documents/proj")
+        let bare = try frontdoor(title: nil, cwd: "/")
+        try check(titled.displayName == "리팩터링 작업", "a designated title is the Frontdoor's name")
+        try check(foldered.displayName == "proj", "without a title the working folder names the Frontdoor")
+        try check(bare.displayName == "Codex Frontdoor", "with neither, the provider label remains")
+        try check(foldered.workingFolder == "proj", "workingFolder is the cwd's last component")
     }
 
     private static func localFrontdoorIsNotDuplicatedAsAWorker() throws {
