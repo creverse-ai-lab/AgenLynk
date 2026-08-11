@@ -24,19 +24,23 @@ export function defaultRuntimeRoot() {
  * then renames it into versions/<id>/ (atomic on the same volume) before
  * activating current.json.
  *
- * Existing-runtime authority: if `current.json` already points at a
- * manifest-verified install inside this runtimeRoot's versions/ directory,
- * that install is returned as-is — the seed is never read, copied, or
- * activated. This is what lets an already-installed Gateway survive a Lynk
- * app update: a newer/older seed bundled with the app must not silently
- * displace a different, still-valid, already-current runtime. The seed is
- * only consulted (and current.json only repointed) when current is absent,
- * malformed, outside the managed versions root, or fails its own manifest
- * verification.
+ * Existing-runtime authority, forward only: a manifest-verified install that
+ * `current.json` already points at is kept, *unless* the app's own seed is
+ * newer. An older seed must never displace a newer runtime — reinstalling an
+ * old DMG once should not roll a machine back. But the reverse was also true
+ * before, and that was the bug: a machine that had an older Lynk installed
+ * kept running that old Gateway runtime forever no matter how many times the
+ * app was updated, because the seed was never even read. The app and the
+ * runtime it ships with have to move together.
+ *
+ * "Newer" is the manifest's `generatedAt`, the only ordered field the two have
+ * in common: gatewayVersion is a release string that does not change on every
+ * payload change, and gatewayBuildId is a content hash with no ordering.
+ * See seedSupersedes for what happens when it cannot be compared.
  */
 export async function ensureRuntimeInstalled({ seedRoot, runtimeRoot = defaultRuntimeRoot() }) {
   const existing = await currentRuntimeIfValid(runtimeRoot);
-  if (existing) return existing;
+  if (existing && !(await seedSupersedes(seedRoot, existing.generatedAt))) return existing;
 
   // Same advisory lock as the updater's mutations: the provisioner runs on
   // every app launch and can otherwise interleave its rm/rename staging with
@@ -44,7 +48,7 @@ export async function ensureRuntimeInstalled({ seedRoot, runtimeRoot = defaultRu
   return withRuntimeLock(runtimeRoot, async () => {
     // Re-check under the lock: whoever held it may have just installed.
     const installed = await currentRuntimeIfValid(runtimeRoot);
-    if (installed) return installed;
+    if (installed && !(await seedSupersedes(seedRoot, installed.generatedAt))) return installed;
 
     const manifest = await readManifestFile(seedRoot);
     const versionDir = `${manifest.gatewayVersion}-${manifest.gatewayBuildId}`;
@@ -54,7 +58,12 @@ export async function ensureRuntimeInstalled({ seedRoot, runtimeRoot = defaultRu
       await stageAndActivate(seedRoot, runtimeRoot, target, manifest);
     }
     await activateCurrent(runtimeRoot, target, manifest);
-    return { runtimeRoot: target, gatewayVersion: manifest.gatewayVersion, gatewayBuildId: manifest.gatewayBuildId };
+    return {
+      runtimeRoot: target,
+      gatewayVersion: manifest.gatewayVersion,
+      gatewayBuildId: manifest.gatewayBuildId,
+      generatedAt: manifest.generatedAt
+    };
   });
 }
 
@@ -71,10 +80,42 @@ async function currentRuntimeIfValid(runtimeRoot) {
       return null;
     }
     await verifyRuntimeManifest(current.runtimeRoot, ownManifest);
-    return { runtimeRoot: current.runtimeRoot, gatewayVersion: current.gatewayVersion, gatewayBuildId: current.gatewayBuildId };
+    return {
+      runtimeRoot: current.runtimeRoot,
+      gatewayVersion: current.gatewayVersion,
+      gatewayBuildId: current.gatewayBuildId,
+      generatedAt: ownManifest.generatedAt
+    };
   } catch {
     return null;
   }
+}
+
+/**
+ * True only when the seed's manifest is provably newer than the installed
+ * one. An unreadable seed manifest, a seed timestamp that is absent or
+ * unparseable, or equal timestamps all answer false: the installed runtime is
+ * known to work, so anything short of proof leaves it alone.
+ *
+ * A missing timestamp on the *installed* side is the one asymmetry — the field
+ * is written by every manifest that carries the current format version, so its
+ * absence means the install predates it, which is exactly the case a newer
+ * seed should replace.
+ */
+async function seedSupersedes(seedRoot, installedGeneratedAt) {
+  const installed = timestamp(installedGeneratedAt) ?? 0;
+  try {
+    const seed = timestamp((await readManifestFile(seedRoot)).generatedAt);
+    return seed !== null && seed > installed;
+  } catch {
+    return false;
+  }
+}
+
+function timestamp(value) {
+  if (typeof value !== "string") return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 /**

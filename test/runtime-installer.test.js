@@ -7,9 +7,12 @@ import { buildRuntimeManifest } from "../src/runtime-manifest.js";
 import { ensureRuntimeInstalled, readCurrentRuntime } from "../src/runtime-installer.js";
 import { writeRuntimeSeed } from "./fixtures/runtime-seed.js";
 
-async function writeFixtureSeed(root, options = {}) {
+async function writeFixtureSeed(root, { generatedAt, ...options } = {}) {
   await writeRuntimeSeed(root, options);
-  const manifest = await buildRuntimeManifest(root);
+  // generatedAt orders seed against install, and real builds are minutes or
+  // days apart; a test writing two seeds in the same millisecond has to say
+  // which is newer explicitly.
+  const manifest = { ...await buildRuntimeManifest(root), ...(generatedAt ? { generatedAt } : {}) };
   await writeFile(join(root, "runtime-manifest.json"), JSON.stringify(manifest));
   return manifest;
 }
@@ -134,34 +137,86 @@ test("readCurrentRuntime returns null instead of throwing when nothing is instal
   }
 });
 
-test("ensureRuntimeInstalled preserves a different, still-valid current runtime across an app-bundle seed update", async () => {
+// The app and the runtime it ships with move together, but only forward.
+// Reinstalling an older DMG once must not roll the machine back; a machine
+// that had an older Lynk installed must not keep running that old runtime
+// forever, which is exactly what happened when the seed was never read.
+test("ensureRuntimeInstalled keeps an older seed out and lets a newer one through", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "acp-runtime-installer-"));
   try {
     const runtimeRoot = join(workspace, "runtime");
 
     // A prior app run already installed and activated version 5.
     const seedFive = join(workspace, "seed-5");
-    await writeFixtureSeed(seedFive, { gatewayVersion: "5.0.0", gatewayBuildId: "build5" });
+    await writeFixtureSeed(seedFive, {
+      gatewayVersion: "5.0.0", gatewayBuildId: "build5", generatedAt: "2026-02-01T00:00:00.000Z"
+    });
     const installed = await ensureRuntimeInstalled({ seedRoot: seedFive, runtimeRoot });
     const marker = join(installed.runtimeRoot, "src/index.js");
     const beforeStat = await stat(marker);
 
-    // The app bundle is updated and now ships a *different* seed (version 6).
+    // Someone reinstalls an older DMG. Its seed must be ignored entirely.
+    const seedFour = join(workspace, "seed-4");
+    await writeFixtureSeed(seedFour, {
+      gatewayVersion: "4.0.0", gatewayBuildId: "build4", generatedAt: "2026-01-01T00:00:00.000Z"
+    });
+    const kept = await ensureRuntimeInstalled({ seedRoot: seedFour, runtimeRoot });
+
+    assert.equal(kept.gatewayVersion, "5.0.0", "an older seed must not displace a newer runtime");
+    assert.equal(kept.runtimeRoot, installed.runtimeRoot);
+    assert.equal((await readCurrentRuntime(runtimeRoot)).gatewayVersion, "5.0.0");
+    assert.deepEqual(
+      (await readdir(join(runtimeRoot, "versions"))).sort(),
+      ["5.0.0-build5"],
+      "an older seed must not even be staged"
+    );
+    assert.equal((await stat(marker)).mtimeMs, beforeStat.mtimeMs, "the preserved runtime must not be touched");
+
+    // The app is updated. Its newer seed becomes the active runtime.
     const seedSix = join(workspace, "seed-6");
-    await writeFixtureSeed(seedSix, { gatewayVersion: "6.0.0", gatewayBuildId: "build6" });
-    const result = await ensureRuntimeInstalled({ seedRoot: seedSix, runtimeRoot });
+    await writeFixtureSeed(seedSix, {
+      gatewayVersion: "6.0.0", gatewayBuildId: "build6", generatedAt: "2026-03-01T00:00:00.000Z"
+    });
+    const upgraded = await ensureRuntimeInstalled({ seedRoot: seedSix, runtimeRoot });
 
-    assert.equal(result.gatewayVersion, "5.0.0", "the already-installed, still-valid runtime must be kept active");
-    assert.equal(result.runtimeRoot, installed.runtimeRoot);
+    assert.equal(upgraded.gatewayVersion, "6.0.0", "a newer seed must become current");
+    assert.equal((await readCurrentRuntime(runtimeRoot)).gatewayVersion, "6.0.0");
+    assert.deepEqual(
+      (await readdir(join(runtimeRoot, "versions"))).sort(),
+      ["5.0.0-build5", "6.0.0-build6"],
+      "the superseded runtime stays on disk so rollback still has a target"
+    );
 
-    const current = await readCurrentRuntime(runtimeRoot);
-    assert.equal(current.gatewayVersion, "5.0.0", "current.json must not be silently repointed at the new seed");
+    // Same seed again is a no-op, not a re-copy.
+    const repeat = await ensureRuntimeInstalled({ seedRoot: seedSix, runtimeRoot });
+    assert.equal(repeat.gatewayBuildId, "build6");
+    assert.deepEqual((await readdir(join(runtimeRoot, "versions"))).sort(), ["5.0.0-build5", "6.0.0-build6"]);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
 
-    const versionDirs = (await readdir(join(runtimeRoot, "versions"))).sort();
-    assert.deepEqual(versionDirs, ["5.0.0-build5"], "the newer seed must never be staged/activated while 5.0.0 is current");
+// An install predating the generatedAt field cannot be ordered against
+// anything, and is the exact case a newer app must be able to replace.
+test("ensureRuntimeInstalled replaces an install whose manifest predates generatedAt", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "acp-runtime-installer-"));
+  try {
+    const runtimeRoot = join(workspace, "runtime");
+    const oldSeed = join(workspace, "seed-old");
+    await writeFixtureSeed(oldSeed, { gatewayVersion: "1.0.0", gatewayBuildId: "old" });
+    const installed = await ensureRuntimeInstalled({ seedRoot: oldSeed, runtimeRoot });
 
-    const afterStat = await stat(marker);
-    assert.equal(afterStat.mtimeMs, beforeStat.mtimeMs, "the preserved runtime must not be touched");
+    const manifestPath = join(installed.runtimeRoot, "runtime-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    delete manifest.generatedAt;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+
+    const newSeed = join(workspace, "seed-new");
+    await writeFixtureSeed(newSeed, {
+      gatewayVersion: "2.0.0", gatewayBuildId: "new", generatedAt: "2026-03-01T00:00:00.000Z"
+    });
+    const result = await ensureRuntimeInstalled({ seedRoot: newSeed, runtimeRoot });
+    assert.equal(result.gatewayVersion, "2.0.0");
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
