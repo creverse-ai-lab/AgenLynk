@@ -91,7 +91,7 @@ private struct GatewayConfigurationView: View {
     @State private var confirmRestart = false
     @State private var pendingDestructiveSave: DestructiveSave?
 
-    private static let knownGroups = ["agentUpdates", "lifecycle", "resourceLimits"]
+    private static let knownGroups = ["agentUpdates", "lifecycle", "resourceLimits", "monitor"]
 
     /// Settings whose lower values destroy stored history. Raising them is
     /// always safe, so only a decrease needs confirming.
@@ -352,6 +352,7 @@ private struct GatewayConfigurationView: View {
         switch group {
         case "agentUpdates": "Agent 업데이트"
         case "lifecycle": "Lifecycle"
+        case "monitor": "로컬 모니터링"
         case "resourceLimits": "Resource Limits"
         default: group
         }
@@ -360,6 +361,7 @@ private struct GatewayConfigurationView: View {
     private func groupSymbol(_ group: String) -> String {
         switch group {
         case "agentUpdates": "arrow.triangle.2.circlepath"
+        case "monitor": "gauge.with.dots.needle.67percent"
         case "lifecycle": "clock.arrow.circlepath"
         default: "memorychip"
         }

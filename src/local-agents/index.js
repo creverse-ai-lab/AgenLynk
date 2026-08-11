@@ -48,6 +48,8 @@ export class LocalAgentScanner {
     this.readyAfter = paths.readyAfter ?? DEFAULT_READY_AFTER;
     this.staleAfter = paths.staleAfter ?? DEFAULT_STALE_AFTER;
     this.discoveryIntervalSeconds = paths.discoveryIntervalSeconds ?? DISCOVERY_INTERVAL_SECONDS;
+    this.conversationWindowMs = paths.conversationWindowMs;
+    this.maxConversationRecords = paths.maxConversationRecords;
 
     this.cursors = new Map();
     this.retired = new Map();
@@ -112,7 +114,9 @@ export class LocalAgentScanner {
       retired: this.retired,
       staleAfter: this.staleAfter,
       now,
-      database: this.database
+      database: this.database,
+      conversationWindowMs: this.conversationWindowMs,
+      maxConversationRecords: this.maxConversationRecords
     });
 
     // Each Orca account keeps its own Codex home, transcripts and database.
@@ -123,7 +127,9 @@ export class LocalAgentScanner {
         retired: this.retired,
         staleAfter: this.staleAfter,
         now,
-        database: join(home, "state_5.sqlite")
+        database: join(home, "state_5.sqlite"),
+        conversationWindowMs: this.conversationWindowMs,
+        maxConversationRecords: this.maxConversationRecords
       });
     }
 

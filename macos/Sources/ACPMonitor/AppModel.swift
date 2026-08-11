@@ -575,6 +575,7 @@ final class AppModel: ObservableObject {
             let snapshot = try await client.saveGatewayConfig(endpoint: endpoint, values: values)
             gatewayConfigOptions = snapshot.options
             gatewayConfigSaving = false
+            if values.keys.contains(where: isMonitorConfigOption) { reconnect() }
             return true
         } catch {
             gatewayConfigError = error.localizedDescription
@@ -594,6 +595,7 @@ final class AppModel: ObservableObject {
             let snapshot = try await client.resetGatewayConfig(endpoint: endpoint, ids: ids)
             gatewayConfigOptions = snapshot.options
             gatewayConfigSaving = false
+            if ids.contains(where: isMonitorConfigOption) { reconnect() }
             return true
         } catch {
             gatewayConfigError = error.localizedDescription
@@ -622,6 +624,10 @@ final class AppModel: ObservableObject {
             updateConnectionPhase()
             return false
         }
+    }
+
+    private func isMonitorConfigOption(_ id: String) -> Bool {
+        ["localScannerEnabled", "localScanIntervalMs", "localDiscoveryIntervalMs", "localTranscriptWindowMs", "localTranscriptRecordLimit"].contains(id)
     }
 
     /// Loads the Worker-advertised config options for one session (ACP

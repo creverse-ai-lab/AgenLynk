@@ -1,4 +1,4 @@
-# ACP Gateway v1.3.1
+# ACP Gateway v1.3.2
 
 혹시 여러 AI 에이전트를 쓰고 계신가요?
 
@@ -301,7 +301,13 @@ npm run macos:run
 - 모니터의 `observer` 연결은 Main의 owner presence나 세션 활동 시각으로 집계되지 않으므로, 앱을 켜 둬도 orphan 취소·정리 타이머가 정상 동작합니다.
 - Gateway health에는 release version과 source build id가 함께 포함됩니다. 같은 release version으로 개발 중이어도 build id가 다르거나 없는 daemon은 installer가 재시작해 checkout과 실행 프로세스가 어긋나지 않게 합니다.
 
-## 미공개 변경 사항 (main)
+## v1.3.2 변경 사항
+
+- **최종 결과 중심 poll** — 기본 poll은 진행 메시지·thought·tool 이벤트를 전달하지 않고, 종료 시 최종 `result`와 Main이 처리해야 하는 permission·질문만 담깁니다. 중간 증거는 `eventTypes`, `includeThoughts`, `includeToolEvents`, `includeInspection`으로 명시 요청해야 합니다.
+- **usage 이벤트 차단** — 반복되는 ACP `usage_update`는 Gateway에 저장하거나 poll을 깨우지 않습니다. provider 계측 신호가 frontdoor tool call과 컨텍스트 소비로 증폭되는 경로를 제거했습니다.
+- **간결한 Worker 반환 기본** — `agent-delegator`가 상세 보고서가 필요하지 않은 요청에 결론·필수 근거·변경 경로·테스트 상태만 간결히 반환하도록 지시합니다.
+
+- **세션 재연결 모델 검증 버그 수정** — idle unload나 daemon 재시작으로 끊긴 세션에 다시 prompt하면 모든 provider에서 복원이 실패하던 문제를 고쳤습니다. 원인은 두 가지: ① 재연결이 세션의 저장된 모델을 프로세스 init 시점에 검증했는데 session-scoped provider는 그 시점에 모델을 알려주지 않음 (이제 init 검증은 `modelScope: "process"`에서만 수행), ② 모델을 `models` capability로만 보고하는 provider(grok)는 요청 모델과 이미 일치해도 설정 가능한 config option이 없다고 실패함 (이제 configOptions → models capability → init 순으로 현재 모델을 발견하고, 일치하면 no-op). 요청 모델이 실제로 다른데 바꿀 수단이 없는 경우는 여전히 실패합니다.
 
 - **세션 재연결 모델 검증 버그 수정** — idle unload나 daemon 재시작으로 끊긴 세션에 다시 prompt하면 모든 provider에서 복원이 실패하던 문제를 고쳤습니다. 원인은 두 가지: ① 재연결이 세션의 저장된 모델을 프로세스 init 시점에 검증했는데 session-scoped provider는 그 시점에 모델을 알려주지 않음 (이제 init 검증은 `modelScope: "process"`에서만 수행), ② 모델을 `models` capability로만 보고하는 provider(grok)는 요청 모델과 이미 일치해도 설정 가능한 config option이 없다고 실패함 (이제 configOptions → models capability → init 순으로 현재 모델을 발견하고, 일치하면 no-op). 요청 모델이 실제로 다른데 바꿀 수단이 없는 경우는 여전히 실패합니다.
 - **멀티 세션 실시간 감시 도구 `agent_acp_watch`** — Main이 세션 하나씩 poll하는 대신, 소유한 모든(또는 지정한) 세션의 이벤트를 **한 번의 호출로 시간순 병합**해서 받습니다. 세션별 `cursors`로 이어서 조회하고, 응답 대기 중인 permission/질문은 `pendingInbox`로 함께 도착하며, long-poll(`waitMs`)은 어느 세션에서든 새 이벤트가 나오면 깨어납니다. **사고(`agent_thought_chunk`)는 이 채널에서 기본 포함**입니다 — 여러 Worker의 중간 사고를 Main이 실시간으로 검수하는 것이 이 도구의 목적이기 때문입니다 (`includeThoughts: false`로 제외 가능). 기존 `agent_acp_poll`은 증거 회수·회고 조회용으로 그대로 유지됩니다.

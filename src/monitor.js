@@ -26,7 +26,12 @@ import { GATEWAY_BUILD_ID, GATEWAY_RUNTIME_ROOT } from "./version.js";
 import { mergeMonitorSessions, projectLocalSnapshot } from "./local-monitor.js";
 import { currentProjectedTurnId, projectCodexTranscript } from "./local-transcript.js";
 import { LocalAgentScanner } from "./local-agents/index.js";
-import { defaultGatewaySettings, gatewaySettingsSnapshot, updateGatewaySettings } from "./gateway-settings.js";
+import {
+  defaultGatewaySettings,
+  gatewaySettingsSnapshot,
+  resolveGatewaySettings,
+  updateGatewaySettings
+} from "./gateway-settings.js";
 import {
   installOfficialAgent,
   officialAgentCatalog,
@@ -38,11 +43,18 @@ const MONITOR_PORT = numberEnv("ACP_GATEWAY_MONITOR_PORT", 8642, 0);
 const MAX_EVENTS_PER_SESSION = numberEnv("ACP_GATEWAY_MONITOR_MAX_EVENTS", 2000, 1);
 const AUTO_START_GATEWAY = booleanEnv("ACP_GATEWAY_MONITOR_AUTOSTART", true);
 const EXPECTED_PARENT_PID = optionalPositiveIntegerEnv("ACP_GATEWAY_MONITOR_PARENT_PID");
-// Local agent scanning is on unless explicitly disabled; the kill switch
-// exists so a scanner fault can never take the Gateway view down with it.
-const LOCAL_SCANNER_ENABLED = (process.env.ACP_MONITOR_LOCAL_SCANNER ?? "on") !== "off";
 const REFRESH_INTERVAL_MS = 3_000;
-const localScanner = LOCAL_SCANNER_ENABLED ? new LocalAgentScanner() : null;
+// Keep the scanner's cost policy with the rest of the user-editable Gateway
+// settings. The sidecar is restarted after changing these options, so one
+// immutable scanner instance owns its cursors and watcher for its lifetime.
+const monitorSettings = resolveGatewaySettings();
+const LOCAL_SCANNER_ENABLED = monitorSettings.localScannerEnabled;
+const LOCAL_SCAN_INTERVAL_MS = monitorSettings.localScanIntervalMs;
+const localScanner = LOCAL_SCANNER_ENABLED ? new LocalAgentScanner({
+  discoveryIntervalSeconds: monitorSettings.localDiscoveryIntervalMs / 1_000,
+  conversationWindowMs: monitorSettings.localTranscriptWindowMs,
+  maxConversationRecords: monitorSettings.localTranscriptRecordLimit
+}) : null;
 
 function numberEnv(name, fallback, minimum) {
   const raw = process.env[name];
@@ -238,9 +250,47 @@ async function main() {
     return subscriptionAttempt;
   }
 
-  await ensureSubscription();
-  await refreshGatewayInfo();
-  await refresh();
+  // Bind and announce the HTTP endpoint before connecting to Gateway or
+  // scanning local transcript trees. The Swift app can render its shell and
+  // subscribe immediately; the initial snapshot arrives asynchronously.
+  const server = createServer((request, response) => {
+    void handleRequest(request, response).catch((error) => {
+      if (response.headersSent) {
+        response.end();
+        return;
+      }
+      const statusCode = error?.statusCode ?? 500;
+      const code = error?.code ?? (statusCode === 500 ? "monitor_internal" : undefined);
+      response.writeHead(statusCode, { "content-type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify({ error: error?.message ?? String(error), ...(code ? { code } : {}) }));
+    });
+  });
+  await new Promise((resolve, reject) => {
+    const onError = (error) => reject(error);
+    server.once("error", onError);
+    server.listen(MONITOR_PORT, MONITOR_HOST, () => {
+      server.off("error", onError);
+      resolve();
+    });
+  });
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : MONITOR_PORT;
+  console.log(JSON.stringify({
+    kind: "monitor_ready",
+    schemaVersion: MONITOR_SCHEMA_VERSION,
+    monitorApiVersion: MONITOR_API_VERSION,
+    url: `http://${MONITOR_HOST}:${port}`,
+    apiToken,
+    rootId: identity.rootId,
+    gatewayIdentity: gatewayIdentity(state, identity),
+    capabilities: monitorCapabilities(state)
+  }));
+
+  void (async () => {
+    await ensureSubscription();
+    await refreshGatewayInfo();
+    await refresh();
+  })().catch((error) => console.error(`Initial monitor refresh failed: ${error.message}`));
   const interval = setInterval(() => {
     void ensureSubscription();
     void refresh();
@@ -263,21 +313,8 @@ async function main() {
       // view down. Without this catch an unhandled rejection kills the process.
       console.error(`Local session refresh failed: ${error.message}`);
     });
-  }, 1_000);
+  }, LOCAL_SCAN_INTERVAL_MS);
   localInterval.unref();
-
-  const server = createServer((request, response) => {
-    void handleRequest(request, response).catch((error) => {
-      if (response.headersSent) {
-        response.end();
-        return;
-      }
-      const statusCode = error?.statusCode ?? 500;
-      const code = error?.code ?? (statusCode === 500 ? "monitor_internal" : undefined);
-      response.writeHead(statusCode, { "content-type": "application/json; charset=utf-8" });
-      response.end(JSON.stringify({ error: error?.message ?? String(error), ...(code ? { code } : {}) }));
-    });
-  });
 
   async function handleRequest(request, response) {
     const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
@@ -494,27 +531,6 @@ async function main() {
       starter.close();
     }
   }
-
-  await new Promise((resolve, reject) => {
-    const onError = (error) => reject(error);
-    server.once("error", onError);
-    server.listen(MONITOR_PORT, MONITOR_HOST, () => {
-      server.off("error", onError);
-      resolve();
-    });
-  });
-  const address = server.address();
-  const port = typeof address === "object" && address ? address.port : MONITOR_PORT;
-  console.log(JSON.stringify({
-    kind: "monitor_ready",
-    schemaVersion: MONITOR_SCHEMA_VERSION,
-    monitorApiVersion: MONITOR_API_VERSION,
-    url: `http://${MONITOR_HOST}:${port}`,
-    apiToken,
-    rootId: identity.rootId,
-    gatewayIdentity: gatewayIdentity(state, identity),
-    capabilities: monitorCapabilities(state)
-  }));
 
   let shuttingDown = false;
   let parentWatch = null;

@@ -22,7 +22,7 @@ test("Gateway settings expose every safe runtime option without secrets", async 
       agentUpdates: { autoUpdate: true, notifications: true }
     }));
     const snapshot = gatewaySettingsSnapshot({ statePath, env: {} });
-    assert.equal(snapshot.options.length, 18);
+    assert.equal(snapshot.options.length, 23);
     assert.equal(snapshot.options.length, GATEWAY_SETTING_DEFINITIONS.length);
     assert.equal(snapshot.options.find((item) => item.id === "maxInlineResultBytes").currentValue, 65_536);
     assert.equal(JSON.stringify(snapshot).includes(token), false);
@@ -50,6 +50,8 @@ test("Gateway settings persist atomically, preserve install identity, and reset 
         gcIntervalMs: 9_000,
         maxEvents: 400,
         maxInlineResultBytes: 32_768,
+        localScanIntervalMs: 2_000,
+        localTranscriptRecordLimit: 1_000,
         agentAutoUpdate: false,
         agentUpdateIntervalMs: 600_000
       }
@@ -59,11 +61,13 @@ test("Gateway settings persist atomically, preserve install identity, and reset 
     assert.equal(saved.managedMcp["codex:agent-acp"].agent, "codex");
     assert.equal(saved.gatewayConfig.lifecycle.gcIntervalMs, 9_000);
     assert.equal(saved.gatewayConfig.resourceLimits.maxEvents, 400);
+    assert.equal(saved.gatewayConfig.monitor.localScanIntervalMs, 2_000);
     assert.equal(saved.agentUpdates.autoUpdate, false);
     assert.equal(saved.agentUpdates.intervalMs, 600_000);
     assert.equal((await stat(statePath)).mode & 0o777, 0o600);
     const resolved = resolveGatewaySettings({ statePath, env: {} });
     assert.equal(resolved.maxInlineResultBytes, 32_768);
+    assert.equal(resolved.localTranscriptRecordLimit, 1_000);
 
     await updateGatewaySettings({ statePath, env: {}, resetIds: ["gcIntervalMs", "agentAutoUpdate"] });
     const reset = resolveGatewaySettings({ statePath, env: {} });

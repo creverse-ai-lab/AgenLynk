@@ -105,7 +105,7 @@ test("socket Gateway separates public guide access from Main control", async () 
     assert.deepEqual((await main.call("session", { action: "list" })).sessions, []);
     assert.deepEqual((await observer.call("session", { action: "list" })).sessions, []);
     const gatewayConfig = await observer.call("gateway_config", { action: "get" });
-    assert.equal(gatewayConfig.options.length, 18);
+    assert.equal(gatewayConfig.options.length, 23);
     assert.equal(gatewayConfig.options.some((option) => option.id === "maxInlineResultBytes"), true);
     await assert.rejects(
       observer.call("gateway_config", { action: "set", values: { maxEvents: 250 } }),

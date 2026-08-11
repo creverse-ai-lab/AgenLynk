@@ -3,7 +3,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const GATEWAY_VERSION = "1.3.1";
+export const GATEWAY_VERSION = "1.3.2";
 
 // The release version intentionally stays stable while dev work is in flight.
 // A daemon can therefore report the right version while still running older

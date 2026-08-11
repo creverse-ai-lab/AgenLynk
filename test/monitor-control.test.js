@@ -121,7 +121,7 @@ test("native monitor controls Gateway config and safely restarts into pending va
     ]);
     const headers = { authorization: `Bearer ${ready.apiToken}` };
     const initial = await fetchJson(`${ready.url}/api/gateway-config`, { headers });
-    assert.equal(initial.options.length, 18);
+    assert.equal(initial.options.length, 23);
 
     const staged = await fetchJson(`${ready.url}/api/gateway-config`, {
       method: "POST",
@@ -198,12 +198,11 @@ test("native monitor cold-starts Gateway when no daemon is running", async () =>
       })),
       new Promise((_, reject) => setTimeout(() => reject(new Error("cold-start monitor ready timeout")), 15_000))
     ]);
-    const snapshot = await fetchJson(`${ready.url}/api/snapshot`, {
-      headers: { authorization: `Bearer ${ready.apiToken}` }
-    });
+    const snapshot = await waitForSnapshot(ready.url, { authorization: `Bearer ${ready.apiToken}` },
+      (value) => value.connected && value.streaming);
     assert.equal(snapshot.connected, true);
     assert.equal(snapshot.streaming, true);
-    assert.equal(snapshot.gateway.gatewayVersion, "1.3.1");
+    assert.equal(snapshot.gateway.gatewayVersion, "1.3.2");
     await access(socketPath);
   } finally {
     if (monitor.exitCode == null) {
@@ -302,6 +301,15 @@ async function fetchJson(url, options) {
   const body = await response.json();
   if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
   return body;
+}
+
+async function waitForSnapshot(baseURL, headers, predicate) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const snapshot = await fetchJson(`${baseURL}/api/snapshot`, { headers });
+    if (predicate(snapshot)) return snapshot;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("monitor snapshot did not become ready");
 }
 
 async function waitForPath(path, errorDetail = () => "") {

@@ -21,6 +21,12 @@ export const GATEWAY_SETTING_DEFINITIONS = Object.freeze([
   numberSetting("maxPendingRequestsPerSession", "resourceLimits", "Pending requests", "Maximum concurrent unanswered Worker requests per session.", "ACP_GATEWAY_MAX_PENDING_REQUESTS_PER_SESSION", 64, 1, "count"),
   numberSetting("maxFrameBytes", "resourceLimits", "RPC frame", "Maximum bytes accepted in one Gateway NDJSON frame.", "ACP_GATEWAY_MAX_FRAME_BYTES", 32 * 1024 * 1024, 1024, "bytes"),
 
+  booleanSetting("localScannerEnabled", "monitor", "Local scanner", "Detect locally started Codex, Claude, and Grok sessions.", "ACP_MONITOR_LOCAL_SCANNER", true),
+  numberSetting("localScanIntervalMs", "monitor", "Local scan interval", "How often the monitor polls known local session files. Lower values make status appear sooner but use more CPU.", "ACP_MONITOR_LOCAL_SCAN_INTERVAL_MS", 1_000, 250, "ms"),
+  numberSetting("localDiscoveryIntervalMs", "monitor", "Local discovery interval", "How often the monitor looks for newly created local sessions. Lower values make new sessions appear sooner but perform more filesystem work.", "ACP_MONITOR_LOCAL_DISCOVERY_INTERVAL_MS", 2_000, 500, "ms"),
+  numberSetting("localTranscriptWindowMs", "monitor", "Local transcript window", "How much recent local transcript history to retain for the timeline. Lower values reduce memory use.", "ACP_MONITOR_LOCAL_TRANSCRIPT_WINDOW_MS", 65 * 60_000, 60_000, "ms"),
+  numberSetting("localTranscriptRecordLimit", "monitor", "Local transcript records", "Maximum retained local transcript records per session. Lower values reduce memory use.", "ACP_MONITOR_LOCAL_TRANSCRIPT_RECORD_LIMIT", 4_000, 100, "count"),
+
   booleanSetting("agentAutoUpdate", "agentUpdates", "Automatic adapter updates", "Automatically apply safe ACP adapter upgrades.", "ACP_GATEWAY_AGENT_AUTO_UPDATE", true),
   booleanSetting("agentUpdateNotifications", "agentUpdates", "Update notifications", "Expose adapter and Gateway update alerts in health responses.", "ACP_GATEWAY_AGENT_UPDATE_NOTIFICATIONS", true),
   numberSetting("agentUpdateIntervalMs", "agentUpdates", "Update check interval", "Interval between ACP registry and Gateway source checks.", "ACP_GATEWAY_AGENT_UPDATE_INTERVAL_MS", 24 * 60 * 60_000, 5 * 60_000, "ms")
@@ -107,9 +113,8 @@ export async function updateGatewaySettings({
   if (state.version !== 1) {
     throw new Error("ACP Gateway must be installed before changing settings");
   }
-  state.gatewayConfig ??= { lifecycle: {}, resourceLimits: {} };
-  state.gatewayConfig.lifecycle ??= {};
-  state.gatewayConfig.resourceLimits ??= {};
+  state.gatewayConfig ??= {};
+  for (const group of ["lifecycle", "resourceLimits", "monitor"]) state.gatewayConfig[group] ??= {};
   state.agentUpdates ??= { autoUpdate: true, notifications: true };
 
   for (const [id, value] of Object.entries(values)) {

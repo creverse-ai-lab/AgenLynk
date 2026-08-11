@@ -19,14 +19,17 @@ import { readRecentThreads } from "./thread-db.js";
 // reads. Before this, LocalTranscriptReader re-read the very same appended
 // bytes every second with its own cursor, cache and rewrite detection — two
 // copies of the scanner's most fragile logic over its hottest file.
-const CONVERSATION_WINDOW_MS = 65 * 60 * 1000;
-const MAX_CONVERSATION_RECORDS = 4_000;
+const DEFAULT_CONVERSATION_WINDOW_MS = 65 * 60 * 1000;
+const DEFAULT_MAX_CONVERSATION_RECORDS = 4_000;
 // A transcript adopted mid-life is read from its tail, not from byte zero: an
 // old rollout can be arbitrarily large, and state/events both only need the
 // recent window anyway.
 const ADOPTION_TAIL_BYTES = 12 * 1024 * 1024;
 
-function newCursor(session, modified, database) {
+function newCursor(session, modified, database, {
+  conversationWindowMs = DEFAULT_CONVERSATION_WINDOW_MS,
+  maxConversationRecords = DEFAULT_MAX_CONVERSATION_RECORDS
+} = {}) {
   return {
     offset: 0,
     session,
@@ -39,20 +42,22 @@ function newCursor(session, modified, database) {
     pendingApprovals: new Set(),
     // Conversation-shaped records from the tail, bounded by time and count,
     // consumed by the event projection.
-    conversation: []
+    conversation: [],
+    conversationWindowMs,
+    maxConversationRecords
   };
 }
 
 function pruneConversation(cursor, nowMs) {
-  const cutoff = nowMs - CONVERSATION_WINDOW_MS;
+  const cutoff = nowMs - cursor.conversationWindowMs;
   let drop = 0;
   while (drop < cursor.conversation.length) {
     const at = Date.parse(cursor.conversation[drop].timestamp ?? "");
     if (Number.isFinite(at) && at >= cutoff) break;
     drop += 1;
   }
-  if (cursor.conversation.length - drop > MAX_CONVERSATION_RECORDS) {
-    drop = cursor.conversation.length - MAX_CONVERSATION_RECORDS;
+  if (cursor.conversation.length - drop > cursor.maxConversationRecords) {
+    drop = cursor.conversation.length - cursor.maxConversationRecords;
   }
   if (drop > 0) cursor.conversation.splice(0, drop);
 }
@@ -83,7 +88,17 @@ async function* rolloutPaths(root) {
  * scanner gave up on, keyed by the mtime it saw, so a retired file is only
  * reconsidered once it actually changes.
  */
-export async function discover({ root, explicitPaths = [], cursors, retired, staleAfter, now, database = null }) {
+export async function discover({
+  root,
+  explicitPaths = [],
+  cursors,
+  retired,
+  staleAfter,
+  now,
+  database = null,
+  conversationWindowMs,
+  maxConversationRecords
+}) {
   // knownModified: recency already known from the thread database, so those
   // candidates cost zero syscalls to consider — discovery runs every 2s, and
   // a stat per candidate was pure duplication of what the DB just reported.
@@ -107,7 +122,10 @@ export async function discover({ root, explicitPaths = [], cursors, retired, sta
       // The DB's updated_at can lag the file slightly; poll() stats the real
       // file before reading, so a coarse recency signal is all that's needed.
       retired.delete(path);
-      cursors.set(path, newCursor(transcriptStem(path), modified, database));
+      cursors.set(path, newCursor(transcriptStem(path), modified, database, {
+        conversationWindowMs,
+        maxConversationRecords
+      }));
     }
   };
 
