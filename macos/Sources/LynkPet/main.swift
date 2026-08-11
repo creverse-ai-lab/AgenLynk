@@ -476,6 +476,7 @@ private final class MotionController: ObservableObject {
     private var lastSessions: [AgentSession] = []
     private var lastMousePoint: NSPoint?
     private var restTicks = 0
+    private var lastOrigin = NSPoint(x: CGFloat.infinity, y: CGFloat.infinity)
 
     init(store: StatusStore) {
         self.store = store
@@ -566,7 +567,16 @@ private final class MotionController: ObservableObject {
         var origin = NSPoint(x: hub.x - windowSize.width / 2, y: hub.y - windowSize.height / 2)
         origin.x = min(max(origin.x, screenFrame.minX), max(screenFrame.minX, screenFrame.maxX - windowSize.width))
         origin.y = min(max(origin.y, screenFrame.minY), max(screenFrame.minY, screenFrame.maxY - windowSize.height))
-        window.setFrameOrigin(origin)
+        // Moving a borderless always-on-top window makes WindowServer
+        // recomposite it. The spring settles to a fixed point and the window
+        // is clamped at screen edges, so most ticks ask for the position it is
+        // already at — and the anchor below keeps tracking the hub either way.
+        if abs(origin.x - lastOrigin.x) >= 0.5 || abs(origin.y - lastOrigin.y) >= 0.5 {
+            window.setFrameOrigin(origin)
+            lastOrigin = origin
+        } else {
+            origin = lastOrigin
+        }
         let anchor = CGPoint(x: hub.x - origin.x, y: windowSize.height - (hub.y - origin.y))
 
         let targets = layoutTargets(sessions, now: now, span: span)
@@ -736,146 +746,189 @@ private func logoForProvider(_ provider: String) -> NSImage? {
     providerLogos[provider.lowercased()]
 }
 
-private struct AgentNodeView: View {
-    let node: RenderNode
-    let time: TimeInterval
-
-    // One line only: the repo (top folder of the session's cwd), falling back to
-    // the task snippet, then the engine name so multiple instances stay tellable.
-    private var label: String {
-        let prefix = isFrontdoor(node.agent) ? "Frontdoor · " : ""
-        if let cwd = node.agent.cwd, !cwd.isEmpty {
-            return prefix + URL(fileURLWithPath: cwd).lastPathComponent
-        }
-        if let task = node.agent.task, !task.isEmpty { return prefix + task }
-        let raw = node.agent.engine ?? node.agent.provider
-        return prefix + String(raw.replacingOccurrences(of: "gpt-", with: "").prefix(12))
+// One line only: the repo (top folder of the session's cwd), falling back to
+// the task snippet, then the engine name so multiple instances stay tellable.
+private func nodeLabel(_ agent: AgentSession) -> String {
+    let prefix = isFrontdoor(agent) ? "Frontdoor · " : ""
+    if let cwd = agent.cwd, !cwd.isEmpty {
+        return prefix + URL(fileURLWithPath: cwd).lastPathComponent
     }
-
-    var body: some View {
-        let size = node.size
-        let pulsing = demandsAttention(node.agent) && !node.warm
-        let spinning = node.agent.state == "running" && !node.warm
-        let ringColor = node.warm ? Color.gray : stateColor(node.agent.state)
-        ZStack {
-            if pulsing {
-                let phase = CGFloat((time * 0.8).truncatingRemainder(dividingBy: 1))
-                Circle()
-                    .stroke(Color.orange.opacity(Double(1 - phase) * 0.6), lineWidth: 1.5)
-                    .frame(width: size + phase * 28, height: size + phase * 28)
-            }
-            Circle().fill(brandColor(node.agent.provider))
-            if let logo = logoForProvider(node.agent.provider) {
-                Image(nsImage: logo)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: size, height: size)
-                    .scaleEffect(1.2)
-                    .clipShape(Circle())
-                    .rotationEffect(.radians(spinning ? time.truncatingRemainder(dividingBy: 2 * .pi / 1.8) * 1.8 : 0))
-            } else {
-                Text(node.agent.provider.prefix(1).uppercased())
-                    .font(.system(size: size * 0.42, weight: .black))
-                    .foregroundStyle(.white)
-                    .rotationEffect(.radians(spinning ? time.truncatingRemainder(dividingBy: 2 * .pi / 1.8) * 1.8 : 0))
-            }
-            Circle()
-                .stroke(ringColor, lineWidth: pulsing ? 2.5 + heartbeat(time) * 2 : 2.5)
-            if isFrontdoor(node.agent) {
-                Circle()
-                    .stroke(.white.opacity(0.85), lineWidth: 1.2)
-                    .frame(width: size + 7, height: size + 7)
-                Text("F")
-                    .font(.system(size: 8, weight: .black))
-                    .foregroundStyle(.black)
-                    .frame(width: 14, height: 14)
-                    .background(.cyan, in: Circle())
-                    .offset(x: -size * 0.38, y: -size * 0.38)
-            }
-            if let pending = node.agent.inboxPending, pending > 0, !node.warm {
-                Text("\(pending)")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(3)
-                    .background(.purple, in: Circle())
-                    .offset(x: size * 0.38, y: size * 0.38)
-            }
-        }
-        .frame(width: size, height: size)
-        .scaleEffect(pulsing ? 1 + 0.3 * heartbeat(time) : 1)
-        .overlay {
-            Text(label)
-                .font(.system(size: 8.5, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.75))
-                .lineLimit(1)
-                .frame(maxWidth: 92)
-                .fixedSize(horizontal: false, vertical: true)
-                .offset(y: size / 2 + 10)
-                .opacity(node.labelOpacity)
-        }
-        .opacity(node.opacity)
-        .accessibilityLabel("\(isFrontdoor(node.agent) ? "frontdoor " : "")\(node.agent.provider) \(label) \(node.agent.state)")
-    }
-}
-
-private struct BadgeView: View {
-    let active: Int
-    let warm: Int
-    let attention: Bool
-    let time: TimeInterval
-
-    var body: some View {
-        let beat = attention ? 1 + 0.3 * heartbeat(time) : 1
-        ZStack {
-            Circle().fill(.black.opacity(0.55))
-            Circle().stroke(attention ? .orange : .cyan, lineWidth: 2)
-            Text("\(active)")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(.white)
-            if warm > 0 {
-                ZStack {
-                    Circle().fill(.black.opacity(0.55))
-                    Circle().stroke(.gray, lineWidth: 1.5)
-                    Text("\(warm)")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.8))
-                }
-                .frame(width: 14, height: 14)
-                .offset(x: -12, y: 10)
-            }
-        }
-        .frame(width: 22, height: 22)
-        .scaleEffect(beat)
-    }
+    if let task = agent.task, !task.isEmpty { return prefix + task }
+    let raw = agent.engine ?? agent.provider
+    return prefix + String(raw.replacingOccurrences(of: "gpt-", with: "").prefix(12))
 }
 
 private struct TreeFlowScene: View {
     @ObservedObject var controller: MotionController
 
+    // Everything is drawn into one Canvas. The nodes used to be SwiftUI views
+    // (`ForEach { AgentNodeView }`), which meant a fresh body evaluation, view
+    // tree diff, and full AppKit layout pass 30 times a second — a `sample` of
+    // the running Pet was dominated by -[NSView _layoutSubtreeWithOldSize:]
+    // recursion, and the process sat at 5-9% CPU whenever any agent was
+    // running. A Canvas redraw has no view tree and no layout, so an animating
+    // frame costs only the drawing itself.
     var body: some View {
         let frame = controller.frame
-        ZStack {
-            Canvas { context, _ in
-                for edge in frame.edges {
-                    drawEdge(edge, time: frame.time, opacity: frame.edgeOpacity, in: &context)
-                }
+        Canvas { context, _ in
+            for edge in frame.edges {
+                drawEdge(edge, time: frame.time, opacity: frame.edgeOpacity, in: &context)
             }
-            ForEach(frame.nodes) { node in
-                AgentNodeView(node: node, time: frame.time)
-                    .position(node.point)
+            for node in frame.nodes {
+                drawNode(node, time: frame.time, in: &context)
             }
             if frame.badgeOpacity > 0.02 {
-                BadgeView(
+                drawBadge(
                     active: frame.activeCount,
                     warm: frame.warmCount,
                     attention: frame.needsAttention,
-                    time: frame.time
+                    time: frame.time,
+                    at: frame.anchor,
+                    opacity: frame.badgeOpacity,
+                    in: &context
                 )
-                .position(frame.anchor)
-                .opacity(frame.badgeOpacity)
             }
         }
         .frame(width: windowSize.width, height: windowSize.height)
+        // Canvas draws pixels, not an accessibility tree. This closure is only
+        // consulted when an assistive client asks, so it costs nothing per
+        // frame while still describing every node the way the views did.
+        .accessibilityRepresentation {
+            VStack {
+                ForEach(frame.nodes) { node in
+                    Text("\(isFrontdoor(node.agent) ? "frontdoor " : "")\(node.agent.provider) \(nodeLabel(node.agent)) \(node.agent.state)")
+                }
+            }
+        }
+    }
+
+    private func drawNode(_ node: RenderNode, time: TimeInterval, in context: inout GraphicsContext) {
+        guard node.opacity > 0.02 else { return }
+        let center = node.point
+        let pulsing = demandsAttention(node.agent) && !node.warm
+        let spinning = node.agent.state == "running" && !node.warm
+        let beat = pulsing ? 1 + 0.3 * heartbeat(time) : 1
+        // The label sat in an .overlay outside the pulse's .scaleEffect, so it
+        // stays at its unscaled size and offset here too.
+        let size = node.size * beat
+        let ringColor = node.warm ? Color.gray : stateColor(node.agent.state)
+        let angle = spinning ? time.truncatingRemainder(dividingBy: 2 * .pi / 1.8) * 1.8 : 0
+
+        func circle(diameter: CGFloat, at point: CGPoint = center) -> Path {
+            Path(ellipseIn: CGRect(
+                x: point.x - diameter / 2, y: point.y - diameter / 2, width: diameter, height: diameter
+            ))
+        }
+
+        if pulsing {
+            let phase = CGFloat((time * 0.8).truncatingRemainder(dividingBy: 1))
+            context.stroke(
+                circle(diameter: size + phase * 28),
+                with: .color(.orange.opacity(Double(1 - phase) * 0.6 * node.opacity)),
+                lineWidth: 1.5
+            )
+        }
+
+        let body = circle(diameter: size)
+        context.fill(body, with: .color(brandColor(node.agent.provider).opacity(node.opacity)))
+        if let logo = logoForProvider(node.agent.provider) {
+            context.drawLayer { layer in
+                layer.opacity = node.opacity
+                layer.clip(to: body)
+                layer.translateBy(x: center.x, y: center.y)
+                layer.rotate(by: .radians(angle))
+                // scaledToFill + scaleEffect(1.2) on a square frame.
+                let side = size * 1.2
+                layer.draw(Image(nsImage: logo), in: CGRect(x: -side / 2, y: -side / 2, width: side, height: side))
+            }
+        } else {
+            context.drawLayer { layer in
+                layer.opacity = node.opacity
+                layer.translateBy(x: center.x, y: center.y)
+                layer.rotate(by: .radians(angle))
+                layer.draw(
+                    Text(node.agent.provider.prefix(1).uppercased())
+                        .font(.system(size: size * 0.42, weight: .black))
+                        .foregroundStyle(.white),
+                    at: .zero
+                )
+            }
+        }
+        context.stroke(
+            body,
+            with: .color(ringColor.opacity(node.opacity)),
+            lineWidth: pulsing ? 2.5 + heartbeat(time) * 2 : 2.5
+        )
+
+        if isFrontdoor(node.agent) {
+            context.stroke(
+                circle(diameter: size + 7),
+                with: .color(.white.opacity(0.85 * node.opacity)),
+                lineWidth: 1.2
+            )
+            let corner = CGPoint(x: center.x - size * 0.38, y: center.y - size * 0.38)
+            context.fill(circle(diameter: 14, at: corner), with: .color(.cyan.opacity(node.opacity)))
+            context.draw(
+                Text("F").font(.system(size: 8, weight: .black)).foregroundStyle(.black),
+                at: corner
+            )
+        }
+        if let pending = node.agent.inboxPending, pending > 0, !node.warm {
+            let corner = CGPoint(x: center.x + size * 0.38, y: center.y + size * 0.38)
+            context.fill(circle(diameter: 14, at: corner), with: .color(.purple.opacity(node.opacity)))
+            context.draw(
+                Text("\(pending)").font(.system(size: 9, weight: .bold)).foregroundStyle(.white),
+                at: corner
+            )
+        }
+
+        let labelOpacity = node.labelOpacity * node.opacity
+        guard labelOpacity > 0.02 else { return }
+        context.drawLayer { layer in
+            // Stands in for lineLimit(1).frame(maxWidth: 92): a long repo name
+            // is cut off at the same width rather than widening the node.
+            let anchor = CGPoint(x: center.x, y: center.y + node.size / 2 + 10)
+            layer.clip(to: Path(CGRect(x: anchor.x - 46, y: anchor.y - 8, width: 92, height: 16)))
+            layer.draw(
+                Text(nodeLabel(node.agent))
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.75 * labelOpacity)),
+                at: anchor
+            )
+        }
+    }
+
+    private func drawBadge(
+        active: Int,
+        warm: Int,
+        attention: Bool,
+        time: TimeInterval,
+        at center: CGPoint,
+        opacity: CGFloat,
+        in context: inout GraphicsContext
+    ) {
+        let size = 22 * (attention ? 1 + 0.3 * heartbeat(time) : 1)
+        func circle(diameter: CGFloat, at point: CGPoint) -> Path {
+            Path(ellipseIn: CGRect(
+                x: point.x - diameter / 2, y: point.y - diameter / 2, width: diameter, height: diameter
+            ))
+        }
+        let disc = circle(diameter: size, at: center)
+        context.fill(disc, with: .color(.black.opacity(0.55 * opacity)))
+        context.stroke(disc, with: .color((attention ? Color.orange : .cyan).opacity(opacity)), lineWidth: 2)
+        context.draw(
+            Text("\(active)").font(.system(size: 10, weight: .bold)).foregroundStyle(.white.opacity(opacity)),
+            at: center
+        )
+        guard warm > 0 else { return }
+        let corner = CGPoint(x: center.x - 12 * (size / 22), y: center.y + 10 * (size / 22))
+        let small = circle(diameter: 14, at: corner)
+        context.fill(small, with: .color(.black.opacity(0.55 * opacity)))
+        context.stroke(small, with: .color(.gray.opacity(opacity)), lineWidth: 1.5)
+        context.draw(
+            Text("\(warm)").font(.system(size: 8, weight: .semibold)).foregroundStyle(.white.opacity(0.8 * opacity)),
+            at: corner
+        )
     }
 
     private func drawEdge(_ edge: RenderEdge, time: TimeInterval, opacity: CGFloat, in context: inout GraphicsContext) {
