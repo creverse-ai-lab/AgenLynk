@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mergeMonitorSessions, projectLocalSnapshot } from "../src/local-monitor.js";
-import { projectCodexTranscript } from "../src/local-transcript.js";
+import { currentProjectedTurnId, projectCodexTranscript } from "../src/local-transcript.js";
 
 test("Codex transcript projection preserves prompt, assistant messages, tools, and completion", () => {
   const records = [
@@ -26,6 +26,37 @@ test("Codex transcript projection preserves prompt, assistant messages, tools, a
   assert.match(events[2].text, /exec: sqlite3 state\.db/);
   assert.equal(events[4].text, "mapping is correct");
   assert.ok(events.every((event) => event.turnId === events[0].turnId));
+});
+
+// Regression: the state scan invents `local-turn:<session>` for a running
+// session because it cannot see turn boundaries, while the transcript
+// projection numbers each turn `local-turn:<session>:<startedAt>`. When the
+// projection supplies a session's events, the session record has to adopt
+// their turn id — the menu-bar live graph scopes events to the session's
+// current turn, so a record pointing at a turn none of its events belongs to
+// draws a running session with nothing in it.
+test("a running local session adopts the turn id its projected events carry", () => {
+  const records = [
+    { timestamp: "2026-08-07T00:00:00.000Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "first" }] } },
+    { timestamp: "2026-08-07T00:00:01.000Z", type: "event_msg", payload: { type: "task_complete" } },
+    { timestamp: "2026-08-07T00:00:02.000Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "second" }] } },
+    { timestamp: "2026-08-07T00:00:03.000Z", type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "working" }] } }
+  ];
+  const [session] = projectLocalSnapshot({ sessions: [
+    { provider: "codex", session: "main", state: "running", time: 100, cwd: "/work" }
+  ] }).sessions;
+  const events = projectCodexTranscript(records, {
+    sessionId: session.sessionId,
+    rawSessionId: session.localSessionId,
+    now: Date.parse("2026-08-07T00:01:00.000Z")
+  });
+
+  const adopted = currentProjectedTurnId(events);
+  assert.notEqual(adopted, session.turnId, "the scan's synthetic id is not a real turn id");
+  assert.equal(adopted, events.at(-1).turnId);
+  assert.ok(events.some((event) => event.turnId === adopted && event.type === "turn_start"),
+    "the adopted turn must be one the events actually opened");
+  assert.equal(currentProjectedTurnId([]), null);
 });
 
 test("local snapshot projects a real frontdoor and nested local workers", () => {

@@ -24,7 +24,7 @@ import { MONITOR_API_VERSION, MONITOR_SCHEMA_VERSION, MonitorState, queuedSingle
 import { gatewaySocketPath } from "./config.js";
 import { GATEWAY_BUILD_ID, GATEWAY_RUNTIME_ROOT } from "./version.js";
 import { mergeMonitorSessions, projectLocalSnapshot } from "./local-monitor.js";
-import { projectCodexTranscript } from "./local-transcript.js";
+import { currentProjectedTurnId, projectCodexTranscript } from "./local-transcript.js";
 import { LocalAgentScanner } from "./local-agents/index.js";
 import { defaultGatewaySettings, gatewaySettingsSnapshot, updateGatewaySettings } from "./gateway-settings.js";
 import {
@@ -556,7 +556,11 @@ async function readLocalProjection() {
         rawSessionId: session.localSessionId,
         now: Date.now()
       });
-      if (events.length) projection.events[session.sessionId] = events;
+      if (!events.length) continue;
+      projection.events[session.sessionId] = events;
+      // Only while the session is actually mid-turn: a record with turnId
+      // null is not running, and must not be given one.
+      if (session.turnId) session.turnId = currentProjectedTurnId(events) ?? session.turnId;
     }
     return projection;
   } catch (error) {

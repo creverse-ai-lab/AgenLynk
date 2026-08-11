@@ -76,6 +76,23 @@ export function projectCodexTranscript(records, {
   return events;
 }
 
+/**
+ * The turn id the newest projected event belongs to, or null for an empty
+ * projection.
+ *
+ * A local session record carries a synthetic `local-turn:<session>` turn id
+ * invented by the state scan, which reads process/transcript *state* and
+ * cannot see turn boundaries. This projection can, and numbers each turn
+ * `local-turn:<session>:<startedAt>`. Whenever it supplies a session's events
+ * the record has to adopt the turn its own events actually carry: consumers
+ * that scope events to the session's current turn (the menu-bar live graph)
+ * match on turn id, and a record pointing at a turn no event belongs to
+ * renders as a session with nothing happening in it.
+ */
+export function currentProjectedTurnId(events) {
+  return events.length ? events[events.length - 1].turnId ?? null : null;
+}
+
 export function isConversationRecord(record) {
   const type = record?.payload?.type;
   return (record?.type === "response_item" && [
