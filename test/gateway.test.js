@@ -815,6 +815,78 @@ test("Worker thinking is requested on every restore, and only where it is unders
   );
 });
 
+test("Subagent transcripts are advertised at initialize only where they are understood", async () => {
+  const initializes = [];
+  const started = [];
+  const startClient = async (provider, options) => {
+    const client = new AcpClient(
+      { provider, command: process.execPath, args: [mockAgent], permissionPolicy: "read_only" },
+      options
+    );
+    const request = client.request.bind(client);
+    client.request = (method, params, timeoutMs) => {
+      if (method === "initialize") initializes.push(params);
+      return request(method, params, timeoutMs);
+    };
+    started.push(client);
+    await client.start();
+  };
+  try {
+    await startClient("claude", { subagentTranscript: true });
+    await startClient("claude", {});
+    await startClient("codex", { subagentTranscript: true });
+    const [enabled, disabled, other] = initializes.map((params) => params.clientCapabilities);
+    // Without this the adapter keeps a Task subagent's text and thinking inside
+    // the spawning tool call and the Gateway never sees the transcript.
+    assert.deepEqual(enabled._meta, { "subagent-transcript": true });
+    assert.equal(enabled.terminal, true, "the opt-in rides along with the standing capabilities");
+    assert.equal(Object.hasOwn(disabled, "_meta"), false, "the default must not sign a Worker up for subagent event volume");
+    assert.equal(Object.hasOwn(other, "_meta"), false, "no other adapter declares this capability key");
+  } finally {
+    await Promise.all(started.map((client) => client.stop().catch(() => {})));
+  }
+});
+
+test("Gateway records a subagent transcript with its attribution, apart from the Worker's own answer", async () => {
+  const clientOptions = [];
+  const makeClient = (_provider, options) => {
+    clientOptions.push(options);
+    return new AcpClient({ provider: "mock", command: process.execPath, args: [mockAgent], permissionPolicy: "read_only" }, options);
+  };
+  const off = new GatewayService({ createClient: makeClient });
+  const service = new GatewayService({ createClient: makeClient, workerSubagentTranscript: true });
+  try {
+    await off.call("session_open", { provider: "claude", cwd: process.cwd(), permissionPolicy: "read_only" }, { rootId: "main-a" });
+    assert.equal(clientOptions[0].subagentTranscript, false, "collection stays off until an operator asks for it");
+
+    const opened = await service.call("session_open", { provider: "claude", cwd: process.cwd(), permissionPolicy: "read_only" }, { rootId: "main-a" });
+    assert.equal(clientOptions[1].subagentTranscript, true);
+
+    // The shape the adapter emits once the capability is advertised: ordinary
+    // chunks and tool calls on the same session, stamped with the Task tool call
+    // that spawned them.
+    const session = service.requireSession(opened.sessionId);
+    const fromSubagent = { claudeCode: { parentToolUseId: "toolu_task_1" } };
+    service.handleUpdate(session, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "WORKER ANSWER" } });
+    service.handleUpdate(session, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "subagent report" }, _meta: fromSubagent });
+    service.handleUpdate(session, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "subagent reasoning" }, _meta: fromSubagent });
+    service.handleUpdate(session, { sessionUpdate: "tool_call", toolCallId: "sub-read", title: "Read", kind: "read", _meta: fromSubagent });
+
+    const attributed = session.events.filter((event) => event.parentToolUseId === "toolu_task_1");
+    assert.deepEqual(
+      attributed.map((event) => event.type),
+      ["agent_message_chunk", "agent_thought_chunk", "tool_call"],
+      "every subagent update reaches the session feed carrying the tool call it belongs to"
+    );
+    assert.equal(attributed[0].text, "subagent report");
+    assert.equal(session.resultText, "WORKER ANSWER", "a subagent's report is evidence, never the Worker's answer");
+    assert.equal(session.thoughtText, "", "nor is its reasoning mixed into the Worker's thought stream");
+  } finally {
+    await off.shutdown().catch(() => {});
+    await service.shutdown().catch(() => {});
+  }
+});
+
 test("Gateway waits for provider initialization before sharing a client", async () => {
   let releaseStart;
   const startGate = new Promise((resolve) => { releaseStart = resolve; });

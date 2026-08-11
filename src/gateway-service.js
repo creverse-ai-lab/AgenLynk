@@ -47,6 +47,7 @@ export class GatewayService {
     maxPendingRequestsPerSession = 64,
     maxFrameBytes = 32 * 1024 * 1024,
     workerThoughtStream = true,
+    workerSubagentTranscript = false,
     artifactRoot = statePath ? join(dirname(statePath), "artifacts") : defaultArtifactRoot(),
     artifactStore = null,
     createClient = null,
@@ -91,6 +92,7 @@ export class GatewayService {
     };
     this.lifecycle = { gcIntervalMs, idleUnloadMs, orphanGraceMs, resultRetentionMs, inboxRetentionMs, sessionRetentionMs };
     this.workerThoughtStream = workerThoughtStream;
+    this.workerSubagentTranscript = workerSubagentTranscript;
     this.metrics = {
       startedAt: new Date(this.now()).toISOString(),
       pollResponses: 0,
@@ -1031,19 +1033,26 @@ export class GatewayService {
     // adapters stream it repeatedly, so retaining it would repeatedly wake
     // long polls and turn accounting chatter into frontdoor token usage.
     if (type === "usage_update") return;
+    // A subagent's transcript is evidence about the turn, not the turn's own
+    // stream: its text is never the Worker's answer and its tool calls are not
+    // boundaries in the Worker's narration. Recorded with the attribution the
+    // adapter stamped, kept out of every accumulator the answer is built from.
+    const parentToolUseId = subagentParentToolUseId(update);
     if (type === "agent_message_chunk") {
       const text = extractText(update);
-      this.store.appendResultText(session, text);
-      this.store.push(session, this.capTextEvent(session, type, text));
+      if (!parentToolUseId) this.store.appendResultText(session, text);
+      this.store.push(session, this.attribute(this.capTextEvent(session, type, text), parentToolUseId));
       return;
     }
     if (type === "agent_thought_chunk") {
       const text = extractText(update);
-      this.store.appendThoughtText(session, text);
-      this.store.push(session, this.capTextEvent(session, type, text));
+      if (!parentToolUseId) this.store.appendThoughtText(session, text);
+      this.store.push(session, this.attribute(this.capTextEvent(session, type, text), parentToolUseId));
       return;
     }
-    if (SEGMENT_BOUNDARY_TYPES.has(type)) this.store.markSegmentBoundary(session, String(type));
+    if (SEGMENT_BOUNDARY_TYPES.has(type) && !parentToolUseId) {
+      this.store.markSegmentBoundary(session, String(type));
+    }
     if (type === "permission_request") {
       session.status = "waiting_permission";
       const cappedToolCall = this.capStructuredField(session, `${type}-toolCall`, "toolCall", update.toolCall);
@@ -1089,16 +1098,22 @@ export class GatewayService {
     }
     const serialized = JSON.stringify(update);
     if (Buffer.byteLength(serialized) <= EVENT_PAYLOAD_CAP_BYTES) {
-      this.store.push(session, { type: String(type), text: serialized, data: update });
+      this.store.push(session, this.attribute({ type: String(type), text: serialized, data: update }, parentToolUseId));
       return;
     }
     // Oversized payloads leave the delivery path but stay readable on disk.
-    this.store.push(session, {
+    this.store.push(session, this.attribute({
       type: String(type),
       text: utf8ByteHead(serialized, EVENT_PAYLOAD_CAP_BYTES),
       dataTruncated: true,
       dataArtifact: this.store.spillText(session.id, `event-${type}`, serialized)
-    });
+    }, parentToolUseId));
+  }
+
+  // Lifts the subagent attribution out of the raw update onto the stored event,
+  // where it survives the payload cap and stays readable without parsing `data`.
+  attribute(event, parentToolUseId) {
+    return parentToolUseId ? { ...event, parentToolUseId } : event;
   }
 
   // Message and thought chunks are usually tiny, but nothing stops a worker
@@ -1145,6 +1160,7 @@ export class GatewayService {
       maxPendingRequestsPerSession: this.resourceLimits.maxPendingRequestsPerSession,
       maxFrameBytes: this.resourceLimits.maxFrameBytes,
       thoughtStream: this.workerThoughtStream,
+      subagentTranscript: this.workerSubagentTranscript,
       onExit: (error) => {
         for (const session of this.store.list().filter((item) => item.client === client)) {
           session.client = null;
@@ -1706,6 +1722,14 @@ function restoreMethod(initResult, requested) {
 function canRestoreSession(initResult) {
   const capabilities = initResult?.agentCapabilities ?? {};
   return Boolean(capabilities.sessionCapabilities?.resume) || capabilities.loadSession === true;
+}
+
+// Claude stamps every update produced inside a Task subagent with the tool call
+// that spawned it, which is the only thing separating a subagent's stream from
+// the Worker's own once both share the session feed.
+function subagentParentToolUseId(update) {
+  const parentToolUseId = update?._meta?.claudeCode?.parentToolUseId;
+  return typeof parentToolUseId === "string" && parentToolUseId ? parentToolUseId : null;
 }
 
 function extractText(update) {

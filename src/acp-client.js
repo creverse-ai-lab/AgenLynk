@@ -13,6 +13,12 @@ const READ_ONLY_TOOL_KINDS = new Set(["read", "search", "think", "fetch"]);
 // Only the Claude adapter understands the `claudeCode` session meta namespace;
 // every other provider would have to guess at options it never declared.
 const THOUGHT_STREAM_PROVIDERS = new Set(["claude"]);
+// Claude's adapter keeps a Task subagent's text and thinking inside the
+// spawning tool call unless the client declares it can render nested
+// transcripts; without this capability the subagent stream never leaves the
+// adapter. No other provider knows the capability key.
+const SUBAGENT_TRANSCRIPT_CAPABILITY = "subagent-transcript";
+const SUBAGENT_TRANSCRIPT_PROVIDERS = new Set(["claude"]);
 
 // Recent Claude models leave `thinking.display` at the API default "omitted",
 // which streams signature-only thinking blocks whose text is empty — and the
@@ -34,6 +40,7 @@ export class AcpClient {
     this.maxPendingRequestsPerSession = options.maxPendingRequestsPerSession ?? 64;
     this.maxFrameBytes = options.maxFrameBytes ?? 32 * 1024 * 1024;
     this.thoughtStream = options.thoughtStream ?? true;
+    this.subagentTranscript = options.subagentTranscript ?? false;
     this.proc = null;
     this.rl = null;
     this.nextId = 1;
@@ -100,12 +107,7 @@ export class AcpClient {
         {
           protocolVersion: ACP_PROTOCOL_VERSION,
           clientInfo: { name: "acp-gateway", version: GATEWAY_VERSION },
-          clientCapabilities: {
-            fs: { readTextFile: true, writeTextFile: true },
-            terminal: true,
-            elicitation: { form: {} },
-            session: { configOptions: { boolean: {} } }
-          }
+          clientCapabilities: this.clientCapabilities()
         },
         30_000
       );
@@ -163,6 +165,22 @@ export class AcpClient {
 
   notify(method, params = {}) {
     this.proc?.stdin?.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
+  }
+
+  // What the Gateway can handle, declared once at initialize. The `_meta` entries
+  // are provider-specific opt-ins: an adapter that never declared one ignores it,
+  // so they are only sent where they mean something.
+  clientCapabilities() {
+    const capabilities = {
+      fs: { readTextFile: true, writeTextFile: true },
+      terminal: true,
+      elicitation: { form: {} },
+      session: { configOptions: { boolean: {} } }
+    };
+    if (this.subagentTranscript && SUBAGENT_TRANSCRIPT_PROVIDERS.has(this.config.provider)) {
+      capabilities._meta = { [SUBAGENT_TRANSCRIPT_CAPABILITY]: true };
+    }
+    return capabilities;
   }
 
   // Provider-specific session options the Gateway asks every Worker session for,
