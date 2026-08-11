@@ -38,6 +38,10 @@ final class AppModel: ObservableObject {
     @Published var selectedSessionId: String?
     @Published var selectedEventId: String?
     @Published var lastNotice: String?
+    /// Errors used to flash once in the connection bar and vanish before they
+    /// could be read. Every notice and disconnect lands here with a timestamp,
+    /// newest first, so the user can open the list and actually read them.
+    @Published private(set) var noticeLog: [NoticeEntry] = []
     @Published private(set) var agentCatalog: [ACPAgentCatalogItem] = []
     @Published private(set) var agentCatalogLoading = false
     @Published private(set) var agentCatalogMutationId: String?
@@ -885,7 +889,16 @@ final class AppModel: ObservableObject {
             if gatewayConnected { updateConnectionPhase() }
             else {
                 let nextPhase = ConnectionPhase.disconnected(message.string("error") ?? "Gateway 연결 끊김")
-                if phase != nextPhase { phase = nextPhase }
+                if phase != nextPhase {
+                    phase = nextPhase
+                    recordNotice(message.string("error") ?? "Gateway 연결 끊김")
+                }
+            }
+            // A streaming pause with the Gateway still connected is a
+            // subscription drop; log its reason even though the bar only
+            // turns amber for it.
+            if gatewayConnected, message.bool("streaming") == false, let error = message.string("error") {
+                recordNotice(error)
             }
             if logCacheChanged { rebuildLogCache() }
             reconcileSelections()
@@ -894,13 +907,36 @@ final class AppModel: ObservableObject {
             gateway = message["gateway"]
             Task { await loadGatewayConfig() }
         case "notice":
-            lastNotice = message["event"]?.objectValue?.string("error") ?? "일부 이벤트를 다시 불러오지 못했습니다."
+            let text = noticeText(message["event"])
+            lastNotice = text
+            recordNotice(text)
         case "session_removed":
             guard let sessionId = message.string("sessionId") else { break }
             removeSession(sessionId)
             syncPetSnapshot()
         default:
             break
+        }
+    }
+
+    /// Human-readable text for a monitor `notice` event.
+    private func noticeText(_ event: JSONValue?) -> String {
+        guard let object = event?.objectValue else { return "일부 이벤트를 다시 불러오지 못했습니다." }
+        if let error = object.string("error") { return error }
+        if object.string("type") == "subscription_replay_truncated" {
+            return "재연결 사이의 이벤트 일부가 보관 한도를 지나 유실되었습니다."
+        }
+        return "일부 이벤트를 다시 불러오지 못했습니다."
+    }
+
+    private func recordNotice(_ text: String) {
+        // Collapse a repeating error into one entry with a count instead of
+        // fifty identical rows.
+        if let last = noticeLog.first, last.text == text {
+            noticeLog[0] = NoticeEntry(at: Date(), text: text, count: last.count + 1)
+        } else {
+            noticeLog.insert(NoticeEntry(at: Date(), text: text, count: 1), at: 0)
+            if noticeLog.count > 50 { noticeLog.removeLast(noticeLog.count - 50) }
         }
     }
 

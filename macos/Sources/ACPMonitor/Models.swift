@@ -777,6 +777,21 @@ func mergedChunkBody(for event: MonitorEvent, in siblings: [MonitorEvent]) -> (t
     return text.isEmpty ? nil : (text, fragments)
 }
 
+/// One entry of the app's notice/error log: repeated identical errors fold
+/// into a count so a flapping subscription reads as one line, not fifty.
+struct NoticeEntry: Identifiable, Equatable, Sendable {
+    let id = UUID()
+    let at: Date
+    let text: String
+    let count: Int
+
+    init(at: Date, text: String, count: Int) {
+        self.at = at
+        self.text = text
+        self.count = count
+    }
+}
+
 struct MonitorRecord: Identifiable, Equatable, Sendable {
     let id: String
     let kind: String

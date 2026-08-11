@@ -80,14 +80,33 @@ struct DashboardView: View {
         }
     }
 
+    @State private var showNoticeLog = false
+
     private var connectionBar: some View {
         HStack(spacing: 9) {
             ACPLogoMark().frame(width: 27, height: 27)
             Divider().frame(height: 22)
             Circle().fill(connectionColor).frame(width: 9, height: 9)
             Text(connectionText).font(.callout.weight(.medium))
+            // Notices used to flash by too fast to read; the bar keeps showing
+            // the newest one, and clicking it (or the bell) opens the retained
+            // log with timestamps.
             if let notice = model.lastNotice {
-                Text(notice).font(.caption).foregroundStyle(.orange).lineLimit(1)
+                Button { showNoticeLog = true } label: {
+                    Text(notice).font(.caption).foregroundStyle(.orange).lineLimit(1)
+                }
+                .buttonStyle(.plain)
+            }
+            if !model.noticeLog.isEmpty {
+                Button { showNoticeLog = true } label: {
+                    Label("\(model.noticeLog.count)", systemImage: "bell.badge")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                .buttonStyle(.plain)
+                .popover(isPresented: $showNoticeLog, arrowEdge: .bottom) {
+                    NoticeLogView(entries: model.noticeLog)
+                }
             }
             Spacer()
             Text("Gateway \(model.gatewayVersion)").foregroundStyle(.secondary)
@@ -390,6 +409,45 @@ struct EventRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// The retained error/notice log. Text is selectable so an error can finally
+/// be copied instead of read off a one-second flash.
+private struct NoticeLogView: View {
+    let entries: [NoticeEntry]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("최근 알림 · 오류").font(.headline)
+            if entries.isEmpty {
+                Text("기록된 알림이 없습니다.").font(.caption).foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(entries) { entry in
+                            HStack(alignment: .top, spacing: 8) {
+                                Text(entry.at.formatted(date: .omitted, time: .standard))
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.tertiary)
+                                Text(entry.text)
+                                    .font(.caption)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                if entry.count > 1 {
+                                    Text("×\(entry.count)")
+                                        .font(.caption2.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 260)
+            }
+        }
+        .padding(14)
+        .frame(width: 420)
     }
 }
 

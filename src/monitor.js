@@ -132,12 +132,17 @@ async function main() {
 
   const onEvent = (event) => {
     if (event?.type === "subscription_error") {
+      // Only the subscription died — the control socket that carried this very
+      // message is still up, so the Gateway has not disconnected and must not
+      // be shown as red. Streaming pauses (amber), and resubscription starts
+      // now instead of waiting out the 3s refresh tick.
       subscriptionActive = false;
-      state.connected = false;
       state.streaming = false;
       state.lastError = event.error ?? "Gateway event subscription failed";
       state.broadcast({ kind: "notice", event });
-      state.broadcast({ kind: "state", connected: false, streaming: false, error: state.lastError });
+      state.broadcast({ kind: "state", connected: state.connected, streaming: false, error: state.lastError });
+      const retry = setTimeout(() => { void ensureSubscription(); }, 500);
+      retry.unref?.();
       return;
     }
     if (event?.type === "subscription_replay_truncated") {
