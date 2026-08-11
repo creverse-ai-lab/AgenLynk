@@ -121,7 +121,7 @@ test("native monitor controls Gateway config and safely restarts into pending va
     ]);
     const headers = { authorization: `Bearer ${ready.apiToken}` };
     const initial = await fetchJson(`${ready.url}/api/gateway-config`, { headers });
-    assert.equal(initial.options.length, 24);
+    assert.equal(initial.options.length, 25);
 
     const staged = await fetchJson(`${ready.url}/api/gateway-config`, {
       method: "POST",

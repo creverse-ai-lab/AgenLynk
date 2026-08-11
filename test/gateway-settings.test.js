@@ -22,7 +22,7 @@ test("Gateway settings expose every safe runtime option without secrets", async 
       agentUpdates: { autoUpdate: true, notifications: true }
     }));
     const snapshot = gatewaySettingsSnapshot({ statePath, env: {} });
-    assert.equal(snapshot.options.length, 24);
+    assert.equal(snapshot.options.length, 25);
     assert.equal(snapshot.options.length, GATEWAY_SETTING_DEFINITIONS.length);
     assert.equal(snapshot.options.find((item) => item.id === "maxInlineResultBytes").currentValue, 65_536);
     // Workers stay thought-visible unless an operator turns it off: the adapter

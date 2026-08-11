@@ -22,6 +22,7 @@ export const GATEWAY_SETTING_DEFINITIONS = Object.freeze([
   numberSetting("maxFrameBytes", "resourceLimits", "RPC frame", "Maximum bytes accepted in one Gateway NDJSON frame.", "ACP_GATEWAY_MAX_FRAME_BYTES", 32 * 1024 * 1024, 1024, "bytes"),
 
   booleanSetting("workerThoughtStream", "workers", "Worker thinking", "Ask Claude Workers to stream their reasoning. Recent models omit thinking text unless it is requested, so delegated thoughts are otherwise never recorded.", "ACP_GATEWAY_WORKER_THOUGHT_STREAM", true),
+  booleanSetting("workerSubagentTranscript", "workers", "Subagent transcripts", "Collect the full transcript (messages, tools, thinking) of Task subagents a Claude Worker spawns internally. Substantially increases event volume per delegation.", "ACP_GATEWAY_WORKER_SUBAGENT_TRANSCRIPT", false),
 
   booleanSetting("localScannerEnabled", "monitor", "Local scanner", "Detect locally started Codex, Claude, and Grok sessions.", "ACP_MONITOR_LOCAL_SCANNER", true),
   numberSetting("localScanIntervalMs", "monitor", "Local scan interval", "How often the monitor polls known local session files. Lower values make status appear sooner but use more CPU.", "ACP_MONITOR_LOCAL_SCAN_INTERVAL_MS", 1_000, 250, "ms"),
