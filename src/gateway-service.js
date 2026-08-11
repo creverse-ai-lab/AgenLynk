@@ -46,6 +46,7 @@ export class GatewayService {
     maxTerminalsPerSession = 16,
     maxPendingRequestsPerSession = 64,
     maxFrameBytes = 32 * 1024 * 1024,
+    workerThoughtStream = true,
     artifactRoot = statePath ? join(dirname(statePath), "artifacts") : defaultArtifactRoot(),
     artifactStore = null,
     createClient = null,
@@ -89,6 +90,7 @@ export class GatewayService {
       maxFrameBytes
     };
     this.lifecycle = { gcIntervalMs, idleUnloadMs, orphanGraceMs, resultRetentionMs, inboxRetentionMs, sessionRetentionMs };
+    this.workerThoughtStream = workerThoughtStream;
     this.metrics = {
       startedAt: new Date(this.now()).toISOString(),
       pollResponses: 0,
@@ -1142,6 +1144,7 @@ export class GatewayService {
       maxTerminalsPerSession: this.resourceLimits.maxTerminalsPerSession,
       maxPendingRequestsPerSession: this.resourceLimits.maxPendingRequestsPerSession,
       maxFrameBytes: this.resourceLimits.maxFrameBytes,
+      thoughtStream: this.workerThoughtStream,
       onExit: (error) => {
         for (const session of this.store.list().filter((item) => item.client === client)) {
           session.client = null;

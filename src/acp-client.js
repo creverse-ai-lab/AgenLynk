@@ -10,6 +10,19 @@ import { delegatedWorkerEnvironment } from "./process-environment.js";
 
 export const PERMISSION_POLICIES = ["ask", "read_only", "auto_approve"];
 const READ_ONLY_TOOL_KINDS = new Set(["read", "search", "think", "fetch"]);
+// Only the Claude adapter understands the `claudeCode` session meta namespace;
+// every other provider would have to guess at options it never declared.
+const THOUGHT_STREAM_PROVIDERS = new Set(["claude"]);
+
+// Recent Claude models leave `thinking.display` at the API default "omitted",
+// which streams signature-only thinking blocks whose text is empty — and the
+// adapter drops those instead of emitting `agent_thought_chunk`. The adapter
+// forwards `_meta.claudeCode.options` straight into the Agent SDK query, where
+// this becomes `--thinking adaptive --thinking-display summarized`, so it is
+// the only place a Worker's reasoning can be turned back on for the Gateway.
+function thoughtStreamMeta() {
+  return { claudeCode: { options: { thinking: { type: "adaptive", display: "summarized" } } } };
+}
 
 export class AcpClient {
   constructor(config, options = {}) {
@@ -20,6 +33,7 @@ export class AcpClient {
     this.maxTerminalsPerSession = options.maxTerminalsPerSession ?? 16;
     this.maxPendingRequestsPerSession = options.maxPendingRequestsPerSession ?? 64;
     this.maxFrameBytes = options.maxFrameBytes ?? 32 * 1024 * 1024;
+    this.thoughtStream = options.thoughtStream ?? true;
     this.proc = null;
     this.rl = null;
     this.nextId = 1;
@@ -151,6 +165,14 @@ export class AcpClient {
     this.proc?.stdin?.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
   }
 
+  // Provider-specific session options the Gateway asks every Worker session for,
+  // or null when this provider has no such knob and the params stay untouched.
+  sessionMeta() {
+    if (!this.thoughtStream) return null;
+    if (!THOUGHT_STREAM_PROVIDERS.has(this.config.provider)) return null;
+    return thoughtStreamMeta();
+  }
+
   async sessionNew({
     cwd,
     mcpServers = [],
@@ -160,6 +182,8 @@ export class AcpClient {
     const roots = await canonicalRoots(cwd, additionalDirectories);
     const params = { cwd: roots[0], mcpServers };
     if (additionalDirectories.length) params.additionalDirectories = roots.slice(1);
+    const meta = this.sessionMeta();
+    if (meta) params._meta = meta;
     const result = await this.request("session/new", params, 30_000);
     this.sessionRoots.set(result.sessionId, roots);
     this.sessionPolicies.set(result.sessionId, requirePermissionPolicy(permissionPolicy));
@@ -177,6 +201,10 @@ export class AcpClient {
     const roots = await canonicalRoots(cwd, additionalDirectories);
     const params = { sessionId, cwd: roots[0], mcpServers };
     if (additionalDirectories.length) params.additionalDirectories = roots.slice(1);
+    // Restores rebuild the underlying query, so they need the same meta as
+    // session/new — otherwise an idle-unloaded Worker comes back thought-blind.
+    const meta = this.sessionMeta();
+    if (meta) params._meta = meta;
     const result = await this.request(method, params, 30_000);
     this.sessionRoots.set(sessionId, roots);
     this.sessionPolicies.set(sessionId, requirePermissionPolicy(permissionPolicy));

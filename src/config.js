@@ -62,7 +62,8 @@ export function gatewayLifecycleConfig() {
     maxArtifactTotalBytes: settings.maxArtifactTotalBytes,
     maxTerminalsPerSession: settings.maxTerminalsPerSession,
     maxPendingRequestsPerSession: settings.maxPendingRequestsPerSession,
-    maxFrameBytes: settings.maxFrameBytes
+    maxFrameBytes: settings.maxFrameBytes,
+    workerThoughtStream: settings.workerThoughtStream
   };
 }
 

@@ -21,6 +21,8 @@ export const GATEWAY_SETTING_DEFINITIONS = Object.freeze([
   numberSetting("maxPendingRequestsPerSession", "resourceLimits", "Pending requests", "Maximum concurrent unanswered Worker requests per session.", "ACP_GATEWAY_MAX_PENDING_REQUESTS_PER_SESSION", 64, 1, "count"),
   numberSetting("maxFrameBytes", "resourceLimits", "RPC frame", "Maximum bytes accepted in one Gateway NDJSON frame.", "ACP_GATEWAY_MAX_FRAME_BYTES", 32 * 1024 * 1024, 1024, "bytes"),
 
+  booleanSetting("workerThoughtStream", "workers", "Worker thinking", "Ask Claude Workers to stream their reasoning. Recent models omit thinking text unless it is requested, so delegated thoughts are otherwise never recorded.", "ACP_GATEWAY_WORKER_THOUGHT_STREAM", true),
+
   booleanSetting("localScannerEnabled", "monitor", "Local scanner", "Detect locally started Codex, Claude, and Grok sessions.", "ACP_MONITOR_LOCAL_SCANNER", true),
   numberSetting("localScanIntervalMs", "monitor", "Local scan interval", "How often the monitor polls known local session files. Lower values make status appear sooner but use more CPU.", "ACP_MONITOR_LOCAL_SCAN_INTERVAL_MS", 1_000, 250, "ms"),
   numberSetting("localDiscoveryIntervalMs", "monitor", "Local discovery interval", "How often the monitor looks for newly created local sessions. Lower values make new sessions appear sooner but perform more filesystem work.", "ACP_MONITOR_LOCAL_DISCOVERY_INTERVAL_MS", 2_000, 500, "ms"),
@@ -114,7 +116,7 @@ export async function updateGatewaySettings({
     throw new Error("ACP Gateway must be installed before changing settings");
   }
   state.gatewayConfig ??= {};
-  for (const group of ["lifecycle", "resourceLimits", "monitor"]) state.gatewayConfig[group] ??= {};
+  for (const group of ["lifecycle", "resourceLimits", "workers", "monitor"]) state.gatewayConfig[group] ??= {};
   state.agentUpdates ??= { autoUpdate: true, notifications: true };
 
   for (const [id, value] of Object.entries(values)) {

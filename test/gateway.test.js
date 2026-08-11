@@ -745,6 +745,76 @@ test("Main lists and controls Worker-advertised session parameters", async () =>
   }
 });
 
+test("Gateway asks Claude Workers to stream their thinking when a session opens", async () => {
+  const clientOptions = [];
+  const requests = [];
+  const makeClient = (_provider, options) => {
+    clientOptions.push(options);
+    const client = new AcpClient(
+      { provider: "claude", command: process.execPath, args: [mockAgent], permissionPolicy: "read_only" },
+      options
+    );
+    const request = client.request.bind(client);
+    client.request = (method, params, timeoutMs) => {
+      requests.push({ method, params });
+      return request(method, params, timeoutMs);
+    };
+    return client;
+  };
+  const service = new GatewayService({ createClient: makeClient });
+  try {
+    await service.call(
+      "session_open",
+      { provider: "claude", cwd: process.cwd(), permissionPolicy: "read_only" },
+      { rootId: "main-a" }
+    );
+    assert.equal(clientOptions[0].thoughtStream, true, "workerThoughtStream defaults on, so thoughts are captured");
+    const created = requests.find((item) => item.method === "session/new");
+    // Without this the adapter's models leave thinking display at "omitted",
+    // stream empty thinking blocks, and no agent_thought_chunk is ever sent.
+    assert.deepEqual(created.params._meta, {
+      claudeCode: { options: { thinking: { type: "adaptive", display: "summarized" } } }
+    });
+  } finally {
+    await service.shutdown().catch(() => {});
+  }
+});
+
+test("Worker thinking is requested on every restore, and only where it is understood", async () => {
+  const captured = [];
+  const recordingClient = (config, options) => {
+    const client = new AcpClient(config, options);
+    client.request = async (method, params) => {
+      captured.push({ method, params });
+      return { sessionId: params.sessionId ?? "stub-session" };
+    };
+    return client;
+  };
+
+  const claude = recordingClient({ provider: "claude", command: process.execPath, args: [], permissionPolicy: "ask" }, {});
+  await claude.sessionNew({ cwd: process.cwd() });
+  await claude.sessionRestore({ method: "session/load", sessionId: "stub-session", cwd: process.cwd() });
+  assert.equal(captured.length, 2);
+  assert.ok(
+    captured.every((item) => item.params._meta?.claudeCode?.options?.thinking?.display === "summarized"),
+    "a restored Worker rebuilds its query, so skipping the meta there would silently end the thought stream"
+  );
+
+  captured.length = 0;
+  const codex = recordingClient({ provider: "codex", command: "codex-acp", args: [], permissionPolicy: "ask" }, {});
+  await codex.sessionNew({ cwd: process.cwd() });
+  const disabled = recordingClient(
+    { provider: "claude", command: process.execPath, args: [], permissionPolicy: "ask" },
+    { thoughtStream: false }
+  );
+  await disabled.sessionNew({ cwd: process.cwd() });
+  assert.equal(captured.length, 2);
+  assert.ok(
+    captured.every((item) => !Object.hasOwn(item.params, "_meta")),
+    "providers without the claudeCode namespace, and an operator opt-out, must see untouched params"
+  );
+});
+
 test("Gateway waits for provider initialization before sharing a client", async () => {
   let releaseStart;
   const startGate = new Promise((resolve) => { releaseStart = resolve; });

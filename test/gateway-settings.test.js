@@ -22,9 +22,12 @@ test("Gateway settings expose every safe runtime option without secrets", async 
       agentUpdates: { autoUpdate: true, notifications: true }
     }));
     const snapshot = gatewaySettingsSnapshot({ statePath, env: {} });
-    assert.equal(snapshot.options.length, 23);
+    assert.equal(snapshot.options.length, 24);
     assert.equal(snapshot.options.length, GATEWAY_SETTING_DEFINITIONS.length);
     assert.equal(snapshot.options.find((item) => item.id === "maxInlineResultBytes").currentValue, 65_536);
+    // Workers stay thought-visible unless an operator turns it off: the adapter
+    // emits no reasoning at all until the Gateway asks for it.
+    assert.equal(snapshot.options.find((item) => item.id === "workerThoughtStream").currentValue, true);
     assert.equal(JSON.stringify(snapshot).includes(token), false);
     assert.equal(snapshot.pendingRestart, false);
   } finally {
@@ -50,6 +53,7 @@ test("Gateway settings persist atomically, preserve install identity, and reset 
         gcIntervalMs: 9_000,
         maxEvents: 400,
         maxInlineResultBytes: 32_768,
+        workerThoughtStream: false,
         localScanIntervalMs: 2_000,
         localTranscriptRecordLimit: 1_000,
         agentAutoUpdate: false,
@@ -61,6 +65,7 @@ test("Gateway settings persist atomically, preserve install identity, and reset 
     assert.equal(saved.managedMcp["codex:agent-acp"].agent, "codex");
     assert.equal(saved.gatewayConfig.lifecycle.gcIntervalMs, 9_000);
     assert.equal(saved.gatewayConfig.resourceLimits.maxEvents, 400);
+    assert.equal(saved.gatewayConfig.workers.workerThoughtStream, false);
     assert.equal(saved.gatewayConfig.monitor.localScanIntervalMs, 2_000);
     assert.equal(saved.agentUpdates.autoUpdate, false);
     assert.equal(saved.agentUpdates.intervalMs, 600_000);
