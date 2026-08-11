@@ -12,12 +12,10 @@
 // update channel, and no arbitrary download here — that boundary is
 // intentional (see TODO.md's fixed runtime boundary) and separate from
 // developer `git pull` workflows, which never touch this file.
-import { execFile } from "node:child_process";
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
-import { pathToFileURL } from "node:url";
-import { promisify } from "node:util";
 import { pathExists } from "./fs-paths.js";
+import { runBundledRuntimeSmokeCheck } from "./runtime-smoke-check.js";
 import { GATEWAY_API_VERSION, UnsupportedGatewayApiVersionError } from "./gateway-api-version.js";
 import { activateCurrent, defaultRuntimeRoot, isConfinedToVersions, readCurrentRuntime } from "./runtime-installer.js";
 import { withRuntimeLock } from "./runtime-lock.js";
@@ -26,8 +24,6 @@ import { PREVIOUS_POINTER_FILE, readPointerFile, writePointerFile } from "./runt
 import { stageVerifiedRuntime } from "./runtime-staging.js";
 
 export { defaultRuntimeRoot };
-
-const execFileAsync = promisify(execFile);
 
 /** Carries a stable machine-readable `code` (+ optional details) into the JSON envelope's `error` field. */
 class RuntimeUpdaterError extends Error {
@@ -126,55 +122,13 @@ function assertSupportedGatewayApiVersion(manifest) {
   throw new RuntimeUpdaterError(error.code, error.message, details);
 }
 
-/**
- * Deterministic pre/post-activation smoke check: actually executes the
- * candidate's *own bundled* node binary (not the host Node running this
- * process) to import its own src/version.js and src/gateway-api-version.js,
- * and compares what it reports against the manifest. This is deliberately
- * more than checksum verification (which only proves the bytes on disk match
- * the manifest) — it proves the bundled runtime can actually execute JS and
- * resolve its own modules. No network access, no shell string, no
- * randomness: same target -> same result every time.
- */
+/** Wraps the shared check in this module's coded-error vocabulary. */
 async function runBuiltinSmokeCheck(target, manifest) {
-  const nodeBinary = join(target, "node", "bin", "node");
-  const versionModuleUrl = pathToFileURL(join(target, "src", "version.js")).href;
-  const apiModuleUrl = pathToFileURL(join(target, "src", "gateway-api-version.js")).href;
-  const script = `(async () => {
-    const [versionUrl, apiUrl] = process.argv.slice(1);
-    const version = await import(versionUrl);
-    const api = await import(apiUrl);
-    process.stdout.write(JSON.stringify({
-      gatewayVersion: version.GATEWAY_VERSION,
-      gatewayBuildId: version.GATEWAY_BUILD_ID,
-      gatewayApiVersion: api.GATEWAY_API_VERSION
-    }));
-  })().catch((error) => {
-    process.stderr.write(String((error && error.stack) || error));
-    process.exit(1);
-  });`;
-
-  let stdout;
   try {
-    ({ stdout } = await execFileAsync(nodeBinary, ["-e", script, versionModuleUrl, apiModuleUrl], { timeout: 10_000 }));
+    return await runBundledRuntimeSmokeCheck(target, manifest);
   } catch (error) {
-    throw new RuntimeUpdaterError("SMOKE_CHECK_FAILED", `bundled runtime smoke check failed to execute: ${error.message}`);
+    throw new RuntimeUpdaterError("SMOKE_CHECK_FAILED", error.message, error.details ?? {});
   }
-
-  let reported;
-  try {
-    reported = JSON.parse(stdout);
-  } catch {
-    throw new RuntimeUpdaterError("SMOKE_CHECK_FAILED", "bundled runtime smoke check produced non-JSON output");
-  }
-  if (
-    reported.gatewayVersion !== manifest.gatewayVersion
-    || reported.gatewayBuildId !== manifest.gatewayBuildId
-    || reported.gatewayApiVersion !== manifest.gatewayApiVersion
-  ) {
-    throw new RuntimeUpdaterError("SMOKE_CHECK_FAILED", "bundled runtime smoke check reported an identity mismatch", { reported });
-  }
-  return reported;
 }
 
 async function runSmokeCheck(check, target, manifest) {
@@ -485,7 +439,7 @@ export async function rollbackRuntime(options) {
       await readCurrentRuntime(runtimeRoot),
       "current"
     );
-    await activateCurrent(runtimeRoot, previous.runtimeRoot, previous);
+    await activateCurrent(runtimeRoot, previous.runtimeRoot, previous, { pinned: true });
     try {
       await runSmokeCheck(healthCheck ?? runBuiltinSmokeCheck, previous.runtimeRoot, manifest);
     } catch (healthError) {

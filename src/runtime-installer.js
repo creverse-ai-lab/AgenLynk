@@ -9,7 +9,8 @@ import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { readManifestFile, verifyRuntimeManifest } from "./runtime-manifest.js";
-import { CURRENT_POINTER_FILE, readPointerFile, writePointerFile } from "./runtime-pointer.js";
+import { CURRENT_POINTER_FILE, PREVIOUS_POINTER_FILE, readPointerFile, writePointerFile } from "./runtime-pointer.js";
+import { runBundledRuntimeSmokeCheck } from "./runtime-smoke-check.js";
 import { stageVerifiedRuntime } from "./runtime-staging.js";
 import { withRuntimeLock } from "./runtime-lock.js";
 
@@ -38,9 +39,13 @@ export function defaultRuntimeRoot() {
  * payload change, and gatewayBuildId is a content hash with no ordering.
  * See seedSupersedes for what happens when it cannot be compared.
  */
-export async function ensureRuntimeInstalled({ seedRoot, runtimeRoot = defaultRuntimeRoot() }) {
+export async function ensureRuntimeInstalled({
+  seedRoot,
+  runtimeRoot = defaultRuntimeRoot(),
+  smokeCheck = runBundledRuntimeSmokeCheck
+}) {
   const existing = await currentRuntimeIfValid(runtimeRoot);
-  if (existing && !(await seedSupersedes(seedRoot, existing.generatedAt))) return existing;
+  if (existing && !(await seedSupersedes(seedRoot, existing))) return existing;
 
   // Same advisory lock as the updater's mutations: the provisioner runs on
   // every app launch and can otherwise interleave its rm/rename staging with
@@ -48,7 +53,7 @@ export async function ensureRuntimeInstalled({ seedRoot, runtimeRoot = defaultRu
   return withRuntimeLock(runtimeRoot, async () => {
     // Re-check under the lock: whoever held it may have just installed.
     const installed = await currentRuntimeIfValid(runtimeRoot);
-    if (installed && !(await seedSupersedes(seedRoot, installed.generatedAt))) return installed;
+    if (installed && !(await seedSupersedes(seedRoot, installed))) return installed;
 
     const manifest = await readManifestFile(seedRoot);
     const versionDir = `${manifest.gatewayVersion}-${manifest.gatewayBuildId}`;
@@ -57,6 +62,26 @@ export async function ensureRuntimeInstalled({ seedRoot, runtimeRoot = defaultRu
     if (!(await isValid(target, manifest))) {
       await stageAndActivate(seedRoot, runtimeRoot, target, manifest);
     }
+
+    // Same gate the manual updater applies. A replacement that happens without
+    // anyone asking must not be able to leave the machine pointed at a runtime
+    // that cannot start, so a candidate that fails to execute is abandoned and
+    // the working install stays current.
+    if (installed) {
+      try {
+        await smokeCheck(target, manifest);
+      } catch (error) {
+        throw new Error(
+          `seed runtime failed its smoke check, keeping ${installed.gatewayVersion} (${installed.gatewayBuildId}): ${error.message}`
+        );
+      }
+      // Record what is being replaced so the app's rollback has a target. The
+      // updater does this on every activation; an automatic upgrade that
+      // skipped it would leave the user with no way back from a bad build.
+      const currentPointer = await readPointerFile(runtimeRoot, CURRENT_POINTER_FILE);
+      if (currentPointer) await writePointerFile(runtimeRoot, PREVIOUS_POINTER_FILE, currentPointer);
+    }
+
     await activateCurrent(runtimeRoot, target, manifest);
     return {
       runtimeRoot: target,
@@ -84,7 +109,8 @@ async function currentRuntimeIfValid(runtimeRoot) {
       runtimeRoot: current.runtimeRoot,
       gatewayVersion: current.gatewayVersion,
       gatewayBuildId: current.gatewayBuildId,
-      generatedAt: ownManifest.generatedAt
+      generatedAt: ownManifest.generatedAt,
+      pinned: current.pinned === true
     };
   } catch {
     return null;
@@ -92,21 +118,28 @@ async function currentRuntimeIfValid(runtimeRoot) {
 }
 
 /**
- * True only when the seed's manifest is provably newer than the installed
- * one. An unreadable seed manifest, a seed timestamp that is absent or
- * unparseable, or equal timestamps all answer false: the installed runtime is
- * known to work, so anything short of proof leaves it alone.
+ * True only when the seed's manifest is provably newer than the installed one
+ * *and* the user has not pinned what is installed. An unreadable seed
+ * manifest, a seed timestamp that is absent or unparseable, or equal
+ * timestamps all answer false: the installed runtime is known to work, so
+ * anything short of proof leaves it alone.
  *
  * A missing timestamp on the *installed* side is the one asymmetry — the field
  * is written by every manifest that carries the current format version, so its
  * absence means the install predates it, which is exactly the case a newer
  * seed should replace.
+ *
+ * The pin is what makes rollback mean anything. Rolling back necessarily lands
+ * on a runtime older than the seed that shipped it, so without the pin the
+ * next launch would re-apply the very build the user just rejected. Choosing a
+ * version explicitly in the updater clears it again.
  */
-async function seedSupersedes(seedRoot, installedGeneratedAt) {
-  const installed = timestamp(installedGeneratedAt) ?? 0;
+async function seedSupersedes(seedRoot, installed) {
+  if (installed.pinned) return false;
+  const installedAt = timestamp(installed.generatedAt) ?? 0;
   try {
     const seed = timestamp((await readManifestFile(seedRoot)).generatedAt);
-    return seed !== null && seed > installed;
+    return seed !== null && seed > installedAt;
   } catch {
     return false;
   }
@@ -165,13 +198,20 @@ async function stageAndActivate(seedRoot, runtimeRoot, target, manifest) {
   });
 }
 
-export async function activateCurrent(runtimeRoot, target, manifest) {
+/**
+ * `pinned` marks a runtime the user deliberately chose to stay on, which
+ * ensureRuntimeInstalled will not replace with a newer seed. Only rollback
+ * sets it; every other activation clears it, so picking a version explicitly
+ * puts the machine back under normal updates.
+ */
+export async function activateCurrent(runtimeRoot, target, manifest, { pinned = false } = {}) {
   const payload = {
     formatVersion: 1,
     runtimeRoot: target,
     gatewayVersion: manifest.gatewayVersion,
     gatewayBuildId: manifest.gatewayBuildId,
-    activatedAt: new Date().toISOString()
+    activatedAt: new Date().toISOString(),
+    ...(pinned ? { pinned: true } : {})
   };
   await writePointerFile(runtimeRoot, CURRENT_POINTER_FILE, payload);
   return payload;

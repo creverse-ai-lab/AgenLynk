@@ -34,6 +34,7 @@ enum MonitorModelChecks {
         try graphProjectionFollowsOnlyTheCurrentLiveTurn()
         try graphProjectionBoundsLargeLiveHistories()
         try restartBlockersMatchTheSharedGatewayContract()
+        try runtimeInspectionSurfacesAPinnedRollback()
         print("Swift model checks passed")
     }
 
@@ -924,6 +925,31 @@ enum MonitorModelChecks {
             )
             try check(blockers == expected, "restart blockers diverged from the Gateway contract (\(name)): got \(blockers), expected \(expected)")
         }
+    }
+
+    /// A rolled-back runtime stops accepting app updates on purpose. If the UI
+    /// does not say so, the machine just looks stuck on an old build.
+    private static func runtimeInspectionSurfacesAPinnedRollback() throws {
+        func inspection(pinned: Bool) throws -> RuntimeInspection {
+            var current: [String: JSONValue] = [
+                "runtimeRoot": .string("/r/versions/1.0.0-old"),
+                "gatewayVersion": .string("1.0.0"),
+                "gatewayBuildId": .string("old")
+            ]
+            if pinned { current["pinned"] = .bool(true) }
+            guard let decoded = RuntimeInspection(.object([
+                "runtimeRoot": .string("/r"),
+                "current": .object(current),
+                "versions": .array([])
+            ])) else { throw CheckError.failed("runtime inspection fixture failed") }
+            return decoded
+        }
+        let pinned = try inspection(pinned: true)
+        let unpinned = try inspection(pinned: false)
+        try check(pinned.currentPinned, "a pinned current runtime must decode as pinned")
+        try check(pinned.pinnedNotice != nil, "a pinned runtime must explain why updates stopped")
+        try check(!unpinned.currentPinned, "an unpinned runtime must not claim to be pinned")
+        try check(unpinned.pinnedNotice == nil, "an unpinned runtime must show no pin notice")
     }
 
     private static func check(_ condition: @autoclosure () -> Bool, _ message: String) throws {

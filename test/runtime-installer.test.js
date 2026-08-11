@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { buildRuntimeManifest } from "../src/runtime-manifest.js";
-import { ensureRuntimeInstalled, readCurrentRuntime } from "../src/runtime-installer.js";
+import { activateCurrent, ensureRuntimeInstalled, readCurrentRuntime } from "../src/runtime-installer.js";
+import { readPreviousRuntime } from "../src/runtime-updater.js";
 import { writeRuntimeSeed } from "./fixtures/runtime-seed.js";
 
 async function writeFixtureSeed(root, { generatedAt, ...options } = {}) {
@@ -177,7 +178,7 @@ test("ensureRuntimeInstalled keeps an older seed out and lets a newer one throug
     await writeFixtureSeed(seedSix, {
       gatewayVersion: "6.0.0", gatewayBuildId: "build6", generatedAt: "2026-03-01T00:00:00.000Z"
     });
-    const upgraded = await ensureRuntimeInstalled({ seedRoot: seedSix, runtimeRoot });
+    const upgraded = await ensureRuntimeInstalled({ seedRoot: seedSix, runtimeRoot, smokeCheck: async () => {} });
 
     assert.equal(upgraded.gatewayVersion, "6.0.0", "a newer seed must become current");
     assert.equal((await readCurrentRuntime(runtimeRoot)).gatewayVersion, "6.0.0");
@@ -188,9 +189,82 @@ test("ensureRuntimeInstalled keeps an older seed out and lets a newer one throug
     );
 
     // Same seed again is a no-op, not a re-copy.
-    const repeat = await ensureRuntimeInstalled({ seedRoot: seedSix, runtimeRoot });
+    const repeat = await ensureRuntimeInstalled({ seedRoot: seedSix, runtimeRoot, smokeCheck: async () => {} });
     assert.equal(repeat.gatewayBuildId, "build6");
     assert.deepEqual((await readdir(join(runtimeRoot, "versions"))).sort(), ["5.0.0-build5", "6.0.0-build6"]);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+// An automatic upgrade is only safe if it carries the same guarantees the
+// manual updater does: proof the candidate runs, and a way back.
+test("an automatic upgrade smoke-checks the seed and records what it replaced", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "acp-runtime-installer-"));
+  try {
+    const runtimeRoot = join(workspace, "runtime");
+    const seedOld = join(workspace, "seed-old");
+    const seedNew = join(workspace, "seed-new");
+    await writeFixtureSeed(seedOld, {
+      gatewayVersion: "1.0.0", gatewayBuildId: "old", generatedAt: "2026-01-01T00:00:00.000Z"
+    });
+    await writeFixtureSeed(seedNew, {
+      gatewayVersion: "2.0.0", gatewayBuildId: "new", generatedAt: "2026-02-01T00:00:00.000Z"
+    });
+    await ensureRuntimeInstalled({ seedRoot: seedOld, runtimeRoot, smokeCheck: async () => {} });
+
+    // A candidate that cannot run is abandoned; the working install stays.
+    await assert.rejects(
+      ensureRuntimeInstalled({
+        seedRoot: seedNew,
+        runtimeRoot,
+        smokeCheck: async () => { throw new Error("bundled node is not executable"); }
+      }),
+      /failed its smoke check, keeping 1\.0\.0/
+    );
+    assert.equal((await readCurrentRuntime(runtimeRoot)).gatewayVersion, "1.0.0");
+    assert.equal(await readPreviousRuntime(runtimeRoot), null, "an abandoned upgrade must not record a previous target");
+
+    // A candidate that runs is activated, and the replaced runtime becomes
+    // rollback's target.
+    await ensureRuntimeInstalled({ seedRoot: seedNew, runtimeRoot, smokeCheck: async () => {} });
+    assert.equal((await readCurrentRuntime(runtimeRoot)).gatewayVersion, "2.0.0");
+    assert.equal((await readPreviousRuntime(runtimeRoot)).gatewayVersion, "1.0.0");
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+// Rollback lands on a runtime older than the seed that shipped it, so without
+// a pin the next launch would re-apply the build the user just rejected.
+test("a pinned runtime is never superseded by a newer seed", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "acp-runtime-installer-"));
+  try {
+    const runtimeRoot = join(workspace, "runtime");
+    const seedOld = join(workspace, "seed-old");
+    const seedNew = join(workspace, "seed-new");
+    await writeFixtureSeed(seedOld, {
+      gatewayVersion: "1.0.0", gatewayBuildId: "old", generatedAt: "2026-01-01T00:00:00.000Z"
+    });
+    await writeFixtureSeed(seedNew, {
+      gatewayVersion: "2.0.0", gatewayBuildId: "new", generatedAt: "2026-02-01T00:00:00.000Z"
+    });
+    const old = await ensureRuntimeInstalled({ seedRoot: seedOld, runtimeRoot, smokeCheck: async () => {} });
+    await ensureRuntimeInstalled({ seedRoot: seedNew, runtimeRoot, smokeCheck: async () => {} });
+
+    // Stand in for rollback: pin the older runtime the way rollbackRuntime does.
+    await activateCurrent(runtimeRoot, old.runtimeRoot, { gatewayVersion: "1.0.0", gatewayBuildId: "old" }, { pinned: true });
+    assert.equal((await readCurrentRuntime(runtimeRoot)).pinned, true);
+
+    const afterLaunch = await ensureRuntimeInstalled({ seedRoot: seedNew, runtimeRoot, smokeCheck: async () => {} });
+    assert.equal(afterLaunch.gatewayVersion, "1.0.0", "a newer seed must not undo a deliberate rollback");
+    assert.equal((await readCurrentRuntime(runtimeRoot)).gatewayVersion, "1.0.0");
+
+    // Choosing a version explicitly clears the pin and normal updates resume.
+    await activateCurrent(runtimeRoot, old.runtimeRoot, { gatewayVersion: "1.0.0", gatewayBuildId: "old" });
+    assert.equal((await readCurrentRuntime(runtimeRoot)).pinned, undefined);
+    const resumed = await ensureRuntimeInstalled({ seedRoot: seedNew, runtimeRoot, smokeCheck: async () => {} });
+    assert.equal(resumed.gatewayVersion, "2.0.0");
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -215,7 +289,7 @@ test("ensureRuntimeInstalled replaces an install whose manifest predates generat
     await writeFixtureSeed(newSeed, {
       gatewayVersion: "2.0.0", gatewayBuildId: "new", generatedAt: "2026-03-01T00:00:00.000Z"
     });
-    const result = await ensureRuntimeInstalled({ seedRoot: newSeed, runtimeRoot });
+    const result = await ensureRuntimeInstalled({ seedRoot: newSeed, runtimeRoot, smokeCheck: async () => {} });
     assert.equal(result.gatewayVersion, "2.0.0");
   } finally {
     await rm(workspace, { recursive: true, force: true });

@@ -82,6 +82,12 @@ struct RuntimeUpdateView: View {
     private var installedSection: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 6) {
+                if let notice = model.runtimeInspection?.pinnedNotice {
+                    Label(notice, systemImage: "pin.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if model.runtimeLoading && model.runtimeInspection == nil {
                     ProgressView("설치된 runtime을 확인하는 중…")
                 } else if let versions = model.runtimeInspection?.versions, !versions.isEmpty {

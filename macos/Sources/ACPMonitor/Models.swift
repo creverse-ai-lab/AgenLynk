@@ -886,11 +886,19 @@ struct RuntimeInspection: Equatable, Sendable {
     let currentGatewayVersion: String?
     let currentGatewayBuildId: String?
     let previousVersionId: String?
+    /// The user rolled back to this runtime, so app updates deliberately stop
+    /// replacing it. Without showing this the machine just looks stuck on an
+    /// old build. Picking a version in the updater clears it.
+    let currentPinned: Bool
     let versions: [RuntimeVersionSummary]
 
     var current: RuntimeVersionSummary? { versions.first(where: \.isCurrent) }
     var previous: RuntimeVersionSummary? { versions.first(where: \.isPrevious) }
     var canRollback: Bool { previous != nil }
+    var pinnedNotice: String? {
+        guard currentPinned else { return nil }
+        return "이 버전으로 롤백해 고정되어 있습니다. 앱을 업데이트해도 런타임은 그대로 유지됩니다 — 버전을 직접 선택하면 고정이 풀립니다."
+    }
 
     init?(_ value: JSONValue) {
         guard let root = value.objectValue else { return nil }
@@ -900,6 +908,7 @@ struct RuntimeInspection: Equatable, Sendable {
         currentGatewayVersion = current?.string("gatewayVersion")
         currentGatewayBuildId = current?.string("gatewayBuildId")
         previousVersionId = root.object("previous")?.string("runtimeRoot").map { ($0 as NSString).lastPathComponent }
+        currentPinned = current?.bool("pinned") ?? false
         versions = (root.array("versions") ?? []).compactMap(RuntimeVersionSummary.init)
     }
 
