@@ -227,6 +227,11 @@ struct DashboardView: View {
                 }
             }
             .padding(14)
+            // Bind the scroll content to the column's width so the vertical
+            // scrollbar rides the column's trailing edge instead of the edge of
+            // some wider child, and so the column can actually shrink when the
+            // window does.
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 

@@ -165,7 +165,11 @@ struct EventBodyView: View {
         let merged = mergedChunkBody(for: event, in: siblings)
         VStack(alignment: .leading, spacing: 10) {
             if let body = merged?.text ?? event.bodyText {
-                textBlock(body, font: looksLikeCode(body) ? .system(.caption, design: .monospaced) : bodyFont, label: "본문")
+                if looksLikeCode(body) {
+                    codeBlock(body, label: "본문")
+                } else {
+                    textBlock(body, font: bodyFont, label: "본문")
+                }
                 if let merged {
                     Text("스트림 조각 \(merged.fragments)개를 합쳐 표시 · 원본 JSON은 선택한 조각의 것")
                         .font(.caption2)
@@ -180,13 +184,17 @@ struct EventBodyView: View {
                 rawPayload
             }
         }
+        // Never wider than the column: a narrow inspector must be able to
+        // shrink to it, and a vertical ScrollView keeps its bar at the trailing
+        // edge only when its content actually fits that width.
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var rawPayload: some View {
-        textBlock(event.payload.prettyPrinted, font: .system(.caption, design: .monospaced), label: "JSON")
+        codeBlock(event.payload.prettyPrinted, label: "JSON")
     }
 
+    /// Prose: wraps to the available width, so it compresses with the column.
     private func textBlock(_ text: String, font: Font, label: String) -> some View {
         let shown = characterLimit.map { String(text.prefix($0)) } ?? text
         return VStack(alignment: .leading, spacing: 3) {
@@ -194,12 +202,36 @@ struct EventBodyView: View {
                 .font(font)
                 .textSelection(.enabled)
                 .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            if shown.count < text.count {
-                Text("\(label) 미리보기 · 전체 \(text.count.formatted())자")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+            previewNote(shown: shown, full: text, label: label)
+        }
+    }
+
+    /// Code / JSON: its long, unbroken lines would otherwise force the whole
+    /// column wide (and push the scrollbar off-screen). Kept on its own lines
+    /// and scrolled horizontally inside a width-bounded box instead of wrapping
+    /// mid-token, so the column can still shrink to its minimum.
+    private func codeBlock(_ text: String, label: String) -> some View {
+        let shown = characterLimit.map { String(text.prefix($0)) } ?? text
+        return VStack(alignment: .leading, spacing: 3) {
+            ScrollView(.horizontal, showsIndicators: true) {
+                Text(shown)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .foregroundStyle(.primary)
+                    .padding(.trailing, 6)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            previewNote(shown: shown, full: text, label: label)
+        }
+    }
+
+    @ViewBuilder private func previewNote(shown: String, full: String, label: String) -> some View {
+        if shown.count < full.count {
+            Text("\(label) 미리보기 · 전체 \(full.count.formatted())자")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
     }
 }
