@@ -33,6 +33,7 @@ enum MonitorModelChecks {
         try graphProjectionBuildsPromptReturnTurnsAndUsesCanvasHeight()
         try graphProjectionFollowsOnlyTheCurrentLiveTurn()
         try graphProjectionBoundsLargeLiveHistories()
+        try eventBodyTextSurfacesReadableTextInsteadOfTheJSONEnvelope()
         try restartBlockersMatchTheSharedGatewayContract()
         try runtimeInspectionSurfacesAPinnedRollback()
         print("Swift model checks passed")
@@ -885,6 +886,91 @@ enum MonitorModelChecks {
         try check(active.events.count <= 160, "a live turn should cap retained detail events")
         try check(active.prompt.count <= 4_001, "a live prompt should be bounded")
         try check(active.response.count <= 12_001, "a live response should be bounded")
+    }
+
+    /// The detail panes lead with `bodyText`, so it must follow the producers'
+    /// real shapes: `src/gateway-service.js` flattens chunks into `text` but
+    /// serializes tool updates into `text` while keeping the real object in
+    /// `data` — reading `text` there would print JSON, which is exactly what
+    /// the body is supposed to replace.
+    private static func eventBodyTextSurfacesReadableTextInsteadOfTheJSONEnvelope() throws {
+        func event(_ fields: [String: JSONValue]) throws -> MonitorEvent {
+            var value = fields
+            value["sessionId"] = .string("s1")
+            value["ts"] = .string("2026-08-07T00:00:00.000Z")
+            guard let event = MonitorEvent(.object(value)) else {
+                throw CheckError.failed("body text fixture creation failed")
+            }
+            return event
+        }
+
+        let chunk = try event([
+            "sequence": .number(0), "type": .string("agent_message_chunk"),
+            "text": .string("리팩터링을 마쳤습니다.")
+        ])
+        try check(chunk.bodyText == "리팩터링을 마쳤습니다.", "a chunk's top-level text is the body verbatim")
+
+        // The gateway's generic tail: `text` is the serialized update, `data`
+        // the real one, and the result sits in a nested ACP content wrapper.
+        let update = try event([
+            "sequence": .number(1), "type": .string("tool_call_update"),
+            "text": .string(#"{"sessionUpdate":"tool_call_update","toolCallId":"tool-1"}"#),
+            "data": .object([
+                "sessionUpdate": .string("tool_call_update"),
+                "toolCallId": .string("tool-1"),
+                "status": .string("completed"),
+                "title": .string("Read file"),
+                "content": .array([
+                    .object(["type": .string("content"), "content": .object(["type": .string("text"), "text": .string("line one")])]),
+                    .object(["type": .string("content"), "content": .object(["type": .string("text"), "text": .string("line two")])])
+                ])
+            ])
+        ])
+        guard let updateBody = update.bodyText else {
+            throw CheckError.failed("a completed tool call must surface what it returned")
+        }
+        try check(updateBody.contains("line one") && updateBody.contains("line two"), "every text part of the result must be joined into the body")
+        try check(updateBody.contains("Read file"), "the tool's title should introduce its result")
+        try check(!updateBody.contains("toolCallId"), "the serialized envelope must never leak into the body")
+
+        // Nothing readable: the raw JSON view stays the only sensible display.
+        let ended = try event(["sequence": .number(2), "type": .string("turn_end"), "stopReason": .string("end_turn")])
+        try check(ended.bodyText == nil, "an event with no text must report no body rather than a fabricated one")
+
+        let started = try event([
+            "sequence": .number(3), "type": .string("tool_call"),
+            "text": .string(#"{"sessionUpdate":"tool_call"}"#),
+            "data": .object([
+                "toolCallId": .string("tool-2"), "title": .string("Edit file"),
+                "rawInput": .object(["path": .string("/tmp/a.txt")])
+            ])
+        ])
+        try check(started.bodyText?.contains("Edit file") == true, "a starting tool call is identified by its title")
+        try check(started.bodyText?.contains("/tmp/a.txt") == true, "a starting tool call should summarize its input")
+
+        // local-transcript.js writes a human summary into `text` and emits no
+        // `data`, so the same tool types must stay readable from that producer.
+        let local = try event([
+            "sequence": .number(4), "type": .string("tool_call"),
+            "source": .string("local-transcript"), "toolCallId": .string("call-1"),
+            "text": .string("exec: sqlite3 state.db")
+        ])
+        try check(local.bodyText == "exec: sqlite3 state.db", "a local transcript summary is already the body")
+
+        let permission = try event([
+            "sequence": .number(5), "type": .string("permission_request"),
+            "requestId": .string("req-1"),
+            "toolCall": .object(["toolCallId": .string("tool-3"), "title": .string("Edit file")])
+        ])
+        try check(permission.bodyText == "Edit file · 권한 요청", "a permission request should name the tool it is asking about")
+
+        // Oversized updates keep only a truncated JSON head in `text`.
+        let truncated = try event([
+            "sequence": .number(6), "type": .string("tool_call_update"),
+            "text": .string(#"{"sessionUpdate":"tool_call_update","rawOutput":"가가가"#),
+            "dataTruncated": .bool(true)
+        ])
+        try check(truncated.bodyText == nil, "a truncated JSON head must not be presented as readable text")
     }
 
     /// Replays test/fixtures/restart-blockers.json — the same file

@@ -72,6 +72,19 @@ enum JSONValue: Equatable, Sendable {
         }
         return text
     }
+
+    /// Single-line JSON, for quoting a small structured value (a tool's
+    /// arguments) inside otherwise human-readable text. Slashes stay
+    /// unescaped: the values quoted this way are mostly paths, and `\/` reads
+    /// as noise in a sentence.
+    var compactPrinted: String {
+        guard JSONSerialization.isValidJSONObject(foundationValue),
+              let data = try? JSONSerialization.data(withJSONObject: foundationValue, options: [.sortedKeys, .withoutEscapingSlashes]),
+              let text = String(data: data, encoding: .utf8) else {
+            return stringValue ?? "null"
+        }
+        return text
+    }
 }
 
 extension Dictionary where Key == String, Value == JSONValue {
@@ -626,6 +639,97 @@ struct MonitorEvent: Identifiable, Equatable, Sendable {
         if let reason = object.string("stopReason") { return reason }
         return type.replacingOccurrences(of: "_", with: " ")
     }
+
+    /// What the event actually *said*, with the JSON envelope stripped — the
+    /// detail panes lead with this and keep the raw payload as a fallback.
+    ///
+    /// The payload's *shape* decides where that text lives, not its type.
+    /// `src/gateway-service.js` flattens only chunk/prompt events into a
+    /// top-level `text` (`capTextEvent`); every other update goes through the
+    /// generic tail that serializes the whole update into `text` and keeps the
+    /// real object in `data` — so on those, `text` is JSON and must not be
+    /// shown as a body. `src/local-transcript.js` emits no `data` at all and
+    /// writes a human summary into `text`. Hence: `data` wins whenever it
+    /// exists, `text` is only trusted without it.
+    ///
+    /// nil means the payload carries nothing more readable than its own JSON.
+    var bodyText: String? {
+        let object = payload.objectValue ?? [:]
+        if type == "permission_request" {
+            // The tool call is capped separately (`capStructuredField`), so
+            // only its identity is guaranteed to survive here.
+            let title = object.object("toolCall")?.string("title")
+            return [title, "권한 요청"].compactMap(nonEmptyBody).joined(separator: " · ")
+        }
+        if let data = object.object("data") {
+            return structuredBodyText(data) ?? nonEmptyBody(data.string("message"))
+        }
+        // An update too large to deliver leaves only a truncated JSON head in
+        // `text`; the raw view renders that better than a half-parsed body.
+        if object.bool("dataTruncated") == true { return nil }
+        return nonEmptyBody(text) ?? nonEmptyBody(object.string("message"))
+    }
+}
+
+/// The readable part of a gateway event's raw ACP update (`data`).
+private func structuredBodyText(_ data: [String: JSONValue]) -> String? {
+    let title = nonEmptyBody(data.string("title") ?? data.string("name"))
+    // A finished call is interesting for what it returned, a starting one for
+    // what it was asked to do — the same rule covers `tool_call` and
+    // `tool_call_update` without branching on a type the payload may not state.
+    let detail = toolResultText(data) ?? toolInputText(data)
+    let parts = [title, detail].compactMap { $0 }
+    if !parts.isEmpty { return parts.joined(separator: "\n\n") }
+    guard let status = nonEmptyBody(data.string("status")) else { return nil }
+    return "상태: \(status)"
+}
+
+/// Whatever the tool reported back. Field names come from the agent, not the
+/// Gateway — the Gateway forwards its update verbatim — so every shape ACP
+/// agents are seen to use is accepted rather than one canonical key.
+private func toolResultText(_ data: [String: JSONValue]) -> String? {
+    for key in ["content", "output", "result", "rawOutput"] {
+        if let text = nonEmptyBody(acpContentText(data[key])) { return text }
+    }
+    // A structured `rawOutput` has no text leaf to lift, but it is still the
+    // result and far shorter than the whole envelope.
+    if let raw = data["rawOutput"], raw.objectValue != nil || raw.arrayValue != nil {
+        return nonEmptyBody(raw.compactPrinted)
+    }
+    return nil
+}
+
+/// A tool call's arguments, summarized: the reader only needs to recognize
+/// *which* call this was, so a long argument blob is cut here instead of
+/// filling the pane.
+private func toolInputText(_ data: [String: JSONValue]) -> String? {
+    guard let raw = data["rawInput"] ?? data["input"] ?? data["arguments"] else { return nil }
+    let text = nonEmptyBody(acpContentText(raw)) ?? nonEmptyBody(raw.compactPrinted)
+    guard let text else { return nil }
+    return text.count > 400 ? String(text.prefix(400)) + "…" : text
+}
+
+/// Text leaves of an ACP content value: a bare string, an array of blocks, a
+/// plain `{type:"text", text}` block, or the tool-call wrapper that nests the
+/// real block under `content`.
+private func acpContentText(_ value: JSONValue?) -> String? {
+    switch value {
+    case let .string(text):
+        return text
+    case let .array(items):
+        let parts = items.compactMap { acpContentText($0) }.filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: "\n")
+    case let .object(object):
+        if let text = object.string("text") { return text }
+        return acpContentText(object["content"])
+    default:
+        return nil
+    }
+}
+
+private func nonEmptyBody(_ text: String?) -> String? {
+    guard let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+    return trimmed
 }
 
 struct MonitorRecord: Identifiable, Equatable, Sendable {

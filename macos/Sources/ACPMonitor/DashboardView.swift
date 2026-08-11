@@ -164,26 +164,11 @@ struct DashboardView: View {
                         }
                         LabeledContent("이벤트", value: event.type.replacingOccurrences(of: "_", with: " "))
                         LabeledContent("시간", value: shortTime(event.timestamp))
-                        Text(String(event.summary.prefix(800)))
-                            .font(.caption)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        if event.summary.count > 800 {
-                            Text("요약 미리보기 · 전체 \(event.summary.count.formatted())자")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
                         Divider()
-                        let payload = event.payload.prettyPrinted
-                        Text(String(payload.prefix(4_000)))
-                            .font(.system(.caption, design: .monospaced))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        if payload.count > 4_000 {
-                            Text("JSON 미리보기 · 전체 \(payload.count.formatted())자")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
+                        // Same body-first treatment as the session detail pane;
+                        // this column is an inspector, not an export, so the
+                        // JSON only has to stay reachable, not lead.
+                        EventBodyView(event: event, characterLimit: 4_000, bodyFont: .caption)
                     } else {
                         EmptyLabel("이벤트를 선택하세요")
                     }

@@ -19,11 +19,7 @@ struct SessionDetailView: View {
                     .frame(minWidth: 430)
                     ScrollView {
                         if let selectedEvent {
-                            Text(selectedEvent.payload.prettyPrinted)
-                                .font(.system(.caption, design: .monospaced))
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(14)
+                            EventBodyView(event: selectedEvent).padding(14)
                         } else {
                             ContentUnavailableView("이벤트를 선택하세요", systemImage: "doc.text.magnifyingglass")
                         }
@@ -119,6 +115,64 @@ struct SessionDetailView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
     }
+}
+
+/// One event rendered the way a reader asks about it: what it said first, the
+/// raw payload one disclosure away. Shared by the session detail pane and the
+/// dashboard inspector so both explain an event identically.
+struct EventBodyView: View {
+    let event: MonitorEvent
+    /// Narrow inspector columns cut long bodies; a full-width pane scrolls
+    /// instead and passes nil.
+    var characterLimit: Int?
+    var bodyFont: Font = .body
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let body = event.bodyText {
+                textBlock(body, font: looksLikeCode(body) ? .system(.caption, design: .monospaced) : bodyFont, label: "본문")
+                DisclosureGroup("원본 JSON") {
+                    rawPayload.padding(.top, 4)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            } else {
+                rawPayload
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var rawPayload: some View {
+        textBlock(event.payload.prettyPrinted, font: .system(.caption, design: .monospaced), label: "JSON")
+    }
+
+    private func textBlock(_ text: String, font: Font, label: String) -> some View {
+        let shown = characterLimit.map { String(text.prefix($0)) } ?? text
+        return VStack(alignment: .leading, spacing: 3) {
+            Text(shown)
+                .font(font)
+                .textSelection(.enabled)
+                .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if shown.count < text.count {
+                Text("\(label) 미리보기 · 전체 \(text.count.formatted())자")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+}
+
+/// Tool output, diffs and JSON only stay readable with aligned columns; an
+/// agent's prose does not, so it keeps the normal body font.
+private func looksLikeCode(_ text: String) -> Bool {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.hasPrefix("{") || trimmed.hasPrefix("[") || trimmed.hasPrefix("<") { return true }
+    let lines = trimmed.split(separator: "\n")
+    guard lines.count > 1 else { return false }
+    let structured = lines.filter { $0.hasPrefix("  ") || $0.hasPrefix("\t") || $0.hasPrefix("+") || $0.hasPrefix("-") }
+    return structured.count * 2 >= lines.count
 }
 
 private struct SessionConfigRow: View {
