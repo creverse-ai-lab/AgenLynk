@@ -37,13 +37,17 @@ struct DashboardView: View {
             connectionBar
             metricStrip
             Divider()
+            // The sequence diagram is the reason this window is open, so the
+            // side columns default to just enough width for their own rows and
+            // the center takes the rest. Both keep their old max widths, so a
+            // divider drag still restores the roomier layout.
             HSplitView {
                 sessionColumn
-                    .frame(minWidth: 230, idealWidth: 270, maxWidth: 340)
+                    .frame(minWidth: 170, idealWidth: 190, maxWidth: 340)
                 eventColumn
-                    .frame(minWidth: 420, idealWidth: 660)
+                    .frame(minWidth: 420, idealWidth: 820)
                 operationsColumn
-                    .frame(minWidth: 280, idealWidth: 340, maxWidth: 440)
+                    .frame(minWidth: 220, idealWidth: 240, maxWidth: 440)
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
@@ -111,13 +115,20 @@ struct DashboardView: View {
 
     private var sessionColumn: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
+            // Narrow column: the title yields first, the filter toggle keeps
+            // its intrinsic width so its checkbox never clips.
+            HStack(spacing: 6) {
                 Label("Frontdoor 세션", systemImage: "rectangle.stack")
                     .font(.headline)
-                Spacer()
-                Toggle("활성만", isOn: $settings.activeOnly).toggleStyle(.checkbox).font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 0)
+                Toggle("활성만", isOn: $settings.activeOnly)
+                    .toggleStyle(.checkbox)
+                    .font(.caption)
+                    .fixedSize()
             }
-            .padding(12)
+            .padding(10)
             Divider()
             List(model.visibleFrontdoors, selection: $model.selectedFrontdoorId) { frontdoor in
                 FrontdoorRow(frontdoor: frontdoor)
@@ -164,6 +175,7 @@ struct DashboardView: View {
                         }
                         LabeledContent("이벤트", value: event.type.replacingOccurrences(of: "_", with: " "))
                         LabeledContent("시간", value: shortTime(event.timestamp))
+                            .lineLimit(1)
                         Divider()
                         // Same body-first treatment as the session detail pane;
                         // this column is an inspector, not an export, so the
@@ -335,6 +347,7 @@ struct FrontdoorRow: View {
                 Text(sourceSummary)
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 if let task = frontdoor.latestTask {
                     Text(task).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 }

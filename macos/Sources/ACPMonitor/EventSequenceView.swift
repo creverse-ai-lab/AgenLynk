@@ -14,6 +14,9 @@ struct EventSequenceView: View {
     private let headerHeight = 82.0
     private let relationRowHeight = 26.0
     private let eventRowHeight = 44.0
+    private let bodyTopInset = 10.0
+    /// Six relation rows; beyond that the pinned band scrolls itself.
+    private let maxRelationBandHeight = 156.0
 
     var body: some View {
         // Derived once per body pass. The computed-property forms re-ran
@@ -22,7 +25,7 @@ struct EventSequenceView: View {
         // event array once per edge — measurable milliseconds at 10 passes/s
         // during a busy turn.
         let diagram = collapseSequenceEvents(events)
-        let firstEventBySession = firstEventIds()
+        let marks = sessionEventMarks()
         let lanes = makeSequenceLanes(sessions: sessions, events: events)
         let laneIndex = lanes.enumerated().reduce(into: [String: Int]()) { result, item in
             result[item.element.session.sessionId] = item.offset
@@ -31,22 +34,30 @@ struct EventSequenceView: View {
             guard let parentId = lane.parentSessionId,
                   let parentIndex = laneIndex[parentId],
                   let childIndex = laneIndex[lane.session.sessionId] else { return nil }
+            let turnEndId = marks.lastTurnEndId[lane.session.sessionId]
             return SequenceCallEdge(
                 parentIndex: parentIndex,
                 childIndex: childIndex,
                 child: lane.session,
                 childDepth: lane.depth,
-                eventId: firstEventBySession[lane.session.sessionId]
+                eventId: marks.firstEventId[lane.session.sessionId],
+                returnEventId: turnEndId,
+                returned: hasReturned(lane.session, turnEndEventId: turnEndId)
             )
         }
+        // One row per drawn arrow instead of one row per edge: a returned
+        // worker gets its 응답 row directly under its call row, and a worker
+        // that is still running takes a single row. Sharing a row between the
+        // two arrows would collide the two capsule labels.
+        let relations = relationRows(for: edges)
         let nodes = pageEvents(in: diagram).compactMap { entry -> SequenceDiagramNode? in
             guard let index = laneIndex[entry.event.sessionId] else { return nil }
             return SequenceDiagramNode(laneIndex: index, event: entry.event, collapsedCount: entry.count)
         }
-        let relationHeight = max(Double(edges.count) * relationRowHeight, 12)
-        let eventTop = headerHeight + relationHeight + 8
+        let relationHeight = max(Double(relations.count) * relationRowHeight, 12)
+        let relationBandHeight = min(relationHeight, maxRelationBandHeight)
         let width = max(timeWidth + Double(max(lanes.count, 1)) * laneWidth, 620)
-        let height = max(eventTop + Double(max(nodes.count, 1)) * eventRowHeight + 20, 420)
+        let bodyHeight = max(bodyTopInset + Double(max(nodes.count, 1)) * eventRowHeight + 16, 240)
         let pages = max(1, (diagram.count + pageSize - 1) / pageSize)
 
         VStack(spacing: 0) {
@@ -81,113 +92,201 @@ struct EventSequenceView: View {
             .frame(height: 34)
             Divider()
 
-            ScrollView([.horizontal, .vertical]) {
-                ZStack(alignment: .topLeading) {
-                    Canvas { context, _ in
-                        for (index, lane) in lanes.enumerated() {
-                            let x = laneX(index)
-                            var lifeline = Path()
-                            lifeline.move(to: CGPoint(x: x, y: headerHeight - 8))
-                            lifeline.addLine(to: CGPoint(x: x, y: height - 12))
-                            context.stroke(
-                                lifeline,
-                                with: .color(providerColor(lane.session.provider).opacity(0.34)),
-                                style: StrokeStyle(lineWidth: 1.5, dash: [5, 5])
-                            )
+            // Identity (lane headers + call/응답 relations) is pinned; only the
+            // event rows scroll vertically. The single outer horizontal scroll
+            // view moves both blocks together, so every header stays over its
+            // own lifeline no matter how far right the diagram is panned.
+            ScrollView(.horizontal) {
+                VStack(spacing: 0) {
+                    ZStack(alignment: .topLeading) {
+                        Canvas { context, _ in
+                            // Lifeline stubs so the headers read as the top of
+                            // the same lines the relation band and body draw.
+                            for (index, lane) in lanes.enumerated() {
+                                let x = laneX(index)
+                                var lifeline = Path()
+                                lifeline.move(to: CGPoint(x: x, y: headerHeight - 8))
+                                lifeline.addLine(to: CGPoint(x: x, y: headerHeight))
+                                context.stroke(
+                                    lifeline,
+                                    with: .color(providerColor(lane.session.provider).opacity(0.34)),
+                                    style: StrokeStyle(lineWidth: 1.5, dash: [5, 5])
+                                )
+                            }
                         }
+                        .accessibilityHidden(true)
 
-                        for (index, edge) in edges.enumerated() {
-                            let parentX = laneX(edge.parentIndex)
-                            let childX = laneX(edge.childIndex)
-                            let y = headerHeight + Double(index) * relationRowHeight + relationRowHeight / 2
-                            var call = Path()
-                            call.move(to: CGPoint(x: parentX, y: y))
-                            call.addLine(to: CGPoint(x: childX, y: y))
-                            context.stroke(call, with: .color(providerColor(edge.child.provider).opacity(0.72)), lineWidth: 1.6)
-
-                            let direction = childX >= parentX ? 1.0 : -1.0
-                            var arrow = Path()
-                            arrow.move(to: CGPoint(x: childX, y: y))
-                            arrow.addLine(to: CGPoint(x: childX - 7 * direction, y: y - 4))
-                            arrow.move(to: CGPoint(x: childX, y: y))
-                            arrow.addLine(to: CGPoint(x: childX - 7 * direction, y: y + 4))
-                            context.stroke(arrow, with: .color(providerColor(edge.child.provider)), lineWidth: 1.6)
+                        ForEach(Array(lanes.enumerated()), id: \.element.id) { index, lane in
+                            Button {
+                                followLatestEvent = false
+                                selectedSessionId = lane.session.sessionId
+                                selectedEventId = nil
+                            } label: {
+                                SequenceLaneHeader(
+                                    lane: lane,
+                                    selected: selectedSessionId == lane.session.sessionId
+                                )
+                            }
+                                .buttonStyle(.plain)
+                                .frame(width: laneWidth - 24, height: 64)
+                                .position(x: laneX(index), y: 35)
+                                .help("\(lane.session.provider) \(lane.session.model ?? "default") 세션 상세")
                         }
                     }
-                    .accessibilityHidden(true)
+                    .frame(width: width, height: headerHeight)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 10)
+                    .background(Color(nsColor: .controlBackgroundColor))
 
-                    ForEach(Array(lanes.enumerated()), id: \.element.id) { index, lane in
-                        Button {
-                            followLatestEvent = false
-                            selectedSessionId = lane.session.sessionId
-                            selectedEventId = nil
-                        } label: {
-                            SequenceLaneHeader(
-                                lane: lane,
-                                selected: selectedSessionId == lane.session.sessionId
-                            )
+                    // The relation band is pinned too, but it is capped: a
+                    // frontdoor with many workers would otherwise grow the
+                    // fixed block until the scrolling event area had no room
+                    // left. Past the cap the band scrolls inside itself while
+                    // the lane headers above stay put.
+                    ScrollView(.vertical) {
+                        ZStack(alignment: .topLeading) {
+                            Canvas { context, _ in
+                                for (index, lane) in lanes.enumerated() {
+                                    let x = laneX(index)
+                                    var lifeline = Path()
+                                    lifeline.move(to: CGPoint(x: x, y: 0))
+                                    lifeline.addLine(to: CGPoint(x: x, y: relationHeight))
+                                    context.stroke(
+                                        lifeline,
+                                        with: .color(providerColor(lane.session.provider).opacity(0.34)),
+                                        style: StrokeStyle(lineWidth: 1.5, dash: [5, 5])
+                                    )
+                                }
+
+                                for row in relations {
+                                    let parentX = laneX(row.edge.parentIndex)
+                                    let childX = laneX(row.edge.childIndex)
+                                    let y = relationY(row.index)
+                                    let color = providerColor(row.edge.child.provider)
+                                    // The call travels parent→child; the 응답
+                                    // travels back, so the head lands on the
+                                    // parent lane and the stroke is dashed.
+                                    let from = row.kind == .call ? parentX : childX
+                                    let to = row.kind == .call ? childX : parentX
+                                    var line = Path()
+                                    line.move(to: CGPoint(x: from, y: y))
+                                    line.addLine(to: CGPoint(x: to, y: y))
+                                    context.stroke(
+                                        line,
+                                        with: .color(color.opacity(row.kind == .call ? 0.72 : 0.6)),
+                                        style: row.kind == .call
+                                            ? StrokeStyle(lineWidth: 1.6)
+                                            : StrokeStyle(lineWidth: 1.4, dash: [4, 3])
+                                    )
+                                    context.stroke(
+                                        arrowHead(at: CGPoint(x: to, y: y), pointingRight: to >= from),
+                                        with: .color(color),
+                                        lineWidth: 1.6
+                                    )
+                                }
+                            }
+                            .accessibilityHidden(true)
+
+                            ForEach(relations) { row in
+                                let parentX = laneX(row.edge.parentIndex)
+                                let childX = laneX(row.edge.childIndex)
+                                let eventId = row.kind == .call ? row.edge.eventId : row.edge.returnEventId
+                                Button {
+                                    followLatestEvent = false
+                                    if let eventId { selectedEventId = eventId }
+                                } label: {
+                                    Label(
+                                        row.kind == .call ? row.edge.childDepthLabel : "응답",
+                                        systemImage: row.kind == .call ? "arrow.right" : "arrow.uturn.left"
+                                    )
+                                        .font(.caption2.weight(.medium))
+                                        .lineLimit(1)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(.background, in: Capsule())
+                                        .overlay(
+                                            Capsule().stroke(
+                                                providerColor(row.edge.child.provider).opacity(row.kind == .call ? 0.3 : 0.45),
+                                                style: row.kind == .call
+                                                    ? StrokeStyle(lineWidth: 1)
+                                                    : StrokeStyle(lineWidth: 1, dash: [3, 2])
+                                            )
+                                        )
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(eventId == nil)
+                                .position(x: (parentX + childX) / 2, y: relationY(row.index))
+                                .help(
+                                    row.kind == .call
+                                        ? "\(row.edge.child.provider) \(row.edge.child.model ?? "default") 호출"
+                                        : "\(row.edge.child.provider) \(row.edge.child.model ?? "default") 응답 반환"
+                                )
+                            }
                         }
-                            .buttonStyle(.plain)
-                            .frame(width: laneWidth - 24, height: 64)
-                            .position(x: laneX(index), y: 35)
-                            .help("\(lane.session.provider) \(lane.session.model ?? "default") 세션 상세")
+                        .frame(width: width, height: relationHeight)
+                        .padding(.horizontal, 10)
                     }
+                    .frame(height: relationBandHeight)
+                    .background(Color(nsColor: .controlBackgroundColor))
 
-                    ForEach(Array(edges.enumerated()), id: \.element.id) { index, edge in
-                        let parentX = laneX(edge.parentIndex)
-                        let childX = laneX(edge.childIndex)
-                        let y = headerHeight + Double(index) * relationRowHeight + relationRowHeight / 2
-                        Button {
-                            followLatestEvent = false
-                            if let eventId = edge.eventId { selectedEventId = eventId }
-                        } label: {
-                            Label(edge.childDepthLabel, systemImage: "arrow.right")
-                                .font(.caption2.weight(.medium))
-                                .lineLimit(1)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(.background, in: Capsule())
-                                .overlay(Capsule().stroke(providerColor(edge.child.provider).opacity(0.3)))
+                    Divider()
+
+                    ScrollView(.vertical) {
+                        ZStack(alignment: .topLeading) {
+                            Canvas { context, _ in
+                                // Lifelines now start at the top of the
+                                // scrolling region, right under the pinned stubs.
+                                for (index, lane) in lanes.enumerated() {
+                                    let x = laneX(index)
+                                    var lifeline = Path()
+                                    lifeline.move(to: CGPoint(x: x, y: 0))
+                                    lifeline.addLine(to: CGPoint(x: x, y: bodyHeight))
+                                    context.stroke(
+                                        lifeline,
+                                        with: .color(providerColor(lane.session.provider).opacity(0.34)),
+                                        style: StrokeStyle(lineWidth: 1.5, dash: [5, 5])
+                                    )
+                                }
+                            }
+                            .accessibilityHidden(true)
+
+                            ForEach(Array(nodes.enumerated()), id: \.element.id) { row, node in
+                                let y = bodyTopInset + Double(row) * eventRowHeight + eventRowHeight / 2
+                                Text(shortTime(node.event.timestamp))
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.tertiary)
+                                    .frame(width: timeWidth - 12, alignment: .trailing)
+                                    .position(x: (timeWidth - 12) / 2, y: y)
+                                Button {
+                                    followLatestEvent = false
+                                    selectedEventId = node.event.id
+                                } label: {
+                                    SequenceEventNode(
+                                        event: node.event,
+                                        collapsedCount: node.collapsedCount,
+                                        selected: selectedEventId == node.event.id
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                                .frame(width: laneWidth - 24, height: eventRowHeight - 12)
+                                .position(x: laneX(node.laneIndex), y: y)
+                            }
+
+                            if nodes.isEmpty {
+                                ContentUnavailableView(
+                                    "표시할 이벤트가 없습니다",
+                                    systemImage: "timeline.selection",
+                                    description: Text("세션 이벤트가 수신되면 호출 관계와 함께 표시됩니다.")
+                                )
+                                .frame(width: width, height: bodyHeight)
+                            }
                         }
-                        .buttonStyle(.plain)
-                        .disabled(edge.eventId == nil)
-                        .position(x: (parentX + childX) / 2, y: y)
-                        .help("\(edge.child.provider) \(edge.child.model ?? "default") 호출")
+                        .frame(width: width, height: bodyHeight)
+                        .padding(.horizontal, 10)
+                        .padding(.bottom, 10)
                     }
-
-                    ForEach(Array(nodes.enumerated()), id: \.element.id) { row, node in
-                        let y = eventTop + Double(row) * eventRowHeight + eventRowHeight / 2
-                        Text(shortTime(node.event.timestamp))
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.tertiary)
-                            .frame(width: timeWidth - 12, alignment: .trailing)
-                            .position(x: (timeWidth - 12) / 2, y: y)
-                        Button {
-                            followLatestEvent = false
-                            selectedEventId = node.event.id
-                        } label: {
-                            SequenceEventNode(
-                                event: node.event,
-                                collapsedCount: node.collapsedCount,
-                                selected: selectedEventId == node.event.id
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .frame(width: laneWidth - 24, height: eventRowHeight - 12)
-                        .position(x: laneX(node.laneIndex), y: y)
-                    }
-
-                    if nodes.isEmpty {
-                        ContentUnavailableView(
-                            "표시할 이벤트가 없습니다",
-                            systemImage: "timeline.selection",
-                            description: Text("세션 이벤트가 수신되면 호출 관계와 함께 표시됩니다.")
-                        )
-                        .frame(width: width, height: height)
-                    }
+                    .frame(maxHeight: .infinity)
                 }
-                .frame(width: width, height: height)
-                .padding(10)
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))
@@ -205,18 +304,60 @@ struct EventSequenceView: View {
         timeWidth + laneWidth * (Double(index) + 0.5)
     }
 
-    /// Earliest event id per session, in one grouping pass instead of a
-    /// filter+sort of every event per edge.
-    private func firstEventIds() -> [String: String] {
+    /// Row centre inside the relation band, whose own origin is the top of the
+    /// band (the lane headers live in a separate fixed block above it).
+    private func relationY(_ index: Int) -> Double {
+        Double(index) * relationRowHeight + relationRowHeight / 2
+    }
+
+    private func relationRows(for edges: [SequenceCallEdge]) -> [SequenceRelationRow] {
+        var rows: [SequenceRelationRow] = []
+        rows.reserveCapacity(edges.count * 2)
+        for edge in edges {
+            rows.append(SequenceRelationRow(edge: edge, kind: .call, index: rows.count))
+            if edge.returned {
+                rows.append(SequenceRelationRow(edge: edge, kind: .response, index: rows.count))
+            }
+        }
+        return rows
+    }
+
+    /// A worker counts as returned once it is no longer working *and* a turn
+    /// actually finished for it: the gateway pushes `turn_end` at the end of a
+    /// turn and stamps the same stopReason on the session record, so either
+    /// signal alone is enough — `turn_end` may sit outside the loaded event
+    /// window, and a restored session may carry a stopReason with no events.
+    /// The isActive gate keeps a worker that is mid-turn (running /
+    /// waiting_permission / waiting_input / cancelling / restoring) showing
+    /// only its call arrow, which is what makes an unanswered call visible.
+    private func hasReturned(_ session: GatewaySession, turnEndEventId: String?) -> Bool {
+        guard !session.isActive else { return false }
+        if turnEndEventId != nil { return true }
+        return session.stopReason?.isEmpty == false
+    }
+
+    /// Earliest event id and newest `turn_end` id per session, in one grouping
+    /// pass instead of a filter+sort of every event per edge.
+    private func sessionEventMarks() -> SequenceEventMarks {
         var earliest: [String: MonitorEvent] = [:]
+        var latestTurnEnd: [String: MonitorEvent] = [:]
         for event in events {
             if let current = earliest[event.sessionId] {
                 if sequenceEventSort(event, current) { earliest[event.sessionId] = event }
             } else {
                 earliest[event.sessionId] = event
             }
+            guard event.type == "turn_end" else { continue }
+            if let current = latestTurnEnd[event.sessionId] {
+                if sequenceEventSort(current, event) { latestTurnEnd[event.sessionId] = event }
+            } else {
+                latestTurnEnd[event.sessionId] = event
+            }
         }
-        return earliest.mapValues(\.id)
+        return SequenceEventMarks(
+            firstEventId: earliest.mapValues(\.id),
+            lastTurnEndId: latestTurnEnd.mapValues(\.id)
+        )
     }
 
     private func pageEvents(in values: [SequenceEventEntry]) -> ArraySlice<SequenceEventEntry> {
@@ -247,9 +388,39 @@ private struct SequenceCallEdge: Identifiable {
     let child: GatewaySession
     let childDepth: Int
     let eventId: String?
+    let returnEventId: String?
+    let returned: Bool
 
     var id: String { "call:\(child.sessionId)" }
     var childDepthLabel: String { childDepth <= 1 ? "Agent 호출" : "Subagent 호출" }
+}
+
+private struct SequenceRelationRow: Identifiable {
+    enum Kind { case call, response }
+
+    let edge: SequenceCallEdge
+    let kind: Kind
+    /// Row slot within the pinned relation block, assigned in draw order.
+    let index: Int
+
+    var id: String { "\(kind == .call ? "call" : "return"):\(edge.child.sessionId)" }
+}
+
+private struct SequenceEventMarks {
+    let firstEventId: [String: String]
+    let lastTurnEndId: [String: String]
+}
+
+/// Two-stroke arrowhead landing on `point`; `pointingRight` follows the travel
+/// direction so call and return heads mirror each other.
+private func arrowHead(at point: CGPoint, pointingRight: Bool) -> Path {
+    let direction = pointingRight ? 1.0 : -1.0
+    var arrow = Path()
+    arrow.move(to: point)
+    arrow.addLine(to: CGPoint(x: point.x - 7 * direction, y: point.y - 4))
+    arrow.move(to: point)
+    arrow.addLine(to: CGPoint(x: point.x - 7 * direction, y: point.y + 4))
+    return arrow
 }
 
 private struct SequenceDiagramNode: Identifiable {
@@ -268,7 +439,10 @@ private struct SequenceLaneHeader: View {
         VStack(spacing: 3) {
             HStack(spacing: 5) {
                 Circle().fill(providerColor(lane.session.provider)).frame(width: 7, height: 7)
-                Text(roleLabel).font(.caption.weight(.semibold))
+                Text(roleLabel)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
             Text(lane.session.provider.capitalized)
                 .font(.caption2.weight(.medium))
@@ -289,9 +463,18 @@ private struct SequenceLaneHeader: View {
     }
 
     private var roleLabel: String {
-        if lane.session.isFrontdoorRecord { return "Frontdoor" }
+        if lane.session.isFrontdoorRecord { return frontdoorLabel }
         if lane.depth <= 1 { return "Agent" }
         return "Subagent L\(lane.depth)"
+    }
+
+    /// The frontdoor lane names its working folder instead of the generic
+    /// "Frontdoor" — with several frontdoors open the folder is the only thing
+    /// that tells them apart at a glance. Root ("/") and an unreported cwd
+    /// carry no such information, so those fall back to the generic label.
+    private var frontdoorLabel: String {
+        let folder = (lane.session.cwd as NSString).lastPathComponent
+        return folder.isEmpty || folder == "/" ? "Frontdoor" : folder
     }
 }
 
