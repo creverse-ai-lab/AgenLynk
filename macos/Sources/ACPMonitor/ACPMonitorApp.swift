@@ -12,7 +12,12 @@ struct ACPMonitorApp: App {
     @StateObject private var model = AppModel()
 
     var body: some Scene {
-        WindowGroup("Lynk", id: "dashboard") {
+        // `Window`, not `WindowGroup`: the dashboard is a single, unique
+        // window. A WindowGroup is a template that spawns a fresh window on
+        // every openWindow(id:), which is why "대시보드 열기" from the menu bar
+        // stacked duplicates instead of focusing the one already open. `Window`
+        // makes openWindow(id:) bring the existing window forward.
+        Window("Lynk", id: "dashboard") {
             DashboardView()
                 .environmentObject(model)
                 .environmentObject(model.settings)
