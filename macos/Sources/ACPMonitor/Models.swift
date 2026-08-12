@@ -1004,7 +1004,11 @@ struct ACPAgentCatalogItem: Identifiable, Equatable, Sendable {
     let registryId: String
     let providerId: String
     let name: String
+    /// The version the ACP registry currently offers.
     let version: String
+    /// The version this Mac has configured (from providers.json), or nil when
+    /// nothing is installed. Compared against `version` to offer an update.
+    let installedVersion: String?
     let description: String
     let website: URL?
     let icon: URL?
@@ -1017,6 +1021,15 @@ struct ACPAgentCatalogItem: Identifiable, Equatable, Sendable {
 
     var id: String { registryId }
 
+    /// An installed adapter whose configured version differs from the
+    /// registry's current one. Re-installing pulls the newer version, so this
+    /// drives the per-row "업데이트" action. A not-installed adapter is never
+    /// "outdated" — it is simply not present.
+    var updateAvailable: Bool {
+        guard installed, let installedVersion, !installedVersion.isEmpty else { return false }
+        return installedVersion != version
+    }
+
     init?(_ value: JSONValue) {
         guard let object = value.objectValue,
               let registryId = object.string("registryId"),
@@ -1025,6 +1038,7 @@ struct ACPAgentCatalogItem: Identifiable, Equatable, Sendable {
         self.providerId = providerId
         name = object.string("name") ?? registryId
         version = object.string("version") ?? "—"
+        installedVersion = object.string("installedVersion")
         description = object.string("description") ?? ""
         website = object.string("website").flatMap(URL.init(string:))
         icon = object.string("icon").flatMap(URL.init(string:))
@@ -1522,6 +1536,74 @@ func monitorFailureGuidance(code: String?) -> String? {
 
 func decodeJSONValue(_ data: Data) throws -> JSONValue {
     JSONValue(any: try JSONSerialization.jsonObject(with: data))
+}
+
+// MARK: - Update surface (app / seed gateway / release feed)
+
+/// One AgenLynk release resolved from the GitHub releases feed: the bare
+/// version, a download target (the DMG asset, or the release page as a
+/// fallback), and the release page itself.
+struct AppReleaseInfo: Equatable, Sendable {
+    let version: String
+    let downloadURL: URL
+    let htmlURL: URL?
+}
+
+/// The Gateway version+build the app bundle ships as its runtime seed, read
+/// from Contents/Resources/runtime/runtime-manifest.json. nil in a
+/// source-tree/dev build that bundles no seed.
+struct SeedGatewayVersion: Equatable, Sendable {
+    let gatewayVersion: String
+    let gatewayBuildId: String
+}
+
+/// Strips a leading `v`/`V` from a release tag: `"v0.3.4"` → `"0.3.4"`.
+func parseReleaseVersion(_ tag: String) -> String {
+    var trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.first == "v" || trimmed.first == "V" { trimmed.removeFirst() }
+    return trimmed
+}
+
+/// Compares two dotted versions by numeric part, treating a missing part as 0
+/// so `1.0` and `1.0.0` are equal. Non-numeric parts count as 0. Semantic, not
+/// lexical: `0.3.4 < 0.3.10`.
+func compareSemanticVersions(_ lhs: String, _ rhs: String) -> ComparisonResult {
+    let left = lhs.split(separator: ".").map { Int($0) ?? 0 }
+    let right = rhs.split(separator: ".").map { Int($0) ?? 0 }
+    for index in 0..<max(left.count, right.count) {
+        let a = index < left.count ? left[index] : 0
+        let b = index < right.count ? right[index] : 0
+        if a != b { return a < b ? .orderedAscending : .orderedDescending }
+    }
+    return .orderedSame
+}
+
+/// Parses the GitHub `GET /releases` array. The newest entry is `releases[0]`
+/// (pre-releases included — the repo may be pre-release-only, for which
+/// `/releases/latest` 404s), whose `tag_name` gives the version and whose
+/// `.dmg` asset gives the download url; the release `html_url` is the fallback
+/// when no DMG asset is attached. nil for an empty/malformed feed.
+func parseGitHubReleases(_ data: Data) -> AppReleaseInfo? {
+    guard let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+          let first = array.first,
+          let tag = first["tag_name"] as? String else { return nil }
+    let version = parseReleaseVersion(tag)
+    guard !version.isEmpty else { return nil }
+    let htmlURL = (first["html_url"] as? String).flatMap(URL.init(string:))
+    let assets = first["assets"] as? [[String: Any]] ?? []
+    let dmg = assets.first { ($0["name"] as? String)?.lowercased().hasSuffix(".dmg") == true }
+    let dmgURL = (dmg?["browser_download_url"] as? String).flatMap(URL.init(string:))
+    guard let downloadURL = dmgURL ?? htmlURL else { return nil }
+    return AppReleaseInfo(version: version, downloadURL: downloadURL, htmlURL: htmlURL)
+}
+
+/// Parses a bundled `runtime-manifest.json` for the seed's Gateway identity.
+/// nil when the file is absent (dev build) or missing either field.
+func parseSeedManifest(_ data: Data) -> SeedGatewayVersion? {
+    guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let version = object["gatewayVersion"] as? String, !version.isEmpty,
+          let buildId = object["gatewayBuildId"] as? String, !buildId.isEmpty else { return nil }
+    return SeedGatewayVersion(gatewayVersion: version, gatewayBuildId: buildId)
 }
 
 /// Work that must finish before the Gateway runtime may be swapped or rolled

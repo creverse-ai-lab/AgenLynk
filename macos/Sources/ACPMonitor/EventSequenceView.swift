@@ -7,6 +7,12 @@ struct EventSequenceView: View {
     @Binding var selectedEventId: String?
     @Binding var followLatestEvent: Bool
     @State private var page = 0
+    // Keyboard scrolling: the diagram is a 2-D canvas, so arrow keys step
+    // through anchor points (one per event row / per lane) and scroll to them.
+    // Focus the diagram (click it) and the arrows move the view.
+    @State private var keyRow = 0
+    @State private var keyLane = 0
+    @FocusState private var diagramFocused: Bool
 
     private let pageSize = 20
     private let timeWidth = 76.0
@@ -68,7 +74,7 @@ struct EventSequenceView: View {
                 Text(pageRangeLabel(for: diagram))
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
-                Text("화살표: 호출 관계 · 노드: 이벤트")
+                Text("화살표: 호출 관계 · 노드: 이벤트 · 클릭 후 방향키로 이동")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                 Spacer()
@@ -101,9 +107,18 @@ struct EventSequenceView: View {
             // on the row of the event that triggered them. The single outer
             // horizontal scroll moves the headers with the body, so each header
             // stays over its own lifeline however far the diagram is panned.
+            ScrollViewReader { proxy in
             ScrollView(.horizontal) {
                 VStack(spacing: 0) {
                     ZStack(alignment: .topLeading) {
+                        // One invisible anchor per lane, on the header row, so a
+                        // left/right key scrolls horizontally without disturbing
+                        // the vertical position.
+                        ForEach(0..<max(lanes.count, 1), id: \.self) { index in
+                            Color.clear.frame(width: 1, height: 1)
+                                .id("col-\(index)")
+                                .position(x: laneX(index), y: 6)
+                        }
                         Canvas { context, _ in
                             // Lifeline stubs so the headers read as the top of
                             // the same lines the timeline below draws.
@@ -195,6 +210,15 @@ struct EventSequenceView: View {
                             }
                             .accessibilityHidden(true)
 
+                            // One invisible anchor per event row, pinned to the
+                            // left edge, so an up/down key scrolls vertically
+                            // without shifting the lane the view is centred on.
+                            ForEach(Array(nodes.enumerated()), id: \.offset) { row, _ in
+                                Color.clear.frame(width: 1, height: 1)
+                                    .id("row-\(row)")
+                                    .position(x: 6, y: bodyTopInset + Double(row) * eventRowHeight + eventRowHeight / 2)
+                            }
+
                             ForEach(Array(nodes.enumerated()), id: \.element.id) { row, node in
                                 let y = bodyTopInset + Double(row) * eventRowHeight + eventRowHeight / 2
                                 Text(shortTime(node.event.timestamp))
@@ -238,6 +262,30 @@ struct EventSequenceView: View {
                     }
                     .frame(maxHeight: .infinity)
                 }
+            }
+            // Click to focus, then arrow keys scroll the diagram. onMoveCommand
+            // fires on arrow presses only while this view holds focus, so it
+            // never steals arrows from a focused list elsewhere.
+            .focusable()
+            .focused($diagramFocused)
+            .onMoveCommand { direction in
+                switch direction {
+                case .up:
+                    keyRow = max(0, keyRow - 1)
+                    withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo("row-\(keyRow)", anchor: .center) }
+                case .down:
+                    keyRow = min(max(0, nodes.count - 1), keyRow + 1)
+                    withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo("row-\(keyRow)", anchor: .center) }
+                case .left:
+                    keyLane = max(0, keyLane - 1)
+                    withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo("col-\(keyLane)", anchor: .center) }
+                case .right:
+                    keyLane = min(max(0, lanes.count - 1), keyLane + 1)
+                    withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo("col-\(keyLane)", anchor: .center) }
+                @unknown default:
+                    break
+                }
+            }
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))

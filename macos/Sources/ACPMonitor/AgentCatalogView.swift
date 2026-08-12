@@ -177,11 +177,22 @@ private struct AgentCatalogRow: View {
                 ProgressView().controlSize(.small)
                     .frame(width: 76)
             } else if agent.installed {
-                Toggle(agent.enabled ? "On" : "Off", isOn: Binding(
-                    get: { agent.enabled },
-                    set: { enabled in Task { await model.setAgentEnabled(agent, enabled: enabled) } }
-                ))
-                .toggleStyle(.switch)
+                VStack(alignment: .trailing, spacing: 4) {
+                    Toggle(agent.enabled ? "On" : "Off", isOn: Binding(
+                        get: { agent.enabled },
+                        set: { enabled in Task { await model.setAgentEnabled(agent, enabled: enabled) } }
+                    ))
+                    .toggleStyle(.switch)
+                    // Re-installing pulls the registry's current version, so the
+                    // update path is just install run again — shown only when
+                    // the configured version differs from the registry latest.
+                    if agent.updateAvailable {
+                        Button("업데이트") { Task { await model.installAgent(agent) } }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .help("\(agent.installedVersion ?? "?") → \(agent.version)")
+                    }
+                }
                 .frame(width: 76)
             } else if agent.installSupported {
                 Button("Install") { Task { await model.installAgent(agent) } }

@@ -51,6 +51,10 @@ export async function officialAgentCatalog({
       providerId,
       name: agent.name,
       version: agent.version,
+      // What the ACP registry currently offers (`version`) vs what this Mac has
+      // configured (`installedVersion`, from providers.json). The app compares
+      // the two to offer an adapter update; null when nothing is installed.
+      installedVersion: installed ? (detectedProvider?.registryVersion ?? null) : null,
       description: typeof agent.description === "string" ? agent.description : "",
       website: firstWebUrl(agent.website, agent.repository),
       icon: firstWebUrl(agent.icon),

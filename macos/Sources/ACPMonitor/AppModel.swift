@@ -78,6 +78,13 @@ final class AppModel: ObservableObject {
     @Published private(set) var runtimeBusy = false
     @Published private(set) var runtimeError: String?
     @Published private(set) var runtimeNotice: String?
+    /// The newest AgenLynk release the GitHub feed advertised, or nil until a
+    /// successful check finds one.
+    @Published private(set) var latestAppRelease: AppReleaseInfo?
+    @Published private(set) var appUpdateChecking = false
+    /// A non-fatal reason the last app-update check produced no result (offline,
+    /// rate-limited, unparseable). The local version stays usable regardless.
+    @Published private(set) var appUpdateError: String?
 
     let settings = AppSettings()
     private let sidecar = SidecarController()
@@ -577,6 +584,71 @@ final class AppModel: ObservableObject {
             runtimeError = nil
         } catch {
             runtimeError = error.localizedDescription
+        }
+    }
+
+    // MARK: - Unified update surface (app / gateway seed / adapters)
+
+    /// The running app's own short version, e.g. `"0.3.4"`.
+    var localAppVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
+    }
+
+    /// True when the GitHub feed advertises a strictly-newer release than the
+    /// running app. A running `.app` cannot safely replace itself, so this only
+    /// drives a download-and-notify action, never an auto-install.
+    var appUpdateAvailable: Bool {
+        guard let latest = latestAppRelease else { return false }
+        return compareSemanticVersions(localAppVersion, latest.version) == .orderedAscending
+    }
+
+    /// The Gateway version+build the app bundle ships as its runtime seed, read
+    /// from Contents/Resources/runtime/runtime-manifest.json. nil in a
+    /// source-tree/dev build that bundles no seed.
+    var seedGatewayVersion: SeedGatewayVersion? {
+        guard let url = Bundle.main.resourceURL?.appendingPathComponent("runtime/runtime-manifest.json"),
+              let data = try? Data(contentsOf: url) else { return nil }
+        return parseSeedManifest(data)
+    }
+
+    /// True when the installed runtime's build differs from the seed the app
+    /// ships — i.e. `updateRuntimeFromAppSeed()` would install something new.
+    var gatewayUpdateAvailable: Bool {
+        guard let seed = seedGatewayVersion,
+              let installedBuild = runtimeInspection?.current?.gatewayBuildId else { return false }
+        return installedBuild != seed.gatewayBuildId
+    }
+
+    /// How many installed adapters have a newer registry version available.
+    var adapterUpdateCount: Int {
+        agentCatalog.filter(\.updateAvailable).count
+    }
+
+    /// Checks the public GitHub releases feed for a newer AgenLynk build.
+    /// Includes pre-releases (the repo may be pre-release-only, so
+    /// `/releases/latest` 404s) and never throws to the caller: offline,
+    /// rate-limit, and parse failures all resolve to `appUpdateError`.
+    func checkAppUpdate() async {
+        guard !appUpdateChecking else { return }
+        appUpdateChecking = true
+        appUpdateError = nil
+        defer { appUpdateChecking = false }
+        var request = URLRequest(url: URL(string: "https://api.github.com/repos/creverse-ai-lab/agenlynk/releases")!)
+        request.timeoutInterval = 10
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                appUpdateError = "확인 실패"
+                return
+            }
+            if let release = parseGitHubReleases(data) {
+                latestAppRelease = release
+            } else {
+                appUpdateError = "확인 실패"
+            }
+        } catch {
+            appUpdateError = "확인 실패"
         }
     }
 

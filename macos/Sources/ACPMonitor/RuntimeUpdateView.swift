@@ -10,6 +10,7 @@ import SwiftUI
 /// otherwise ship code that no existing install ever receives.
 struct RuntimeUpdateView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.openURL) private var openURL
 
     private var appVersion: String {
         let info = Bundle.main.infoDictionary
@@ -18,15 +19,24 @@ struct RuntimeUpdateView: View {
         return "\(short) (build \(build))"
     }
 
+    /// Re-checks all three update sources (app release feed, installed runtime,
+    /// adapter catalog) that the top "업데이트" section compares.
+    private func refreshAll() async {
+        async let app: Void = model.checkAppUpdate()
+        async let runtime: Void = model.loadRuntimeInspection()
+        async let catalog: Void = model.loadAgentCatalog()
+        _ = await (app, runtime, catalog)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 ACPLogoLockup(subtitle: "버전과 Gateway runtime 업데이트")
                 Spacer()
                 Button("새로고침", systemImage: "arrow.clockwise") {
-                    Task { await model.loadRuntimeInspection() }
+                    Task { await refreshAll() }
                 }
-                .disabled(model.runtimeLoading || model.runtimeBusy)
+                .disabled(model.runtimeLoading || model.runtimeBusy || model.appUpdateChecking)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
@@ -40,6 +50,7 @@ struct RuntimeUpdateView: View {
                             .foregroundStyle(.orange)
                             .textSelection(.enabled)
                     }
+                    updateSection
                     versionSection
                     installedSection
                     if let notice = model.runtimeNotice {
@@ -60,7 +71,86 @@ struct RuntimeUpdateView: View {
             Divider()
             actionBar
         }
-        .task { await model.loadRuntimeInspection() }
+        .task { await refreshAll() }
+    }
+
+    /// The unified "업데이트" surface: app, Gateway runtime, and ACP adapters,
+    /// each comparing 현재 vs 최신 with an action only when they differ.
+    private var updateSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 12) {
+                appUpdateRow
+                Divider()
+                gatewayUpdateRow
+                Divider()
+                adapterUpdateRow
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } label: {
+            Label("업데이트", systemImage: "arrow.down.circle").font(.headline)
+        }
+    }
+
+    private var appUpdateRow: some View {
+        UpdateRow(
+            title: "AgenLynk 앱",
+            current: model.localAppVersion,
+            latest: model.latestAppRelease?.version,
+            checking: model.appUpdateChecking,
+            failure: model.appUpdateError
+        ) {
+            if model.appUpdateAvailable, let release = model.latestAppRelease {
+                VStack(alignment: .trailing, spacing: 3) {
+                    Button("다운로드") { openURL(release.downloadURL) }
+                        .buttonStyle(.borderedProminent)
+                    Text("새 DMG를 받아 Applications의 앱을 교체하세요")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            } else if model.appUpdateError == nil && !model.appUpdateChecking {
+                Text("최신").font(.caption).foregroundStyle(.green)
+            }
+        }
+    }
+
+    private var gatewayUpdateRow: some View {
+        UpdateRow(
+            title: "Gateway 런타임",
+            current: model.runtimeInspection?.current.map { "\($0.gatewayVersion ?? "—") · \($0.gatewayBuildId ?? "—")" } ?? "—",
+            latest: model.seedGatewayVersion.map { "\($0.gatewayVersion) · \($0.gatewayBuildId)" },
+            checking: model.runtimeLoading && model.runtimeInspection == nil,
+            failure: model.seedGatewayVersion == nil ? "이 빌드에는 seed runtime이 없습니다" : nil
+        ) {
+            if model.gatewayUpdateAvailable {
+                Button("이 앱의 runtime 설치 및 적용") { Task { await model.updateRuntimeFromAppSeed() } }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.runtimeBusy)
+            } else if model.seedGatewayVersion != nil {
+                Text("최신").font(.caption).foregroundStyle(.green)
+            }
+        }
+    }
+
+    private var adapterUpdateRow: some View {
+        UpdateRow(
+            title: "ACP 어댑터",
+            current: model.agentCatalog.isEmpty ? "—" : "설치된 어댑터 \(model.agentCatalog.filter(\.installed).count)개",
+            latest: nil,
+            checking: model.agentCatalogLoading && model.agentCatalog.isEmpty,
+            failure: nil
+        ) {
+            if model.adapterUpdateCount > 0 {
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text("\(model.adapterUpdateCount)개 업데이트 가능")
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.orange)
+                    Text("ACP 연결 탭에서 업데이트")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            } else if !model.agentCatalog.isEmpty {
+                Text("최신").font(.caption).foregroundStyle(.green)
+            }
+        }
     }
 
     private var versionSection: some View {
@@ -118,6 +208,43 @@ struct RuntimeUpdateView: View {
                 .help("앱에 포함된 Gateway runtime을 설치하고 current로 전환합니다. 진행 중인 작업이 있으면 보류됩니다.")
         }
         .padding(14)
+    }
+}
+
+/// One row of the "업데이트" surface: a component name, its 현재/최신 versions,
+/// and a trailing action supplied by the caller (download, apply, or a "최신"
+/// badge). A check in progress shows a spinner; a non-fatal failure is shown
+/// as caption text rather than blocking the row.
+private struct UpdateRow<Trailing: View>: View {
+    let title: String
+    let current: String
+    let latest: String?
+    let checking: Bool
+    let failure: String?
+    @ViewBuilder let trailing: () -> Trailing
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.callout.weight(.semibold))
+                HStack(spacing: 6) {
+                    Text("현재 \(current)").font(.caption).foregroundStyle(.secondary)
+                    if let latest {
+                        Text("→ 최신 \(latest)").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .textSelection(.enabled)
+                if let failure {
+                    Text(failure).font(.caption2).foregroundStyle(.orange)
+                }
+            }
+            Spacer(minLength: 12)
+            if checking {
+                ProgressView().controlSize(.small)
+            } else {
+                trailing()
+            }
+        }
     }
 }
 
