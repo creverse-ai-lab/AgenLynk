@@ -5,7 +5,7 @@
 <h1 align="center">AgenLynk</h1>
 
 <p align="center">
-  <b>beta 0.3.4</b>
+  <b>beta 0.3.5</b>
 </p>
 
 <p align="center">
@@ -14,7 +14,7 @@
 
 <p align="center">
   <img alt="platform" src="https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white">
-  <img alt="app" src="https://img.shields.io/badge/AgenLynk-0.3.4--beta-1461FA">
+  <img alt="app" src="https://img.shields.io/badge/AgenLynk-0.3.5--beta-1461FA">
   <img alt="runtime" src="https://img.shields.io/badge/runtime-ACP%20Gateway%201.3.2-6E7681">
   <img alt="node" src="https://img.shields.io/badge/Node-22%2B-339933?logo=nodedotjs&logoColor=white">
 </p>
