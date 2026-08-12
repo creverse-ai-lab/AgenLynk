@@ -316,20 +316,20 @@ private struct SequenceSelectionContext: View {
         HStack(alignment: .top, spacing: 14) {
             if let frontdoor {
                 VStack(alignment: .leading, spacing: 5) {
-                    Label("선택 Frontdoor", systemImage: "rectangle.stack")
-                        .font(.caption.weight(.semibold))
-                    Text(frontdoor.id)
-                        .font(.system(.caption2, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .lineLimit(1)
+                    // Lead with the Frontdoor's name, not the label "선택
+                    // Frontdoor". The opaque instance id it used to emphasise
+                    // told a reader nothing, so it is gone.
+                    HStack(spacing: 6) {
+                        Image(systemName: "rectangle.stack").font(.caption).foregroundStyle(.secondary)
+                        Text(frontdoor.displayName).font(.callout.weight(.semibold)).lineLimit(1)
+                    }
                     HStack(spacing: 6) {
                         ContextPill(text: frontdoor.provider.capitalized, color: .blue)
                         ContextPill(text: frontdoor.isActive ? "진행 중" : "대기", color: frontdoor.isActive ? .green : .secondary)
                         ContextPill(text: "Worker \(frontdoor.workers.count)", color: .secondary)
-                        ContextPill(text: "Workspace \(frontdoor.workspaceCount)", color: .secondary)
+                        ContextPill(text: "작업공간 \(frontdoor.workspaceCount)", color: .secondary)
                     }
-                    if let task = frontdoor.latestTask {
+                    if let task = frontdoor.latestTask, task != frontdoor.displayName {
                         Text(task).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                     }
                 }
@@ -368,7 +368,8 @@ private struct SequenceSelectionContext: View {
                         }
                     }
                     HStack(spacing: 6) {
-                        ContextPill(text: session.sourceLabel, color: session.isLocalSource ? .purple : .blue)
+                        // The LOCAL/ACP source is not something a reader acts
+                        // on; role and model are.
                         ContextPill(text: session.isFrontdoorRecord ? "Frontdoor" : "Worker", color: .secondary)
                         Text("\(session.provider.capitalized) · \(session.model ?? "default")")
                             .font(.caption2.weight(.medium))
@@ -434,31 +435,19 @@ struct FrontdoorRow: View {
             Circle().fill(frontdoor.isActive ? .blue : .secondary).frame(width: 8, height: 8).padding(.top, 5)
             VStack(alignment: .leading, spacing: 3) {
                 Text(frontdoor.displayName).font(.callout.weight(.medium)).lineLimit(1)
-                Text(frontdoor.id)
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                // No opaque instance id, no LOCAL/ACP source — neither is
+                // something a reader acts on. The name identifies the row; the
+                // counts and current task are what tell it apart.
                 Text("Worker \(frontdoor.workers.count) · 진행 중 \(frontdoor.activeWorkerCount) · 작업공간 \(frontdoor.workspaceCount)")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
-                Text(sourceSummary)
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                // The title is now the row's name; only show the task line
-                // when it says something the name doesn't.
                 if let task = frontdoor.latestTask, task != frontdoor.displayName {
                     Text(task).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
         }
         .padding(.vertical, 3)
-    }
-
-    private var sourceSummary: String {
-        let sources = Set(frontdoor.members.map(\.sourceLabel))
-        return sources.sorted().joined(separator: " + ")
     }
 }
 

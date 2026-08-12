@@ -401,9 +401,6 @@ private struct SequenceLaneHeader: View {
             }
             Text(lane.session.provider.capitalized)
                 .font(.caption2.weight(.medium))
-            Text(lane.session.sourceLabel)
-                .font(.system(size: 8, weight: .bold))
-                .foregroundStyle(lane.session.isLocalSource ? .purple : .blue)
             Text(lane.session.model ?? "default")
                 .font(.system(.caption2, design: .monospaced))
                 .foregroundStyle(.secondary)
