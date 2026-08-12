@@ -341,30 +341,22 @@ private struct SequenceSelectionContext: View {
             }
 
             if let session {
+                // Identity + what it is doing. The log text does NOT stack
+                // under the headline here; it moves to its own column on the
+                // right so this block stays the same height as the Frontdoor
+                // block beside it.
                 VStack(alignment: .leading, spacing: 5) {
                     Label("선택 에이전트", systemImage: "rectangle.and.hand.point.up.left")
                         .font(.caption.weight(.semibold))
-                    // What it is doing now, front and centre — the status word
-                    // is demoted to a small pill next to the identity.
                     if let activity {
-                        HStack(alignment: .top, spacing: 6) {
+                        HStack(spacing: 6) {
                             Image(systemName: activity.symbol)
                                 .foregroundStyle(activity.color)
                                 .font(.callout)
-                                .frame(width: 16)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(activity.headline)
-                                    .font(.callout.weight(.semibold))
-                                    .foregroundStyle(activity.color)
-                                if let detail = activity.detail, !detail.isEmpty {
-                                    Text(detail)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(2)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                        .textSelection(.enabled)
-                                }
-                            }
+                            Text(activity.headline)
+                                .font(.callout.weight(.semibold))
+                                .foregroundStyle(activity.color)
+                                .lineLimit(1)
                         }
                     }
                     HStack(spacing: 6) {
@@ -379,6 +371,26 @@ private struct SequenceSelectionContext: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+
+                // The activity log fills the right-hand empty space rather than
+                // pushing the agent block taller. Multi-line here is fine — it
+                // is the widest column, and the whole strip is sized to it.
+                if let detail = activity?.detail, !detail.isEmpty {
+                    Divider().frame(height: 68)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label("현재 활동 로그", systemImage: "text.alignleft")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(detail)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
 
             if frontdoor == nil, session == nil {
