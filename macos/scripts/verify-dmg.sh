@@ -3,11 +3,11 @@ set -eu
 
 # Read-only verification of a packaged Lynk DMG. Never mutates the DMG or
 # its mounted contents. Usage:
-#   macos/scripts/verify-dmg.sh [path/to/Lynk.dmg]
-# Defaults to build/Lynk.dmg. See macos/README.md for the full release flow.
+#   macos/scripts/verify-dmg.sh [path/to/AgenLynk.dmg]
+# Defaults to build/AgenLynk.dmg. See macos/README.md for the full release flow.
 
 REPO_ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
-DMG=${1:-"$REPO_ROOT/build/Lynk.dmg"}
+DMG=${1:-"$REPO_ROOT/build/AgenLynk.dmg"}
 
 if [ ! -f "$DMG" ]; then
   echo "error: $DMG not found" >&2
@@ -37,7 +37,7 @@ trap cleanup EXIT INT TERM
 
 hdiutil attach "$DMG" -mountpoint "$MOUNT_POINT" -readonly -nobrowse -noautofsck -noautoopen -quiet
 
-APP="$MOUNT_POINT/Lynk.app"
+APP="$MOUNT_POINT/AgenLynk.app"
 if [ ! -d "$APP" ]; then
   echo "error: $APP not found inside the DMG" >&2
   exit 1
@@ -52,7 +52,7 @@ if [ "$APPLICATIONS_TARGET" != "/Applications" ]; then
   echo "error: DMG's Applications symlink points to '$APPLICATIONS_TARGET', expected /Applications" >&2
   exit 1
 fi
-printf '%s\n' "Lynk.app and an /Applications symlink are both present"
+printf '%s\n' "AgenLynk.app and an /Applications symlink are both present"
 
 PET_APP="$APP/Contents/Helpers/LynkPet.app"
 PET_EXECUTABLE="$PET_APP/Contents/MacOS/LynkPet"
@@ -133,7 +133,7 @@ if [ -f "$SHA_FILE" ]; then
   printf '%s\n' "$(basename "$SHA_FILE") matches the DMG"
 fi
 
-RELEASE_JSON="$(dirname "$DMG")/Lynk.release.json"
+RELEASE_JSON="$(dirname "$DMG")/AgenLynk.release.json"
 if [ -f "$RELEASE_JSON" ]; then
   "$SYSTEM_NODE" -e '
     const fs = require("fs");
@@ -148,7 +148,7 @@ if [ -f "$RELEASE_JSON" ]; then
       console.error(`release manifest byte size mismatch: recorded ${release.dmg && release.dmg.bytes}, actual ${actualBytes}`);
       process.exit(1);
     }
-    console.log("Lynk.release.json dmg sha256/bytes agree with the DMG");
+    console.log("AgenLynk.release.json dmg sha256/bytes agree with the DMG");
   ' "$RELEASE_JSON" "$ACTUAL_SHA256" "$ACTUAL_BYTES"
 fi
 

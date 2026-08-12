@@ -6,7 +6,7 @@ import SwiftUI
 /// `runtime-updater-cli.js` and show that library's own error codes, so the CLI
 /// and the app can never disagree about what happened. Without this screen an
 /// already-installed runtime is never replaced — `ensureRuntimeInstalled`
-/// deliberately refuses to overwrite a valid one — so a Lynk update would
+/// deliberately refuses to overwrite a valid one — so an AgenLynk update would
 /// otherwise ship code that no existing install ever receives.
 struct RuntimeUpdateView: View {
     @EnvironmentObject private var model: AppModel
@@ -66,7 +66,7 @@ struct RuntimeUpdateView: View {
     private var versionSection: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 8) {
-                LabeledContent("Lynk", value: appVersion)
+                LabeledContent("AgenLynk", value: appVersion)
                 LabeledContent("Gateway", value: "\(model.gatewayVersion) · build \(model.gatewayBuild)")
                 LabeledContent("Monitor API", value: model.monitorApiVersionText)
                 LabeledContent("Node", value: model.runtimeInspection?.current?.nodeVersion ?? "—")

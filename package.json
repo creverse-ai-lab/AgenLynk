@@ -29,7 +29,7 @@
     "macos:verify": "sh macos/scripts/verify-dmg.sh",
     "macos:test": "sh macos/scripts/test-models.sh",
     "macos:clean": "sh macos/scripts/clean-derived.sh",
-    "macos:run": "open \"build/Lynk.app\"",
+    "macos:run": "open \"build/AgenLynk.app\"",
     "test": "node scripts/run-tests.js",
     "test:quick": "node scripts/run-tests.js --quick",
     "smoke": "node test/live-smoke.js",

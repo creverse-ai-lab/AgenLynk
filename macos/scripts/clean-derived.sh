@@ -4,7 +4,7 @@ set -eu
 REPO_ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 BUILD_DIR="$REPO_ROOT/build"
 
-# Preserve release outputs (Lynk.app, Lynk.dmg, checksum, release manifest)
+# Preserve release outputs (AgenLynk.app, AgenLynk.dmg, checksum, release manifest)
 # and the extracted Node distribution. Remove only reproducible intermediates.
 rm -rf \
   "$BUILD_DIR/cache" \

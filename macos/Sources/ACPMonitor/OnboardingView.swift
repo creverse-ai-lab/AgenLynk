@@ -11,7 +11,7 @@ struct OnboardingView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             ACPLogoMark().frame(width: 40, height: 40)
-            Text("Lynk 처음 설치").font(.title2.weight(.semibold))
+            Text("AgenLynk 처음 설치").font(.title2.weight(.semibold))
             Text("이 Mac에 ACP Gateway를 설치합니다. 대화할 Frontdoor를 선택한 뒤 설치를 시작하세요.")
                 .foregroundStyle(.secondary)
 
@@ -25,7 +25,7 @@ struct OnboardingView: View {
             .frame(maxWidth: 320)
 
             if !model.onboardingInstallLocationReady {
-                Label("Lynk를 Applications 폴더로 옮긴 뒤 다시 실행해야 설치 경로가 유지됩니다.", systemImage: "externaldrive.badge.exclamationmark")
+                Label("AgenLynk를 Applications 폴더로 옮긴 뒤 다시 실행해야 설치 경로가 유지됩니다.", systemImage: "externaldrive.badge.exclamationmark")
                     .foregroundStyle(.orange)
             }
 

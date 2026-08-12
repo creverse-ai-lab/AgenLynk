@@ -171,18 +171,21 @@ struct MenuBarStatusView: View {
                 openWindow(id: "dashboard")
                 NSApp.activate(ignoringOtherApps: true)
             }
-            // SettingsLink is the only supported way to open the Settings scene
-            // from a menu-bar popover on macOS 14; a plain Button has no window
-            // id to target. Activate too, or the window opens behind the app.
+            .buttonStyle(.borderless)
+            Spacer()
+            // Bottom-right, icon only. SettingsLink is the only supported way
+            // to open the Settings scene from a menu-bar popover on macOS 14;
+            // a plain Button has no window id to target. Activate too, or the
+            // window opens behind the app.
             SettingsLink {
-                Label("설정", systemImage: "gearshape")
+                Image(systemName: "gearshape")
             }
+            .buttonStyle(.bordered)
+            .help("설정")
             .simultaneousGesture(TapGesture().onEnded {
                 NSApp.activate(ignoringOtherApps: true)
             })
-            Spacer()
         }
-        .buttonStyle(.borderless)
     }
 
     private var sortedAgents: [PetAgentActivity] { model.activityProjection.orderedByProgress }

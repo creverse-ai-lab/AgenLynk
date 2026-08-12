@@ -1,10 +1,10 @@
 #!/bin/sh
 set -eu
 
-# Reproducible local DMG build: runs build-app.sh, packages Lynk.app and an
-# Applications symlink into build/Lynk.dmg with hdiutil, then (after any
+# Reproducible local DMG build: runs build-app.sh, packages AgenLynk.app and an
+# Applications symlink into build/AgenLynk.dmg with hdiutil, then (after any
 # signing/notarization/stapling) verifies the final DMG and generates its
-# release artifacts: build/Lynk.dmg.sha256 and build/Lynk.release.json.
+# release artifacts: build/AgenLynk.dmg.sha256 and build/AgenLynk.release.json.
 #
 # Signing/notarization are parameterized, never hardcoded, and require no
 # credentials for a local build:
@@ -18,9 +18,9 @@ set -eu
 # See macos/README.md for the full release signing/notarization flow.
 
 REPO_ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
-APP="$REPO_ROOT/build/Lynk.app"
-DMG="$REPO_ROOT/build/Lynk.dmg"
-RELEASE_JSON="$REPO_ROOT/build/Lynk.release.json"
+APP="$REPO_ROOT/build/AgenLynk.app"
+DMG="$REPO_ROOT/build/AgenLynk.dmg"
+RELEASE_JSON="$REPO_ROOT/build/AgenLynk.release.json"
 STAGING="$REPO_ROOT/build/dmg-staging"
 
 cleanup() {
@@ -42,14 +42,14 @@ fi
 
 rm -rf "$STAGING" "$DMG" "$DMG.sha256" "$RELEASE_JSON"
 mkdir -p "$STAGING"
-cp -R "$APP" "$STAGING/Lynk.app"
+cp -R "$APP" "$STAGING/AgenLynk.app"
 ln -s /Applications "$STAGING/Applications"
 
 # ULMO (LZMA) rather than the conventional UDZO (zlib): the payload is
 # dominated by a 245MB agent binary and a 107MB Node binary, and LZMA takes the
 # image from ~158MB to ~109MB. It costs about a minute of build time and needs
 # macOS 10.15+ to mount, which is far below the app's own 14.0 minimum.
-hdiutil create -volname Lynk -srcfolder "$STAGING" -ov -format ULMO "$DMG"
+hdiutil create -volname AgenLynk -srcfolder "$STAGING" -ov -format ULMO "$DMG"
 cleanup
 
 if [ "${ACP_LYNK_NOTARIZE:-0}" = "1" ]; then
@@ -63,7 +63,7 @@ else
   STAPLED=false
 fi
 
-# build/Lynk.dmg.sha256 in the conventional `shasum -c`-compatible format.
+# build/AgenLynk.dmg.sha256 in the conventional `shasum -c`-compatible format.
 ( cd "$(dirname "$DMG")" && shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256" )
 DMG_SHA256=$(awk '{print $1}' "$DMG.sha256")
 DMG_BYTES=$(stat -f%z "$DMG")
@@ -94,7 +94,7 @@ BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Content
 MIN_MACOS=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$APP/Contents/Info.plist")
 
 BUILD_NODE=$(command -v node || true)
-: "${BUILD_NODE:?a system Node is required at build time to generate Lynk.release.json}"
+: "${BUILD_NODE:?a system Node is required at build time to generate AgenLynk.release.json}"
 SIGNING_IDENTITY_ARGS=""
 if [ -n "$SIGNING_IDENTITY" ]; then
   SIGNING_IDENTITY_ARGS="--signing-identity=$SIGNING_IDENTITY"
@@ -102,7 +102,7 @@ fi
 # shellcheck disable=SC2086
 "$BUILD_NODE" "$REPO_ROOT/src/build-release-manifest-cli.js" \
   --runtime-root "$APP/Contents/Resources/runtime" \
-  --app-name "Lynk.app" \
+  --app-name "AgenLynk.app" \
   --app-version "$APP_VERSION" \
   --app-build "$APP_BUILD" \
   --bundle-id "$BUNDLE_ID" \

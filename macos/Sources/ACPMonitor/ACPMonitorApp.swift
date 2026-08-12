@@ -17,7 +17,7 @@ struct ACPMonitorApp: App {
         // every openWindow(id:), which is why "대시보드 열기" from the menu bar
         // stacked duplicates instead of focusing the one already open. `Window`
         // makes openWindow(id:) bring the existing window forward.
-        Window("Lynk", id: "dashboard") {
+        Window("AgenLynk", id: "dashboard") {
             DashboardView()
                 .environmentObject(model)
                 .environmentObject(model.settings)
@@ -44,7 +44,7 @@ struct ACPMonitorApp: App {
                 .environmentObject(model.settings)
         } label: {
             Image(nsImage: ACPMenuBarIcon.image)
-                .accessibilityLabel("Lynk")
+                .accessibilityLabel("AgenLynk")
         }
         .menuBarExtraStyle(.window)
     }

@@ -4,7 +4,7 @@ set -eu
 REPO_ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 CACHE_ROOT="$REPO_ROOT/build/cache"
 SCRATCH="$CACHE_ROOT/swift-build"
-APP="$REPO_ROOT/build/Lynk.app"
+APP="$REPO_ROOT/build/AgenLynk.app"
 LEGACY_APP="$REPO_ROOT/build/ACP Monitor.app"
 CONTENTS="$APP/Contents"
 PET_APP="$CONTENTS/Helpers/LynkPet.app"
