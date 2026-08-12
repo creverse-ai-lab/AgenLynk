@@ -132,12 +132,8 @@ npm run macos:verify  # 완성 DMG 검증
 
 ## Credits
 
-| 역할 | 이름 | with |
-|---|---|---|
-| **Dev** | 윤치영 | feat. Fable / Opus |
-| **App Icon** | 이희주 | feat. 디자이너리 |
-| **App Name** | 김은경 | feat. Luna |
-
-## 라이선스
-
-사내 프로젝트 — creverse-ai-lab.
+| 역할 | 이름 |
+|---|---|
+| **Dev** | 윤치영 (feat. Fable / Opus) |
+| **App Icon** | 이희주 (feat. 디자이너리) |
+| **App Name** | 김은경 (feat. Luna) |
