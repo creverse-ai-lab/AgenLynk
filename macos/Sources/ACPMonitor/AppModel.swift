@@ -438,6 +438,37 @@ final class AppModel: ObservableObject {
         ])
     }
 
+    /// Installs one agent's Control MCP after onboarding, so a Frontdoor the
+    /// user skipped at first-run starts being monitored. Additive: existing
+    /// Frontdoors are left in place. Reports through the same onboarding output
+    /// surface, which is idle once the app is `.ready`.
+    func installFrontdoorControl(_ target: String) {
+        guard !onboardingRunning, onboardingInstallLocationReady else { return }
+        onboardingRunning = true
+        onboardingError = nil
+        lastNotice = nil
+        onboardingOutput.removeAll()
+        let nodeOverride = settings.nodePath
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await self.installer.installControl(target: target, nodeOverride: nodeOverride) { line in
+                    Task { @MainActor [weak self] in self?.appendOnboardingOutput(line) }
+                }
+                self.onboardingRunning = false
+                if result.ok {
+                    self.lastNotice = "\(target.capitalized) Frontdoor를 설치했습니다. 새로 시작하는 세션부터 모니터링됩니다."
+                    self.reconnect()
+                } else {
+                    self.onboardingError = result.message
+                }
+            } catch {
+                self.onboardingRunning = false
+                self.onboardingError = error.localizedDescription
+            }
+        }
+    }
+
     func setAgentEnabled(_ agent: ACPAgentCatalogItem, enabled: Bool) async {
         await mutateAgent(agent, body: [
             "action": .string("set_enabled"),

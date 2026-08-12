@@ -32,8 +32,37 @@ final class InstallerController {
 
     private var process: Process?
 
+    /// First-run install: sets `frontDoor` as the sole Frontdoor and installs
+    /// every worker adapter.
     func run(
         frontDoor: String,
+        nodeOverride: String = "",
+        onOutputLine: @escaping (String) -> Void
+    ) async throws -> BootstrapResult {
+        try await run(
+            arguments: ["--install-all", "--front-door", frontDoor, "--refresh-registry"],
+            nodeOverride: nodeOverride,
+            onOutputLine: onOutputLine
+        )
+    }
+
+    /// Adds one agent's Control MCP without disturbing Frontdoors already
+    /// installed — `--install-control --target` is additive, unlike
+    /// `--install-all --front-door` which makes its target exclusive.
+    func installControl(
+        target: String,
+        nodeOverride: String = "",
+        onOutputLine: @escaping (String) -> Void
+    ) async throws -> BootstrapResult {
+        try await run(
+            arguments: ["--install-control", "--target", target, "--refresh-registry"],
+            nodeOverride: nodeOverride,
+            onOutputLine: onOutputLine
+        )
+    }
+
+    func run(
+        arguments: [String],
         nodeOverride: String = "",
         onOutputLine: @escaping (String) -> Void
     ) async throws -> BootstrapResult {
@@ -45,7 +74,7 @@ final class InstallerController {
         let stdout = Pipe()
         let stderr = Pipe()
         process.executableURL = nodeURL
-        process.arguments = [scriptURL.path, "--install-all", "--front-door", frontDoor, "--refresh-registry"]
+        process.arguments = [scriptURL.path] + arguments
         process.standardOutput = stdout
         process.standardError = stderr
         let nodeDirectory = nodeURL.deletingLastPathComponent()

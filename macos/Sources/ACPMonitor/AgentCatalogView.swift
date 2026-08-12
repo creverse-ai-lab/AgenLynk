@@ -3,6 +3,7 @@ import SwiftUI
 struct AgentCatalogView: View {
     @EnvironmentObject private var model: AppModel
     @State private var searchText = ""
+    @State private var frontdoorTarget = "codex"
 
     private var filteredAgents: [ACPAgentCatalogItem] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -28,6 +29,9 @@ struct AgentCatalogView: View {
                 .disabled(model.agentCatalogLoading || model.agentCatalogMutationId != nil)
             }
             .padding(14)
+            Divider()
+
+            frontdoorInstall
             Divider()
 
             if model.agentCatalogLoading && model.agentCatalog.isEmpty {
@@ -66,6 +70,50 @@ struct AgentCatalogView: View {
         .task {
             if model.agentCatalog.isEmpty { await model.loadAgentCatalog() }
         }
+    }
+
+    /// Install a Frontdoor's Control MCP after onboarding — the first-run
+    /// screen used to be the only place this could happen, so an agent skipped
+    /// there could never be monitored as a Frontdoor. Additive: it does not
+    /// remove Frontdoors already installed.
+    private var frontdoorInstall: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Frontdoor 설치", systemImage: "door.left.hand.open")
+                .font(.callout.weight(.semibold))
+            Text("선택한 에이전트에 Control MCP를 설치해 Frontdoor로 모니터링되게 합니다. 이미 설치된 Frontdoor는 그대로 유지됩니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                Picker("에이전트", selection: $frontdoorTarget) {
+                    Text("Codex").tag("codex")
+                    Text("Claude").tag("claude")
+                    Text("Grok").tag("grok")
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(maxWidth: 260)
+                .disabled(model.onboardingRunning)
+                Button(model.onboardingRunning ? "설치 중…" : "설치") {
+                    model.installFrontdoorControl(frontdoorTarget)
+                }
+                .disabled(model.onboardingRunning || !model.onboardingInstallLocationReady)
+                if model.onboardingRunning { ProgressView().controlSize(.small) }
+                Spacer()
+            }
+            if !model.onboardingInstallLocationReady {
+                Label("AgenLynk를 Applications 폴더로 옮긴 뒤 다시 실행해야 설치할 수 있습니다.", systemImage: "externaldrive.badge.exclamationmark")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            if let error = model.onboardingError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+                    .lineLimit(3)
+            }
+        }
+        .padding(14)
     }
 }
 
