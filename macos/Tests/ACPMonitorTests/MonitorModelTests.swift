@@ -30,7 +30,7 @@ enum MonitorModelChecks {
         try petChildEnvironmentAllowsOnlyBenignKeysPlusContractFiles()
         try realtimeSessionsRequireAnActiveFrontdoorIdentity()
         try frontdoorSessionsAggregateWorkersAndExcludeLegacyRecords()
-        try frontdoorNamePrefersTitleThenFolderThenProvider()
+        try frontdoorNamePrefersFolderThenSaneTitle()
         try localFrontdoorIsNotDuplicatedAsAWorker()
         try graphProjectionGroupsFrontdoorsAndAssignsWorkerLanes()
         try graphProjectionBuildsPromptReturnTurnsAndUsesCanvasHeight()
@@ -475,10 +475,10 @@ enum MonitorModelChecks {
         try check(!frontdoors.contains(where: { $0.id == "legacy" }), "legacy sessions without a Frontdoor id must stay out of the UI")
     }
 
-    /// The sidebar and the sequence lane both name a Frontdoor by what tells
-    /// two of them apart: the title it designated, then its working folder,
-    /// only then the bare "Codex Frontdoor".
-    private static func frontdoorNamePrefersTitleThenFolderThenProvider() throws {
+    /// The Frontdoor name is its working folder first; a title is only used
+    /// without a folder, and never when it is the transient tool-call text a
+    /// local session parks in its title.
+    private static func frontdoorNamePrefersFolderThenSaneTitle() throws {
         func frontdoor(title: String?, cwd: String) throws -> FrontdoorSession {
             var root: [String: JSONValue] = [
                 "sessionId": .string("root"), "provider": .string("codex"),
@@ -493,13 +493,18 @@ enum MonitorModelChecks {
             }
             return made
         }
-        let titled = try frontdoor(title: "리팩터링 작업", cwd: "/Users/x/Documents/proj")
-        let foldered = try frontdoor(title: nil, cwd: "/Users/x/Documents/proj")
+        // Folder wins even when a title is present; a real title is used only
+        // without a folder; tool-call text is never a name.
+        let folderWithTitle = try frontdoor(title: "리팩터링 작업", cwd: "/Users/x/Documents/proj")
+        let titleNoFolder = try frontdoor(title: "리팩터링 작업", cwd: "/")
+        let junkTitle = try frontdoor(title: "custom_tool_call/exec", cwd: "/")
+        let folderOnly = try frontdoor(title: nil, cwd: "/Users/x/Documents/proj")
         let bare = try frontdoor(title: nil, cwd: "/")
-        try check(titled.displayName == "리팩터링 작업", "a designated title is the Frontdoor's name")
-        try check(foldered.displayName == "proj", "without a title the working folder names the Frontdoor")
+        try check(folderWithTitle.displayName == "proj", "the working folder names the Frontdoor even when a title exists")
+        try check(titleNoFolder.displayName == "리팩터링 작업", "without a folder a sane title names the Frontdoor")
+        try check(junkTitle.displayName == "Codex Frontdoor", "a tool-call title is rejected as a name")
+        try check(folderOnly.displayName == "proj", "the working folder names the Frontdoor")
         try check(bare.displayName == "Codex Frontdoor", "with neither, the provider label remains")
-        try check(foldered.workingFolder == "proj", "workingFolder is the cwd's last component")
     }
 
     private static func localFrontdoorIsNotDuplicatedAsAWorker() throws {

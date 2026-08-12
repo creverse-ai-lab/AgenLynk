@@ -420,14 +420,18 @@ private struct SequenceLaneHeader: View {
         return "Subagent L\(lane.depth)"
     }
 
-    /// The frontdoor lane names itself the way the sidebar does: the title the
-    /// Frontdoor designated, then its working folder, then the generic
-    /// "Frontdoor". Several frontdoors open at once are only tellable apart by
-    /// one of the first two.
+    /// The frontdoor lane names itself by its working folder — stable and
+    /// meaningful — falling back to a designated title only when there is no
+    /// folder, and never to the transient tool-call text a local session parks
+    /// in its title.
     private var frontdoorLabel: String {
-        if let title = lane.session.title, !title.isEmpty { return title }
         let folder = (lane.session.cwd as NSString).lastPathComponent
-        return folder.isEmpty || folder == "/" ? "Frontdoor" : folder
+        if !folder.isEmpty, folder != "/" { return folder }
+        if let title = lane.session.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+            let lower = title.lowercased()
+            if !lower.contains("tool_call"), !lower.contains("function_call"), !title.contains("/") { return title }
+        }
+        return "Frontdoor"
     }
 }
 

@@ -157,14 +157,23 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
     let root: GatewaySession?
     let workers: [GatewaySession]
 
-    /// Prefers a name the Frontdoor itself designated (the root session's
-    /// title — for a local CLI this is its task topic, for a Gateway Main the
-    /// title it opened with), then the working folder, and only then the bare
-    /// "Codex Frontdoor" that made two concurrent Frontdoors indistinguishable.
+    /// The working folder names the Frontdoor — it is stable and meaningful,
+    /// and it is what tells two concurrent Frontdoors apart. A designated title
+    /// is only used when there is no folder, and only if it is a real name:
+    /// a local CLI writes its *current tool call* into its title
+    /// ("custom_tool_call/exec"), which as a name is worse than useless.
     var displayName: String {
-        if let title = root?.title, !title.isEmpty { return title }
         if let folder = workingFolder { return folder }
+        if let name = designatedName { return name }
         return "\(provider.capitalized) Frontdoor"
+    }
+    /// The root's title, but only when it reads as a name rather than the
+    /// transient event/tool text local sessions park there.
+    private var designatedName: String? {
+        guard let title = root?.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else { return nil }
+        let lower = title.lowercased()
+        if lower.contains("tool_call") || lower.contains("function_call") || title.contains("/") { return nil }
+        return title
     }
     /// Last path component of the Frontdoor's working directory, or nil when no
     /// member reports one.
