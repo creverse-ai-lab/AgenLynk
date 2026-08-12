@@ -32,13 +32,30 @@ test("Control MCP stays inert when inherited by a delegated Worker", async () =>
   }
 });
 
+function waitForStderr(child, needle, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let buffer = "";
+    const onData = (chunk) => {
+      buffer += chunk.toString();
+      if (buffer.includes(needle)) { cleanup(); resolve(); }
+    };
+    const timer = setTimeout(() => { cleanup(); reject(new Error(`stderr never emitted ${needle}`)); }, timeoutMs);
+    const cleanup = () => { clearTimeout(timer); child.stderr.off("data", onData); };
+    child.stderr.on("data", onData);
+  });
+}
+
 test("Control MCP exits cleanly when its host terminates it", async () => {
   const child = spawn(process.execPath, [fileURLToPath(new URL("../src/index.js", import.meta.url))], {
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, ACP_GATEWAY_PROCESS_ROLE: "worker" }
   });
   try {
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // Wait for the server's readiness marker instead of a fixed delay: a cold
+    // Node in CI can still be parsing modules well past 200ms, and terminating
+    // before the shutdown handler is installed would kill it by signal (null
+    // exit code) rather than exit it cleanly.
+    await waitForStderr(child, "acp-control-mcp: ready", 5_000);
     const exited = once(child, "close");
     child.kill("SIGTERM");
     const [code, signal] = await Promise.race([

@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 
+// Imported first, before the heavy MCP SDK, so its SIGTERM/SIGINT handler is in
+// place before those slow imports load — a signal during startup then exits
+// cleanly instead of killing the process.
+import { onShutdown } from "./early-shutdown.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -98,16 +102,17 @@ if (!blockedWorker) {
   });
 }
 
-let shuttingDown = false;
-const shutdown = () => {
-  if (shuttingDown) return;
-  shuttingDown = true;
+// Replaces the early bare-exit handler with the full cleanup now that rpc and
+// server exist. A signal before this point still exits 0 (see early-shutdown).
+onShutdown(() => {
   rpc?.close();
   void server.close().finally(() => process.exit(0));
-};
-process.once("SIGTERM", shutdown);
-process.once("SIGINT", shutdown);
+});
 await server.connect(new StdioServerTransport());
+// Readiness marker on stderr (never stdout — that is the MCP protocol channel).
+// A supervisor can wait for this to know the server is up and its shutdown
+// handler is installed, rather than guessing with a fixed delay.
+process.stderr.write("acp-control-mcp: ready\n");
 
 function toolResult(data, isError = false) {
   return {
