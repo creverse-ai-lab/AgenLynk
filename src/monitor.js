@@ -37,6 +37,7 @@ import {
   officialAgentCatalog,
   setOfficialAgentEnabled
 } from "./agent-catalog.js";
+import { defaultInstallStatePath } from "./installer.js";
 
 const MONITOR_HOST = "127.0.0.1";
 const MONITOR_PORT = numberEnv("ACP_GATEWAY_MONITOR_PORT", 8642, 0);
@@ -364,6 +365,10 @@ async function main() {
       });
       return;
     }
+    if (url.pathname === "/api/frontdoors" && request.method === "GET") {
+      sendJson(response, await readInstalledFrontdoors());
+      return;
+    }
     if (url.pathname === "/api/snapshot") {
       response.writeHead(200, {
         "content-type": "application/json; charset=utf-8",
@@ -636,6 +641,23 @@ async function collectLocalSessions() {
 // Missing Gateway setup values (e.g. before the first successful "setup"
 // call) surface as null rather than being omitted, per the shared wire
 // contract; apiToken/control token are never part of this shape.
+// Which agents already have a Control MCP installed, read from install.json.
+// The Settings UI shows these as installed and the onboarding screen pre-checks
+// them, so a Frontdoor is never offered as "install" when it is already there.
+const FRONT_DOOR_AGENTS = new Set(["codex", "claude", "grok"]);
+async function readInstalledFrontdoors() {
+  try {
+    const raw = JSON.parse(await readFile(defaultInstallStatePath(), "utf8"));
+    const installed = [...new Set(Object.values(raw?.managedMcp ?? {})
+      .filter((item) => item?.kind === "control" && item.agent)
+      .map((item) => item.agent))].filter((agent) => FRONT_DOOR_AGENTS.has(agent));
+    return { primary: FRONT_DOOR_AGENTS.has(raw?.frontDoor) ? raw.frontDoor : null, installed };
+  } catch {
+    // No install.json yet (fresh machine) reads as "none installed", not an error.
+    return { primary: null, installed: [] };
+  }
+}
+
 function gatewayIdentity(state, identity) {
   return {
     rootId: identity.rootId ?? null,

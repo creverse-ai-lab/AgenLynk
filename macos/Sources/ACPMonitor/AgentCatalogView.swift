@@ -3,7 +3,13 @@ import SwiftUI
 struct AgentCatalogView: View {
     @EnvironmentObject private var model: AppModel
     @State private var searchText = ""
-    @State private var frontdoorTarget = "codex"
+
+    private struct FrontdoorAgent { let id: String; let label: String }
+    private static let frontdoorAgents = [
+        FrontdoorAgent(id: "codex", label: "Codex"),
+        FrontdoorAgent(id: "claude", label: "Claude"),
+        FrontdoorAgent(id: "grok", label: "Grok")
+    ]
 
     private var filteredAgents: [ACPAgentCatalogItem] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -83,22 +89,10 @@ struct AgentCatalogView: View {
             Text("선택한 에이전트에 Control MCP를 설치해 Frontdoor로 모니터링되게 합니다. 이미 설치된 Frontdoor는 그대로 유지됩니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            HStack(spacing: 10) {
-                Picker("에이전트", selection: $frontdoorTarget) {
-                    Text("Codex").tag("codex")
-                    Text("Claude").tag("claude")
-                    Text("Grok").tag("grok")
+            VStack(spacing: 4) {
+                ForEach(Self.frontdoorAgents, id: \.id) { agent in
+                    frontdoorRow(agent)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(maxWidth: 260)
-                .disabled(model.onboardingRunning)
-                Button(model.onboardingRunning ? "설치 중…" : "설치") {
-                    model.installFrontdoorControl(frontdoorTarget)
-                }
-                .disabled(model.onboardingRunning || !model.onboardingInstallLocationReady)
-                if model.onboardingRunning { ProgressView().controlSize(.small) }
-                Spacer()
             }
             if !model.onboardingInstallLocationReady {
                 Label("AgenLynk를 Applications 폴더로 옮긴 뒤 다시 실행해야 설치할 수 있습니다.", systemImage: "externaldrive.badge.exclamationmark")
@@ -114,6 +108,36 @@ struct AgentCatalogView: View {
             }
         }
         .padding(14)
+        .task { await model.loadInstalledFrontdoors() }
+    }
+
+    @ViewBuilder
+    private func frontdoorRow(_ agent: FrontdoorAgent) -> some View {
+        let installed = model.installedFrontdoors.contains(agent.id)
+        HStack(spacing: 8) {
+            Text(agent.label).font(.callout)
+            if model.primaryFrontdoor == agent.id {
+                Text("기본")
+                    .font(.caption2.weight(.medium))
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(.tint.opacity(0.15), in: Capsule())
+                    .foregroundStyle(.tint)
+            }
+            Spacer()
+            if installed {
+                Label("설치됨", systemImage: "checkmark.seal.fill")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.green)
+                    .labelStyle(.titleAndIcon)
+            } else {
+                Button(model.onboardingRunning ? "설치 중…" : "설치") {
+                    model.installFrontdoorControl(agent.id)
+                }
+                .disabled(model.onboardingRunning || !model.onboardingInstallLocationReady)
+                if model.onboardingRunning { ProgressView().controlSize(.small) }
+            }
+        }
+        .padding(.vertical, 2)
     }
 }
 

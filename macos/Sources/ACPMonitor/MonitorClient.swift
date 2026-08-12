@@ -24,6 +24,12 @@ actor MonitorClient {
         return try MonitorMeta.decode(data)
     }
 
+    func fetchInstalledFrontdoors(endpoint: MonitorEndpoint) async throws -> InstalledFrontdoors {
+        let (data, response) = try await URLSession.shared.data(for: endpoint.request(path: "api/frontdoors"))
+        try validate(response: response, data: data)
+        return try InstalledFrontdoors.decode(data)
+    }
+
     func fetchSnapshot(endpoint: MonitorEndpoint) async throws -> MonitorSnapshot {
         let (data, response) = try await URLSession.shared.data(for: endpoint.request(path: "api/snapshot"))
         try validate(response: response, data: data)

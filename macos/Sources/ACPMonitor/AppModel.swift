@@ -21,9 +21,18 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var startupPhase: StartupPhase = .checking
     @Published var onboardingFrontDoor: String = "codex"
+    /// Onboarding installs any subset of the built-in Frontdoors at once; at
+    /// least one must stay ticked. `onboardingFrontDoor` above is kept as the
+    /// legacy single value other code may still read.
+    @Published var onboardingFrontdoors: Set<String> = ["codex"]
     @Published private(set) var onboardingRunning = false
     @Published private(set) var onboardingOutput: [String] = []
     @Published private(set) var onboardingError: String?
+    /// Agents that already carry a Control MCP, per `/api/frontdoors`, with the
+    /// exclusive primary (nil when none). Drives the Settings install-state
+    /// badges; empty until `loadInstalledFrontdoors()` first succeeds.
+    @Published private(set) var installedFrontdoors: [String] = []
+    @Published private(set) var primaryFrontdoor: String?
     @Published private(set) var phase: ConnectionPhase = .idle
     @Published private(set) var gateway: JSONValue?
     @Published private(set) var sessions: [GatewaySession] = []
@@ -328,30 +337,52 @@ final class AppModel: ObservableObject {
     /// only starts after the installer reports a health-verified success.
     func startOnboardingInstall() {
         guard !onboardingRunning, onboardingInstallLocationReady else { return }
+        // The primary is installed with `--install-all` (adapters + registry +
+        // that exclusive Frontdoor); every additional pick is added on top with
+        // the additive `--install-control`. A stable order keeps the primary
+        // deterministic and the output readable.
+        let targets = Self.frontdoorInstallOrder.filter { onboardingFrontdoors.contains($0) }
+        guard let primary = targets.first else { return }
+        let extras = Array(targets.dropFirst())
         onboardingRunning = true
         onboardingError = nil
         onboardingOutput.removeAll()
-        let frontDoor = onboardingFrontDoor
         let nodeOverride = settings.nodePath
         Task { [weak self] in
             guard let self else { return }
+            let append: (String) -> Void = { line in
+                Task { @MainActor [weak self] in self?.appendOnboardingOutput(line) }
+            }
             do {
-                let result = try await self.installer.run(frontDoor: frontDoor, nodeOverride: nodeOverride) { line in
-                    Task { @MainActor [weak self] in self?.appendOnboardingOutput(line) }
+                // Steps run strictly sequentially — the installer reuses a
+                // single-shot process, so overlapping runs would collide.
+                let primaryResult = try await self.installer.run(frontDoor: primary, nodeOverride: nodeOverride, onOutputLine: append)
+                guard primaryResult.ok else {
+                    self.onboardingRunning = false
+                    self.onboardingError = primaryResult.message
+                    return
+                }
+                for target in extras {
+                    let result = try await self.installer.installControl(target: target, nodeOverride: nodeOverride, onOutputLine: append)
+                    guard result.ok else {
+                        self.onboardingRunning = false
+                        self.onboardingError = result.message
+                        return
+                    }
                 }
                 self.onboardingRunning = false
-                if result.ok {
-                    self.startupPhase = .ready
-                    self.startIfNeeded()
-                } else {
-                    self.onboardingError = result.message
-                }
+                self.startupPhase = .ready
+                self.startIfNeeded()
             } catch {
                 self.onboardingRunning = false
                 self.onboardingError = error.localizedDescription
             }
         }
     }
+
+    /// Canonical Frontdoor order used wherever the built-in agents are listed
+    /// or installed, so the primary and the UI rows stay deterministic.
+    static let frontdoorInstallOrder = ["codex", "claude", "grok"]
 
     private func appendOnboardingOutput(_ line: String) {
         onboardingOutput.append(line)
@@ -459,6 +490,7 @@ final class AppModel: ObservableObject {
                 if result.ok {
                     self.lastNotice = "\(target.capitalized) Frontdoor를 설치했습니다. 새로 시작하는 세션부터 모니터링됩니다."
                     self.reconnect()
+                    Task { await self.loadInstalledFrontdoors() }
                 } else {
                     self.onboardingError = result.message
                 }
@@ -475,6 +507,25 @@ final class AppModel: ObservableObject {
             "providerId": .string(agent.providerId),
             "enabled": .bool(enabled)
         ])
+    }
+
+    /// Refreshes the installed-Frontdoor snapshot for the Settings badges. The
+    /// endpoint must be up first (like `loadGatewayConfig`); any failure is a
+    /// non-fatal debug — an install-state read must never break Settings.
+    func loadInstalledFrontdoors() async {
+        if endpoint == nil { await ensureStarted() }
+        guard let endpoint else { return }
+        do {
+            let snapshot = try await client.fetchInstalledFrontdoors(endpoint: endpoint)
+            installedFrontdoors = snapshot.installed
+            primaryFrontdoor = snapshot.primary
+        } catch {
+            // Non-fatal: the badges just stay at their last known state rather
+            // than surfacing an error into Settings.
+            #if DEBUG
+            FileHandle.standardError.write(Data("loadInstalledFrontdoors failed: \(error.localizedDescription)\n".utf8))
+            #endif
+        }
     }
 
     func loadGatewayConfig() async {

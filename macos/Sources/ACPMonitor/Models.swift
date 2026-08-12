@@ -928,6 +928,26 @@ struct MonitorMeta: Equatable, Sendable {
     }
 }
 
+/// Which agents already have a Control MCP installed, per `/api/frontdoors`.
+/// `primary` is the one installed as the exclusive `--install-all` Frontdoor
+/// (nil when none is), and `installed` lists every agent — primary included —
+/// that carries a Control MCP. Unversioned: the endpoint is a plain install
+/// snapshot, so a missing/malformed body decodes to "nothing installed"
+/// rather than failing the whole Settings load.
+struct InstalledFrontdoors: Equatable, Sendable {
+    let primary: String?
+    let installed: [String]
+
+    static func decode(_ data: Data) throws -> InstalledFrontdoors {
+        let raw = try JSONSerialization.jsonObject(with: data)
+        guard let root = JSONValue(any: raw).objectValue else { throw MonitorDecodeError.invalidMessage }
+        return InstalledFrontdoors(
+            primary: root.string("primary"),
+            installed: (root.array("installed") ?? []).compactMap(\.stringValue)
+        )
+    }
+}
+
 struct MonitorSnapshot: Sendable {
     let schemaVersion: Int
     let monitorApiVersion: String

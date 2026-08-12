@@ -13,6 +13,7 @@ enum MonitorModelChecks {
         try everyStableFailureCodeCarriesDistinctActionableGuidance()
         try runtimeSplitAnnotationSurfacesAsAWarning()
         try agentCatalogDecodesInstallAndEnabledState()
+        try installedFrontdoorsDecodePrimaryInstalledAndNullEmpty()
         try gatewayConfigDecodesAllControlMetadata()
         try gatewayConfigRepresentsAllKnownSettingIds()
         try gatewayConfigDecodesBothLanguagesAndFallsBackToEnglish()
@@ -619,6 +620,20 @@ enum MonitorModelChecks {
         try check(response.agents.count == 2, "agent catalog decode failed")
         try check(response.agents[0].installed && !response.agents[0].enabled, "installed and enabled must be independent")
         try check(!response.agents[1].installSupported, "manual binary install state decode failed")
+    }
+
+    private static func installedFrontdoorsDecodePrimaryInstalledAndNullEmpty() throws {
+        let populated = try InstalledFrontdoors.decode(Data(#"""
+        {"primary":"codex","installed":["codex","claude"]}
+        """#.utf8))
+        try check(populated.primary == "codex", "installed frontdoors primary decode failed")
+        try check(populated.installed == ["codex", "claude"], "installed frontdoors list decode failed")
+
+        let empty = try InstalledFrontdoors.decode(Data(#"""
+        {"primary":null,"installed":[]}
+        """#.utf8))
+        try check(empty.primary == nil, "null primary must decode to nil")
+        try check(empty.installed.isEmpty, "empty installed list decode failed")
     }
 
     private static func gatewayConfigDecodesAllControlMetadata() throws {
