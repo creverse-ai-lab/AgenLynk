@@ -29,7 +29,7 @@ Claude에게 물어봤다가, Codex로 코드를 고치고, Grok에게 리뷰를
 
 ### 1. DMG로 설치 (권장)
 
-[**Releases 페이지**](https://github.com/creverse-ai-lab/agenlynk/releases/latest)에서 최신 `AgenLynk.dmg`를 내려받아 `AgenLynk.app`을 **Applications 폴더로** 옮긴 뒤 실행하세요.
+[**Releases 페이지**](https://github.com/creverse-ai-lab/agenlynk/releases)에서 최신 `AgenLynk.dmg`를 내려받아 `AgenLynk.app`을 **Applications 폴더로** 옮긴 뒤 실행하세요.
 
 - 최초 실행 시 대시보드 대신 **설치 화면**이 먼저 뜹니다. 대화용 Frontdoor(Codex / Claude / Grok)를 하나 이상 골라 설치하면, 앱이 번들된 Gateway 런타임을 `~/.acp-gateway/`에 설치·검증한 뒤 모니터링을 시작합니다.
 - 시스템에 별도로 Node를 깔 필요가 없습니다. 필요한 Node 22 런타임이 앱에 포함돼 있습니다.
