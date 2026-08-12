@@ -198,8 +198,12 @@ test("native monitor cold-starts Gateway when no daemon is running", async () =>
       })),
       new Promise((_, reject) => setTimeout(() => reject(new Error("cold-start monitor ready timeout")), 15_000))
     ]);
+    // `gateway` (setup metadata) is populated by refreshGatewayInfo AFTER the
+    // subscription flips connected/streaming, so a snapshot can be
+    // connected+streaming with gateway still null. Wait for gateway too, or a
+    // slow CI reads the null and NPEs on gatewayVersion.
     const snapshot = await waitForSnapshot(ready.url, { authorization: `Bearer ${ready.apiToken}` },
-      (value) => value.connected && value.streaming);
+      (value) => value.connected && value.streaming && value.gateway);
     assert.equal(snapshot.connected, true);
     assert.equal(snapshot.streaming, true);
     assert.equal(snapshot.gateway.gatewayVersion, "1.3.2");
