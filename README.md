@@ -130,6 +130,14 @@ npm run macos:verify  # 완성 DMG 검증
 
 > 내부 런타임(ACP Gateway)은 앱 버전과 별개로 `1.3.x`로 버전을 매깁니다. 런타임 변경 이력은 [`macos/README.md`](macos/README.md)와 커밋 로그를 참고하세요.
 
+## Credits
+
+| 역할 | 이름 | with |
+|---|---|---|
+| **Dev** | 윤치영 | feat. Fable / Opus |
+| **App Icon** | 이희주 | feat. 디자이너리 |
+| **App Name** | 김은경 | feat. Luna |
+
 ## 라이선스
 
 사내 프로젝트 — creverse-ai-lab.
