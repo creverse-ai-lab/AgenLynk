@@ -8,7 +8,13 @@ import { AgentUpdateManager } from "./agent-updates.js";
 import { checkGatewaySource } from "./gateway-source-monitor.js";
 import { GatewayService } from "./gateway-service.js";
 import { readNdjson } from "./ndjson.js";
-import { createSocketSender } from "./socket-flow.js";
+import {
+  createSocketSender,
+  MAX_CONNECTION_BUFFER_BYTES,
+  MAX_OBSERVER_CONNECTION_BUFFER_BYTES,
+  MAX_OBSERVER_SOCKET_BUFFER_BYTES,
+  MAX_SOCKET_BUFFER_BYTES
+} from "./socket-flow.js";
 import { GATEWAY_BUILD_ID, GATEWAY_VERSION } from "./version.js";
 import {
   gatewaySettingsSnapshot,
@@ -48,7 +54,12 @@ const server = createServer((socket) => {
   let boundAccess = null;
   const sender = createSocketSender(socket, {
     unsubscribe: (subscriptionId) => service.unsubscribe(subscriptionId, { rootId: boundRootId }),
-    removeSubscription: (subscriptionId) => subscriptions.delete(subscriptionId)
+    removeSubscription: (subscriptionId) => subscriptions.delete(subscriptionId),
+    // The observer (the monitor) gets the far larger budget; a Worker keeps the
+    // default so a stuck one still can't grow the Gateway's memory unbounded.
+    // Resolved per send because access is only bound after setup.
+    maxSubscriptionBytes: () => (boundAccess === "observer" ? MAX_OBSERVER_SOCKET_BUFFER_BYTES : MAX_SOCKET_BUFFER_BYTES),
+    maxConnectionBytes: () => (boundAccess === "observer" ? MAX_OBSERVER_CONNECTION_BUFFER_BYTES : MAX_CONNECTION_BUFFER_BYTES)
   });
   const { send, sendEvent } = sender;
   readNdjson(socket, {

@@ -204,12 +204,17 @@ final class AppModel: ObservableObject {
     }
 
     var visibleFrontdoors: [FrontdoorSession] {
-        frontdoorSessions.filter { !settings.activeOnly || $0.isActive }
+        // Built from the merged log (live + retained history), not the live
+        // list alone: a Frontdoor that just went idle leaves the live session
+        // list but is still in history, and it must NOT vanish from the sidebar
+        // unless the user asked for active-only. Vanishing also churned the
+        // selection (see reconcileSelections), which cleared the picked event.
+        logFrontdoorSessions.filter { !settings.activeOnly || $0.isActive }
     }
 
     var selectedFrontdoor: FrontdoorSession? {
         guard let selectedFrontdoorId else { return nil }
-        return frontdoorSessions.first { $0.id == selectedFrontdoorId }
+        return logFrontdoorSessions.first { $0.id == selectedFrontdoorId }
     }
 
     var selectedSession: GatewaySession? {
@@ -1218,13 +1223,22 @@ final class AppModel: ObservableObject {
     }
 
     private func reconcileSelections() {
-        if let selectedFrontdoorId, !frontdoorSessions.contains(where: { $0.id == selectedFrontdoorId }) {
-            self.selectedFrontdoorId = activeFrontdoors.first?.id ?? frontdoorSessions.first?.id
+        // Reconcile against the SAME merged list the sidebar shows. Checking the
+        // live-only `frontdoorSessions` here reassigned selectedFrontdoorId every
+        // time a Frontdoor briefly left the live list, and DashboardView's
+        // onChange(selectedFrontdoorId) then cleared the selected event — the
+        // reported "clicking an event, it deselects on update" bug.
+        let available = logFrontdoorSessions
+        if let selectedFrontdoorId, !available.contains(where: { $0.id == selectedFrontdoorId }) {
+            self.selectedFrontdoorId = available.first(where: \.isActive)?.id ?? available.first?.id
         } else if selectedFrontdoorId == nil {
-            selectedFrontdoorId = activeFrontdoors.first?.id ?? frontdoorSessions.first?.id
+            selectedFrontdoorId = available.first(where: \.isActive)?.id ?? available.first?.id
         }
+        // Check the merged log the sequence view actually renders, not the
+        // live-only buckets: a selected event whose session moved to history is
+        // still on screen and must stay selected.
         if let selectedEventId,
-           !eventsBySession.values.joined().contains(where: { $0.id == selectedEventId }) {
+           !logEventsBySession.values.joined().contains(where: { $0.id == selectedEventId }) {
             self.selectedEventId = nil
         }
         if let selectedSessionId,

@@ -9,6 +9,14 @@
 // 8MB behind and draining is not that.
 export const MAX_SOCKET_BUFFER_BYTES = 8_000_000;
 export const MAX_CONNECTION_BUFFER_BYTES = 16_000_000;
+// The monitor is a single, local, trusted observer that fans out the whole
+// event stream — with thought and subagent-transcript streaming enabled, one
+// delegated turn can burst past the worker-sized limits in a single tick while
+// the observer is perfectly healthy and draining. Killing its subscription
+// there produced the recurring reconnect notice. It gets a far larger budget;
+// a genuinely stuck reader still hits the connection cap and is dropped.
+export const MAX_OBSERVER_SOCKET_BUFFER_BYTES = 64_000_000;
+export const MAX_OBSERVER_CONNECTION_BUFFER_BYTES = 128_000_000;
 
 export function createSocketSender(socket, {
   unsubscribe,
@@ -16,9 +24,13 @@ export function createSocketSender(socket, {
   maxSubscriptionBytes = MAX_SOCKET_BUFFER_BYTES,
   maxConnectionBytes = MAX_CONNECTION_BUFFER_BYTES
 }) {
+  // Limits may be passed as a number or a zero-arg function, so the daemon can
+  // widen them once a connection is known to be the observer (its access mode
+  // is only bound after the sender is created).
+  const resolve = (limit) => (typeof limit === "function" ? limit() : limit);
   const send = (message) => {
     if (socket.destroyed) throw new Error("Gateway socket closed");
-    if (socket.writableLength > maxConnectionBytes) {
+    if (socket.writableLength > resolve(maxConnectionBytes)) {
       socket.destroy(new Error("Gateway connection buffer exceeded"));
       throw new Error("Gateway connection buffer exceeded");
     }
@@ -29,10 +41,10 @@ export function createSocketSender(socket, {
     send,
     sendEvent(subscriptionId, event) {
       if (socket.destroyed) throw new Error("Gateway socket closed");
-      if (socket.writableLength > maxSubscriptionBytes) {
+      if (socket.writableLength > resolve(maxSubscriptionBytes)) {
         unsubscribe(subscriptionId);
         removeSubscription(subscriptionId);
-        if (socket.writableLength <= maxConnectionBytes) {
+        if (socket.writableLength <= resolve(maxConnectionBytes)) {
           send({ type: "subscription_error", subscriptionId, error: "Gateway subscriber is too slow" });
         }
         return false;
