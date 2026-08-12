@@ -33,6 +33,9 @@ final class AppModel: ObservableObject {
     /// badges; empty until `loadInstalledFrontdoors()` first succeeds.
     @Published private(set) var installedFrontdoors: [String] = []
     @Published private(set) var primaryFrontdoor: String?
+    /// The agent whose Control MCP install is running right now (nil when idle),
+    /// so only its row shows progress.
+    @Published private(set) var installingFrontdoor: String?
     @Published private(set) var phase: ConnectionPhase = .idle
     @Published private(set) var gateway: JSONValue?
     @Published private(set) var sessions: [GatewaySession] = []
@@ -474,8 +477,11 @@ final class AppModel: ObservableObject {
     /// Frontdoors are left in place. Reports through the same onboarding output
     /// surface, which is idle once the app is `.ready`.
     func installFrontdoorControl(_ target: String) {
-        guard !onboardingRunning, onboardingInstallLocationReady else { return }
-        onboardingRunning = true
+        // Only that agent's row shows progress — the installer's process is
+        // single-shot, so a second install is refused while one runs, but the
+        // other rows must not all read as "설치 중".
+        guard installingFrontdoor == nil, !onboardingRunning, onboardingInstallLocationReady else { return }
+        installingFrontdoor = target
         onboardingError = nil
         lastNotice = nil
         onboardingOutput.removeAll()
@@ -486,16 +492,16 @@ final class AppModel: ObservableObject {
                 let result = try await self.installer.installControl(target: target, nodeOverride: nodeOverride) { line in
                     Task { @MainActor [weak self] in self?.appendOnboardingOutput(line) }
                 }
-                self.onboardingRunning = false
+                self.installingFrontdoor = nil
                 if result.ok {
-                    self.lastNotice = "\(target.capitalized) Frontdoor를 설치했습니다. 새로 시작하는 세션부터 모니터링됩니다."
+                    self.lastNotice = "\(target.capitalized) Frontdoor MCP를 설치했습니다. 새로 시작하는 세션부터 모니터링됩니다."
                     self.reconnect()
                     Task { await self.loadInstalledFrontdoors() }
                 } else {
                     self.onboardingError = result.message
                 }
             } catch {
-                self.onboardingRunning = false
+                self.installingFrontdoor = nil
                 self.onboardingError = error.localizedDescription
             }
         }

@@ -84,9 +84,9 @@ struct AgentCatalogView: View {
     /// remove Frontdoors already installed.
     private var frontdoorInstall: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label("Frontdoor 설치", systemImage: "door.left.hand.open")
+            Label("Frontdoor MCP 설치", systemImage: "door.left.hand.open")
                 .font(.callout.weight(.semibold))
-            Text("선택한 에이전트에 Control MCP를 설치해 Frontdoor로 모니터링되게 합니다. 이미 설치된 Frontdoor는 그대로 유지됩니다.")
+            Text("에이전트에 Control MCP를 설치해 Frontdoor로 모니터링되게 합니다. 이미 설치된 것은 그대로 유지되며, 한 번에 하나씩 설치됩니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             VStack(spacing: 4) {
@@ -114,6 +114,8 @@ struct AgentCatalogView: View {
     @ViewBuilder
     private func frontdoorRow(_ agent: FrontdoorAgent) -> some View {
         let installed = model.installedFrontdoors.contains(agent.id)
+        let installingThis = model.installingFrontdoor == agent.id
+        let anyInstalling = model.installingFrontdoor != nil
         HStack(spacing: 8) {
             Text(agent.label).font(.callout)
             if model.primaryFrontdoor == agent.id {
@@ -130,11 +132,13 @@ struct AgentCatalogView: View {
                     .foregroundStyle(.green)
                     .labelStyle(.titleAndIcon)
             } else {
-                Button(model.onboardingRunning ? "설치 중…" : "설치") {
+                // Only this agent's row shows its own progress; the others are
+                // just disabled while one install runs.
+                Button(installingThis ? "설치 중…" : "설치") {
                     model.installFrontdoorControl(agent.id)
                 }
-                .disabled(model.onboardingRunning || !model.onboardingInstallLocationReady)
-                if model.onboardingRunning { ProgressView().controlSize(.small) }
+                .disabled(anyInstalling || !model.onboardingInstallLocationReady)
+                if installingThis { ProgressView().controlSize(.small) }
             }
         }
         .padding(.vertical, 2)

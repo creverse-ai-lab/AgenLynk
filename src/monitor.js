@@ -641,21 +641,58 @@ async function collectLocalSessions() {
 // Missing Gateway setup values (e.g. before the first successful "setup"
 // call) surface as null rather than being omitted, per the shared wire
 // contract; apiToken/control token are never part of this shape.
-// Which agents already have a Control MCP installed, read from install.json.
-// The Settings UI shows these as installed and the onboarding screen pre-checks
-// them, so a Frontdoor is never offered as "install" when it is already there.
+// Which agents already have the "agent-acp" Control MCP installed. The ground
+// truth is each agent's own config, NOT install.json's managedMcp record —
+// managedMcp only lists what this app installed, so an MCP the user set up any
+// other way (or before this app tracked it) would read as "not installed" and
+// be wrongly offered for install. The section header `[mcp_servers.agent-acp]`
+// (codex/grok TOML) or the `mcpServers["agent-acp"]` key (claude JSON) is what
+// actually gates the Frontdoor.
 const FRONT_DOOR_AGENTS = new Set(["codex", "claude", "grok"]);
+// Matches the control section but not agent-acp-guide (next char is `-`).
+const CONTROL_MCP_TOML = /^\[mcp_servers\.agent-acp[\].]/m;
+
+async function tomlHasControlMcp(path) {
+  try {
+    return CONTROL_MCP_TOML.test(await readFile(path, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+async function claudeJsonHasControlMcp(path) {
+  try {
+    const raw = JSON.parse(await readFile(path, "utf8"));
+    return Boolean(raw?.mcpServers && raw.mcpServers["agent-acp"]);
+  } catch {
+    return false;
+  }
+}
+
 async function readInstalledFrontdoors() {
+  const home = homedir();
+  const codexHome = process.env.CODEX_HOME || join(home, ".codex");
+  const grokHome = process.env.GROK_HOME || join(home, ".grok");
+  const [codex, grok, claude] = await Promise.all([
+    tomlHasControlMcp(join(codexHome, "config.toml")),
+    tomlHasControlMcp(join(grokHome, "config.toml")),
+    claudeJsonHasControlMcp(join(home, ".claude.json"))
+  ]);
+  const installed = [
+    ...(codex ? ["codex"] : []),
+    ...(claude ? ["claude"] : []),
+    ...(grok ? ["grok"] : [])
+  ];
+  // The exclusive primary is still whatever install.json recorded; it is only
+  // a label, and a missing/invalid file just means "no primary".
+  let primary = null;
   try {
     const raw = JSON.parse(await readFile(defaultInstallStatePath(), "utf8"));
-    const installed = [...new Set(Object.values(raw?.managedMcp ?? {})
-      .filter((item) => item?.kind === "control" && item.agent)
-      .map((item) => item.agent))].filter((agent) => FRONT_DOOR_AGENTS.has(agent));
-    return { primary: FRONT_DOOR_AGENTS.has(raw?.frontDoor) ? raw.frontDoor : null, installed };
+    if (FRONT_DOOR_AGENTS.has(raw?.frontDoor)) primary = raw.frontDoor;
   } catch {
-    // No install.json yet (fresh machine) reads as "none installed", not an error.
-    return { primary: null, installed: [] };
+    // no install.json → no primary
   }
+  return { primary, installed };
 }
 
 function gatewayIdentity(state, identity) {
