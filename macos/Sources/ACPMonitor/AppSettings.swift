@@ -26,6 +26,7 @@ final class AppSettings: ObservableObject {
         static let petEnabled = "monitor.petEnabled"
         static let petExecutablePath = "monitor.petExecutablePath"
         static let bundledPetDefaultMigration = "monitor.bundledPetDefaultV1"
+        static let frontdoorNicknames = "monitor.frontdoorNicknames"
     }
 
     private let defaults: UserDefaults
@@ -39,6 +40,37 @@ final class AppSettings: ObservableObject {
     @Published var petEnabled: Bool { didSet { defaults.set(petEnabled, forKey: Key.petEnabled) } }
     /// Optional custom renderer executable. Empty selects Lynk's bundled Pet.
     @Published var petExecutablePath: String { didSet { defaults.set(petExecutablePath, forKey: Key.petExecutablePath) } }
+
+    /// User-chosen Frontdoor names, keyed by openerInstanceId. The auto name
+    /// (working folder) is only a default; a person can override it and it
+    /// persists here. A UI preference, so it lives in UserDefaults, not on the
+    /// Gateway.
+    @Published private(set) var frontdoorNicknames: [String: String] {
+        didSet {
+            defaults.set(try? JSONEncoder().encode(frontdoorNicknames), forKey: Key.frontdoorNicknames)
+        }
+    }
+
+    /// The name to show for a Frontdoor: the user's override when set,
+    /// otherwise the auto-derived name the caller passes in.
+    func frontdoorName(id: String, auto: String) -> String {
+        let override = frontdoorNicknames[id]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (override?.isEmpty == false) ? override! : auto
+    }
+
+    func hasFrontdoorNickname(id: String) -> Bool {
+        (frontdoorNicknames[id]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+    }
+
+    /// Save a name, or clear the override (revert to auto) when passed empty.
+    func setFrontdoorName(_ name: String?, id: String) {
+        let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if trimmed.isEmpty {
+            frontdoorNicknames.removeValue(forKey: id)
+        } else {
+            frontdoorNicknames[id] = trimmed
+        }
+    }
 
     var resolvedPetExecutablePath: String {
         let custom = petExecutablePath.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -68,6 +100,12 @@ final class AppSettings: ObservableObject {
             defaults.set(true, forKey: Key.followLatestEventUXMigration)
         }
         nodePath = defaults.string(forKey: Key.nodePath) ?? ""
+        if let data = defaults.data(forKey: Key.frontdoorNicknames),
+           let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
+            frontdoorNicknames = decoded
+        } else {
+            frontdoorNicknames = [:]
+        }
         let storedPetExecutablePath = defaults.string(forKey: Key.petExecutablePath) ?? ""
         let hasCustomPet = !storedPetExecutablePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         petExecutablePath = hasCustomPet ? storedPetExecutablePath : ""

@@ -387,6 +387,7 @@ private struct SequenceDiagramNode: Identifiable {
 }
 
 private struct SequenceLaneHeader: View {
+    @EnvironmentObject private var settings: AppSettings
     let lane: SequenceLane
     let selected: Bool
 
@@ -420,11 +421,15 @@ private struct SequenceLaneHeader: View {
         return "Subagent L\(lane.depth)"
     }
 
-    /// The frontdoor lane names itself by its working folder — stable and
-    /// meaningful — falling back to a designated title only when there is no
-    /// folder, and never to the transient tool-call text a local session parks
-    /// in its title.
+    /// The user's chosen name when set, otherwise the working folder — stable
+    /// and meaningful — falling back to a designated title only when there is
+    /// no folder, and never to the transient tool-call text a local session
+    /// parks in its title.
     private var frontdoorLabel: String {
+        settings.frontdoorName(id: lane.session.openerInstanceId ?? "", auto: autoFrontdoorLabel)
+    }
+
+    private var autoFrontdoorLabel: String {
         let folder = (lane.session.cwd as NSString).lastPathComponent
         if !folder.isEmpty, folder != "/" { return folder }
         if let title = lane.session.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {

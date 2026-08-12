@@ -56,6 +56,29 @@ enum AppSettingsChecks {
         guard !relaunchedSettings.petEnabled else {
             throw SettingsCheckError.failed("an explicit Pet Off choice must survive relaunch after the default migration")
         }
+        // Frontdoor rename: auto by default, override persists, empty reverts.
+        let nickSuite = "ACPMonitor.AppSettingsTests.Nick.\(UUID().uuidString)"
+        guard let nickDefaults = UserDefaults(suiteName: nickSuite) else {
+            throw SettingsCheckError.failed("could not create nickname defaults")
+        }
+        defer { nickDefaults.removePersistentDomain(forName: nickSuite) }
+        let nick = AppSettings(defaults: nickDefaults)
+        guard nick.frontdoorName(id: "main-1", auto: "proj") == "proj", !nick.hasFrontdoorNickname(id: "main-1") else {
+            throw SettingsCheckError.failed("an un-renamed Frontdoor must show its auto name")
+        }
+        nick.setFrontdoorName("코드리뷰 봇", id: "main-1")
+        guard nick.frontdoorName(id: "main-1", auto: "proj") == "코드리뷰 봇", nick.hasFrontdoorNickname(id: "main-1") else {
+            throw SettingsCheckError.failed("a set name must override the auto name")
+        }
+        let reloaded = AppSettings(defaults: nickDefaults)
+        guard reloaded.frontdoorName(id: "main-1", auto: "proj") == "코드리뷰 봇" else {
+            throw SettingsCheckError.failed("a Frontdoor name must survive relaunch")
+        }
+        reloaded.setFrontdoorName("   ", id: "main-1")
+        guard reloaded.frontdoorName(id: "main-1", auto: "proj") == "proj", !reloaded.hasFrontdoorNickname(id: "main-1") else {
+            throw SettingsCheckError.failed("clearing a name must revert to the auto name")
+        }
+
         print("Swift settings checks passed")
     }
 }

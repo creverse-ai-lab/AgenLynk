@@ -308,21 +308,54 @@ struct SessionActivity {
 }
 
 private struct SequenceSelectionContext: View {
+    @EnvironmentObject private var settings: AppSettings
     let frontdoor: FrontdoorSession?
     let session: GatewaySession?
     var activity: SessionActivity? = nil
+    @State private var editingName = false
+    @State private var nameDraft = ""
 
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
             if let frontdoor {
                 VStack(alignment: .leading, spacing: 5) {
-                    // Lead with the Frontdoor's name, not the label "선택
-                    // Frontdoor". The opaque instance id it used to emphasise
-                    // told a reader nothing, so it is gone.
+                    // The name is auto (working folder) but a person can rename
+                    // it here and it persists; the pencil enters an inline
+                    // editor, an empty save reverts to the auto name.
                     HStack(spacing: 6) {
                         Image(systemName: "rectangle.stack").font(.caption).foregroundStyle(.secondary)
-                        Text(frontdoor.displayName).font(.callout.weight(.semibold)).lineLimit(1)
+                        if editingName {
+                            TextField("이름", text: $nameDraft, onCommit: { commitName(frontdoor) })
+                                .textFieldStyle(.roundedBorder)
+                                .font(.callout)
+                                .frame(maxWidth: 180)
+                            Button("저장") { commitName(frontdoor) }.buttonStyle(.borderless)
+                            Button("취소") { editingName = false }.buttonStyle(.borderless).foregroundStyle(.secondary)
+                        } else {
+                            Text(settings.frontdoorName(id: frontdoor.id, auto: frontdoor.displayName))
+                                .font(.callout.weight(.semibold)).lineLimit(1)
+                            Button {
+                                nameDraft = settings.frontdoorName(id: frontdoor.id, auto: frontdoor.displayName)
+                                editingName = true
+                            } label: {
+                                Image(systemName: "pencil")
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.secondary)
+                            .help("이름 변경")
+                            if settings.hasFrontdoorNickname(id: frontdoor.id) {
+                                Button {
+                                    settings.setFrontdoorName(nil, id: frontdoor.id)
+                                } label: {
+                                    Image(systemName: "arrow.uturn.backward")
+                                }
+                                .buttonStyle(.borderless)
+                                .foregroundStyle(.secondary)
+                                .help("자동 이름(폴더명)으로 되돌리기")
+                            }
+                        }
                     }
+                    .onChange(of: frontdoor.id) { _, _ in editingName = false }
                     HStack(spacing: 6) {
                         ContextPill(text: frontdoor.provider.capitalized, color: .blue)
                         ContextPill(text: frontdoor.isActive ? "진행 중" : "대기", color: frontdoor.isActive ? .green : .secondary)
@@ -404,6 +437,11 @@ private struct SequenceSelectionContext: View {
         .frame(maxWidth: .infinity, minHeight: 82, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
     }
+
+    private func commitName(_ frontdoor: FrontdoorSession) {
+        settings.setFrontdoorName(nameDraft, id: frontdoor.id)
+        editingName = false
+    }
 }
 
 private struct ContextPill: View {
@@ -441,12 +479,14 @@ private struct MetricCard: View {
 }
 
 struct FrontdoorRow: View {
+    @EnvironmentObject private var settings: AppSettings
     let frontdoor: FrontdoorSession
     var body: some View {
         HStack(alignment: .top, spacing: 9) {
             Circle().fill(frontdoor.isActive ? .blue : .secondary).frame(width: 8, height: 8).padding(.top, 5)
             VStack(alignment: .leading, spacing: 3) {
-                Text(frontdoor.displayName).font(.callout.weight(.medium)).lineLimit(1)
+                Text(settings.frontdoorName(id: frontdoor.id, auto: frontdoor.displayName))
+                    .font(.callout.weight(.medium)).lineLimit(1)
                 // No opaque instance id, no LOCAL/ACP source — neither is
                 // something a reader acts on. The name identifies the row; the
                 // counts and current task are what tell it apart.
