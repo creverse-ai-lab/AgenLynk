@@ -1,5 +1,5 @@
 {
-  "_comment": "Restart/activation blocker contract. src/monitor-state.js's MonitorState.restartBlockers (what the Gateway hands the updater) and macos Models.swift's restartBlockerLabels (what the Settings UI hands it) must turn identical input into identical strings — the updater refuses to activate on a non-empty list, so a disagreement either blocks a safe update or permits an unsafe one. test/monitor-control.test.js and MonitorModelTests.swift each replay every case below.",
+  "_comment": "Restart/activation blocker contract. sidecar/src/projection/monitor-state.js's MonitorState.restartBlockers and macOS Models.swift's restartBlockerLabels must turn identical input into identical strings. sidecar/test/monitor-control.test.js and MonitorModelTests.swift each replay every case below.",
   "cases": [
     {
       "name": "counts each blocker category and omits the empty ones",

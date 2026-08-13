@@ -368,7 +368,7 @@ extension PetAgentState {
 
 /// Maps a raw Gateway/local-monitor session status onto the contract's
 /// frozen 8-value state vocabulary. Covers every literal status produced by
-/// `src/gateway-service.js` and `src/local-monitor.js`. This is the single
+/// `src/gateway-service.js` and `sidecar/src/local-monitor.js`. This is the single
 /// classifier both the Pet contract and the legacy `PetSnapshot` derive
 /// their per-agent state from — a cancelled or errored turn is never
 /// reported as `.completed`.
@@ -673,7 +673,7 @@ struct MonitorEvent: Identifiable, Equatable, Sendable {
     /// top-level `text` (`capTextEvent`); every other update goes through the
     /// generic tail that serializes the whole update into `text` and keeps the
     /// real object in `data` — so on those, `text` is JSON and must not be
-    /// shown as a body. `src/local-transcript.js` emits no `data` at all and
+    /// shown as a body. `sidecar/src/local-transcript.js` emits no `data` at all and
     /// writes a human summary into `text`. Hence: `data` wins whenever it
     /// exists, `text` is only trusted without it.
     ///
@@ -1667,10 +1667,10 @@ func parseSeedManifest(_ data: Data) -> SeedGatewayVersion? {
 }
 
 /// Work that must finish before the Gateway runtime may be swapped or rolled
-/// back. `MonitorState.restartBlockers()` in src/monitor-state.js decides the
+/// back. `MonitorState.restartBlockers()` in sidecar/src/projection/monitor-state.js decides the
 /// same thing from the Gateway's own state, and the updater refuses to activate
 /// whenever either hands it a non-empty list — so the two must agree exactly.
-/// test/fixtures/restart-blockers.json is replayed against both.
+/// sidecar/test/fixtures/restart-blockers.json is replayed against both.
 ///
 /// Local sessions are excluded: they never run through the Gateway runtime, so
 /// restarting it cannot interrupt them.
@@ -1684,4 +1684,3 @@ func restartBlockerLabels(sessions: [GatewaySession], tasks: [MonitorRecord], in
         pendingInbox > 0 ? "미응답 Inbox \(pendingInbox)개" : nil
     ].compactMap { $0 }
 }
-

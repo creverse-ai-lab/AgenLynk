@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Build-time helper: snapshots gatewayVersion/gatewayBuildId/nodeVersion and
+// Build-time helper: snapshots Gateway, sidecar, and Node identities plus
 // the required-file list of a fully assembled runtime directory (Node dist,
 // node_modules, skills, src/ all copied in) into runtime-manifest.json.
 // runtime-installer.js reads this later to reject an incomplete/corrupt
@@ -26,7 +26,7 @@ try {
   // cost of checking this bundle rather than a guess.
   const { verificationMs } = await verifyRuntimeManifest(root, manifest);
   process.stdout.write(
-    `runtime-manifest.json: ${manifest.gatewayVersion} (${manifest.gatewayBuildId}), gatewayApiVersion ${manifest.gatewayApiVersion}, `
+    `runtime-manifest.json: Gateway ${manifest.gatewayVersion} (${manifest.gatewayBuildId}), sidecar ${manifest.sidecarVersion} (${manifest.sidecarBuildId}), gatewayApiVersion ${manifest.gatewayApiVersion}, `
     + `node ${manifest.nodeVersion}, ${manifest.payload.length} payload entries, verified in ${verificationMs.toFixed(1)}ms\n`
   );
 } catch (error) {

@@ -26,7 +26,7 @@ const execFileAsync = promisify(execFile);
 // Bumped alongside the payload/gatewayApiVersion fields added below: an
 // older manifest shape (no payload inventory) must not be silently accepted
 // as fully verified by the newer, stricter check.
-export const RUNTIME_MANIFEST_FORMAT_VERSION = 2;
+export const RUNTIME_MANIFEST_FORMAT_VERSION = 3;
 
 export const RUNTIME_MANIFEST_FILE_NAME = "runtime-manifest.json";
 
@@ -39,7 +39,10 @@ export const REQUIRED_RUNTIME_FILES = [
   "src/index.js",
   "src/guide.js",
   "src/bootstrap.js",
-  "src/monitor.js",
+  "sidecar/package.json",
+  "sidecar/src/server/monitor.js",
+  "sidecar/src/version.js",
+  "sidecar/src/gateway/legacy-adapter.js",
   "src/version.js",
   "src/gateway-api-version.js",
   "src/installer.js",
@@ -50,6 +53,44 @@ export const REQUIRED_RUNTIME_FILES = [
   "node/bin/npm",
   "node/bin/npx"
 ];
+
+/** Shared install/stage directory name so sidecar-only builds cannot collide. */
+export function runtimeVersionId(manifest) {
+  const { gatewayVersion, gatewayBuildId, sidecarBuildId } = manifest ?? {};
+  if (
+    typeof gatewayVersion !== "string" || !gatewayVersion
+    || typeof gatewayBuildId !== "string" || !gatewayBuildId
+    || typeof sidecarBuildId !== "string" || !sidecarBuildId
+  ) {
+    throw new Error("runtime version id requires gatewayVersion, gatewayBuildId, and sidecarBuildId");
+  }
+  return `${gatewayVersion}-${gatewayBuildId}-${sidecarBuildId}`;
+}
+
+export function runtimeSidecarIdentity(source) {
+  const identity = {};
+  if (typeof source?.sidecarVersion === "string" && source.sidecarVersion) {
+    identity.sidecarVersion = source.sidecarVersion;
+  }
+  if (typeof source?.sidecarBuildId === "string" && source.sidecarBuildId) {
+    identity.sidecarBuildId = source.sidecarBuildId;
+  }
+  return identity;
+}
+
+export function runtimePointerIdentityMismatch(pointer, manifest) {
+  if (!pointer || !manifest) return true;
+  if (pointer.gatewayVersion !== manifest.gatewayVersion || pointer.gatewayBuildId !== manifest.gatewayBuildId) {
+    return true;
+  }
+  if (typeof pointer.sidecarVersion === "string" && pointer.sidecarVersion !== manifest.sidecarVersion) {
+    return true;
+  }
+  if (typeof pointer.sidecarBuildId === "string" && pointer.sidecarBuildId !== manifest.sidecarBuildId) {
+    return true;
+  }
+  return false;
+}
 
 export async function assertRequiredFilesExist(root, files = REQUIRED_RUNTIME_FILES) {
   for (const relativePath of files) {
@@ -69,6 +110,16 @@ export async function readGatewayIdentity(root) {
     throw new Error(`${root}/src/version.js did not export GATEWAY_VERSION/GATEWAY_BUILD_ID`);
   }
   return { gatewayVersion: module.GATEWAY_VERSION, gatewayBuildId: module.GATEWAY_BUILD_ID };
+}
+
+/** Imports the independently versioned AgenLynk sidecar identity. */
+export async function readSidecarIdentity(root) {
+  const moduleURL = pathToFileURL(join(root, "sidecar", "src", "version.js")).href;
+  const module = await import(moduleURL);
+  if (typeof module.SIDECAR_VERSION !== "string" || typeof module.SIDECAR_BUILD_ID !== "string") {
+    throw new Error(`${root}/sidecar/src/version.js did not export SIDECAR_VERSION/SIDECAR_BUILD_ID`);
+  }
+  return { sidecarVersion: module.SIDECAR_VERSION, sidecarBuildId: module.SIDECAR_BUILD_ID };
 }
 
 /** Imports `<root>/src/gateway-api-version.js` so a corrupted copy fails the same way as version.js. */
@@ -251,6 +302,7 @@ function comparePayload(actualEntries, expectedEntries) {
 export async function buildRuntimeManifest(root, { nodeVersion } = {}) {
   await assertRequiredFilesExist(root);
   const identity = await readGatewayIdentity(root);
+  const sidecarIdentity = await readSidecarIdentity(root);
   const gatewayApiVersion = await readGatewayApiVersion(root);
   const resolvedNodeVersion = nodeVersion ?? await readExecutableVersion(join(root, "node/bin/node"));
   const payload = await collectPayloadEntries(root);
@@ -259,6 +311,7 @@ export async function buildRuntimeManifest(root, { nodeVersion } = {}) {
     gatewayVersion: identity.gatewayVersion,
     gatewayBuildId: identity.gatewayBuildId,
     gatewayApiVersion,
+    ...sidecarIdentity,
     nodeVersion: resolvedNodeVersion,
     requiredFiles: REQUIRED_RUNTIME_FILES,
     payload,
@@ -290,6 +343,14 @@ export async function verifyRuntimeManifest(root, manifest) {
     );
   }
 
+  const sidecarIdentity = await readSidecarIdentity(root);
+  if (sidecarIdentity.sidecarVersion !== manifest.sidecarVersion
+    || sidecarIdentity.sidecarBuildId !== manifest.sidecarBuildId) {
+    throw new Error(
+      `sidecar content does not match its manifest (expected ${manifest.sidecarVersion}/${manifest.sidecarBuildId}, found ${sidecarIdentity.sidecarVersion}/${sidecarIdentity.sidecarBuildId})`
+    );
+  }
+
   const gatewayApiVersion = await readGatewayApiVersion(root);
   if (gatewayApiVersion !== manifest.gatewayApiVersion) {
     throw new Error(`Gateway API version mismatch (expected ${manifest.gatewayApiVersion}, found ${gatewayApiVersion})`);
@@ -308,7 +369,7 @@ export async function verifyRuntimeManifest(root, manifest) {
   comparePayload(payloadEntries, manifest.payload ?? []);
 
   const verificationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
-  return { ...identity, gatewayApiVersion, verificationMs };
+  return { ...identity, ...sidecarIdentity, gatewayApiVersion, verificationMs };
 }
 
 export async function readManifestFile(root) {

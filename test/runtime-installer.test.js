@@ -39,7 +39,7 @@ test("ensureRuntimeInstalled activates a runtime root outside the seed's .app bu
 
     // The activated copy must be independently usable: its own required
     // files exist under the installed root, not just the seed.
-    await assert.doesNotReject(readFile(join(result.runtimeRoot, "src/monitor.js")));
+    await assert.doesNotReject(readFile(join(result.runtimeRoot, "sidecar/src/server/monitor.js")));
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -77,10 +77,44 @@ test("ensureRuntimeInstalled is idempotent: a second run does not re-copy or cre
     assert.equal(second.runtimeRoot, first.runtimeRoot);
 
     const versionDirs = await readdir(join(runtimeRoot, "versions"));
-    assert.deepEqual(versionDirs, ["2.0.0-build2"]);
+    assert.deepEqual(versionDirs, ["2.0.0-build2-fixture-sidecar"]);
 
     const afterStat = await stat(marker);
     assert.equal(afterStat.mtimeMs, beforeStat.mtimeMs, "an already-valid installed runtime must not be re-copied");
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("sidecar-only build changes install under a distinct version id", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "acp-runtime-installer-"));
+  try {
+    const runtimeRoot = join(workspace, "runtime");
+    const seedA = join(workspace, "seed-a");
+    const seedB = join(workspace, "seed-b");
+    await writeFixtureSeed(seedA, {
+      gatewayVersion: "1.0.0",
+      gatewayBuildId: "same-gw",
+      sidecarBuildId: "sidecar-a",
+      generatedAt: "2026-01-01T00:00:00.000Z"
+    });
+    await writeFixtureSeed(seedB, {
+      gatewayVersion: "1.0.0",
+      gatewayBuildId: "same-gw",
+      sidecarBuildId: "sidecar-b",
+      generatedAt: "2026-02-01T00:00:00.000Z"
+    });
+
+    const first = await ensureRuntimeInstalled({ seedRoot: seedA, runtimeRoot, smokeCheck: async () => {} });
+    const second = await ensureRuntimeInstalled({ seedRoot: seedB, runtimeRoot, smokeCheck: async () => {} });
+
+    assert.notEqual(first.runtimeRoot, second.runtimeRoot);
+    assert.equal(first.sidecarBuildId, "sidecar-a");
+    assert.equal(second.sidecarBuildId, "sidecar-b");
+    assert.deepEqual(
+      (await readdir(join(runtimeRoot, "versions"))).sort(),
+      ["1.0.0-same-gw-sidecar-a", "1.0.0-same-gw-sidecar-b"]
+    );
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -106,6 +140,8 @@ test("ensureRuntimeInstalled leaves current.json as valid JSON with no stray tem
     const parsed = JSON.parse(raw);
     assert.equal(parsed.formatVersion, 1);
     assert.equal(parsed.gatewayVersion, "3.0.0");
+    assert.equal(parsed.sidecarVersion, "0.4.0");
+    assert.equal(parsed.sidecarBuildId, "fixture-sidecar");
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -119,11 +155,11 @@ test("ensureRuntimeInstalled re-stages when the installed copy has been corrupte
     const runtimeRoot = join(workspace, "runtime");
 
     const first = await ensureRuntimeInstalled({ seedRoot: seed, runtimeRoot });
-    await rm(join(first.runtimeRoot, "src/monitor.js"));
+    await rm(join(first.runtimeRoot, "sidecar/src/server/monitor.js"));
 
     const second = await ensureRuntimeInstalled({ seedRoot: seed, runtimeRoot });
     assert.equal(second.runtimeRoot, first.runtimeRoot);
-    await assert.doesNotReject(readFile(join(second.runtimeRoot, "src/monitor.js")));
+    await assert.doesNotReject(readFile(join(second.runtimeRoot, "sidecar/src/server/monitor.js")));
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -168,7 +204,7 @@ test("ensureRuntimeInstalled keeps an older seed out and lets a newer one throug
     assert.equal((await readCurrentRuntime(runtimeRoot)).gatewayVersion, "5.0.0");
     assert.deepEqual(
       (await readdir(join(runtimeRoot, "versions"))).sort(),
-      ["5.0.0-build5"],
+      ["5.0.0-build5-fixture-sidecar"],
       "an older seed must not even be staged"
     );
     assert.equal((await stat(marker)).mtimeMs, beforeStat.mtimeMs, "the preserved runtime must not be touched");
@@ -184,14 +220,14 @@ test("ensureRuntimeInstalled keeps an older seed out and lets a newer one throug
     assert.equal((await readCurrentRuntime(runtimeRoot)).gatewayVersion, "6.0.0");
     assert.deepEqual(
       (await readdir(join(runtimeRoot, "versions"))).sort(),
-      ["5.0.0-build5", "6.0.0-build6"],
+      ["5.0.0-build5-fixture-sidecar", "6.0.0-build6-fixture-sidecar"],
       "the superseded runtime stays on disk so rollback still has a target"
     );
 
     // Same seed again is a no-op, not a re-copy.
     const repeat = await ensureRuntimeInstalled({ seedRoot: seedSix, runtimeRoot, smokeCheck: async () => {} });
     assert.equal(repeat.gatewayBuildId, "build6");
-    assert.deepEqual((await readdir(join(runtimeRoot, "versions"))).sort(), ["5.0.0-build5", "6.0.0-build6"]);
+    assert.deepEqual((await readdir(join(runtimeRoot, "versions"))).sort(), ["5.0.0-build5-fixture-sidecar", "6.0.0-build6-fixture-sidecar"]);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -325,7 +361,7 @@ test("ensureRuntimeInstalled repairs current.json when it is malformed, pointing
     );
     const corruptResult = await ensureRuntimeInstalled({ seedRoot: seed, runtimeRoot: corruptRoot });
     assert.equal(corruptResult.gatewayVersion, "7.0.0");
-    await assert.doesNotReject(readFile(join(corruptResult.runtimeRoot, "src/monitor.js")));
+    await assert.doesNotReject(readFile(join(corruptResult.runtimeRoot, "sidecar/src/server/monitor.js")));
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

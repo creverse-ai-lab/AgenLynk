@@ -1,5 +1,5 @@
 // Copies the app bundle's runtime seed into a single, version-pinned install
-// path (~/.acp-gateway/runtime/versions/<gatewayVersion>-<gatewayBuildId>/)
+// path (~/.acp-gateway/runtime/versions/<gatewayVersion>-<gatewayBuildId>-<sidecarBuildId>/)
 // and atomically activates it via current.json. This is the only place a
 // packaged Lynk build's Node/monitor/bootstrap should ever run from — the
 // app bundle itself is seed input only (see TODO.md's fixed runtime
@@ -8,7 +8,13 @@
 import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
-import { readManifestFile, verifyRuntimeManifest } from "./runtime-manifest.js";
+import {
+  readManifestFile,
+  runtimePointerIdentityMismatch,
+  runtimeSidecarIdentity,
+  runtimeVersionId,
+  verifyRuntimeManifest
+} from "./runtime-manifest.js";
 import { CURRENT_POINTER_FILE, PREVIOUS_POINTER_FILE, readPointerFile, writePointerFile } from "./runtime-pointer.js";
 import { runBundledRuntimeSmokeCheck } from "./runtime-smoke-check.js";
 import { stageVerifiedRuntime } from "./runtime-staging.js";
@@ -56,7 +62,7 @@ export async function ensureRuntimeInstalled({
     if (installed && !(await seedSupersedes(seedRoot, installed))) return installed;
 
     const manifest = await readManifestFile(seedRoot);
-    const versionDir = `${manifest.gatewayVersion}-${manifest.gatewayBuildId}`;
+    const versionDir = runtimeVersionId(manifest);
     const target = join(runtimeRoot, "versions", versionDir);
 
     if (!(await isValid(target, manifest))) {
@@ -87,6 +93,7 @@ export async function ensureRuntimeInstalled({
       runtimeRoot: target,
       gatewayVersion: manifest.gatewayVersion,
       gatewayBuildId: manifest.gatewayBuildId,
+      ...runtimeSidecarIdentity(manifest),
       generatedAt: manifest.generatedAt
     };
   });
@@ -101,7 +108,7 @@ async function currentRuntimeIfValid(runtimeRoot) {
     const current = await readCurrentRuntime(runtimeRoot);
     if (!current || !(await isConfinedToVersions(runtimeRoot, current.runtimeRoot))) return null;
     const ownManifest = await readManifestFile(current.runtimeRoot);
-    if (ownManifest.gatewayVersion !== current.gatewayVersion || ownManifest.gatewayBuildId !== current.gatewayBuildId) {
+    if (runtimePointerIdentityMismatch(current, ownManifest)) {
       return null;
     }
     await verifyRuntimeManifest(current.runtimeRoot, ownManifest);
@@ -109,6 +116,7 @@ async function currentRuntimeIfValid(runtimeRoot) {
       runtimeRoot: current.runtimeRoot,
       gatewayVersion: current.gatewayVersion,
       gatewayBuildId: current.gatewayBuildId,
+      ...runtimeSidecarIdentity(ownManifest),
       generatedAt: ownManifest.generatedAt,
       pinned: current.pinned === true
     };
@@ -210,6 +218,7 @@ export async function activateCurrent(runtimeRoot, target, manifest, { pinned = 
     runtimeRoot: target,
     gatewayVersion: manifest.gatewayVersion,
     gatewayBuildId: manifest.gatewayBuildId,
+    ...runtimeSidecarIdentity(manifest),
     activatedAt: new Date().toISOString(),
     ...(pinned ? { pinned: true } : {})
   };

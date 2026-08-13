@@ -55,9 +55,10 @@ export function computeGatewayBuildId(packageRoot) {
   const sourceRoot = join(packageRoot, "src");
   const hash = createHash("sha256");
   // The whole of src/ and skills/, not just top-level scripts: the runtime
-  // payload also carries nested assets (e.g. src/local-agents/), and a build
+  // payload also carries nested Gateway assets (e.g. src/providers/), and a build
   // id that ignored them would leave an already-installed runtime looking
-  // current while missing files the app just shipped.
+  // current while missing files the app just shipped. The sidecar namespace
+  // is fingerprinted independently by sidecar/src/version.js.
   hashPayloadTree(hash, sourceRoot, "src");
   hashPayloadTree(hash, join(packageRoot, "skills"), "skills");
   // node_modules is pinned by the lockfile rather than hashed directly.

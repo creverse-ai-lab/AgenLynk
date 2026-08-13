@@ -6,6 +6,7 @@
   "private": true,
   "files": [
     "src/",
+    "sidecar/",
     "skills/",
     "README.md"
   ],
@@ -16,14 +17,15 @@
     "acp-gateway-guide": "src/guide.js",
     "acp-gateway-daemon": "src/gateway-daemon.js",
     "acp-gateway-bootstrap": "src/bootstrap.js",
-    "acp-gateway-monitor": "src/monitor.js"
+    "agenlynk-sidecar": "sidecar/src/server/monitor.js"
   },
   "scripts": {
     "start": "node src/index.js",
     "daemon": "node src/gateway-daemon.js",
     "guide": "node src/guide.js",
     "bootstrap": "node src/bootstrap.js",
-    "monitor:server": "node src/monitor.js",
+    "monitor:server": "node sidecar/src/server/monitor.js",
+    "sidecar:test": "node --test sidecar/test/*.test.js",
     "macos:build": "sh macos/scripts/build-app.sh",
     "macos:dmg": "sh macos/scripts/build-dmg.sh",
     "macos:verify": "sh macos/scripts/verify-dmg.sh",

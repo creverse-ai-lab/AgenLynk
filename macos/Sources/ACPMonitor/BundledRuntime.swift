@@ -146,13 +146,13 @@ enum BundledRuntime {
         let path = runtimeRootBase().appendingPathComponent("current.json")
         guard let data = try? Data(contentsOf: path), let pointer = parseCurrentRuntime(data: data) else { return nil }
         let node = pointer.runtimeRoot.appendingPathComponent("node/bin/node")
-        let monitor = pointer.runtimeRoot.appendingPathComponent("src/monitor.js")
+        let monitor = pointer.runtimeRoot.appendingPathComponent("sidecar/src/server/monitor.js")
         guard FileManager.default.isExecutableFile(atPath: node.path),
               FileManager.default.fileExists(atPath: monitor.path) else { return nil }
         return pointer
     }
 
-    /// Resolves a resource (e.g. "src/monitor.js") from the installed
+    /// Resolves a resource (e.g. "sidecar/src/server/monitor.js") from the installed
     /// runtime in a packaged build, or from the source-tree checkout during
     /// development. Never resolves it from the app bundle's seed.
     static func resourceURL(_ relativePath: String) throws -> URL {

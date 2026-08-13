@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const testDirectory = fileURLToPath(new URL("../test/", import.meta.url));
+const sidecarTestDirectory = fileURLToPath(new URL("../sidecar/test/", import.meta.url));
 const quick = process.argv.includes("--quick");
 const forwardedArgs = process.argv.slice(2).filter((argument) => argument !== "--quick");
 const slowFiles = new Set([
@@ -16,12 +17,16 @@ const slowFiles = new Set([
   "socket.test.js"
 ]);
 
-const allFiles = (await readdir(testDirectory))
+const rootFiles = (await readdir(testDirectory))
   .filter((name) => name.endsWith(".test.js"))
-  .sort();
+  .map((name) => ({ name, path: join(testDirectory, name) }));
+const sidecarFiles = (await readdir(sidecarTestDirectory))
+  .filter((name) => name.endsWith(".test.js"))
+  .map((name) => ({ name, path: join(sidecarTestDirectory, name) }));
+const allFiles = [...rootFiles, ...sidecarFiles].sort((left, right) => left.path.localeCompare(right.path));
 const selectedFiles = allFiles
-  .filter((name) => !quick || !slowFiles.has(name))
-  .map((name) => join(testDirectory, name));
+  .filter(({ name }) => !quick || !slowFiles.has(name))
+  .map(({ path }) => path);
 const artifacts = await mkdtemp(join(tmpdir(), "acp-gateway-test-artifacts-"));
 
 if (quick) {

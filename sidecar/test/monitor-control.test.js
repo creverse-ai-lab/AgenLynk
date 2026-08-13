@@ -8,9 +8,10 @@ import { createInterface } from "node:readline";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
-import { GatewayRpcClient } from "../src/socket-rpc.js";
-import { MonitorState } from "../src/monitor-state.js";
-import { annotateRuntimeSplit, restartBlockedError } from "../src/monitor.js";
+import { GatewayRpcClient, LEGACY_GATEWAY_DAEMON_URL } from "../src/gateway/legacy-adapter.js";
+import { MonitorState } from "../src/projection/monitor-state.js";
+import { annotateRuntimeSplit, restartBlockedError } from "../src/server/monitor.js";
+import { SIDECAR_BUILD_ID, SIDECAR_VERSION } from "../src/version.js";
 
 // The Swift half of this contract lives in MonitorModelTests.swift
 // (restartBlockersMatchTheSharedGatewayContract) and replays the same file.
@@ -97,7 +98,7 @@ test("native monitor controls Gateway config and safely restarts into pending va
     agentUpdates: { autoUpdate: true, notifications: true }
   }), { mode: 0o600 });
 
-  const daemon = spawn(process.execPath, [fileURLToPath(new URL("../src/gateway-daemon.js", import.meta.url))], {
+  const daemon = spawn(process.execPath, [fileURLToPath(LEGACY_GATEWAY_DAEMON_URL)], {
     env: commonEnv,
     stdio: ["ignore", "ignore", "pipe"]
   });
@@ -108,7 +109,7 @@ test("native monitor controls Gateway config and safely restarts into pending va
   try {
     await waitForPath(socketPath, () => daemonError);
     await cleanupRpc.call("setup", {}, 15_000);
-    monitor = spawn(process.execPath, [fileURLToPath(new URL("../src/monitor.js", import.meta.url))], {
+    monitor = spawn(process.execPath, [fileURLToPath(new URL("../src/server/monitor.js", import.meta.url))], {
       env: { ...commonEnv, ACP_GATEWAY_MONITOR_PORT: "0", ACP_GATEWAY_MONITOR_AUTOSTART: "0" },
       stdio: ["ignore", "pipe", "pipe"]
     });
@@ -185,7 +186,7 @@ test("native monitor cold-starts Gateway when no daemon is running", async () =>
     agentUpdates: { autoUpdate: true, notifications: true }
   }), { mode: 0o600 });
 
-  const monitor = spawn(process.execPath, [fileURLToPath(new URL("../src/monitor.js", import.meta.url))], {
+  const monitor = spawn(process.execPath, [fileURLToPath(new URL("../src/server/monitor.js", import.meta.url))], {
     env,
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -236,7 +237,7 @@ test("native monitor exposes /api/meta, versioned snapshot, and stable error cod
 
   // No Gateway daemon is started for this test: the API-shape and
   // error-code contract must hold even before a "setup" call ever succeeds.
-  const monitor = spawn(process.execPath, [fileURLToPath(new URL("../src/monitor.js", import.meta.url))], {
+  const monitor = spawn(process.execPath, [fileURLToPath(new URL("../src/server/monitor.js", import.meta.url))], {
     env,
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -250,6 +251,8 @@ test("native monitor exposes /api/meta, versioned snapshot, and stable error cod
     ]);
     assert.equal(ready.schemaVersion, 1);
     assert.equal(ready.monitorApiVersion, "1.0");
+    assert.equal(ready.sidecarVersion, SIDECAR_VERSION);
+    assert.equal(ready.sidecarBuildId, SIDECAR_BUILD_ID);
     assert.deepEqual(ready.gatewayIdentity, {
       rootId,
       gatewayApiVersion: null,

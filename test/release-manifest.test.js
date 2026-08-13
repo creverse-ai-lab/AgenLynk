@@ -17,6 +17,8 @@ async function fixture() {
     gatewayVersion: "1.3.1",
     gatewayBuildId: "build-id",
     gatewayApiVersion: 1,
+    sidecarVersion: "0.4.0",
+    sidecarBuildId: "sidecar-build-id",
     nodeVersion: "22.23.2"
   }));
   return { root, runtimeRoot, out: join(root, "Lynk.release.json") };
@@ -51,6 +53,7 @@ test("release manifest CLI writes evidence-backed app, runtime, DMG, and signing
     assert.equal(release.dmg.bytes, 12345);
     assert.equal(release.dmg.sha256, "a".repeat(64));
     assert.deepEqual(release.gateway, { version: "1.3.1", buildId: "build-id", apiVersion: 1 });
+    assert.deepEqual(release.sidecar, { version: "0.4.0", buildId: "sidecar-build-id" });
     assert.deepEqual(release.signing, { mode: "ad-hoc", identity: null, notarized: false, stapled: false });
   } finally {
     await rm(root, { recursive: true, force: true });

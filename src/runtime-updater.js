@@ -19,7 +19,13 @@ import { runBundledRuntimeSmokeCheck } from "./runtime-smoke-check.js";
 import { GATEWAY_API_VERSION, UnsupportedGatewayApiVersionError } from "./gateway-api-version.js";
 import { activateCurrent, defaultRuntimeRoot, isConfinedToVersions, readCurrentRuntime } from "./runtime-installer.js";
 import { withRuntimeLock } from "./runtime-lock.js";
-import { readManifestFile, verifyRuntimeManifest } from "./runtime-manifest.js";
+import {
+  readManifestFile,
+  runtimePointerIdentityMismatch,
+  runtimeSidecarIdentity,
+  runtimeVersionId,
+  verifyRuntimeManifest
+} from "./runtime-manifest.js";
 import { PREVIOUS_POINTER_FILE, readPointerFile, writePointerFile } from "./runtime-pointer.js";
 import { stageVerifiedRuntime } from "./runtime-staging.js";
 
@@ -150,17 +156,14 @@ async function assertKnownGoodPointer(runtimeRoot, pointer, label) {
   }
   const manifest = await readCandidateManifest(pointer.runtimeRoot);
   await verifyCandidate(pointer.runtimeRoot, manifest);
-  if (
-    manifest.gatewayVersion !== pointer.gatewayVersion
-    || manifest.gatewayBuildId !== pointer.gatewayBuildId
-  ) {
+  if (runtimePointerIdentityMismatch(pointer, manifest)) {
     throw new RuntimeUpdaterError(
       "RUNTIME_POINTER_IDENTITY_MISMATCH",
       `${label} target does not match its runtime manifest`,
       { pointer: label }
     );
   }
-  return pointer;
+  return { ...pointer, ...runtimeSidecarIdentity(manifest) };
 }
 
 export async function readPreviousRuntime(runtimeRoot = defaultRuntimeRoot()) {
@@ -197,6 +200,7 @@ export async function inspectRuntime(options) {
         const manifest = await readManifestFile(target);
         summary.gatewayVersion = manifest.gatewayVersion;
         summary.gatewayBuildId = manifest.gatewayBuildId;
+        Object.assign(summary, runtimeSidecarIdentity(manifest));
         summary.gatewayApiVersion = manifest.gatewayApiVersion;
         // Surfaced so the app can show which Node each installed runtime
         // carries without opening the manifest a second time.
@@ -223,7 +227,7 @@ export async function inspectRuntime(options) {
 
 /**
  * stage: manifest/checksum-verify a seed and copy it into
- * runtimeRoot/versions/<gatewayVersion>-<gatewayBuildId>/ without touching
+ * runtimeRoot/versions/<gatewayVersion>-<gatewayBuildId>-<sidecarBuildId>/ without touching
  * current.json. Idempotent — re-staging an already-valid target is a no-op.
  * Mirrors runtime-installer.js's stageAndActivate, minus the activation step.
  */
@@ -239,7 +243,7 @@ export async function stageRuntimeCandidate(options) {
     await verifyCandidate(seedRoot, manifest);
     assertSupportedGatewayApiVersion(manifest);
 
-    const versionId = `${manifest.gatewayVersion}-${manifest.gatewayBuildId}`;
+    const versionId = runtimeVersionId(manifest);
     const target = resolveVersionTarget(runtimeRoot, versionId);
 
     if (await pathExists(target)) {
@@ -253,6 +257,7 @@ export async function stageRuntimeCandidate(options) {
           runtimeRoot: target,
           gatewayVersion: manifest.gatewayVersion,
           gatewayBuildId: manifest.gatewayBuildId,
+          ...runtimeSidecarIdentity(manifest),
           gatewayApiVersion: manifest.gatewayApiVersion,
           alreadyStaged: true
         };
@@ -290,6 +295,7 @@ export async function stageRuntimeCandidate(options) {
       runtimeRoot: target,
       gatewayVersion: manifest.gatewayVersion,
       gatewayBuildId: manifest.gatewayBuildId,
+      ...runtimeSidecarIdentity(manifest),
       gatewayApiVersion: manifest.gatewayApiVersion,
       alreadyStaged: false
     };
@@ -322,6 +328,7 @@ export async function validateRuntimeCandidate(options) {
       runtimeRoot: target,
       gatewayVersion: manifest.gatewayVersion,
       gatewayBuildId: manifest.gatewayBuildId,
+      ...runtimeSidecarIdentity(manifest),
       gatewayApiVersion: manifest.gatewayApiVersion,
       smoke
     };
@@ -374,9 +381,17 @@ export async function activateRuntimeCandidate(options) {
         "POST_ACTIVATION_HEALTH_CHECK_FAILED",
         `post-activation health check failed, restored previous target: ${healthError.message}`,
         {
-          attempted: { gatewayVersion: manifest.gatewayVersion, gatewayBuildId: manifest.gatewayBuildId },
+          attempted: {
+            gatewayVersion: manifest.gatewayVersion,
+            gatewayBuildId: manifest.gatewayBuildId,
+            ...runtimeSidecarIdentity(manifest)
+          },
           restoredTo: previousBeforeSwitch
-            ? { gatewayVersion: previousBeforeSwitch.gatewayVersion, gatewayBuildId: previousBeforeSwitch.gatewayBuildId }
+            ? {
+              gatewayVersion: previousBeforeSwitch.gatewayVersion,
+              gatewayBuildId: previousBeforeSwitch.gatewayBuildId,
+              ...runtimeSidecarIdentity(previousBeforeSwitch)
+            }
             : null
         }
       );
@@ -388,10 +403,16 @@ export async function activateRuntimeCandidate(options) {
         runtimeRoot: target,
         gatewayVersion: manifest.gatewayVersion,
         gatewayBuildId: manifest.gatewayBuildId,
+        ...runtimeSidecarIdentity(manifest),
         gatewayApiVersion: manifest.gatewayApiVersion
       },
       previous: previousBeforeSwitch
-        ? { runtimeRoot: previousBeforeSwitch.runtimeRoot, gatewayVersion: previousBeforeSwitch.gatewayVersion, gatewayBuildId: previousBeforeSwitch.gatewayBuildId }
+        ? {
+          runtimeRoot: previousBeforeSwitch.runtimeRoot,
+          gatewayVersion: previousBeforeSwitch.gatewayVersion,
+          gatewayBuildId: previousBeforeSwitch.gatewayBuildId,
+          ...runtimeSidecarIdentity(previousBeforeSwitch)
+        }
         : null
     };
     });
@@ -422,15 +443,13 @@ export async function rollbackRuntime(options) {
 
     const manifest = await readCandidateManifest(previous.runtimeRoot);
     await verifyCandidate(previous.runtimeRoot, manifest);
-    if (
-      manifest.gatewayVersion !== previous.gatewayVersion
-      || manifest.gatewayBuildId !== previous.gatewayBuildId
-    ) {
+    if (runtimePointerIdentityMismatch(previous, manifest)) {
       throw new RuntimeUpdaterError(
         "PREVIOUS_TARGET_IDENTITY_MISMATCH",
         "recorded previous target does not match its runtime manifest"
       );
     }
+    Object.assign(previous, runtimeSidecarIdentity(manifest));
     assertSupportedGatewayApiVersion(manifest);
     await runSmokeCheck(smokeCheck ?? runBuiltinSmokeCheck, previous.runtimeRoot, manifest);
 
@@ -452,9 +471,17 @@ export async function rollbackRuntime(options) {
         "POST_ROLLBACK_HEALTH_CHECK_FAILED",
         `post-rollback health check failed, restored current target: ${healthError.message}`,
         {
-          attempted: { gatewayVersion: previous.gatewayVersion, gatewayBuildId: previous.gatewayBuildId },
+          attempted: {
+            gatewayVersion: previous.gatewayVersion,
+            gatewayBuildId: previous.gatewayBuildId,
+            ...runtimeSidecarIdentity(previous)
+          },
           restoredTo: currentBeforeRollback
-            ? { gatewayVersion: currentBeforeRollback.gatewayVersion, gatewayBuildId: currentBeforeRollback.gatewayBuildId }
+            ? {
+              gatewayVersion: currentBeforeRollback.gatewayVersion,
+              gatewayBuildId: currentBeforeRollback.gatewayBuildId,
+              ...runtimeSidecarIdentity(currentBeforeRollback)
+            }
             : null
         }
       );
@@ -464,9 +491,19 @@ export async function rollbackRuntime(options) {
     }
 
     return {
-      activated: { runtimeRoot: previous.runtimeRoot, gatewayVersion: previous.gatewayVersion, gatewayBuildId: previous.gatewayBuildId },
+      activated: {
+        runtimeRoot: previous.runtimeRoot,
+        gatewayVersion: previous.gatewayVersion,
+        gatewayBuildId: previous.gatewayBuildId,
+        ...runtimeSidecarIdentity(previous)
+      },
       rolledBackFrom: currentBeforeRollback
-        ? { runtimeRoot: currentBeforeRollback.runtimeRoot, gatewayVersion: currentBeforeRollback.gatewayVersion, gatewayBuildId: currentBeforeRollback.gatewayBuildId }
+        ? {
+          runtimeRoot: currentBeforeRollback.runtimeRoot,
+          gatewayVersion: currentBeforeRollback.gatewayVersion,
+          gatewayBuildId: currentBeforeRollback.gatewayBuildId,
+          ...runtimeSidecarIdentity(currentBeforeRollback)
+        }
         : null
     };
     });

@@ -18,26 +18,30 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { pathIsMissing } from "./fs-paths.js";
-import { GatewayRpcClient } from "./socket-rpc.js";
-import { MONITOR_API_VERSION, MONITOR_SCHEMA_VERSION, MonitorState, queuedSingleFlight } from "./monitor-state.js";
-import { gatewaySocketPath } from "./config.js";
-import { GATEWAY_BUILD_ID, GATEWAY_RUNTIME_ROOT } from "./version.js";
-import { mergeMonitorSessions, projectLocalSnapshot } from "./local-monitor.js";
-import { currentProjectedTurnId, projectCodexTranscript } from "./local-transcript.js";
-import { LocalAgentScanner } from "./local-agents/index.js";
 import {
   defaultGatewaySettings,
+  defaultInstallStatePath,
   gatewaySettingsSnapshot,
-  resolveGatewaySettings,
-  updateGatewaySettings
-} from "./gateway-settings.js";
-import {
+  gatewaySocketPath,
+  GATEWAY_BUILD_ID,
+  GATEWAY_RUNTIME_ROOT,
+  GatewayRpcClient,
   installOfficialAgent,
   officialAgentCatalog,
-  setOfficialAgentEnabled
-} from "./agent-catalog.js";
-import { defaultInstallStatePath } from "./installer.js";
+  pathIsMissing,
+  resolveGatewaySettings,
+  setOfficialAgentEnabled,
+  updateGatewaySettings
+} from "../gateway/legacy-adapter.js";
+import { MONITOR_API_VERSION, MONITOR_SCHEMA_VERSION, MonitorState, queuedSingleFlight } from "../projection/monitor-state.js";
+import { SIDECAR_BUILD_ID, SIDECAR_VERSION } from "../version.js";
+import { mergeMonitorSessions, projectLocalSnapshot } from "../local-monitor.js";
+import { currentProjectedTurnId, projectCodexTranscript } from "../local-transcript.js";
+import { LocalAgentScanner } from "../local-agents/index.js";
+/*
+ * Keep every Gateway-private import above in legacy-adapter.js. The sidecar
+ * modules below this directory must not reach into the bundled Gateway fork.
+ */
 
 const MONITOR_HOST = "127.0.0.1";
 const MONITOR_PORT = numberEnv("ACP_GATEWAY_MONITOR_PORT", 8642, 0);
@@ -316,6 +320,8 @@ async function main() {
     url: `http://${MONITOR_HOST}:${port}`,
     apiToken,
     rootId: identity.rootId,
+    sidecarVersion: SIDECAR_VERSION,
+    sidecarBuildId: SIDECAR_BUILD_ID,
     gatewayIdentity: gatewayIdentity(state, identity),
     capabilities: monitorCapabilities(state)
   }));

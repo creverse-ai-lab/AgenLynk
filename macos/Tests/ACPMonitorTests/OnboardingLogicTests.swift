@@ -31,7 +31,7 @@ enum OnboardingLogicChecks {
         guard BundledRuntimeError.nodeNotFound.stableCode == nil else {
             throw CheckError.failed("expected nodeNotFound to carry no stable code")
         }
-        guard BundledRuntimeError.resourceNotFound("src/monitor.js").stableCode == nil else {
+        guard BundledRuntimeError.resourceNotFound("sidecar/src/server/monitor.js").stableCode == nil else {
             throw CheckError.failed("expected resourceNotFound to carry no stable code")
         }
     }

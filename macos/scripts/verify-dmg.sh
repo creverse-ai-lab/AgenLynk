@@ -89,7 +89,7 @@ done
 printf '%s\n' "No shipped binary resolves through a build-machine path"
 
 RUNTIME_DIR="$APP/Contents/Resources/runtime"
-if [ ! -f "$RUNTIME_DIR/src/index.js" ] || [ ! -f "$RUNTIME_DIR/package.json" ]; then
+if [ ! -f "$RUNTIME_DIR/src/index.js" ] || [ ! -f "$RUNTIME_DIR/sidecar/src/server/monitor.js" ] || [ ! -f "$RUNTIME_DIR/package.json" ]; then
   echo "error: $RUNTIME_DIR does not look like a bundled runtime seed" >&2
   exit 1
 fi

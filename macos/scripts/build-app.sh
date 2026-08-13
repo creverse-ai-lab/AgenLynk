@@ -61,14 +61,16 @@ for SIZE in 16 32 128 256 512; do
 done
 iconutil -c icns "$ICONSET" -o "$CONTENTS/Resources/AppIcon.icns"
 
-# Copy src/ wholesale rather than enumerating file types or subdirectories.
-# Everything under src/ is runtime payload, and src/version.js hashes the same
-# tree to derive gatewayBuildId — a seed that omitted part of it would compute a
-# different build id once installed, and nested additions would silently never
-# ship.
+# Copy the Gateway fork and AgenLynk sidecar as separate runtime namespaces.
+# src/version.js fingerprints only the Gateway payload; sidecar/src/version.js
+# owns the independent sidecar build id.
 rm -rf "$CONTENTS/Resources/runtime/src"
 cp -R "$REPO_ROOT/src" "$CONTENTS/Resources/runtime/src"
-for REQUIRED in src/monitor.js src/index.js src/local-agents/index.js; do
+rm -rf "$CONTENTS/Resources/runtime/sidecar"
+mkdir -p "$CONTENTS/Resources/runtime/sidecar"
+cp "$REPO_ROOT/sidecar/package.json" "$CONTENTS/Resources/runtime/sidecar/package.json"
+cp -R "$REPO_ROOT/sidecar/src" "$CONTENTS/Resources/runtime/sidecar/src"
+for REQUIRED in src/index.js sidecar/src/server/monitor.js sidecar/src/local-agents/index.js sidecar/src/gateway/legacy-adapter.js; do
   if [ ! -f "$CONTENTS/Resources/runtime/$REQUIRED" ]; then
     echo "error: $REQUIRED is missing from the runtime seed" >&2
     exit 1

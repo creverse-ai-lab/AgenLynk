@@ -6,11 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import test from "node:test";
-import { GatewayService } from "../src/gateway-service.js";
-import { MonitorState } from "../src/monitor-state.js";
-import { isIgnoredMonitorEvent } from "../src/monitor.js";
-import { createSocketSender } from "../src/socket-flow.js";
-import { GatewayRpcClient } from "../src/socket-rpc.js";
+import { GatewayRpcClient, GatewayService, createSocketSender } from "../src/gateway/legacy-adapter.js";
+import { MonitorState } from "../src/projection/monitor-state.js";
+import { isIgnoredMonitorEvent } from "../src/server/monitor.js";
 
 const traceDirectory = new URL("./fixtures/monitor-traces/", import.meta.url);
 const SNAPSHOT_KEYS = [

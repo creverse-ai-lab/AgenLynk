@@ -65,8 +65,10 @@ test("stage -> validate -> activate -> inspect succeeds end to end via the real 
     const staged = await stageRuntimeCandidate({ runtimeRoot, seedRoot: seed });
     assert.equal(staged.ok, true);
     assert.equal(staged.op, "stage");
-    assert.equal(staged.versionId, "1.0.0-build1");
+    assert.equal(staged.versionId, "1.0.0-build1-fixture-sidecar");
     assert.equal(staged.alreadyStaged, false);
+    assert.equal(staged.sidecarVersion, "0.4.0");
+    assert.equal(staged.sidecarBuildId, "fixture-sidecar");
 
     const restaged = await stageRuntimeCandidate({ runtimeRoot, seedRoot: seed });
     assert.equal(restaged.alreadyStaged, true, "re-staging an already-valid target is idempotent");
@@ -74,6 +76,8 @@ test("stage -> validate -> activate -> inspect succeeds end to end via the real 
     const validated = await validateRuntimeCandidate({ runtimeRoot, versionId: staged.versionId });
     assert.equal(validated.ok, true);
     assert.equal(validated.smoke.gatewayVersion, "1.0.0");
+    assert.equal(validated.smoke.sidecarVersion, "0.4.0");
+    assert.equal(validated.smoke.sidecarBuildId, "fixture-sidecar");
 
     const activated = await activateRuntimeCandidate({ runtimeRoot, versionId: staged.versionId });
     assert.equal(activated.ok, true);
@@ -92,12 +96,47 @@ test("stage -> validate -> activate -> inspect succeeds end to end via the real 
   }
 });
 
+test("sidecar-only build changes stage as distinct version ids", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "acp-runtime-updater-"));
+  try {
+    const runtimeRoot = join(workspace, "runtime");
+    const seedA = join(workspace, "seed-a");
+    const seedB = join(workspace, "seed-b");
+    await writeSmokeCapableSeed(seedA, {
+      gatewayVersion: "1.0.0",
+      gatewayBuildId: "same-gw",
+      sidecarBuildId: "sidecar-a"
+    });
+    await writeSmokeCapableSeed(seedB, {
+      gatewayVersion: "1.0.0",
+      gatewayBuildId: "same-gw",
+      sidecarBuildId: "sidecar-b"
+    });
+
+    const stagedA = await stageRuntimeCandidate({ runtimeRoot, seedRoot: seedA });
+    const stagedB = await stageRuntimeCandidate({ runtimeRoot, seedRoot: seedB });
+    assert.equal(stagedA.ok, true);
+    assert.equal(stagedB.ok, true);
+    assert.equal(stagedA.alreadyStaged, false);
+    assert.equal(stagedB.alreadyStaged, false);
+    assert.equal(stagedA.versionId, "1.0.0-same-gw-sidecar-a");
+    assert.equal(stagedB.versionId, "1.0.0-same-gw-sidecar-b");
+    assert.equal(stagedA.sidecarBuildId, "sidecar-a");
+    assert.equal(stagedB.sidecarBuildId, "sidecar-b");
+
+    const restagedA = await stageRuntimeCandidate({ runtimeRoot, seedRoot: seedA });
+    assert.equal(restagedA.alreadyStaged, true);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("stage rejects a candidate whose payload was tampered with after its manifest was generated", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "acp-runtime-updater-"));
   try {
     const seed = join(workspace, "seed-tampered");
     await writeSmokeCapableSeed(seed, { gatewayVersion: "2.0.0", gatewayBuildId: "build2" });
-    await writeFile(join(seed, "src/monitor.js"), "export default { tampered: true };\n");
+    await writeFile(join(seed, "sidecar/src/server/monitor.js"), "export default { tampered: true };\n");
 
     const result = await stageRuntimeCandidate({ runtimeRoot: join(workspace, "runtime"), seedRoot: seed });
     assert.equal(result.ok, false);
@@ -117,7 +156,7 @@ test("stage never replaces a corrupt current target in place", async () => {
     await activateRuntimeCandidate({ runtimeRoot, versionId: staged.versionId, smokeCheck: noopSmokeCheck, healthCheck: noopSmokeCheck });
 
     const current = await readCurrentRuntime(runtimeRoot);
-    const corruptedPath = join(current.runtimeRoot, "src/monitor.js");
+    const corruptedPath = join(current.runtimeRoot, "sidecar/src/server/monitor.js");
     const corruptedBytes = "export default { corrupted: true };\n";
     await writeFile(corruptedPath, corruptedBytes);
 
@@ -253,6 +292,44 @@ test("rollback restores the previous target and reports NO_PREVIOUS_TARGET when 
     assert.equal(rolledBack.rolledBackFrom.gatewayBuildId, "build7b");
     assert.equal((await readCurrentRuntime(runtimeRoot)).gatewayBuildId, "build7a");
     assert.equal((await readPreviousRuntime(runtimeRoot)).gatewayBuildId, "build7b", "rollback must be itself reversible");
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("rollback fills sidecar identity from the verified manifest when previous is a legacy pointer", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "acp-runtime-updater-"));
+  try {
+    const runtimeRoot = join(workspace, "runtime");
+    const seedOne = join(workspace, "seed-legacy-a");
+    await writeSmokeCapableSeed(seedOne, { gatewayVersion: "7.2.0", gatewayBuildId: "legacy-a" });
+    const stagedOne = await stageRuntimeCandidate({ runtimeRoot, seedRoot: seedOne });
+    await activateRuntimeCandidate({ runtimeRoot, versionId: stagedOne.versionId, smokeCheck: noopSmokeCheck, healthCheck: noopSmokeCheck });
+
+    const seedTwo = join(workspace, "seed-legacy-b");
+    await writeSmokeCapableSeed(seedTwo, { gatewayVersion: "7.2.0", gatewayBuildId: "legacy-b" });
+    const stagedTwo = await stageRuntimeCandidate({ runtimeRoot, seedRoot: seedTwo });
+    await activateRuntimeCandidate({ runtimeRoot, versionId: stagedTwo.versionId, smokeCheck: noopSmokeCheck, healthCheck: noopSmokeCheck });
+
+    const previous = await readPreviousRuntime(runtimeRoot);
+    await writeFile(join(runtimeRoot, "previous.json"), JSON.stringify({
+      formatVersion: 1,
+      runtimeRoot: previous.runtimeRoot,
+      gatewayVersion: previous.gatewayVersion,
+      gatewayBuildId: previous.gatewayBuildId,
+      activatedAt: previous.activatedAt
+    }));
+    assert.equal((await readPreviousRuntime(runtimeRoot)).sidecarBuildId, undefined);
+
+    const rolledBack = await rollbackRuntime({ runtimeRoot, smokeCheck: noopSmokeCheck, healthCheck: noopSmokeCheck });
+    assert.equal(rolledBack.ok, true);
+    assert.equal(rolledBack.activated.sidecarVersion, "0.4.0");
+    assert.equal(rolledBack.activated.sidecarBuildId, "fixture-sidecar");
+
+    const current = await readCurrentRuntime(runtimeRoot);
+    assert.equal(current.gatewayBuildId, "legacy-a");
+    assert.equal(current.sidecarVersion, "0.4.0");
+    assert.equal(current.sidecarBuildId, "fixture-sidecar");
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

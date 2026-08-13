@@ -54,6 +54,9 @@ try {
   if (!Number.isInteger(runtimeManifest.gatewayApiVersion)) {
     throw new Error("runtime manifest is missing an integer gatewayApiVersion");
   }
+  if (!runtimeManifest.sidecarVersion || !runtimeManifest.sidecarBuildId) {
+    throw new Error("runtime manifest is missing the sidecar identity");
+  }
 
   const release = {
     schemaVersion: RELEASE_MANIFEST_FORMAT_VERSION,
@@ -75,6 +78,10 @@ try {
       version: runtimeManifest.gatewayVersion,
       buildId: runtimeManifest.gatewayBuildId,
       apiVersion: runtimeManifest.gatewayApiVersion
+    },
+    sidecar: {
+      version: runtimeManifest.sidecarVersion,
+      buildId: runtimeManifest.sidecarBuildId
     },
     node: {
       version: runtimeManifest.nodeVersion

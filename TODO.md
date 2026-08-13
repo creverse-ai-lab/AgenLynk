@@ -35,7 +35,7 @@ Monitor activity projection
 - [x] Gateway 세션, ACP session ID, 모델, opener agent와 최소 resume checkpoint를 저장하고 재시작 후 복원한다 (`src/gateway-service.js`, `test/gateway.test.js`).
 - [x] Frontdoor/Worker topology, 이벤트, Task, Inbox와 세션 상세를 네이티브 SwiftUI에서 실시간 표시한다.
 - [x] 안전하게 공개 가능한 Gateway runtime config 18개를 UI에서 조회·저장·초기화하고 안전 재시작한다 (`src/gateway-settings.js`, `SettingsView.swift`).
-- [x] Gateway를 거치지 않는 로컬 Codex/Claude/Grok 세션과 그 sub-agent를 monitor 프로세스 안에서 직접 감지한다. 외부 스크립트도 `python3`/`sqlite3` CLI 의존도 없다 (`src/local-agents/`, `test/local-agents.test.js`).
+- [x] Gateway를 거치지 않는 로컬 Codex/Claude/Grok 세션과 그 sub-agent를 monitor 프로세스 안에서 직접 감지한다. 외부 스크립트도 `python3`/`sqlite3` CLI 의존도 없다 (`sidecar/src/local-agents/`, `sidecar/test/local-agents.test.js`).
 - [x] `gatewayBuildId`가 `src/`와 `skills/` 전체를 재귀 해시해 중첩 payload 추가가 기존 설치에 반드시 도달하게 한다 (`src/version.js`, `test/runtime-manifest.test.js`).
 - [x] 환경변수로 잠긴 config는 읽기 전용으로 표시하고 token/identity 같은 secret은 config 응답에 포함하지 않는다 (`test/gateway-settings.test.js`).
 - [x] 공식 ACP agent catalog 조회, targeted install, On/Off와 adapter update 상태를 UI에서 관리한다.
@@ -118,7 +118,7 @@ Monitor activity projection
 - [x] renderer에 Monitor/Gateway token, 전체 prompt, agent cwd 같은 private data를 전달하지 않는다.
 - [x] renderer가 만든 파일을 앱이 control 입력으로 읽지 않으며 Pet에서 Gateway mutation을 수행할 수 없게 한다.
 - [x] 개발자 절대 Pet 프로젝트 경로 기본값을 제거한다.
-- [x] 로컬 세션 감지를 외부 Python watcher에서 monitor 내장 Node 스캐너로 대체했다. 사용자 설정·`python3`·`sqlite3` CLI 의존이 모두 사라졌고, 별도 프로세스와 JSON 파일 IPC도 없다 (`src/local-agents/`).
+- [x] 로컬 세션 감지를 외부 Python watcher에서 monitor 내장 Node 스캐너로 대체했다. 사용자 설정·`python3`·`sqlite3` CLI 의존이 모두 사라졌고, 별도 프로세스와 JSON 파일 IPC도 없다 (`sidecar/src/local-agents/`).
 - [x] 기본 Pet은 하나의 renderer일 뿐이며 사용자가 같은 JSON 계약으로 다른 UI를 연결할 수 있게 한다. 번들 `Contents/Helpers/LynkPet.app`이 기본값이고 `monitor.petExecutablePath`로 교체한다 (`AppSettings.BundledPet`, `PetController`).
 - [x] Pet 경계의 atomic `0600` 쓰기와 renderer 환경 제한을 실제 자식 프로세스로 검증한다. 계약 파일 0600/디렉터리 0700, state/actions 시퀀스 동기, 내부 필드 미유출, secret 환경변수 미전달, stop() 시 자식 종료까지 확인한다 (`PetControllerTests.swift`).
 

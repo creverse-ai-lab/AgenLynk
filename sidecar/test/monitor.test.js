@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { MONITOR_API_VERSION, MONITOR_SCHEMA_VERSION, MonitorState, queuedSingleFlight } from "../src/monitor-state.js";
+import {
+  MONITOR_API_VERSION,
+  MONITOR_SCHEMA_VERSION,
+  MonitorState,
+  queuedSingleFlight
+} from "../src/projection/monitor-state.js";
 
 test("queuedSingleFlight serializes overlapping refreshes and coalesces the queue", async () => {
   let releaseFirst;

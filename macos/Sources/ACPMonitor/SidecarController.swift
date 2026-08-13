@@ -43,7 +43,7 @@ final class SidecarController {
         let startGeneration = generation
         let nodeURL = try BundledRuntime.locateNode(override: nodeOverride)
         try BundledRuntime.validateVersion(at: nodeURL)
-        let scriptURL = try BundledRuntime.resourceURL("src/monitor.js")
+        let scriptURL = try BundledRuntime.resourceURL("sidecar/src/server/monitor.js")
         let process = Process()
         let output = Pipe()
 

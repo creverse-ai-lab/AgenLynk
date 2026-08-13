@@ -259,7 +259,7 @@ enum MonitorModelChecks {
         let repoRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
-        let fixtureURL = repoRoot.appendingPathComponent("test/fixtures/monitor-snapshot-v1.json")
+        let fixtureURL = repoRoot.appendingPathComponent("sidecar/test/fixtures/monitor-snapshot-v1.json")
         let data = try Data(contentsOf: fixtureURL)
         let snapshot = try MonitorSnapshot.decode(data)
         try check(snapshot.schemaVersion == 1, "snapshot should decode the schema version")
@@ -283,7 +283,7 @@ enum MonitorModelChecks {
         let repoRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
-        let traceRoot = repoRoot.appendingPathComponent("test/fixtures/monitor-traces")
+        let traceRoot = repoRoot.appendingPathComponent("sidecar/test/fixtures/monitor-traces")
         let traceFiles = [
             "cold-start-gateway-meta-delay.ndjson",
             "frontdoor-disappears.ndjson",
@@ -1356,7 +1356,7 @@ enum MonitorModelChecks {
         try check(truncated.bodyText == nil, "a truncated JSON head must not be presented as readable text")
     }
 
-    /// Replays test/fixtures/restart-blockers.json — the same file
+    /// Replays sidecar/test/fixtures/restart-blockers.json — the same file
     /// test/monitor-control.test.js feeds to MonitorState.restartBlockers().
     /// The updater refuses to activate whenever either side reports a blocker,
     /// so the two must produce byte-identical strings for identical input.
@@ -1364,7 +1364,7 @@ enum MonitorModelChecks {
         let repoRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
-        let fixtureURL = repoRoot.appendingPathComponent("test/fixtures/restart-blockers.json")
+        let fixtureURL = repoRoot.appendingPathComponent("sidecar/test/fixtures/restart-blockers.json")
         guard let data = try? Data(contentsOf: fixtureURL),
               let cases = try? decodeJSONValue(data).objectValue?.array("cases"), !cases.isEmpty else {
             throw CheckError.failed("shared restart-blocker fixture is missing or unreadable at \(fixtureURL.path)")

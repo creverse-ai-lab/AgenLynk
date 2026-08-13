@@ -42,5 +42,5 @@ AgenLynk 0.4.0은 `agent_gateway`의 **실제 1.4.0 wire contract**에 맞춘다
 - 1.4.0 setup golden keys: `../ACP/test/characterization.test.js`
 - 1.4.0 stable errors: `../ACP/src/errors.js`
 - 1.4.0 gap-aware client: `../ACP/src/socket-rpc.js`
-- AgenLynk app 전용 config RPC: `src/gateway-daemon.js`, `src/monitor.js`
-- AgenLynk setup identity 및 split annotation: `src/gateway-service.js`, `src/monitor.js`
+- AgenLynk app 전용 config RPC: `src/gateway-daemon.js`, `sidecar/src/server/monitor.js`
+- AgenLynk setup identity 및 split annotation: `src/gateway-service.js`, `sidecar/src/server/monitor.js`

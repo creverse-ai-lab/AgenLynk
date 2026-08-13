@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { RUNTIME_MANIFEST_FORMAT_VERSION, buildRuntimeManifest, verifyRuntimeManifest } from "../src/runtime-manifest.js";
 import { computeGatewayBuildId } from "../src/version.js";
+import { computeSidecarBuildId } from "../sidecar/src/version.js";
 import { writeRuntimeSeed as writeFixtureSeed } from "./fixtures/runtime-seed.js";
 
 test("buildRuntimeManifest captures gatewayVersion/gatewayBuildId/nodeVersion from the seed's own files", async () => {
@@ -16,6 +17,8 @@ test("buildRuntimeManifest captures gatewayVersion/gatewayBuildId/nodeVersion fr
     assert.equal(manifest.gatewayVersion, "9.9.9");
     assert.equal(manifest.gatewayBuildId, "deadbeef");
     assert.equal(manifest.gatewayApiVersion, 3);
+    assert.equal(manifest.sidecarVersion, "0.4.0");
+    assert.equal(manifest.sidecarBuildId, "fixture-sidecar");
     assert.equal(manifest.nodeVersion, "22.14.0");
     assert.ok(Array.isArray(manifest.payload) && manifest.payload.length > 0, "payload inventory should be populated");
     assert.ok(!manifest.payload.some((entry) => entry.path === "runtime-manifest.json"), "the manifest must not describe itself");
@@ -56,7 +59,7 @@ test("verifyRuntimeManifest rejects an incomplete copy missing a required file",
   try {
     await writeFixtureSeed(seed);
     const manifest = await buildRuntimeManifest(seed);
-    await rm(join(seed, "src/monitor.js"));
+    await rm(join(seed, "sidecar/src/server/monitor.js"));
     await assert.rejects(() => verifyRuntimeManifest(seed, manifest), /missing a required file/);
   } finally {
     await rm(seed, { recursive: true, force: true });
@@ -92,6 +95,30 @@ test("verifyRuntimeManifest rejects a Node binary whose reported version no long
     await assert.rejects(() => verifyRuntimeManifest(seed, manifest), /Node version mismatch/);
   } finally {
     await rm(seed, { recursive: true, force: true });
+  }
+});
+
+test("verifyRuntimeManifest rejects a root whose sidecar identity does not match the recorded manifest", async () => {
+  // Distinct directories: ESM caches version.js by file:// URL, so in-place
+  // edits would keep returning the original sidecar exports.
+  const original = await mkdtemp(join(tmpdir(), "acp-runtime-manifest-"));
+  const tampered = await mkdtemp(join(tmpdir(), "acp-runtime-manifest-"));
+  try {
+    await writeFixtureSeed(original, {
+      gatewayVersion: "1.0.0",
+      gatewayBuildId: "same-build",
+      sidecarBuildId: "sidecar-original"
+    });
+    const manifest = await buildRuntimeManifest(original);
+    await writeFixtureSeed(tampered, {
+      gatewayVersion: "1.0.0",
+      gatewayBuildId: "same-build",
+      sidecarBuildId: "sidecar-tampered"
+    });
+    await assert.rejects(() => verifyRuntimeManifest(tampered, manifest), /sidecar content does not match its manifest/);
+  } finally {
+    await rm(original, { recursive: true, force: true });
+    await rm(tampered, { recursive: true, force: true });
   }
 });
 
@@ -218,29 +245,29 @@ test("verifyRuntimeManifest rejects a manifest payload with an unsafe declared p
   }
 });
 
-test("gatewayBuildId covers nested payload files, not just top-level src scripts", async () => {
+test("Gateway and sidecar build ids cover only their independently owned payloads", async () => {
   const root = await mkdtemp(join(tmpdir(), "acp-build-id-"));
   try {
-    await mkdir(join(root, "src", "local-agents"), { recursive: true });
+    await mkdir(join(root, "src", "nested"), { recursive: true });
+    await mkdir(join(root, "sidecar", "src", "nested"), { recursive: true });
     await writeFile(join(root, "package.json"), JSON.stringify({ name: "acp-gateway", version: "1.3.1" }));
+    await writeFile(join(root, "sidecar", "package.json"), JSON.stringify({ name: "agenlynk-sidecar", version: "0.4.0" }));
     await writeFile(join(root, "src", "version.js"), "export const GATEWAY_VERSION = \"1.3.1\";\n");
-    await writeFile(join(root, "src", "local-agents", "nested.js"), "# original\n");
-    const original = computeGatewayBuildId(root);
+    await writeFile(join(root, "src", "nested", "core.js"), "# gateway\n");
+    await writeFile(join(root, "sidecar", "src", "nested", "monitor.js"), "# original\n");
+    const gatewayOriginal = computeGatewayBuildId(root);
+    const sidecarOriginal = computeSidecarBuildId(join(root, "sidecar"));
 
-    // The regression this guards: a nested payload file changed while the id
-    // stayed put, so an already-installed runtime looked current even though
-    // the app had just shipped different files.
-    await writeFile(join(root, "src", "local-agents", "nested.js"), "# changed\n");
-    assert.notEqual(computeGatewayBuildId(root), original, "a nested payload change must change the build id");
+    await writeFile(join(root, "sidecar", "src", "nested", "monitor.js"), "# changed\n");
+    assert.notEqual(computeSidecarBuildId(join(root, "sidecar")), sidecarOriginal);
+    assert.equal(computeGatewayBuildId(root), gatewayOriginal, "sidecar changes must not change the Gateway build id");
 
-    await writeFile(join(root, "src", "local-agents", "nested.js"), "# original\n");
-    assert.equal(computeGatewayBuildId(root), original, "restoring the payload must restore the build id");
+    await writeFile(join(root, "src", "nested", "core.js"), "# changed gateway\n");
+    assert.notEqual(computeGatewayBuildId(root), gatewayOriginal);
 
     await mkdir(join(root, "skills", "agent-delegator"), { recursive: true });
     await writeFile(join(root, "skills", "agent-delegator", "SKILL.md"), "# skill\n");
-    assert.notEqual(computeGatewayBuildId(root), original, "a shipped skill must be covered by the build id");
-
-    assert.equal(computeGatewayBuildId(root), computeGatewayBuildId(root), "the build id must be deterministic");
+    assert.notEqual(computeGatewayBuildId(root), gatewayOriginal, "a shipped skill must be covered by the Gateway build id");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

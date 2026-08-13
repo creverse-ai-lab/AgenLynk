@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { MonitorState } from "../src/monitor-state.js";
-import { isIgnoredMonitorEvent } from "../src/monitor.js";
+import { MonitorState } from "../src/projection/monitor-state.js";
+import { isIgnoredMonitorEvent } from "../src/server/monitor.js";
 
 test("MonitorState produces the shared Monitor API v1 snapshot fixture", async () => {
   const fixtureUrl = new URL("./fixtures/monitor-snapshot-v1.json", import.meta.url);
