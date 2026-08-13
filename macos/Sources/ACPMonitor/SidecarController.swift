@@ -43,7 +43,11 @@ final class SidecarController {
         let startGeneration = generation
         let nodeURL = try BundledRuntime.locateNode(override: nodeOverride)
         try BundledRuntime.validateVersion(at: nodeURL)
-        let scriptURL = try BundledRuntime.resourceURL("sidecar/src/server/monitor.js")
+        let scriptURL = try BundledRuntime.sidecarResourceURL("src/server/monitor.js")
+        let gatewayClientURL = try BundledRuntime.gatewayResourceURL("gateway-client/index.js")
+        let gatewayRuntimeRoot = gatewayClientURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
         let process = Process()
         let output = Pipe()
 
@@ -62,6 +66,8 @@ final class SidecarController {
             "PATH": path,
             "ACP_GATEWAY_NODE": nodeURL.path,
             "ACP_GATEWAY_RUNTIME_BIN": nodeURL.deletingLastPathComponent().path,
+            "ACP_GATEWAY_CLIENT_ENTRYPOINT": gatewayClientURL.path,
+            "ACP_GATEWAY_ACTIVE_ROOT": gatewayRuntimeRoot.path,
             "NPM_CONFIG_PREFIX": FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".npm-global").path
         ]

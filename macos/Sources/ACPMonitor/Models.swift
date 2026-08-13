@@ -1610,7 +1610,7 @@ struct AppReleaseInfo: Equatable, Sendable {
 }
 
 /// The Gateway version+build the app bundle ships as its runtime seed, read
-/// from Contents/Resources/runtime/runtime-manifest.json. nil in a
+/// from Contents/Resources/gateway-seed/runtime-manifest.json. nil in a
 /// source-tree/dev build that bundles no seed.
 struct SeedGatewayVersion: Equatable, Sendable {
     let gatewayVersion: String

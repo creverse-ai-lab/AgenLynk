@@ -101,7 +101,8 @@ if [ -n "$SIGNING_IDENTITY" ]; then
 fi
 # shellcheck disable=SC2086
 "$BUILD_NODE" "$REPO_ROOT/src/build-release-manifest-cli.js" \
-  --runtime-root "$APP/Contents/Resources/runtime" \
+  --runtime-root "$APP/Contents/Resources/gateway-seed" \
+  --sidecar-root "$APP/Contents/Resources/sidecar" \
   --app-name "AgenLynk.app" \
   --app-version "$APP_VERSION" \
   --app-build "$APP_BUILD" \

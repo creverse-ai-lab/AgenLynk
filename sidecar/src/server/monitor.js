@@ -18,29 +18,24 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { GatewayRpcClient } from "../gateway/client.js";
+import { pathIsMissing } from "../app/fs-paths.js";
+import { gatewaySocketPath } from "../app/config.js";
+import { defaultInstallStatePath } from "../app/install-state.js";
 import {
   defaultGatewaySettings,
-  defaultInstallStatePath,
   gatewaySettingsSnapshot,
-  gatewaySocketPath,
-  GATEWAY_BUILD_ID,
-  GATEWAY_RUNTIME_ROOT,
-  GatewayRpcClient,
-  installOfficialAgent,
-  officialAgentCatalog,
-  pathIsMissing,
   resolveGatewaySettings,
-  setOfficialAgentEnabled,
   updateGatewaySettings
-} from "../gateway/legacy-adapter.js";
+} from "../app/gateway-settings.js";
+import { installOfficialAgent, officialAgentCatalog, setOfficialAgentEnabled } from "../app/agent-catalog.js";
 import { MONITOR_API_VERSION, MONITOR_SCHEMA_VERSION, MonitorState, queuedSingleFlight } from "../projection/monitor-state.js";
 import { SIDECAR_BUILD_ID, SIDECAR_VERSION } from "../version.js";
 import { mergeMonitorSessions, projectLocalSnapshot } from "../local-monitor.js";
 import { currentProjectedTurnId, projectCodexTranscript } from "../local-transcript.js";
 import { LocalAgentScanner } from "../local-agents/index.js";
 /*
- * Keep every Gateway-private import above in legacy-adapter.js. The sidecar
- * modules below this directory must not reach into the bundled Gateway fork.
+ * Gateway code above comes only from the release artifact's public client.
  */
 
 const MONITOR_HOST = "127.0.0.1";
@@ -49,6 +44,7 @@ const MAX_EVENTS_PER_SESSION = numberEnv("ACP_GATEWAY_MONITOR_MAX_EVENTS", 2000,
 const AUTO_START_GATEWAY = booleanEnv("ACP_GATEWAY_MONITOR_AUTOSTART", true);
 const EXPECTED_PARENT_PID = optionalPositiveIntegerEnv("ACP_GATEWAY_MONITOR_PARENT_PID");
 const REFRESH_INTERVAL_MS = 3_000;
+const GATEWAY_RUNTIME_ROOT = process.env.ACP_GATEWAY_ACTIVE_ROOT ?? null;
 // Keep the scanner's cost policy with the rest of the user-editable Gateway
 // settings. The sidecar is restarted after changing these options, so one
 // immutable scanner instance owns its cursors and watcher for its lifetime.
@@ -728,7 +724,7 @@ function monitorCapabilities(state) {
  * first half; a safe Gateway restart respawns from this monitor's runtime and
  * heals the split.
  */
-export function annotateRuntimeSplit(gateway, monitorRuntimeRoot, monitorBuildId = GATEWAY_BUILD_ID) {
+export function annotateRuntimeSplit(gateway, monitorRuntimeRoot, monitorBuildId = null) {
   if (!gateway || typeof gateway !== "object") return gateway;
   const daemonRoot = gateway.runtimeRoot;
   if (typeof daemonRoot === "string" && daemonRoot && monitorRuntimeRoot && daemonRoot !== monitorRuntimeRoot) {

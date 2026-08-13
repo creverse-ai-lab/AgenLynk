@@ -3,7 +3,7 @@ import Foundation
 // Copies the app bundle's runtime seed into ~/.acp-gateway/runtime once per
 // distribution build, so every later Node/monitor/bootstrap execution runs
 // from that installed copy — never the app bundle (see BundledRuntime).
-// Spawns the *bundled* seed Node against the bundled src/runtime-installer-cli.js
+// Spawns the *bundled* seed Node against app-runtime/runtime-installer-cli.js
 // (reusing the Node module that owns the copy/verify/activate logic, rather
 // than reimplementing it here) because no other Node exists yet on a fresh
 // machine. A no-op when running from a source-tree checkout (no seed) or
@@ -43,7 +43,7 @@ final class RuntimeProvisioner {
         do {
             result = try await SeedNodeProcess.run(
                 seedRoot: seedRoot,
-                script: "src/runtime-installer-cli.js",
+                script: "app-runtime/runtime-installer-cli.js",
                 arguments: ["--seed", seedRoot.path],
                 onSpawn: { [weak self] spawned in self?.process = spawned }
             )

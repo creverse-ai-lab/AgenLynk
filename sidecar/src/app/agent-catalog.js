@@ -3,13 +3,27 @@ import {
   discoverRegistryAgents,
   installedGlobalNpmPackages,
   loadOfficialRegistry,
+  mergeProviderDefinitions,
+  providerDefinition,
   providerIdForRegistryAgent,
   readProviderRegistry,
   selectDistribution,
   setProviderEnabled
 } from "./acp-registry.js";
-import { parseInstallerArgs, runCommand, runInstaller } from "./installer.js";
 import { detectProviders } from "./providers.js";
+import { spawn } from "node:child_process";
+
+async function runCommand(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+  });
+}
 
 export async function officialAgentCatalog({
   refresh = false,
@@ -83,18 +97,46 @@ export async function officialAgentCatalog({
 
 export async function installOfficialAgent(registryId, {
   providerRegistryPath = defaultProviderRegistryPath(),
-  installer = runInstaller,
-  installerDependencies = {}
+  registryLoader = loadOfficialRegistry,
+  registryDiscover = discoverRegistryAgents,
+  run = runCommand,
+  platform = process.platform,
+  arch = process.arch
 } = {}) {
   if (!/^[a-z0-9][a-z0-9._-]*$/.test(registryId)) throw new Error(`invalid registry agent id: ${registryId}`);
-  const options = parseInstallerArgs(["--registry-agent", registryId, "--skip-health-check"]);
-  // The general CLI intentionally discovers all installed agents. A row-level UI
-  // action must configure only the agent the user selected.
-  options.registryAgentsOnly = true;
-  const result = await installer(options, { ...installerDependencies, providerRegistryPath });
+  const loaded = await registryLoader({ refresh: true });
+  const agent = loaded.registry.agents.find((item) => item.id === registryId);
+  if (!agent) throw new Error(`Official ACP agent not found: ${registryId}`);
+  const installedPackages = await installedGlobalNpmPackages(run);
+  const discovered = await registryDiscover(loaded.registry, { installedPackages, platform, arch });
+  let match = discovered.find((item) => item.registryId === registryId);
+  if (!match) {
+    const distribution = selectDistribution(agent, platformTarget(platform, arch));
+    if (!distribution) throw new Error(`${registryId} has no distribution for this platform`);
+    if (distribution.type === "binary") throw new Error(`${registryId} must be installed from its official binary first`);
+    match = {
+      id: providerIdForRegistryAgent(agent.id),
+      registryId: agent.id,
+      name: agent.name,
+      version: agent.version,
+      distribution,
+      foundCommand: null,
+      packageInstalled: false
+    };
+  }
+  if (["npx", "uvx"].includes(match.distribution.type)) {
+    const command = match.distribution.type === "npx" ? "npm" : "uv";
+    const args = match.distribution.type === "npx"
+      ? ["install", "--global", match.distribution.package]
+      : ["tool", "install", "--force", match.distribution.package];
+    const result = await run(command, args);
+    if (result.code !== 0) throw new Error(`Failed to install ${registryId}: ${result.stderr || result.stdout}`);
+  }
+  const definition = providerDefinition(match);
+  await mergeProviderDefinitions(providerRegistryPath, [definition]);
   const providerId = providerIdForRegistryAgent(registryId);
   await setProviderEnabled(providerId, true, providerRegistryPath);
-  return { ok: true, providerId, result };
+  return { ok: true, providerId };
 }
 
 export async function setOfficialAgentEnabled(providerId, enabled, {

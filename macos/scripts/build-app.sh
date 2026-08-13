@@ -21,7 +21,7 @@ BIN_DIR=$(env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" SWIFTPM_MOD
   swift build --package-path "$REPO_ROOT/macos" --scratch-path "$SCRATCH" -c release --show-bin-path)
 
 rm -rf "$APP" "$LEGACY_APP"
-mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources/runtime/src" "$PET_CONTENTS/MacOS" "$PET_CONTENTS/Resources"
+mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$PET_CONTENTS/MacOS" "$PET_CONTENTS/Resources"
 cp "$BIN_DIR/ACPMonitor" "$CONTENTS/MacOS/ACPMonitor"
 cp "$REPO_ROOT/macos/Resources/Info.plist" "$CONTENTS/Info.plist"
 cp "$REPO_ROOT/macos/Resources/ACPLogo.svg" "$CONTENTS/Resources/ACPLogo.svg"
@@ -61,37 +61,54 @@ for SIZE in 16 32 128 256 512; do
 done
 iconutil -c icns "$ICONSET" -o "$CONTENTS/Resources/AppIcon.icns"
 
-# Copy the Gateway fork and AgenLynk sidecar as separate runtime namespaces.
-# src/version.js fingerprints only the Gateway payload; sidecar/src/version.js
-# owns the independent sidecar build id.
-rm -rf "$CONTENTS/Resources/runtime/src"
-cp -R "$REPO_ROOT/src" "$CONTENTS/Resources/runtime/src"
-rm -rf "$CONTENTS/Resources/runtime/sidecar"
-mkdir -p "$CONTENTS/Resources/runtime/sidecar"
-cp "$REPO_ROOT/sidecar/package.json" "$CONTENTS/Resources/runtime/sidecar/package.json"
-cp -R "$REPO_ROOT/sidecar/src" "$CONTENTS/Resources/runtime/sidecar/src"
-for REQUIRED in src/index.js sidecar/src/server/monitor.js sidecar/src/local-agents/index.js sidecar/src/gateway/legacy-adapter.js; do
-  if [ ! -f "$CONTENTS/Resources/runtime/$REQUIRED" ]; then
-    echo "error: $REQUIRED is missing from the runtime seed" >&2
+# Assemble the three ownership roots. gateway/ is extracted only from the
+# immutable release asset in gateway.lock.json; sidecar/ is app-owned and is
+# never copied into an installed Gateway version; app-runtime/ contains only
+# AgenLynk's install/activate tooling, never Gateway implementation code.
+GATEWAY_SEED="$CONTENTS/Resources/gateway-seed"
+SIDECAR_ROOT="$CONTENTS/Resources/sidecar"
+rm -rf "$GATEWAY_SEED" "$SIDECAR_ROOT"
+mkdir -p "$GATEWAY_SEED/app-runtime" "$SIDECAR_ROOT"
+node "$REPO_ROOT/scripts/fetch-gateway-runtime.js" --output "$GATEWAY_SEED/gateway"
+cp "$REPO_ROOT/gateway.lock.json" "$GATEWAY_SEED/gateway.lock.json"
+
+for FILE in \
+  build-runtime-manifest-cli.js \
+  runtime-installer-cli.js \
+  runtime-installer.js \
+  runtime-lock.js \
+  runtime-manifest.js \
+  runtime-pointer.js \
+  runtime-smoke-check.js \
+  runtime-staging.js \
+  runtime-updater-cli.js \
+  runtime-updater.js \
+  verify-runtime-manifest-cli.js; do
+  cp "$REPO_ROOT/src/$FILE" "$GATEWAY_SEED/app-runtime/$FILE"
+done
+
+cp "$REPO_ROOT/sidecar/package.json" "$SIDECAR_ROOT/package.json"
+cp -R "$REPO_ROOT/sidecar/src" "$SIDECAR_ROOT/src"
+for REQUIRED in \
+  gateway-seed/gateway/src/index.js \
+  gateway-seed/gateway/src/bootstrap.js \
+  gateway-seed/gateway/gateway-client/index.js \
+  gateway-seed/app-runtime/runtime-installer-cli.js \
+  sidecar/src/server/monitor.js \
+  sidecar/src/local-agents/index.js \
+  sidecar/src/gateway/client.js; do
+  if [ ! -f "$CONTENTS/Resources/$REQUIRED" ]; then
+    echo "error: $REQUIRED is missing from the packaged resource roots" >&2
     exit 1
   fi
 done
-
-# Bundle package metadata and the agent-delegator skill so the installed
-# runtime resolves node_modules/skills the same way the source checkout does
-# (src/version.js hashes package.json/package-lock.json next to src/, and
-# src/installer.js installs skills/agent-delegator relative to src/).
-cp "$REPO_ROOT/package.json" "$CONTENTS/Resources/runtime/package.json"
-cp "$REPO_ROOT/package-lock.json" "$CONTENTS/Resources/runtime/package-lock.json"
-rm -rf "$CONTENTS/Resources/runtime/skills"
-cp -R "$REPO_ROOT/skills" "$CONTENTS/Resources/runtime/skills"
 
 # Distribution builds provide the complete official Node tree, including
 # npm/npx. Copying only bin/node is insufficient because first-run bootstrap
 # installs registry adapters through npm. Development builds deliberately omit
 # Node and keep the source-tree/system fallback used by SidecarController.
 NODE_DIST=${ACP_LYNK_NODE_DIST_DIR:-}
-rm -rf "$CONTENTS/Resources/runtime/node"
+rm -rf "$GATEWAY_SEED/node"
 if [ -n "$NODE_DIST" ]; then
   NODE_BIN="$NODE_DIST/bin/node"
   if [ ! -x "$NODE_BIN" ] || [ ! -x "$NODE_DIST/bin/npm" ] || [ ! -x "$NODE_DIST/bin/npx" ]; then
@@ -118,7 +135,7 @@ if [ -n "$NODE_DIST" ]; then
     echo "error: $NODE_BIN depends on non-system shared libraries; use the official nodejs.org darwin-arm64 distribution" >&2
     exit 1
   fi
-  cp -R "$NODE_DIST" "$CONTENTS/Resources/runtime/node"
+  cp -R "$NODE_DIST" "$GATEWAY_SEED/node"
 
   # Drop the parts of the official distribution the shipped runtime never
   # executes. include/node is 62MB of C++ headers for compiling native addons;
@@ -128,45 +145,83 @@ if [ -n "$NODE_DIST" ]; then
   # runtime manifest on every launch. bin/node, bin/npm, and bin/npx (verified
   # above) and lib/node_modules/npm all stay.
   for UNUSED in include lib/node_modules/corepack bin/corepack share CHANGELOG.md README.md; do
-    rm -rf "$CONTENTS/Resources/runtime/node/$UNUSED"
+    rm -rf "$GATEWAY_SEED/node/$UNUSED"
   done
   for REQUIRED in bin/node bin/npm bin/npx lib/node_modules/npm; do
-    if [ ! -e "$CONTENTS/Resources/runtime/node/$REQUIRED" ]; then
+    if [ ! -e "$GATEWAY_SEED/node/$REQUIRED" ]; then
       echo "error: trimming the bundled Node distribution removed $REQUIRED" >&2
       exit 1
     fi
   done
 fi
 
-# Bundle production dependencies. Reuse the checkout's installed node_modules
-# when present (package.json declares no devDependencies, so it is already
-# production-only); otherwise install them fresh from the lockfile.
-rm -rf "$CONTENTS/Resources/runtime/node_modules"
-if [ -d "$REPO_ROOT/node_modules" ]; then
-  cp -R "$REPO_ROOT/node_modules" "$CONTENTS/Resources/runtime/node_modules"
-else
-  ( cd "$CONTENTS/Resources/runtime" && npm ci --omit=dev )
-fi
+# Gateway dependencies are already verified inside the official artifact.
+# The app sidecar intentionally has no third-party runtime dependency.
 
 # Sign nested Mach-O files explicitly. Distribution signing uses hardened
 # runtime and a timestamp; ad-hoc development signing omits those flags.
+# Node/JIT entitlements apply only to the bundled official Node binary —
+# never to the official Claude helper shipped inside the Gateway artifact.
 CODESIGN_IDENTITY=${ACP_LYNK_CODESIGN_IDENTITY:--}
 if [ "$CODESIGN_IDENTITY" = "-" ]; then
   SIGN_FLAGS=""
 else
   SIGN_FLAGS="--options runtime --timestamp"
 fi
-find "$CONTENTS/Resources/runtime" -type f | while IFS= read -r FILE; do
-  if file "$FILE" | grep -q 'Mach-O'; then
-    if [ "$FILE" = "$CONTENTS/Resources/runtime/node/bin/node" ]; then
-      # shellcheck disable=SC2086
-      codesign --force $SIGN_FLAGS --entitlements "$REPO_ROOT/macos/Resources/Node.entitlements" --sign "$CODESIGN_IDENTITY" "$FILE"
-    else
-      # shellcheck disable=SC2086
-      codesign --force $SIGN_FLAGS --sign "$CODESIGN_IDENTITY" "$FILE"
-    fi
+
+OFFICIAL_HELPER_REL="node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude"
+OFFICIAL_HELPER="$GATEWAY_SEED/gateway/$OFFICIAL_HELPER_REL"
+TRANSFORMS_FILE="$GATEWAY_SEED/official-codesign-transforms.json"
+rm -f "$TRANSFORMS_FILE"
+
+if [ -f "$GATEWAY_SEED/node/bin/node" ]; then
+  # shellcheck disable=SC2086
+  codesign --force $SIGN_FLAGS --entitlements "$REPO_ROOT/macos/Resources/Node.entitlements" --sign "$CODESIGN_IDENTITY" "$GATEWAY_SEED/node/bin/node"
+fi
+
+if [ -f "$OFFICIAL_HELPER" ]; then
+  # Always seal the nested helper with the same identity as the containing
+  # app. A published signature can verify before the parent is sealed yet be
+  # invalid as an individually verified nested binary in the finished app.
+  # This helper is not Node, so it deliberately receives no JIT entitlements.
+  OFFICIAL_SHA=$(shasum -a 256 "$OFFICIAL_HELPER" | awk '{print $1}')
+  # shellcheck disable=SC2086
+  codesign --force $SIGN_FLAGS --sign "$CODESIGN_IDENTITY" "$OFFICIAL_HELPER"
+  INSTALLED_SHA=$(shasum -a 256 "$OFFICIAL_HELPER" | awk '{print $1}')
+  printf '%s\n' "[{\"path\":\"$OFFICIAL_HELPER_REL\",\"kind\":\"codesign\",\"officialSha256\":\"$OFFICIAL_SHA\",\"installedSha256\":\"$INSTALLED_SHA\"}]" > "$TRANSFORMS_FILE"
+  printf '%s\n' "re-signed official Claude helper without Node entitlements (codesign-only transform recorded)"
+  codesign --verify --strict "$OFFICIAL_HELPER"
+  "$OFFICIAL_HELPER" --version >/dev/null
+  printf '%s\n' "official Claude helper nested signature and --version smoke passed"
+fi
+
+OTHER_UNSIGNED=""
+while IFS= read -r FILE; do
+  [ -n "$FILE" ] || continue
+  file "$FILE" | grep -q 'Mach-O' || continue
+  REL=${FILE#"$GATEWAY_SEED/gateway/"}
+  if [ "$REL" = "$OFFICIAL_HELPER_REL" ]; then
+    continue
   fi
-done
+  if ! codesign --verify --strict "$FILE" >/dev/null 2>&1; then
+    echo "error: official Gateway Mach-O is not safely signed and is not an allowed codesign transform: $REL" >&2
+    OTHER_UNSIGNED=1
+  fi
+done <<EOF
+$(find "$GATEWAY_SEED/gateway" -type f)
+EOF
+if [ -n "$OTHER_UNSIGNED" ]; then
+  exit 1
+fi
+
+while IFS= read -r FILE; do
+  [ -n "$FILE" ] || continue
+  file "$FILE" | grep -q 'Mach-O' || continue
+  # shellcheck disable=SC2086
+  codesign --force $SIGN_FLAGS --sign "$CODESIGN_IDENTITY" "$FILE"
+done <<EOF
+$(find "$SIDECAR_ROOT" -type f)
+EOF
 
 # Distribution builds only: snapshot this seed's gatewayVersion/gatewayBuildId
 # (reused as-is from src/version.js, not reinvented), gatewayApiVersion,
@@ -182,14 +237,14 @@ done
 # RuntimeProvisioner (Swift) spawns runtime-installer-cli.js to copy this
 # seed into ~/.acp-gateway/runtime/versions/<gatewayVersion>-<gatewayBuildId>/
 # on first run and reject an incomplete/corrupt copy using this manifest.
-rm -f "$CONTENTS/Resources/runtime/runtime-manifest.json"
-if [ -x "$CONTENTS/Resources/runtime/node/bin/node" ]; then
+rm -f "$GATEWAY_SEED/runtime-manifest.json"
+if [ -x "$GATEWAY_SEED/node/bin/node" ]; then
   BUILD_NODE=$(command -v node || true)
   if [ -z "$BUILD_NODE" ]; then
     echo "error: a system Node is required at build time to generate runtime-manifest.json" >&2
     exit 1
   fi
-  "$BUILD_NODE" "$REPO_ROOT/src/build-runtime-manifest-cli.js" "$CONTENTS/Resources/runtime"
+  "$BUILD_NODE" "$GATEWAY_SEED/app-runtime/build-runtime-manifest-cli.js" "$GATEWAY_SEED"
 fi
 
 # LynkPet is a nested LSUIElement helper app. Validate its pure contract/layout
@@ -217,11 +272,11 @@ codesign --verify --deep --strict "$APP"
 # no other system Node — node/npm/npx must still execute. npm/npx are
 # `#!/usr/bin/env node` shims, so this also proves the runtime's own PATH
 # ordering (bin first) resolves them to the bundled node, not any other one.
-if [ -x "$CONTENTS/Resources/runtime/node/bin/node" ]; then
-  RESTRICTED_PATH="$CONTENTS/Resources/runtime/node/bin:/usr/bin:/bin"
-  env -i PATH="$RESTRICTED_PATH" "$CONTENTS/Resources/runtime/node/bin/node" --version >/dev/null
-  env -i PATH="$RESTRICTED_PATH" "$CONTENTS/Resources/runtime/node/bin/npm" --version >/dev/null
-  env -i PATH="$RESTRICTED_PATH" "$CONTENTS/Resources/runtime/node/bin/npx" --version >/dev/null
+if [ -x "$GATEWAY_SEED/node/bin/node" ]; then
+  RESTRICTED_PATH="$GATEWAY_SEED/node/bin:/usr/bin:/bin"
+  env -i PATH="$RESTRICTED_PATH" "$GATEWAY_SEED/node/bin/node" --version >/dev/null
+  env -i PATH="$RESTRICTED_PATH" "$GATEWAY_SEED/node/bin/npm" --version >/dev/null
+  env -i PATH="$RESTRICTED_PATH" "$GATEWAY_SEED/node/bin/npx" --version >/dev/null
   printf '%s\n' "Bundled node/npm/npx executed with a Homebrew/system-Node-free PATH"
 fi
 printf '%s\n' "Built $APP"

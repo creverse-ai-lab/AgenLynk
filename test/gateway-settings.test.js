@@ -8,7 +8,7 @@ import {
   gatewaySettingsSnapshot,
   resolveGatewaySettings,
   updateGatewaySettings
-} from "../src/gateway-settings.js";
+} from "../sidecar/src/app/gateway-settings.js";
 
 test("Gateway settings expose every safe runtime option without secrets", async () => {
   const directory = await mkdtemp(join(tmpdir(), "acp-gateway-settings-"));

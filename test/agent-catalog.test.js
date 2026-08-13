@@ -3,8 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { installOfficialAgent, officialAgentCatalog } from "../src/agent-catalog.js";
-import { mergeProviderDefinitions, readProviderRegistry, setProviderEnabled } from "../src/acp-registry.js";
+import { installOfficialAgent, officialAgentCatalog } from "../sidecar/src/app/agent-catalog.js";
+import { mergeProviderDefinitions, readProviderRegistry, setProviderEnabled } from "../sidecar/src/app/acp-registry.js";
 
 const registry = {
   version: "1.0.0",
@@ -47,24 +47,28 @@ test("official agent catalog separates installed, enabled, and install-supported
   }
 });
 
-test("row-level official agent install forces targeted registry-only behavior and enables it", async () => {
+test("row-level official agent install downloads only the selected registry distribution and enables it", async () => {
   const directory = await mkdtemp(join(tmpdir(), "acp-agent-install-"));
   const providerRegistryPath = join(directory, "providers.json");
-  let receivedOptions;
+  const commands = [];
   try {
     await mergeProviderDefinitions(providerRegistryPath, [{ id: "gemini", command: "npx", args: ["gemini"], env: {} }]);
     await setProviderEnabled("gemini", false, providerRegistryPath);
     await installOfficialAgent("gemini", {
       providerRegistryPath,
-      installer: async (options) => {
-        receivedOptions = options;
-        return { ok: true };
+      registryLoader: async () => ({ registry, source: "network", stale: false }),
+      registryDiscover: async () => [],
+      run: async (command, args) => {
+        commands.push([command, args]);
+        return command === "npm" && args[0] === "list"
+          ? { code: 0, stdout: '{"dependencies":{}}', stderr: "" }
+          : { code: 0, stdout: "", stderr: "" };
       }
     });
-    assert.deepEqual(receivedOptions.registryAgents, ["gemini"]);
-    assert.equal(receivedOptions.registryAgentsOnly, true);
-    assert.equal(receivedOptions.installAdapters, true);
-    assert.deepEqual((await readProviderRegistry(providerRegistryPath)).disabled, []);
+    assert.deepEqual(commands.at(-1), ["npm", ["install", "--global", "gemini@2"]]);
+    const document = await readProviderRegistry(providerRegistryPath);
+    assert.deepEqual(document.disabled, []);
+    assert.equal(document.providers.gemini.registryId, "gemini");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

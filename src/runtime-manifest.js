@@ -1,246 +1,278 @@
-// Manifest for a Gateway runtime seed/installation: the same shape is used
-// by the DMG build (to snapshot what it shipped) and by runtime-installer.js
-// (to reject an incomplete/corrupt copy before it is activated). Reuses
-// src/version.js's existing GATEWAY_VERSION/GATEWAY_BUILD_ID rather than
-// inventing a separate identifier or hashing scheme: gatewayBuildId is
-// re-derived by dynamically importing the *copied* version.js, so a
-// corrupted or truncated src/**/*.js, package.json, or package-lock.json at
-// that root produces a different id and fails verification. gatewayApiVersion
-// is re-derived the same way from the copied gateway-api-version.js.
+// Composite AgenLynk runtime manifest.
 //
-// On top of that identity check, the manifest also carries a complete,
-// deterministic payload inventory (every regular file and symlink under the
-// root, sorted by relative POSIX path, each with a sha256) so verification
-// can catch a modified/missing/added file anywhere in the runtime — not just
-// in the small REQUIRED_RUNTIME_FILES marker list.
+// A managed runtime contains three independent namespaces:
+//   gateway/     exact, immutable Gateway release artifact from gateway.lock.json
+//   node/        the one Node distribution shared by Gateway and the app sidecar
+//   app-runtime/ AgenLynk-owned install/stage/activate/rollback tooling
+//
+// The sidecar is intentionally not part of this tree. It is versioned with the
+// app and runs from Contents/Resources/sidecar.
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, readFile, readdir, readlink, stat } from "node:fs/promises";
+import { access, lstat, readFile, readdir, readlink, stat } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { pathToFileURL } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-// Bumped alongside the payload/gatewayApiVersion fields added below: an
-// older manifest shape (no payload inventory) must not be silently accepted
-// as fully verified by the newer, stricter check.
-export const RUNTIME_MANIFEST_FORMAT_VERSION = 3;
-
+export const RUNTIME_MANIFEST_FORMAT_VERSION = 4;
 export const RUNTIME_MANIFEST_FILE_NAME = "runtime-manifest.json";
-
-// Marker files whose presence (not full content) is checked directly,
-// without spawning Node or importing anything. Kept short and cheap: this is
-// an incomplete-copy guard, not a full integrity scan of node_modules.
+export const OFFICIAL_CODESIGN_TRANSFORMS_FILE = "official-codesign-transforms.json";
+export const OFFICIAL_CODESIGN_TRANSFORM_PATHS = new Set([
+  "node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude"
+]);
 export const REQUIRED_RUNTIME_FILES = [
-  "package.json",
-  "package-lock.json",
-  "src/index.js",
-  "src/guide.js",
-  "src/bootstrap.js",
-  "sidecar/package.json",
-  "sidecar/src/server/monitor.js",
-  "sidecar/src/version.js",
-  "sidecar/src/gateway/legacy-adapter.js",
-  "src/version.js",
-  "src/gateway-api-version.js",
-  "src/installer.js",
-  "skills/agent-delegator/SKILL.md",
-  "node_modules/@agentclientprotocol/claude-agent-acp/package.json",
-  "node_modules/@modelcontextprotocol/sdk/package.json",
+  "gateway.lock.json",
+  "gateway/runtime-manifest.json",
+  "gateway/package.json",
+  "gateway/package-lock.json",
+  "gateway/src/index.js",
+  "gateway/src/bootstrap.js",
+  "gateway/gateway-client/index.js",
+  "app-runtime/runtime-installer-cli.js",
+  "app-runtime/runtime-installer.js",
+  "app-runtime/runtime-updater-cli.js",
+  "app-runtime/runtime-updater.js",
   "node/bin/node",
   "node/bin/npm",
   "node/bin/npx"
 ];
 
-/** Shared install/stage directory name so sidecar-only builds cannot collide. */
-export function runtimeVersionId(manifest) {
-  const { gatewayVersion, gatewayBuildId, sidecarBuildId } = manifest ?? {};
-  if (
-    typeof gatewayVersion !== "string" || !gatewayVersion
-    || typeof gatewayBuildId !== "string" || !gatewayBuildId
-    || typeof sidecarBuildId !== "string" || !sidecarBuildId
-  ) {
-    throw new Error("runtime version id requires gatewayVersion, gatewayBuildId, and sidecarBuildId");
-  }
-  return `${gatewayVersion}-${gatewayBuildId}-${sidecarBuildId}`;
-}
-
-export function runtimeSidecarIdentity(source) {
-  const identity = {};
-  if (typeof source?.sidecarVersion === "string" && source.sidecarVersion) {
-    identity.sidecarVersion = source.sidecarVersion;
-  }
-  if (typeof source?.sidecarBuildId === "string" && source.sidecarBuildId) {
-    identity.sidecarBuildId = source.sidecarBuildId;
-  }
-  return identity;
-}
-
-export function runtimePointerIdentityMismatch(pointer, manifest) {
-  if (!pointer || !manifest) return true;
-  if (pointer.gatewayVersion !== manifest.gatewayVersion || pointer.gatewayBuildId !== manifest.gatewayBuildId) {
-    return true;
-  }
-  if (typeof pointer.sidecarVersion === "string" && pointer.sidecarVersion !== manifest.sidecarVersion) {
-    return true;
-  }
-  if (typeof pointer.sidecarBuildId === "string" && pointer.sidecarBuildId !== manifest.sidecarBuildId) {
-    return true;
-  }
-  return false;
-}
-
-export async function assertRequiredFilesExist(root, files = REQUIRED_RUNTIME_FILES) {
-  for (const relativePath of files) {
-    try {
-      await access(join(root, relativePath));
-    } catch {
-      throw new Error(`runtime is missing a required file: ${relativePath}`);
-    }
-  }
-}
-
-/** Imports `<root>/src/version.js` so GATEWAY_BUILD_ID reflects that root's actual files. */
-export async function readGatewayIdentity(root) {
-  const versionModuleURL = pathToFileURL(join(root, "src", "version.js")).href;
-  const module = await import(versionModuleURL);
-  if (typeof module.GATEWAY_VERSION !== "string" || typeof module.GATEWAY_BUILD_ID !== "string") {
-    throw new Error(`${root}/src/version.js did not export GATEWAY_VERSION/GATEWAY_BUILD_ID`);
-  }
-  return { gatewayVersion: module.GATEWAY_VERSION, gatewayBuildId: module.GATEWAY_BUILD_ID };
-}
-
-/** Imports the independently versioned AgenLynk sidecar identity. */
-export async function readSidecarIdentity(root) {
-  const moduleURL = pathToFileURL(join(root, "sidecar", "src", "version.js")).href;
-  const module = await import(moduleURL);
-  if (typeof module.SIDECAR_VERSION !== "string" || typeof module.SIDECAR_BUILD_ID !== "string") {
-    throw new Error(`${root}/sidecar/src/version.js did not export SIDECAR_VERSION/SIDECAR_BUILD_ID`);
-  }
-  return { sidecarVersion: module.SIDECAR_VERSION, sidecarBuildId: module.SIDECAR_BUILD_ID };
-}
-
-/** Imports `<root>/src/gateway-api-version.js` so a corrupted copy fails the same way as version.js. */
-export async function readGatewayApiVersion(root) {
-  const moduleURL = pathToFileURL(join(root, "src", "gateway-api-version.js")).href;
-  const module = await import(moduleURL);
-  if (!Number.isInteger(module.GATEWAY_API_VERSION)) {
-    throw new Error(`${root}/src/gateway-api-version.js did not export an integer GATEWAY_API_VERSION`);
-  }
-  return module.GATEWAY_API_VERSION;
-}
-
-async function readExecutableVersion(binaryPath, args = ["--version"]) {
-  // npm/npx use `#!/usr/bin/env node`. Finder-launched apps commonly inherit
-  // a PATH without Node, so executing the bundled shim directly is not
-  // sufficient: make its sibling bundled Node discoverable explicitly.
-  const runtimeBin = dirname(binaryPath);
-  const inheritedPath = process.env.PATH ?? "";
-  const env = {
-    ...process.env,
-    PATH: inheritedPath ? `${runtimeBin}${delimiter}${inheritedPath}` : runtimeBin
-  };
-  const { stdout } = await execFileAsync(binaryPath, args, { env });
-  return stdout.trim().replace(/^v/, "");
-}
-
 function sha256Hex(input) {
   return createHash("sha256").update(input).digest("hex");
 }
 
-// Above this size a file is streamed through sha256 (the bundled Node binary
-// alone is hundreds of MB); below it, one readFile is markedly cheaper than
-// stream machinery — the runtime's median payload file is ~2KB.
-const STREAM_HASH_THRESHOLD_BYTES = 8 * 1024 * 1024;
-// The payload hash is I/O-bound (only ~0.5s of the measured 1.5-2.4s wall is
-// sha256 CPU), so overlapping reads cuts the wall time ~4x. Bounded so peak
-// buffered memory stays ≤ pool × threshold.
-const HASH_CONCURRENCY = 16;
-
 async function hashFile(path) {
   const info = await stat(path);
-  if (info.size <= STREAM_HASH_THRESHOLD_BYTES) {
-    return sha256Hex(await readFile(path));
-  }
+  if (info.size <= 8 * 1024 * 1024) return sha256Hex(await readFile(path));
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(path)) hash.update(chunk);
   return hash.digest("hex");
 }
 
-/** Runs `tasks` (thunks) with at most `limit` in flight; rejects on first failure. */
-async function runWithConcurrency(tasks, limit) {
-  const executing = new Set();
-  for (const task of tasks) {
-    const promise = task().finally(() => executing.delete(promise));
-    executing.add(promise);
-    if (executing.size >= limit) await Promise.race(executing);
+export function runtimeVersionId(manifest) {
+  if (typeof manifest?.gatewayVersion !== "string" || !manifest.gatewayVersion
+    || typeof manifest?.runtimeBuildId !== "string" || !/^[a-f0-9]{16}$/.test(manifest.runtimeBuildId)) {
+    throw new Error("runtime version id requires gatewayVersion and runtimeBuildId");
   }
-  await Promise.all(executing);
+  return `${manifest.gatewayVersion}-${manifest.runtimeBuildId}`;
 }
 
-/**
- * Rejects a symlink whose target — resolved lexically relative to the
- * symlink's own directory, never dereferenced on disk — would land outside
- * `root`. The raw target string (not its resolved contents) is what gets
- * recorded/hashed in the payload, so a symlink pointing outside the runtime
- * is never opened/read, only checked textually.
- */
-function assertSymlinkConfined(root, relativePath, target) {
-  if (isAbsolute(target)) {
-    throw new Error(`runtime symlink target must be relative: ${relativePath} -> ${target}`);
+// Kept as a compatibility shim while updater result objects are migrated.
+// It deliberately returns no sidecar fields: the sidecar no longer belongs to
+// a Gateway runtime version.
+export function runtimeSidecarIdentity() {
+  return {};
+}
+
+export function runtimePointerIdentityMismatch(pointer, manifest) {
+  return !pointer || !manifest
+    || pointer.gatewayVersion !== manifest.gatewayVersion
+    || pointer.gatewayBuildId !== manifest.gatewayBuildId
+    || pointer.runtimeBuildId !== manifest.runtimeBuildId;
+}
+
+export async function assertRequiredFilesExist(root, files = REQUIRED_RUNTIME_FILES) {
+  for (const relativePath of files) {
+    try { await access(join(root, relativePath)); }
+    catch { throw new Error(`runtime is missing a required file: ${relativePath}`); }
   }
+}
+
+function assertGatewayLock(lock) {
+  if (lock?.schemaVersion !== 1 || lock.version !== "1.4.0" || lock.tag !== "v1.4.0" || lock.apiMajor !== 1) {
+    throw new Error("gateway.lock.json must pin Gateway v1.4.0 API major 1");
+  }
+  if (!/^[a-f0-9]{40}$/.test(lock.sourceCommit ?? "") || !/^[a-f0-9]{64}$/.test(lock.asset?.sha256 ?? "")) {
+    throw new Error("gateway.lock.json release identity is invalid");
+  }
+  if (lock.runtimeRoot !== "acp-gateway-runtime" || lock.publicEntrypoint !== "gateway-client/index.js") {
+    throw new Error("gateway.lock.json public runtime boundary is invalid");
+  }
+  if (lock.platform !== "darwin" || lock.arch !== "arm64") throw new Error("gateway.lock.json platform must be darwin-arm64");
+}
+
+async function readGatewayReleaseIdentity(root) {
+  const lock = JSON.parse(await readFile(join(root, "gateway.lock.json"), "utf8"));
+  assertGatewayLock(lock);
+  const upstream = JSON.parse(await readFile(join(root, "gateway", "runtime-manifest.json"), "utf8"));
+  const matches = upstream?.schemaVersion === 1
+    && upstream.package === "acp-gateway"
+    && upstream.version === lock.version
+    && upstream.apiMajor === lock.apiMajor
+    && upstream.platform === lock.platform
+    && upstream.arch === lock.arch
+    && upstream.runtimeRoot === lock.runtimeRoot
+    && upstream.publicEntrypoint === `./${lock.publicEntrypoint}`
+    && upstream.artifact === lock.asset.name
+    && upstream.source?.tag === lock.tag
+    && upstream.source?.commit === lock.sourceCommit;
+  if (!matches) throw new Error("Gateway artifact manifest does not match gateway.lock.json");
+  if (!Array.isArray(upstream.files) || !upstream.files.length) throw new Error("Gateway artifact manifest file inventory is missing");
+  return {
+    gatewayVersion: lock.version,
+    gatewayBuildId: lock.sourceCommit,
+    gatewayApiVersion: lock.apiMajor,
+    gatewayArtifactSha256: lock.asset.sha256,
+    gatewayManifestSha256: await hashFile(join(root, "gateway", "runtime-manifest.json")),
+    upstream
+  };
+}
+
+function confinedToGatewayRoot(root, candidate) {
+  const relativePath = relative(root, candidate);
+  return relativePath !== "" && relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath);
+}
+
+function officialPathKey(path) {
+  return typeof path === "string" ? path.replace(/\/$/, "") : "";
+}
+
+export async function readOfficialCodesignTransforms(root) {
+  try {
+    const raw = JSON.parse(await readFile(join(root, OFFICIAL_CODESIGN_TRANSFORMS_FILE), "utf8"));
+    if (!Array.isArray(raw)) throw new Error("official-codesign-transforms.json must be an array");
+    return raw;
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+function indexOfficialCodesignTransforms(transforms, upstream) {
+  if (transforms == null) return new Map();
+  if (!Array.isArray(transforms)) throw new Error("official codesign transforms must be an array");
+  const officialFiles = new Map(
+    upstream.files
+      .filter((entry) => entry?.type === "file")
+      .map((entry) => [officialPathKey(entry.path), entry])
+  );
+  const byPath = new Map();
+  for (const transform of transforms) {
+    if (transform?.kind !== "codesign") throw new Error("only codesign official transforms are allowed");
+    const path = officialPathKey(transform.path);
+    if (!OFFICIAL_CODESIGN_TRANSFORM_PATHS.has(path)) {
+      throw new Error(`official codesign transform path is not allowed: ${path}`);
+    }
+    const official = officialFiles.get(path);
+    if (!official) throw new Error(`official codesign transform does not name an official file: ${path}`);
+    if (transform.officialSha256 !== official.sha256) {
+      throw new Error(`official codesign transform officialSha256 does not match files[]: ${path}`);
+    }
+    if (!/^[a-f0-9]{64}$/.test(transform.installedSha256 ?? "")) {
+      throw new Error(`official codesign transform installedSha256 is invalid: ${path}`);
+    }
+    if (transform.installedSha256 === transform.officialSha256) {
+      throw new Error(`official codesign transform does not change bytes: ${path}`);
+    }
+    if (byPath.has(path)) throw new Error(`duplicate official codesign transform: ${path}`);
+    byPath.set(path, transform);
+  }
+  return byPath;
+}
+
+async function verifyOfficialManifestEntry(root, record, transform) {
+  const relativePath = officialPathKey(record?.path);
+  const absolute = join(root, ...relativePath.split("/"));
+  if (!relativePath || !confinedToGatewayRoot(root, absolute)) {
+    throw new Error(`official Gateway manifest path escapes runtime root: ${record?.path}`);
+  }
+  const info = await lstat(absolute);
+  if (record.type === "directory") {
+    if (!info.isDirectory()) throw new Error(`official Gateway manifest type mismatch: ${record.path}`);
+    return;
+  }
+  if (record.type === "file") {
+    if (!info.isFile()) throw new Error(`official Gateway manifest type mismatch: ${record.path}`);
+    const digest = await hashFile(absolute);
+    if (digest === record.sha256) {
+      if (transform) throw new Error(`official codesign transform does not match installed bytes: ${record.path}`);
+      return;
+    }
+    if (!transform) throw new Error(`official Gateway file checksum mismatch: ${record.path}`);
+    if (digest !== transform.installedSha256) {
+      throw new Error(`official codesign transform does not match installed bytes: ${record.path}`);
+    }
+    return;
+  }
+  if (record.type === "symlink") {
+    const target = await readlink(absolute);
+    const resolved = resolve(dirname(absolute), target);
+    if (target !== record.target || !confinedToGatewayRoot(root, resolved)) {
+      throw new Error(`official Gateway manifest symlink mismatch: ${record.path}`);
+    }
+    return;
+  }
+  throw new Error(`official Gateway manifest entry type is invalid: ${record.path}`);
+}
+
+export async function verifyOfficialGatewayInventory(gatewayRoot, upstream, transforms = []) {
+  if (!Array.isArray(upstream?.files) || !upstream.files.length) {
+    throw new Error("Gateway artifact manifest file inventory is missing");
+  }
+  const transformByPath = indexOfficialCodesignTransforms(transforms, upstream);
+  const expectedPaths = new Set(upstream.files.map((entry) => officialPathKey(entry.path)));
+  expectedPaths.add("runtime-manifest.json");
+  const actualPaths = new Set();
+  async function walk(directory) {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const absolute = join(directory, entry.name);
+      const rel = relative(gatewayRoot, absolute).split(sep).join("/");
+      actualPaths.add(rel);
+      if (entry.isDirectory()) await walk(absolute);
+    }
+  }
+  await walk(gatewayRoot);
+  for (const path of actualPaths) {
+    if (!expectedPaths.has(path)) throw new Error(`official Gateway payload has an unexpected entry: ${path}`);
+  }
+  for (const path of expectedPaths) {
+    if (!actualPaths.has(path)) throw new Error(`official Gateway payload is missing an entry: ${path}`);
+  }
+  for (const record of upstream.files) {
+    await verifyOfficialManifestEntry(gatewayRoot, record, transformByPath.get(officialPathKey(record.path)));
+  }
+}
+
+async function readExecutableVersion(binaryPath, args = ["--version"]) {
+  const runtimeBin = dirname(binaryPath);
+  const inheritedPath = process.env.PATH ?? "";
+  const env = { ...process.env, PATH: inheritedPath ? `${runtimeBin}${delimiter}${inheritedPath}` : runtimeBin };
+  const { stdout } = await execFileAsync(binaryPath, args, { env });
+  return stdout.trim().replace(/^v/, "");
+}
+
+function assertSymlinkConfined(root, relativePath, target) {
+  if (isAbsolute(target)) throw new Error(`runtime symlink target must be relative: ${relativePath}`);
   const resolvedTarget = resolve(dirname(join(root, relativePath)), target);
   const relativeToRoot = relative(root, resolvedTarget);
   if (relativeToRoot === ".." || relativeToRoot.startsWith(`..${sep}`) || isAbsolute(relativeToRoot)) {
-    throw new Error(`runtime symlink escapes its root: ${relativePath} -> ${target}`);
+    throw new Error(`runtime symlink escapes its root: ${relativePath}`);
   }
 }
 
-/**
- * Walks the entire runtime root (regular files and symlinks; directories are
- * only traversed, never recorded on their own) into a stable, sorted payload
- * inventory. runtime-manifest.json itself is excluded so the manifest does
- * not need to describe itself. Symlinked directories are never followed —
- * `readdir(withFileTypes)` reports a symlink's own dirent type, so the walk
- * naturally treats it as a leaf instead of descending through it.
- */
 async function collectPayloadEntries(root) {
   const entries = [];
-  const fileHashTasks = [];
-
-  async function walk(relativeDir) {
-    const absoluteDir = relativeDir ? join(root, relativeDir) : root;
-    const dirents = await readdir(absoluteDir, { withFileTypes: true });
-    for (const dirent of dirents) {
-      const relativePath = relativeDir ? `${relativeDir}/${dirent.name}` : dirent.name;
-      if (!relativeDir && dirent.name === RUNTIME_MANIFEST_FILE_NAME) continue;
-      const absolutePath = join(root, relativePath);
-      if (dirent.isDirectory()) {
-        await walk(relativePath);
-      } else if (dirent.isSymbolicLink()) {
-        const target = await readlink(absolutePath);
-        assertSymlinkConfined(root, relativePath, target);
-        entries.push({ path: relativePath, type: "symlink", target, sha256: sha256Hex(target) });
-      } else if (dirent.isFile()) {
-        // Record the entry in walk order, hash later with bounded overlap —
-        // the hash pass is I/O-bound, and interleaving it into the walk made
-        // it strictly sequential.
-        const entry = { path: relativePath, type: "file", sha256: "" };
-        entries.push(entry);
-        fileHashTasks.push(async () => {
-          entry.sha256 = await hashFile(absolutePath);
-        });
-      } else {
-        throw new Error(`runtime contains an unsupported filesystem entry: ${relativePath}`);
-      }
+  async function walk(relativeDirectory) {
+    const directory = relativeDirectory ? join(root, relativeDirectory) : root;
+    const children = await readdir(directory, { withFileTypes: true });
+    children.sort((left, right) => left.name.localeCompare(right.name));
+    for (const child of children) {
+      const path = relativeDirectory ? `${relativeDirectory}/${child.name}` : child.name;
+      if (!relativeDirectory && child.name === RUNTIME_MANIFEST_FILE_NAME) continue;
+      const absolute = join(root, path);
+      if (child.isDirectory()) await walk(path);
+      else if (child.isSymbolicLink()) {
+        const target = await readlink(absolute);
+        assertSymlinkConfined(root, path, target);
+        entries.push({ path, type: "symlink", target, sha256: sha256Hex(target) });
+      } else if (child.isFile()) entries.push({ path, type: "file", sha256: await hashFile(absolute) });
+      else throw new Error(`runtime contains an unsupported filesystem entry: ${path}`);
     }
   }
-
   await walk("");
-  await runWithConcurrency(fileHashTasks, HASH_CONCURRENCY);
-  entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  entries.sort((left, right) => left.path.localeCompare(right.path));
   return entries;
 }
 
@@ -248,128 +280,73 @@ function assertPayloadEntriesWellFormed(entries) {
   if (!Array.isArray(entries)) throw new Error("runtime manifest payload must be an array");
   const seen = new Set();
   for (const entry of entries) {
-    const path = entry?.path;
-    if (typeof path !== "string" || !path) throw new Error("runtime manifest payload entry is missing a path");
-    const segments = path.split("/");
-    if (isAbsolute(path) || segments.some((segment) => !segment || segment === "." || segment === "..")) {
-      throw new Error(`runtime manifest payload contains an unsafe path: ${path}`);
+    const segments = typeof entry?.path === "string" ? entry.path.split("/") : [];
+    if (!segments.length || segments.some((segment) => !segment || segment === "." || segment === "..") || isAbsolute(entry.path)) {
+      throw new Error(`runtime manifest payload contains an unsafe path: ${entry?.path}`);
     }
-    if (seen.has(path)) throw new Error(`runtime manifest payload contains a duplicate path: ${path}`);
-    seen.add(path);
-    if (entry.type !== "file" && entry.type !== "symlink") {
-      throw new Error(`runtime manifest payload entry has an unknown type: ${path}`);
+    if (seen.has(entry.path)) throw new Error(`runtime manifest payload contains a duplicate path: ${entry.path}`);
+    seen.add(entry.path);
+    if (!new Set(["file", "symlink"]).has(entry.type) || !/^[a-f0-9]{64}$/.test(entry.sha256 ?? "")) {
+      throw new Error(`runtime manifest payload entry is invalid: ${entry.path}`);
     }
-    if (typeof entry.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(entry.sha256)) {
-      throw new Error(`runtime manifest payload entry is missing a checksum: ${path}`);
-    }
-    if (entry.type === "symlink") {
-      if (typeof entry.target !== "string" || sha256Hex(entry.target) !== entry.sha256) {
-        throw new Error(`runtime manifest symlink entry is inconsistent: ${path}`);
-      }
+    if (entry.type === "symlink" && (typeof entry.target !== "string" || sha256Hex(entry.target) !== entry.sha256)) {
+      throw new Error(`runtime manifest symlink entry is inconsistent: ${entry.path}`);
     }
   }
 }
 
-/** Compares two already-validated, path-sorted payload lists; throws describing every mismatch found. */
-function comparePayload(actualEntries, expectedEntries) {
-  assertPayloadEntriesWellFormed(expectedEntries);
-  const actualByPath = new Map(actualEntries.map((entry) => [entry.path, entry]));
-  const expectedByPath = new Map(expectedEntries.map((entry) => [entry.path, entry]));
-
-  const missing = [];
-  const modified = [];
-  for (const [path, expected] of expectedByPath) {
-    const actual = actualByPath.get(path);
-    if (!actual) {
-      missing.push(path);
-    } else if (
-      actual.type !== expected.type
-      || actual.sha256 !== expected.sha256
-      || (actual.type === "symlink" && actual.target !== expected.target)
-    ) {
-      modified.push(path);
-    }
-  }
+function comparePayload(actual, expected) {
+  assertPayloadEntriesWellFormed(expected);
+  if (JSON.stringify(actual) === JSON.stringify(expected)) return;
+  const actualByPath = new Map(actual.map((entry) => [entry.path, entry]));
+  const expectedByPath = new Map(expected.map((entry) => [entry.path, entry]));
+  const missing = [...expectedByPath.keys()].filter((path) => !actualByPath.has(path));
   const unexpected = [...actualByPath.keys()].filter((path) => !expectedByPath.has(path));
-
-  if (missing.length || modified.length || unexpected.length) {
-    const summarize = (label, paths) => (paths.length ? [`${label} (${paths.length}): ${paths.slice(0, 5).join(", ")}${paths.length > 5 ? ", ..." : ""}`] : []);
-    const details = [...summarize("missing", missing), ...summarize("modified", modified), ...summarize("unexpected", unexpected)];
-    throw new Error(`runtime payload does not match its manifest — ${details.join("; ")}`);
-  }
+  const modified = [...expectedByPath].filter(([path, entry]) => {
+    const found = actualByPath.get(path);
+    return found && JSON.stringify(found) !== JSON.stringify(entry);
+  }).map(([path]) => path);
+  throw new Error(`runtime payload does not match its manifest — missing: ${missing.slice(0, 5).join(", ")}; modified: ${modified.slice(0, 5).join(", ")}; unexpected: ${unexpected.slice(0, 5).join(", ")}`);
 }
 
 export async function buildRuntimeManifest(root, { nodeVersion } = {}) {
   await assertRequiredFilesExist(root);
-  const identity = await readGatewayIdentity(root);
-  const sidecarIdentity = await readSidecarIdentity(root);
-  const gatewayApiVersion = await readGatewayApiVersion(root);
+  const officialCodesignTransforms = await readOfficialCodesignTransforms(root);
+  const identity = await readGatewayReleaseIdentity(root);
+  await verifyOfficialGatewayInventory(join(root, "gateway"), identity.upstream, officialCodesignTransforms);
   const resolvedNodeVersion = nodeVersion ?? await readExecutableVersion(join(root, "node/bin/node"));
   const payload = await collectPayloadEntries(root);
+  const runtimeBuildId = sha256Hex(JSON.stringify(payload)).slice(0, 16);
   return {
     formatVersion: RUNTIME_MANIFEST_FORMAT_VERSION,
-    gatewayVersion: identity.gatewayVersion,
-    gatewayBuildId: identity.gatewayBuildId,
-    gatewayApiVersion,
-    ...sidecarIdentity,
+    ...Object.fromEntries(Object.entries(identity).filter(([key]) => key !== "upstream")),
+    runtimeBuildId,
     nodeVersion: resolvedNodeVersion,
     requiredFiles: REQUIRED_RUNTIME_FILES,
+    officialCodesignTransforms,
     payload,
     generatedAt: new Date().toISOString()
   };
 }
 
-/**
- * Re-derives a root's identity/executables/payload and throws with an
- * actionable message on the first mismatch. Used both right after staging a
- * copy (reject before activating) and as a fast idempotency check on every
- * startup (skip re-copying an already-valid installed version). Each file is
- * hashed exactly once (the payload walk below); nothing here re-hashes a
- * file already covered by an earlier step in the same call. The returned
- * `verificationMs` lets a caller report the real cost of checking an actual
- * bundle instead of guessing.
- */
 export async function verifyRuntimeManifest(root, manifest) {
   const startedAt = process.hrtime.bigint();
-  if (!manifest || manifest.formatVersion !== RUNTIME_MANIFEST_FORMAT_VERSION) {
-    throw new Error("unsupported runtime manifest format");
-  }
+  if (!manifest || manifest.formatVersion !== RUNTIME_MANIFEST_FORMAT_VERSION) throw new Error("unsupported runtime manifest format");
   await assertRequiredFilesExist(root, manifest.requiredFiles ?? REQUIRED_RUNTIME_FILES);
-
-  const identity = await readGatewayIdentity(root);
-  if (identity.gatewayVersion !== manifest.gatewayVersion || identity.gatewayBuildId !== manifest.gatewayBuildId) {
-    throw new Error(
-      `runtime content does not match its manifest (expected ${manifest.gatewayVersion}/${manifest.gatewayBuildId}, found ${identity.gatewayVersion}/${identity.gatewayBuildId})`
-    );
+  const identity = await readGatewayReleaseIdentity(root);
+  for (const key of ["gatewayVersion", "gatewayBuildId", "gatewayApiVersion", "gatewayArtifactSha256", "gatewayManifestSha256"]) {
+    if (identity[key] !== manifest[key]) throw new Error(`runtime ${key} does not match its lock/manifest`);
   }
-
-  const sidecarIdentity = await readSidecarIdentity(root);
-  if (sidecarIdentity.sidecarVersion !== manifest.sidecarVersion
-    || sidecarIdentity.sidecarBuildId !== manifest.sidecarBuildId) {
-    throw new Error(
-      `sidecar content does not match its manifest (expected ${manifest.sidecarVersion}/${manifest.sidecarBuildId}, found ${sidecarIdentity.sidecarVersion}/${sidecarIdentity.sidecarBuildId})`
-    );
-  }
-
-  const gatewayApiVersion = await readGatewayApiVersion(root);
-  if (gatewayApiVersion !== manifest.gatewayApiVersion) {
-    throw new Error(`Gateway API version mismatch (expected ${manifest.gatewayApiVersion}, found ${gatewayApiVersion})`);
-  }
-
+  await verifyOfficialGatewayInventory(join(root, "gateway"), identity.upstream, manifest.officialCodesignTransforms ?? []);
   const nodeVersion = await readExecutableVersion(join(root, "node/bin/node"));
-  if (manifest.nodeVersion && nodeVersion !== manifest.nodeVersion) {
-    throw new Error(`installed Node version mismatch (expected ${manifest.nodeVersion}, found ${nodeVersion})`);
-  }
-  // npm/npx must actually execute (not just exist) so a corrupted symlink/shim
-  // is rejected the same way a corrupted node binary would be.
+  if (manifest.nodeVersion !== nodeVersion) throw new Error(`installed Node version mismatch (expected ${manifest.nodeVersion}, found ${nodeVersion})`);
   await readExecutableVersion(join(root, "node/bin/npm"));
   await readExecutableVersion(join(root, "node/bin/npx"));
-
-  const payloadEntries = await collectPayloadEntries(root);
-  comparePayload(payloadEntries, manifest.payload ?? []);
-
-  const verificationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
-  return { ...identity, ...sidecarIdentity, gatewayApiVersion, verificationMs };
+  const payload = await collectPayloadEntries(root);
+  comparePayload(payload, manifest.payload ?? []);
+  const runtimeBuildId = sha256Hex(JSON.stringify(payload)).slice(0, 16);
+  if (runtimeBuildId !== manifest.runtimeBuildId) throw new Error("runtime build id does not match payload");
+  return { ...Object.fromEntries(Object.entries(identity).filter(([key]) => key !== "upstream")), runtimeBuildId, verificationMs: Number(process.hrtime.bigint() - startedAt) / 1e6 };
 }
 
 export async function readManifestFile(root) {

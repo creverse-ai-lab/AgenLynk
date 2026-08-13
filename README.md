@@ -15,7 +15,7 @@
 <p align="center">
   <img alt="platform" src="https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white">
   <img alt="app" src="https://img.shields.io/badge/AgenLynk-0.3.5--beta-1461FA">
-  <img alt="runtime" src="https://img.shields.io/badge/runtime-ACP%20Gateway%201.3.2-6E7681">
+  <img alt="runtime" src="https://img.shields.io/badge/runtime-ACP%20Gateway%201.4.0-6E7681">
   <img alt="node" src="https://img.shields.io/badge/Node-22%2B-339933?logo=nodedotjs&logoColor=white">
 </p>
 
@@ -117,7 +117,7 @@ npm run macos:dmg     # AgenLynk.dmg 빌드
 npm run macos:verify  # 완성 DMG 검증
 ```
 
-앱 UI는 순수 SwiftUI(`macos/Sources/`)이고, 런타임은 Node(`src/`)입니다. DMG는 Node 배포판·`src/`·production `node_modules`·`skills/`를 `Contents/Resources/runtime/`에 **설치용 seed**로 담습니다. 앱은 이 seed를 직접 실행하지 않고, 최초 실행 시 `~/.acp-gateway/runtime/versions/<버전>-<빌드ID>/`로 복사·검증한 뒤 그 설치본만 실행합니다.
+앱 UI는 SwiftUI(`macos/Sources/`), Monitor sidecar는 Node(`sidecar/`)입니다. DMG는 `gateway.lock.json`에 고정된 공식 Gateway 1.4.0 artifact와 단일 Node를 `Contents/Resources/gateway-seed/`에, 앱 버전과 함께 움직이는 sidecar를 `Contents/Resources/sidecar/`에 분리해 담습니다. Gateway seed는 최초 실행 때 `~/.acp-gateway/runtime/versions/<Gateway버전>-<runtimeBuildId>/`로 복사·검증되며, sidecar는 앱 리소스에서 실행됩니다. 소스 트리에서 Gateway를 쓰려면 `npm run gateway:fetch`로 `build/cache/gateway-runtime`을 만들거나 `ACP_LYNK_GATEWAY_DEVELOPMENT_ROOT`를 지정하세요. 형제 `../ACP` 체크아웃은 쓰지 않습니다.
 
 ## 버전 이력 (앱)
 
@@ -128,7 +128,7 @@ npm run macos:verify  # 완성 DMG 검증
 | **0.3.3** | Frontdoor 이름을 폴더명 기반으로 + 직접 이름 지정(저장 유지) · 시퀀스 다이어그램 개선(고정 헤더, 타임라인 위의 호출/응답 화살표) · 선택 에이전트 활동 표시 |
 | **0.2.0** | **AgenLynk로 리네임** · Pet을 단일 Canvas로 렌더해 CPU 절감 · DMG 190MB→111MB 경량화 · 이중 언어 Gateway 설정 · 서브에이전트 트랜스크립트 수집(설정 게이트) |
 
-> 내부 런타임(ACP Gateway)은 앱 버전과 별개로 `1.3.x`로 버전을 매깁니다. 런타임 변경 이력은 [`macos/README.md`](macos/README.md)와 커밋 로그를 참고하세요.
+> ACP Gateway는 앱 버전과 독립적으로 관리되며 AgenLynk 0.4.0은 공식 Gateway 1.4.0 release artifact를 고정해 사용합니다.
 
 ## Credits
 

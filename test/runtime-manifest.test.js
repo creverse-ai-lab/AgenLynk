@@ -1,274 +1,123 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { RUNTIME_MANIFEST_FORMAT_VERSION, buildRuntimeManifest, verifyRuntimeManifest } from "../src/runtime-manifest.js";
-import { computeGatewayBuildId } from "../src/version.js";
-import { computeSidecarBuildId } from "../sidecar/src/version.js";
-import { writeRuntimeSeed as writeFixtureSeed } from "./fixtures/runtime-seed.js";
+import { OFFICIAL_CLAUDE_HELPER_PATH, writeRuntimeSeed } from "./fixtures/runtime-seed.js";
 
-test("buildRuntimeManifest captures gatewayVersion/gatewayBuildId/nodeVersion from the seed's own files", async () => {
-  const seed = await mkdtemp(join(tmpdir(), "acp-runtime-manifest-"));
+test("composite manifest pins Gateway 1.4.0 independently from app sidecar", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agenlynk-manifest-"));
   try {
-    await writeFixtureSeed(seed, { gatewayVersion: "9.9.9", gatewayBuildId: "deadbeef", nodeVersion: "22.14.0", gatewayApiVersion: 3 });
-    const manifest = await buildRuntimeManifest(seed);
+    const { commit } = await writeRuntimeSeed(root);
+    const manifest = await buildRuntimeManifest(root);
     assert.equal(manifest.formatVersion, RUNTIME_MANIFEST_FORMAT_VERSION);
-    assert.equal(manifest.gatewayVersion, "9.9.9");
-    assert.equal(manifest.gatewayBuildId, "deadbeef");
-    assert.equal(manifest.gatewayApiVersion, 3);
-    assert.equal(manifest.sidecarVersion, "0.4.0");
-    assert.equal(manifest.sidecarBuildId, "fixture-sidecar");
-    assert.equal(manifest.nodeVersion, "22.14.0");
-    assert.ok(Array.isArray(manifest.payload) && manifest.payload.length > 0, "payload inventory should be populated");
-    assert.ok(!manifest.payload.some((entry) => entry.path === "runtime-manifest.json"), "the manifest must not describe itself");
-    const paths = manifest.payload.map((entry) => entry.path);
-    assert.deepEqual(paths, [...paths].sort(), "payload entries must be sorted by path");
-    const result = await verifyRuntimeManifest(seed, manifest);
-    assert.equal(typeof result.verificationMs, "number");
-    assert.ok(result.verificationMs >= 0);
-  } finally {
-    await rm(seed, { recursive: true, force: true });
+    assert.equal(manifest.gatewayVersion, "1.4.0");
+    assert.equal(manifest.gatewayBuildId, commit);
+    assert.equal(manifest.gatewayApiVersion, 1);
+    assert.match(manifest.runtimeBuildId, /^[a-f0-9]{16}$/);
+    assert.equal(manifest.sidecarVersion, undefined);
+    assert.ok(manifest.payload.some((entry) => entry.path === "gateway/gateway-client/index.js"));
+    assert.ok(!manifest.payload.some((entry) => entry.path.startsWith("sidecar/")));
+    await assert.doesNotReject(verifyRuntimeManifest(root, manifest));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("verification rejects lock/artifact-manifest identity mismatch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agenlynk-manifest-"));
+  try {
+    await writeRuntimeSeed(root);
+    const manifest = await buildRuntimeManifest(root);
+    const lockPath = join(root, "gateway.lock.json");
+    const lock = JSON.parse(await readFile(lockPath, "utf8"));
+    lock.sourceCommit = "f".repeat(40);
+    await writeFile(lockPath, JSON.stringify(lock));
+    await assert.rejects(() => verifyRuntimeManifest(root, manifest), /does not match gateway\.lock/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("verification rejects modified, missing, and unexpected payload files", async () => {
+  for (const mutation of ["modified", "missing", "unexpected"]) {
+    const root = await mkdtemp(join(tmpdir(), "agenlynk-manifest-"));
+    try {
+      await writeRuntimeSeed(root);
+      const manifest = await buildRuntimeManifest(root);
+      if (mutation === "modified") await writeFile(join(root, "gateway/src/index.js"), "tampered\n");
+      if (mutation === "missing") await rm(join(root, "gateway/src/bootstrap.js"));
+      if (mutation === "unexpected") await writeFile(join(root, "gateway/extra.js"), "extra\n");
+      await assert.rejects(() => verifyRuntimeManifest(root, manifest), /missing a required file|payload does not match|unexpected entry|checksum mismatch/);
+    } finally { await rm(root, { recursive: true, force: true }); }
   }
 });
 
-test("verifyRuntimeManifest runs bundled npm and npx when the inherited PATH has no Node", async () => {
-  const seed = await mkdtemp(join(tmpdir(), "acp-runtime-manifest-"));
-  const inheritedPath = process.env.PATH;
+test("verification rejects a Node version changed after manifest creation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agenlynk-manifest-"));
   try {
-    await writeFixtureSeed(seed);
-    // Match the official Node distribution: npm/npx locate `node` through
-    // /usr/bin/env rather than by an absolute path in their shebang.
-    await writeFile(join(seed, "node/bin/npm"), "#!/usr/bin/env node\n");
-    await writeFile(join(seed, "node/bin/npx"), "#!/usr/bin/env node\n");
-    await chmod(join(seed, "node/bin/npm"), 0o755);
-    await chmod(join(seed, "node/bin/npx"), 0o755);
-    const manifest = await buildRuntimeManifest(seed);
-
-    process.env.PATH = join(seed, "path-without-node");
-    await verifyRuntimeManifest(seed, manifest);
-  } finally {
-    if (inheritedPath === undefined) delete process.env.PATH;
-    else process.env.PATH = inheritedPath;
-    await rm(seed, { recursive: true, force: true });
-  }
+    await writeRuntimeSeed(root);
+    const manifest = await buildRuntimeManifest(root);
+    await writeFile(join(root, "node/bin/node"), '#!/bin/sh\necho "v23.0.0"\n');
+    await chmod(join(root, "node/bin/node"), 0o755);
+    await assert.rejects(() => verifyRuntimeManifest(root, manifest), /Node version mismatch/);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("verifyRuntimeManifest rejects an incomplete copy missing a required file", async () => {
-  const seed = await mkdtemp(join(tmpdir(), "acp-runtime-manifest-"));
+test("manifest refuses symlinks that escape the composite runtime", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agenlynk-manifest-"));
   try {
-    await writeFixtureSeed(seed);
-    const manifest = await buildRuntimeManifest(seed);
-    await rm(join(seed, "sidecar/src/server/monitor.js"));
-    await assert.rejects(() => verifyRuntimeManifest(seed, manifest), /missing a required file/);
-  } finally {
-    await rm(seed, { recursive: true, force: true });
-  }
+    await writeRuntimeSeed(root);
+    await symlink("../../../../etc/passwd", join(root, "escape"));
+    await assert.rejects(() => buildRuntimeManifest(root), /symlink escapes/);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("verifyRuntimeManifest rejects a root whose build id does not match the recorded manifest", async () => {
-  // Two distinct directories (not the same path mutated in place) so each
-  // gets its own fresh dynamic import of src/version.js: Node's ESM loader
-  // caches a given file:// URL for the life of the process, so re-importing
-  // the *same* path after editing it in place would misleadingly return the
-  // stale cached export instead of exercising the mismatch check.
-  const original = await mkdtemp(join(tmpdir(), "acp-runtime-manifest-"));
-  const tampered = await mkdtemp(join(tmpdir(), "acp-runtime-manifest-"));
+test("verification rejects a bad official files[].sha256", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agenlynk-manifest-"));
   try {
-    await writeFixtureSeed(original, { gatewayVersion: "1.0.0", gatewayBuildId: "original" });
-    const manifest = await buildRuntimeManifest(original);
-    await writeFixtureSeed(tampered, { gatewayVersion: "1.0.0", gatewayBuildId: "tampered" });
-    await assert.rejects(() => verifyRuntimeManifest(tampered, manifest), /does not match its manifest/);
-  } finally {
-    await rm(original, { recursive: true, force: true });
-    await rm(tampered, { recursive: true, force: true });
-  }
+    await writeRuntimeSeed(root);
+    const officialPath = join(root, "gateway/runtime-manifest.json");
+    const official = JSON.parse(await readFile(officialPath, "utf8"));
+    const packageEntry = official.files.find((entry) => entry.path === "package.json");
+    packageEntry.sha256 = "a".repeat(64);
+    await writeFile(officialPath, `${JSON.stringify(official)}\n`);
+    await assert.rejects(() => buildRuntimeManifest(root), /official Gateway file checksum mismatch/);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("verifyRuntimeManifest rejects a Node binary whose reported version no longer matches", async () => {
-  const seed = await mkdtemp(join(tmpdir(), "acp-runtime-manifest-"));
+test("verification accepts only a recorded codesign-only transform for the official helper", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agenlynk-manifest-"));
   try {
-    await writeFixtureSeed(seed, { nodeVersion: "22.14.0" });
-    const manifest = await buildRuntimeManifest(seed);
-    await writeFile(join(seed, "node/bin/node"), '#!/bin/sh\necho "v19.0.0"\n');
-    await chmod(join(seed, "node/bin/node"), 0o755);
-    await assert.rejects(() => verifyRuntimeManifest(seed, manifest), /Node version mismatch/);
-  } finally {
-    await rm(seed, { recursive: true, force: true });
-  }
+    const { officialHelperSha256 } = await writeRuntimeSeed(root, { includeOfficialHelper: true });
+    const helper = join(root, "gateway", OFFICIAL_CLAUDE_HELPER_PATH);
+    await writeFile(helper, "re-signed-helper\n");
+    await assert.rejects(() => buildRuntimeManifest(root), /official Gateway file checksum mismatch/);
+
+    const { createHash } = await import("node:crypto");
+    const installedSha256 = createHash("sha256").update("re-signed-helper\n").digest("hex");
+    await writeFile(join(root, "official-codesign-transforms.json"), `${JSON.stringify([{
+      path: OFFICIAL_CLAUDE_HELPER_PATH,
+      kind: "codesign",
+      officialSha256: officialHelperSha256,
+      installedSha256
+    }])}\n`);
+    const manifest = await buildRuntimeManifest(root);
+    assert.equal(manifest.officialCodesignTransforms[0].kind, "codesign");
+    await assert.doesNotReject(verifyRuntimeManifest(root, manifest));
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("verifyRuntimeManifest rejects a root whose sidecar identity does not match the recorded manifest", async () => {
-  // Distinct directories: ESM caches version.js by file:// URL, so in-place
-  // edits would keep returning the original sidecar exports.
-  const original = await mkdtemp(join(tmpdir(), "acp-runtime-manifest-"));
-  const tampered = await mkdtemp(join(tmpdir(), "acp-runtime-manifest-"));
+test("verification rejects an unofficial codesign transform path", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agenlynk-manifest-"));
   try {
-    await writeFixtureSeed(original, {
-      gatewayVersion: "1.0.0",
-      gatewayBuildId: "same-build",
-      sidecarBuildId: "sidecar-original"
-    });
-    const manifest = await buildRuntimeManifest(original);
-    await writeFixtureSeed(tampered, {
-      gatewayVersion: "1.0.0",
-      gatewayBuildId: "same-build",
-      sidecarBuildId: "sidecar-tampered"
-    });
-    await assert.rejects(() => verifyRuntimeManifest(tampered, manifest), /sidecar content does not match its manifest/);
-  } finally {
-    await rm(original, { recursive: true, force: true });
-    await rm(tampered, { recursive: true, force: true });
-  }
-});
-
-test("verifyRuntimeManifest rejects a Gateway API version that no longer matches", async () => {
-  // Two distinct directories, same reasoning as the build-id mismatch test
-  // above: dynamic import caches by file:// URL, so tampering the *same*
-  // path in place would misleadingly keep returning the cached export.
-  const original = await mkdtemp(join(tmpdir(), "acp-runtime-manifest-"));
-  const tampered = await mkdtemp(join(tmpdir(), "acp-runtime-manifest-"));
-  try {
-    await writeFixtureSeed(original, { gatewayVersion: "1.0.0", gatewayBuildId: "same-build", gatewayApiVersion: 1 });
-    const manifest = await buildRuntimeManifest(original);
-    await writeFixtureSeed(tampered, { gatewayVersion: "1.0.0", gatewayBuildId: "same-build", gatewayApiVersion: 2 });
-    await assert.rejects(() => verifyRuntimeManifest(tampered, manifest), /Gateway API version mismatch/);
-  } finally {
-    await rm(original, { recursive: true, force: true });
-    await rm(tampered, { recursive: true, force: true });
-  }
-});
-
-test("verifyRuntimeManifest rejects an older manifest format that predates the payload inventory", async () => {
-  const seed = await mkdtemp(join(tmpdir(), "acp-runtime-manifest-"));
-  try {
-    await writeFixtureSeed(seed);
-    const manifest = await buildRuntimeManifest(seed);
-    await assert.rejects(
-      () => verifyRuntimeManifest(seed, { ...manifest, formatVersion: 1 }),
-      /unsupported runtime manifest format/
-    );
-  } finally {
-    await rm(seed, { recursive: true, force: true });
-  }
-});
-
-test("verifyRuntimeManifest detects a payload file modified after the manifest was built", async () => {
-  const seed = await mkdtemp(join(tmpdir(), "acp-runtime-manifest-"));
-  try {
-    await writeFixtureSeed(seed);
-    const manifest = await buildRuntimeManifest(seed);
-    // Not in REQUIRED_RUNTIME_FILES and not part of gateway identity, so only
-    // the payload checksum inventory — not the existing marker/identity
-    // checks — can catch this tampering.
-    const target = join(seed, "skills/agent-delegator/SKILL.md");
-    await writeFile(target, "# tampered\n");
-    await assert.rejects(() => verifyRuntimeManifest(seed, manifest), /modified.*SKILL\.md/s);
-  } finally {
-    await rm(seed, { recursive: true, force: true });
-  }
-});
-
-test("verifyRuntimeManifest detects a file removed after the manifest was built (missing payload entry)", async () => {
-  const seed = await mkdtemp(join(tmpdir(), "acp-runtime-manifest-"));
-  try {
-    await writeFixtureSeed(seed);
-    await writeFile(join(seed, "extra.txt"), "not required, but was shipped\n");
-    const manifest = await buildRuntimeManifest(seed);
-    await rm(join(seed, "extra.txt"));
-    await assert.rejects(() => verifyRuntimeManifest(seed, manifest), /missing.*extra\.txt/s);
-  } finally {
-    await rm(seed, { recursive: true, force: true });
-  }
-});
-
-test("verifyRuntimeManifest detects a file added after the manifest was built (unexpected payload entry)", async () => {
-  const seed = await mkdtemp(join(tmpdir(), "acp-runtime-manifest-"));
-  try {
-    await writeFixtureSeed(seed);
-    const manifest = await buildRuntimeManifest(seed);
-    await writeFile(join(seed, "src/smuggled.js"), "export default {};\n");
-    await assert.rejects(() => verifyRuntimeManifest(seed, manifest), /unexpected.*smuggled\.js/s);
-  } finally {
-    await rm(seed, { recursive: true, force: true });
-  }
-});
-
-test("buildRuntimeManifest hashes a confined symlink by its target text without following it, and verification catches a retargeted link", async () => {
-  const seed = await mkdtemp(join(tmpdir(), "acp-runtime-manifest-"));
-  try {
-    await writeFixtureSeed(seed);
-    await symlink("../npm-cli.js", join(seed, "node/bin/npm-link"), "file");
-    await writeFile(join(seed, "node/npm-cli.js"), "// npm entry\n");
-    const manifest = await buildRuntimeManifest(seed);
-    const linkEntry = manifest.payload.find((entry) => entry.path === "node/bin/npm-link");
-    assert.ok(linkEntry, "a confined symlink must appear in the payload inventory");
-    assert.equal(linkEntry.type, "symlink");
-    assert.equal(linkEntry.target, "../npm-cli.js");
-    await verifyRuntimeManifest(seed, manifest);
-
-    await rm(join(seed, "node/bin/npm-link"));
-    await symlink("../../../../etc/hosts", join(seed, "node/bin/npm-link"), "file");
-    await assert.rejects(() => verifyRuntimeManifest(seed, manifest), /escapes its root|modified/);
-  } finally {
-    await rm(seed, { recursive: true, force: true });
-  }
-});
-
-test("buildRuntimeManifest rejects a symlink whose target escapes the runtime root", async () => {
-  const seed = await mkdtemp(join(tmpdir(), "acp-runtime-manifest-"));
-  try {
-    await writeFixtureSeed(seed);
-    await symlink("../../../../etc/hosts", join(seed, "node/bin/escape-link"), "file");
-    await assert.rejects(() => buildRuntimeManifest(seed), /escapes its root/);
-  } finally {
-    await rm(seed, { recursive: true, force: true });
-  }
-});
-
-test("verifyRuntimeManifest rejects a manifest payload with an unsafe declared path", async () => {
-  const seed = await mkdtemp(join(tmpdir(), "acp-runtime-manifest-"));
-  try {
-    await writeFixtureSeed(seed);
-    const manifest = await buildRuntimeManifest(seed);
-
-    const traversal = { ...manifest, payload: [...manifest.payload, { path: "../outside.txt", type: "file", sha256: "a".repeat(64) }] };
-    await assert.rejects(() => verifyRuntimeManifest(seed, traversal), /unsafe path/);
-
-    const absolute = { ...manifest, payload: [...manifest.payload, { path: "/etc/hosts", type: "file", sha256: "a".repeat(64) }] };
-    await assert.rejects(() => verifyRuntimeManifest(seed, absolute), /unsafe path/);
-
-    const duplicate = { ...manifest, payload: [...manifest.payload, manifest.payload[0]] };
-    await assert.rejects(() => verifyRuntimeManifest(seed, duplicate), /duplicate path/);
-  } finally {
-    await rm(seed, { recursive: true, force: true });
-  }
-});
-
-test("Gateway and sidecar build ids cover only their independently owned payloads", async () => {
-  const root = await mkdtemp(join(tmpdir(), "acp-build-id-"));
-  try {
-    await mkdir(join(root, "src", "nested"), { recursive: true });
-    await mkdir(join(root, "sidecar", "src", "nested"), { recursive: true });
-    await writeFile(join(root, "package.json"), JSON.stringify({ name: "acp-gateway", version: "1.3.1" }));
-    await writeFile(join(root, "sidecar", "package.json"), JSON.stringify({ name: "agenlynk-sidecar", version: "0.4.0" }));
-    await writeFile(join(root, "src", "version.js"), "export const GATEWAY_VERSION = \"1.3.1\";\n");
-    await writeFile(join(root, "src", "nested", "core.js"), "# gateway\n");
-    await writeFile(join(root, "sidecar", "src", "nested", "monitor.js"), "# original\n");
-    const gatewayOriginal = computeGatewayBuildId(root);
-    const sidecarOriginal = computeSidecarBuildId(join(root, "sidecar"));
-
-    await writeFile(join(root, "sidecar", "src", "nested", "monitor.js"), "# changed\n");
-    assert.notEqual(computeSidecarBuildId(join(root, "sidecar")), sidecarOriginal);
-    assert.equal(computeGatewayBuildId(root), gatewayOriginal, "sidecar changes must not change the Gateway build id");
-
-    await writeFile(join(root, "src", "nested", "core.js"), "# changed gateway\n");
-    assert.notEqual(computeGatewayBuildId(root), gatewayOriginal);
-
-    await mkdir(join(root, "skills", "agent-delegator"), { recursive: true });
-    await writeFile(join(root, "skills", "agent-delegator", "SKILL.md"), "# skill\n");
-    assert.notEqual(computeGatewayBuildId(root), gatewayOriginal, "a shipped skill must be covered by the Gateway build id");
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+    await writeRuntimeSeed(root);
+    const original = await readFile(join(root, "gateway/src/index.js"), "utf8");
+    const { createHash } = await import("node:crypto");
+    await writeFile(join(root, "gateway/src/index.js"), "mutated\n");
+    await writeFile(join(root, "official-codesign-transforms.json"), `${JSON.stringify([{
+      path: "src/index.js",
+      kind: "codesign",
+      officialSha256: createHash("sha256").update(original).digest("hex"),
+      installedSha256: createHash("sha256").update("mutated\n").digest("hex")
+    }])}\n`);
+    await assert.rejects(() => buildRuntimeManifest(root), /official codesign transform path is not allowed/);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { controlIdentity } from "../src/config.js";
+import { controlIdentity } from "../sidecar/src/app/config.js";
 
 test("Control bridge loads its identity from installer state without embedded credentials", async () => {
   const directory = await mkdtemp(join(tmpdir(), "acp-control-identity-"));

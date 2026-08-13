@@ -9,8 +9,7 @@
 Runner:
 
 - `monitor-state`: `MonitorState`의 실제 mutation API를 순서대로 호출한다. `state.sessions`가 있으면 `setSessions` 후 현재 SSE `state` shape(`sessions`, `removedSessionIds`)을 기록한다.
-- `socket-flow`: `createSocketSender`로 observer backpressure를 재생하고, `subscription_error`를 monitor가 보내는 SSE `state`(notice 아님)로 사상한다.
-- `gateway-rpc`: 실제 Unix socket과 `GatewayRpcClient`로 disconnect/reconnect/cursor replay를 재생한다. subscribe args는 production observer와 같다 (`includeThoughts`, `includeToolEvents`).
+- `socket-flow`, `gateway-rpc`: Phase 1에서 고정한 transport 입력/기대값이다. Gateway 구현이 공식 artifact로 이동한 Phase 4 이후 AgenLynk Node suite는 이를 재실행하지 않고 Swift decoder/selection 호환 검증에서만 소비한다. Gateway transport 동작 자체는 `agent_gateway`가 검증한다.
 
 Node 재생 결과는 완전한 `MonitorState.snapshot()`이다. fixture `expected.snapshot`은 그 생성본의 부분 계약이다. Swift는 같은 입력 줄을 production decoder로 재생하고, `AppModel`이 쓰는 `MonitorSelection.reconcile` / `MonitorStreamNotice.forPausedSubscription`을 그대로 실행한다.
 

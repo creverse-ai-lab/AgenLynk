@@ -88,12 +88,22 @@ for BINARY in "$APP/Contents/MacOS/ACPMonitor" "$PET_EXECUTABLE"; do
 done
 printf '%s\n' "No shipped binary resolves through a build-machine path"
 
-RUNTIME_DIR="$APP/Contents/Resources/runtime"
-if [ ! -f "$RUNTIME_DIR/src/index.js" ] || [ ! -f "$RUNTIME_DIR/sidecar/src/server/monitor.js" ] || [ ! -f "$RUNTIME_DIR/package.json" ]; then
-  echo "error: $RUNTIME_DIR does not look like a bundled runtime seed" >&2
+RUNTIME_DIR="$APP/Contents/Resources/gateway-seed"
+SIDECAR_DIR="$APP/Contents/Resources/sidecar"
+if [ ! -f "$RUNTIME_DIR/gateway/src/index.js" ] \
+  || [ ! -f "$RUNTIME_DIR/gateway/gateway-client/index.js" ] \
+  || [ ! -f "$RUNTIME_DIR/app-runtime/runtime-installer-cli.js" ] \
+  || [ ! -f "$SIDECAR_DIR/src/server/monitor.js" ]; then
+  echo "error: Gateway seed and sidecar resource roots are incomplete" >&2
   exit 1
 fi
 "$SYSTEM_NODE" "$REPO_ROOT/src/verify-runtime-manifest-cli.js" "$RUNTIME_DIR"
+
+if [ "$RUNTIME_DIR" = "$SIDECAR_DIR" ] || [ -e "$RUNTIME_DIR/sidecar" ] || [ -e "$SIDECAR_DIR/gateway" ]; then
+  echo "error: Gateway and sidecar resource roots are not isolated" >&2
+  exit 1
+fi
+printf '%s\n' "Gateway daemon and sidecar resources are isolated"
 
 codesign --verify --deep --strict "$APP"
 printf '%s\n' "codesign --verify passed"

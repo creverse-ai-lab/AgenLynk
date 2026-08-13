@@ -1,7 +1,6 @@
 #!/usr/bin/env node
-// Build-time helper: snapshots Gateway, sidecar, and Node identities plus
-// the required-file list of a fully assembled runtime directory (Node dist,
-// node_modules, skills, src/ all copied in) into runtime-manifest.json.
+// Build-time helper: snapshots the pinned Gateway artifact, Node, and
+// AgenLynk-owned runtime manager into runtime-manifest.json.
 // runtime-installer.js reads this later to reject an incomplete/corrupt
 // staged copy before activating it. Run by build-app.sh after every other
 // runtime asset has been copied into place; the executing Node here can be
@@ -26,7 +25,7 @@ try {
   // cost of checking this bundle rather than a guess.
   const { verificationMs } = await verifyRuntimeManifest(root, manifest);
   process.stdout.write(
-    `runtime-manifest.json: Gateway ${manifest.gatewayVersion} (${manifest.gatewayBuildId}), sidecar ${manifest.sidecarVersion} (${manifest.sidecarBuildId}), gatewayApiVersion ${manifest.gatewayApiVersion}, `
+    `runtime-manifest.json: Gateway ${manifest.gatewayVersion} (${manifest.gatewayBuildId}), runtime ${manifest.runtimeBuildId}, gatewayApiVersion ${manifest.gatewayApiVersion}, `
     + `node ${manifest.nodeVersion}, ${manifest.payload.length} payload entries, verified in ${verificationMs.toFixed(1)}ms\n`
   );
 } catch (error) {

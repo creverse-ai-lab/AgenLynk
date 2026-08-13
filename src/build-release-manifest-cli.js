@@ -6,6 +6,8 @@
 // packaging, optional notarization/stapling, and verify-dmg.sh have all
 // completed successfully.
 import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { readManifestFile } from "./runtime-manifest.js";
 
 export const RELEASE_MANIFEST_FORMAT_VERSION = 1;
@@ -42,6 +44,7 @@ function requireBooleanArg(args, name) {
 try {
   const args = parseArgs(process.argv.slice(2));
   const runtimeManifest = await readManifestFile(requireArg(args, "runtime-root"));
+  const sidecarModule = await import(pathToFileURL(join(requireArg(args, "sidecar-root"), "src/version.js")).href);
 
   const signingMode = requireArg(args, "signing-mode");
   if (signingMode !== "ad-hoc" && signingMode !== "developer-id") {
@@ -54,8 +57,8 @@ try {
   if (!Number.isInteger(runtimeManifest.gatewayApiVersion)) {
     throw new Error("runtime manifest is missing an integer gatewayApiVersion");
   }
-  if (!runtimeManifest.sidecarVersion || !runtimeManifest.sidecarBuildId) {
-    throw new Error("runtime manifest is missing the sidecar identity");
+  if (!sidecarModule.SIDECAR_VERSION || !sidecarModule.SIDECAR_BUILD_ID) {
+    throw new Error("sidecar resource is missing its independent identity");
   }
 
   const release = {
@@ -80,8 +83,8 @@ try {
       apiVersion: runtimeManifest.gatewayApiVersion
     },
     sidecar: {
-      version: runtimeManifest.sidecarVersion,
-      buildId: runtimeManifest.sidecarBuildId
+      version: sidecarModule.SIDECAR_VERSION,
+      buildId: sidecarModule.SIDECAR_BUILD_ID
     },
     node: {
       version: runtimeManifest.nodeVersion

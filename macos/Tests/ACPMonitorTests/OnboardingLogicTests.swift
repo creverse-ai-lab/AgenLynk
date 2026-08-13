@@ -14,6 +14,7 @@ enum OnboardingLogicChecks {
         try checkCurrentRuntimeParsing()
         try checkRuntimeProvisionerResultParsing()
         try checkBundledRuntimeErrorStableCodes()
+        try checkDevelopmentGatewaySearchRoots()
         print("Swift onboarding logic checks passed")
     }
 
@@ -187,6 +188,43 @@ enum OnboardingLogicChecks {
         }
         guard RuntimeProvisioner.parse("{}") == nil else {
             throw CheckError.failed("expected output missing required fields to return nil")
+        }
+    }
+
+    static func checkDevelopmentGatewaySearchRoots() throws {
+        let explicit = URL(fileURLWithPath: "/tmp/explicit-gateway")
+        let installed = URL(fileURLWithPath: "/tmp/installed/runtime/versions/1.4.0-deadbeef/gateway")
+        let fetched = URL(fileURLWithPath: "/tmp/agenlynk/build/cache/gateway-runtime")
+
+        let all = BundledRuntime.developmentGatewaySearchRoots(
+            environmentRoot: explicit.path,
+            installedGatewayRoot: installed,
+            fetchedGatewayRoot: fetched
+        )
+        guard all == [explicit, installed, fetched] else {
+            throw CheckError.failed("expected explicit env, then installed runtime, then gateway:fetch cache")
+        }
+
+        let withoutEnv = BundledRuntime.developmentGatewaySearchRoots(
+            environmentRoot: nil,
+            installedGatewayRoot: installed,
+            fetchedGatewayRoot: fetched
+        )
+        guard withoutEnv == [installed, fetched] else {
+            throw CheckError.failed("expected installed runtime before the gateway:fetch cache when env is unset")
+        }
+
+        let emptyEnv = BundledRuntime.developmentGatewaySearchRoots(
+            environmentRoot: "",
+            installedGatewayRoot: nil,
+            fetchedGatewayRoot: fetched
+        )
+        guard emptyEnv == [fetched] else {
+            throw CheckError.failed("expected only the gateway:fetch cache when env and installed runtime are absent")
+        }
+
+        guard all.allSatisfy({ !$0.path.hasSuffix("/ACP") && !$0.path.contains("/ACP/") }) else {
+            throw CheckError.failed("development Gateway roots must not include an ambient sibling ACP checkout")
         }
     }
 }

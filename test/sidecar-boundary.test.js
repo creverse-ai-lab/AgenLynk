@@ -4,80 +4,29 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import {
-  collectSidecarPrivateImportViolations,
-  findForbiddenPrivateImportPatterns
-} from "../scripts/sidecar-private-imports.js";
+import { collectSidecarPrivateImportViolations, findForbiddenPrivateImportPatterns } from "../scripts/sidecar-private-imports.js";
 
-test("legacy-adapter.js remains the only allowed Gateway private-import exception", async () => {
-  const root = await mkdtemp(join(tmpdir(), "acp-sidecar-boundary-"));
+test("private import guard rejects source-tree, legacy-adapter, and private package subpaths", () => {
+  assert.deepEqual(findForbiddenPrivateImportPatterns('import { x } from "../../../src/socket-rpc.js";'), ["private-src-import"]);
+  assert.deepEqual(findForbiddenPrivateImportPatterns('import x from "../gateway/legacy-adapter.js";'), ["legacy-adapter"]);
+  assert.deepEqual(findForbiddenPrivateImportPatterns('import "acp-gateway/src/socket-rpc.js";'), ["package-private-subpath"]);
+  assert.deepEqual(findForbiddenPrivateImportPatterns('import { GatewayRpcClient } from "../gateway/client.js";'), []);
+});
+
+test("scanner permits pathToFileURL only in the public client loader", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agenlynk-sidecar-boundary-"));
   try {
     await mkdir(join(root, "gateway"), { recursive: true });
     await mkdir(join(root, "server"), { recursive: true });
-    await writeFile(
-      join(root, "gateway/legacy-adapter.js"),
-      [
-        'import { GatewayRpcClient } from "../../../src/socket-rpc.js";',
-        'export const url = new URL("../../../src/gateway-daemon.js", import.meta.url);',
-        'import { createRequire } from "node:module";',
-        "createRequire(import.meta.url);",
-        "pathToFileURL(\"/tmp/x.js\");",
-        ""
-      ].join("\n")
-    );
-    await writeFile(join(root, "server/monitor.js"), 'export const ok = true;\n');
-    assert.deepEqual(await collectSidecarPrivateImportViolations(root), []);
+    await writeFile(join(root, "gateway/client.js"), 'pathToFileURL(process.env.ACP_GATEWAY_CLIENT_ENTRYPOINT);\n');
+    await writeFile(join(root, "server/monitor.js"), 'pathToFileURL("/tmp/private.js");\n');
+    assert.deepEqual(await collectSidecarPrivateImportViolations(root), [{ path: "server/monitor.js", patterns: ["pathToFileURL"] }]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("private import guard rejects static import, URL, createRequire, and pathToFileURL bypasses", () => {
-  assert.deepEqual(
-    findForbiddenPrivateImportPatterns('import { x } from "../../../src/socket-rpc.js";'),
-    ["static-import"]
-  );
-  assert.deepEqual(
-    findForbiddenPrivateImportPatterns('const mod = await import("../../../src/config.js");'),
-    ["static-import"]
-  );
-  assert.deepEqual(
-    findForbiddenPrivateImportPatterns('export const url = new URL("../../../src/gateway-daemon.js", import.meta.url);'),
-    ["url-constructor"]
-  );
-  assert.deepEqual(
-    findForbiddenPrivateImportPatterns('const url = URL("../../../src/installer.js");'),
-    ["url-constructor"]
-  );
-  assert.deepEqual(
-    findForbiddenPrivateImportPatterns("const require = createRequire(import.meta.url);"),
-    ["createRequire"]
-  );
-  assert.deepEqual(
-    findForbiddenPrivateImportPatterns("await import(pathToFileURL(join(root, \"src/version.js\")));"),
-    ["pathToFileURL"]
-  );
-  assert.deepEqual(
-    findForbiddenPrivateImportPatterns('import { GatewayRpcClient } from "../gateway/legacy-adapter.js";'),
-    []
-  );
-});
-
-test("scanner reports forbidden patterns outside the adapter", async () => {
-  const root = await mkdtemp(join(tmpdir(), "acp-sidecar-boundary-"));
-  try {
-    await mkdir(join(root, "gateway"), { recursive: true });
-    await mkdir(join(root, "server"), { recursive: true });
-    await writeFile(join(root, "gateway/legacy-adapter.js"), 'import { x } from "../../../src/foo.js";\n');
-    await writeFile(join(root, "server/monitor.js"), 'import { x } from "../../../src/foo.js";\n');
-    const violations = await collectSidecarPrivateImportViolations(root);
-    assert.deepEqual(violations, [{ path: "server/monitor.js", patterns: ["static-import"] }]);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("actual sidecar/src has no private Gateway access outside legacy-adapter.js", async () => {
+test("actual sidecar imports only the Phase 3 public client boundary", async () => {
   const sourceRoot = fileURLToPath(new URL("../sidecar/src/", import.meta.url));
   assert.deepEqual(await collectSidecarPrivateImportViolations(sourceRoot), []);
 });

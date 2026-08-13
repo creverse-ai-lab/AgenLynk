@@ -28,6 +28,7 @@ const selectedFiles = allFiles
   .filter(({ name }) => !quick || !slowFiles.has(name))
   .map(({ path }) => path);
 const artifacts = await mkdtemp(join(tmpdir(), "acp-gateway-test-artifacts-"));
+const publicClientFixture = fileURLToPath(new URL("../test/fixtures/gateway-client/index.js", import.meta.url));
 
 if (quick) {
   process.stdout.write(`Quick suite: ${selectedFiles.length}/${allFiles.length} files; full release gate remains npm test.\n`);
@@ -40,7 +41,9 @@ try {
       env: {
         ...process.env,
         ACP_GATEWAY_DISABLE_DYNAMIC_PROVIDERS: "1",
-        ACP_GATEWAY_ARTIFACTS: artifacts
+        ACP_GATEWAY_ARTIFACTS: artifacts,
+        ACP_GATEWAY_CLIENT_ENTRYPOINT: publicClientFixture,
+        ACP_GATEWAY_ACTIVE_ROOT: fileURLToPath(new URL("../test/fixtures/", import.meta.url))
       }
     });
     child.once("error", reject);

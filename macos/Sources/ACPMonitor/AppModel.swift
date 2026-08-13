@@ -603,10 +603,10 @@ final class AppModel: ObservableObject {
     }
 
     /// The Gateway version+build the app bundle ships as its runtime seed, read
-    /// from Contents/Resources/runtime/runtime-manifest.json. nil in a
+    /// from Contents/Resources/gateway-seed/runtime-manifest.json. nil in a
     /// source-tree/dev build that bundles no seed.
     var seedGatewayVersion: SeedGatewayVersion? {
-        guard let url = Bundle.main.resourceURL?.appendingPathComponent("runtime/runtime-manifest.json"),
+        guard let url = Bundle.main.resourceURL?.appendingPathComponent("gateway-seed/runtime-manifest.json"),
               let data = try? Data(contentsOf: url) else { return nil }
         return parseSeedManifest(data)
     }

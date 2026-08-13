@@ -1,46 +1,31 @@
-// Static check that sidecar/src reaches Gateway private code only through
-// gateway/legacy-adapter.js. Covers import/from plus the common static
-// bypasses (URL/new URL, createRequire, pathToFileURL).
+// Sidecar boundary guard: no import may reach an AgenLynk-owned Gateway
+// implementation. gateway/client.js may dynamically load only the verified
+// public entrypoint supplied by Swift.
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 
-export const LEGACY_ADAPTER_RELATIVE_PATH = "gateway/legacy-adapter.js";
+export const PUBLIC_CLIENT_RELATIVE_PATH = "gateway/client.js";
 
 export const PRIVATE_IMPORT_PATTERNS = [
-  {
-    id: "static-import",
-    regex: /(?:from\s+|import\s*\()\s*["'`][^"'`\n]*(?:\.\.\/){2,}src\//
-  },
-  {
-    id: "url-constructor",
-    regex: /(?:new\s+URL|\bURL)\s*\(\s*["'`][^"'`\n]*(?:\.\.\/){2,}src\//
-  },
-  {
-    id: "createRequire",
-    regex: /\bcreateRequire\s*\(/
-  },
-  {
-    id: "pathToFileURL",
-    regex: /\bpathToFileURL\s*\(/
-  }
+  { id: "private-src-import", regex: /(?:from\s+|import\s*\(|new\s+URL)\s*\(?\s*["'`][^"'`\n]*(?:\.\.\/){2,}src\// },
+  { id: "legacy-adapter", regex: /legacy-adapter\.js/ },
+  { id: "package-private-subpath", regex: /acp-gateway\/src\// },
+  { id: "createRequire", regex: /\bcreateRequire\s*\(/ }
 ];
 
 export function findForbiddenPrivateImportPatterns(source) {
   if (typeof source !== "string" || !source) return [];
-  return PRIVATE_IMPORT_PATTERNS
-    .filter((pattern) => pattern.regex.test(source))
-    .map((pattern) => pattern.id);
+  return PRIVATE_IMPORT_PATTERNS.filter((pattern) => pattern.regex.test(source)).map((pattern) => pattern.id);
 }
 
 export async function collectSidecarPrivateImportViolations(sourceRoot) {
-  const adapterPath = join(sourceRoot, ...LEGACY_ADAPTER_RELATIVE_PATH.split("/"));
   const violations = [];
   for (const path of await javascriptFiles(sourceRoot)) {
-    if (path === adapterPath) continue;
-    const patterns = findForbiddenPrivateImportPatterns(await readFile(path, "utf8"));
-    if (patterns.length) {
-      violations.push({ path: relative(sourceRoot, path), patterns });
-    }
+    const source = await readFile(path, "utf8");
+    const patterns = findForbiddenPrivateImportPatterns(source);
+    const rel = relative(sourceRoot, path);
+    if (rel !== PUBLIC_CLIENT_RELATIVE_PATH && /\bpathToFileURL\s*\(/.test(source)) patterns.push("pathToFileURL");
+    if (patterns.length) violations.push({ path: rel, patterns: [...new Set(patterns)] });
   }
   return violations;
 }

@@ -1,4 +1,4 @@
-// Shared filesystem predicates. Three modules had their own copy of this and
+// Shared filesystem predicates used by the app-owned sidecar services.
 // they had drifted: two rethrew non-ENOENT errors, one swallowed them, so an
 // EACCES path read as "absent" and the caller happily created over it.
 // Rethrowing is the behaviour kept here — only "not there" answers false.
