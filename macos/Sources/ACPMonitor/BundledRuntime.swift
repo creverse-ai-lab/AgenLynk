@@ -4,8 +4,8 @@ import Foundation
 // and the installer/bootstrap script.
 //
 // Packaged builds (an app bundle carrying a runtime seed under
-// Contents/Resources/runtime/node/bin/node) must resolve Node and every
-// script from the *installed* runtime at ~/.acp-gateway/runtime — never the
+// Contents/Resources/gateway-seed/node/bin/node) must resolve Node and Gateway
+// scripts from the *installed* runtime at ~/.acp-gateway/runtime — never the
 // app bundle itself, which is seed input only (see TODO.md's fixed
 // single-install-path boundary and RuntimeProvisioner, which copies the seed
 // there). A Settings/ACP_GATEWAY_NODE override therefore cannot bypass the
@@ -83,7 +83,7 @@ enum BundledRuntime {
     }
 
     static func bundledNodeURL() -> URL? {
-        Bundle.main.resourceURL?.appendingPathComponent("runtime/node/bin/node")
+        Bundle.main.resourceURL?.appendingPathComponent("gateway-seed/node/bin/node")
     }
 
     /// True when the running app bundle carries a runtime seed (a
@@ -99,7 +99,7 @@ enum BundledRuntime {
     /// else should execute Node or scripts from here.
     static func seedRuntimeRoot() -> URL? {
         guard isPackagedDistribution() else { return nil }
-        return Bundle.main.resourceURL?.appendingPathComponent("runtime")
+        return Bundle.main.resourceURL?.appendingPathComponent("gateway-seed")
     }
 
     static var installationLocationReady: Bool {
@@ -146,19 +146,17 @@ enum BundledRuntime {
         let path = runtimeRootBase().appendingPathComponent("current.json")
         guard let data = try? Data(contentsOf: path), let pointer = parseCurrentRuntime(data: data) else { return nil }
         let node = pointer.runtimeRoot.appendingPathComponent("node/bin/node")
-        let monitor = pointer.runtimeRoot.appendingPathComponent("src/monitor.js")
+        let gatewayClient = pointer.runtimeRoot.appendingPathComponent("gateway/gateway-client/index.js")
         guard FileManager.default.isExecutableFile(atPath: node.path),
-              FileManager.default.fileExists(atPath: monitor.path) else { return nil }
+              FileManager.default.fileExists(atPath: gatewayClient.path) else { return nil }
         return pointer
     }
 
-    /// Resolves a resource (e.g. "src/monitor.js") from the installed
-    /// runtime in a packaged build, or from the source-tree checkout during
-    /// development. Never resolves it from the app bundle's seed.
-    static func resourceURL(_ relativePath: String) throws -> URL {
+    /// Resolves a Gateway resource from the verified installed artifact.
+    static func gatewayResourceURL(_ relativePath: String) throws -> URL {
         if isPackagedDistribution() {
             guard let installed = readCurrentRuntime() else { throw BundledRuntimeError.runtimeNotInstalled }
-            let resolved = installed.runtimeRoot.appendingPathComponent(relativePath)
+            let resolved = installed.runtimeRoot.appendingPathComponent("gateway").appendingPathComponent(relativePath)
             guard FileManager.default.fileExists(atPath: resolved.path) else {
                 throw BundledRuntimeError.resourceNotFound(resolved.path)
             }
@@ -172,13 +170,96 @@ enum BundledRuntime {
         // the real problem, which is that no runtime is installed.
         guard !isApplicationBundle() else { throw BundledRuntimeError.runtimeNotInstalled }
 
+        for root in developmentGatewaySearchRoots() {
+            let resolved = root.appendingPathComponent(relativePath)
+            if FileManager.default.fileExists(atPath: resolved.path) {
+                return resolved
+            }
+        }
+        throw BundledRuntimeError.resourceNotFound(relativePath)
+    }
+
+    /// Live source-tree lookup. Tests should call the explicit overload.
+    static func developmentGatewaySearchRoots() -> [URL] {
+        developmentGatewaySearchRoots(
+            environmentRoot: ProcessInfo.processInfo.environment["ACP_LYNK_GATEWAY_DEVELOPMENT_ROOT"],
+            installedGatewayRoot: readCurrentRuntime()?.runtimeRoot.appendingPathComponent("gateway"),
+            fetchedGatewayRoot: developmentRepositoryRoot().appendingPathComponent("build/cache/gateway-runtime")
+        )
+    }
+
+    /// Source-tree Gateway roots, in order:
+    /// 1. `ACP_LYNK_GATEWAY_DEVELOPMENT_ROOT` (explicit checkout or unpacked artifact)
+    /// 2. verified installed `runtime/current/gateway` when present
+    /// 3. `build/cache/gateway-runtime` produced by `npm run gateway:fetch`
+    /// There is no ambient sibling `../ACP` fallback.
+    static func developmentGatewaySearchRoots(
+        environmentRoot: String?,
+        installedGatewayRoot: URL?,
+        fetchedGatewayRoot: URL
+    ) -> [URL] {
+        var roots: [URL] = []
+        if let environmentRoot, !environmentRoot.isEmpty {
+            roots.append(URL(fileURLWithPath: environmentRoot))
+        }
+        if let installedGatewayRoot {
+            roots.append(installedGatewayRoot)
+        }
+        roots.append(fetchedGatewayRoot)
+        return roots
+    }
+
+    /// Stable symlink path used only while Gateway writes external MCP
+    /// configuration. Normal app execution continues to use the verified
+    /// current.json target above, so the symlink is not a second authority.
+    static func stableGatewayResourceURL(_ relativePath: String) throws -> URL {
+        guard isPackagedDistribution(), readCurrentRuntime() != nil else {
+            return try gatewayResourceURL(relativePath)
+        }
+        let resolved = runtimeRootBase()
+            .appendingPathComponent("current/gateway")
+            .appendingPathComponent(relativePath)
+        guard FileManager.default.fileExists(atPath: resolved.path) else {
+            throw BundledRuntimeError.resourceNotFound(resolved.path)
+        }
+        return resolved
+    }
+
+    static func stableNodeURL() throws -> URL {
+        guard isPackagedDistribution(), readCurrentRuntime() != nil else {
+            return try locateNode()
+        }
+        let resolved = runtimeRootBase().appendingPathComponent("current/node/bin/node")
+        guard FileManager.default.isExecutableFile(atPath: resolved.path) else {
+            throw BundledRuntimeError.resourceNotFound(resolved.path)
+        }
+        return resolved
+    }
+
+    /// Resolves the app-owned sidecar. Packaged builds execute it directly
+    /// from Contents/Resources/sidecar; it is never copied into a Gateway
+    /// runtime version and therefore follows the app's 0.4.x version.
+    static func sidecarResourceURL(_ relativePath: String) throws -> URL {
+        let root: URL
+        if isApplicationBundle() {
+            guard let resources = Bundle.main.resourceURL else {
+                throw BundledRuntimeError.resourceNotFound(relativePath)
+            }
+            root = resources.appendingPathComponent("sidecar")
+        } else {
+            root = developmentRepositoryRoot().appendingPathComponent("sidecar")
+        }
+        let resolved = root.appendingPathComponent(relativePath)
+        guard FileManager.default.fileExists(atPath: resolved.path) else {
+            throw BundledRuntimeError.resourceNotFound(resolved.path)
+        }
+        return resolved
+    }
+
+    private static func developmentRepositoryRoot() -> URL {
         var source = URL(fileURLWithPath: #filePath)
         for _ in 0..<4 { source.deleteLastPathComponent() }
-        let development = source.appendingPathComponent(relativePath)
-        guard FileManager.default.fileExists(atPath: development.path) else {
-            throw BundledRuntimeError.resourceNotFound(development.path)
-        }
-        return development
+        return source
     }
 
     /// True when this process runs from a `.app`, i.e. anything a user

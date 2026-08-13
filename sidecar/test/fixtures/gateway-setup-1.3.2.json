@@ -1,0 +1,41 @@
+{
+  "_comment": "Golden top-level setup contract for the AgenLynk-embedded Gateway 1.3.2. Machine-dependent values are type-checked; this fixture freezes the wire keys and stable identity/capability values.",
+  "keys": [
+    "agentUpdates",
+    "alerts",
+    "capabilities",
+    "detected",
+    "gatewayApiVersion",
+    "gatewayBuildId",
+    "gatewayUpdate",
+    "gatewayVersion",
+    "lifecycle",
+    "metrics",
+    "ok",
+    "persistence",
+    "providers",
+    "resourceLimits",
+    "runtimeRoot",
+    "runtimeSource"
+  ],
+  "stable": {
+    "ok": true,
+    "gatewayVersion": "1.3.2",
+    "gatewayApiVersion": 1,
+    "capabilities": {
+      "agentUpdates": true
+    }
+  },
+  "types": {
+    "gatewayBuildId": "string",
+    "runtimeRoot": "string",
+    "runtimeSource": "string",
+    "persistence": "object",
+    "lifecycle": "object",
+    "resourceLimits": "object",
+    "metrics": "object",
+    "alerts": "array",
+    "detected": "array",
+    "providers": "array"
+  }
+}

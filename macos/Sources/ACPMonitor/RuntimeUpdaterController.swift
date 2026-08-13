@@ -54,7 +54,7 @@ final class RuntimeUpdaterController {
         do {
             result = try await SeedNodeProcess.run(
                 seedRoot: seedRoot,
-                script: "src/runtime-updater-cli.js",
+                script: "app-runtime/runtime-updater-cli.js",
                 arguments: argv,
                 timeout: 120
             )

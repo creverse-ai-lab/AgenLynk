@@ -23,6 +23,17 @@ DMG="$REPO_ROOT/build/AgenLynk.dmg"
 RELEASE_JSON="$REPO_ROOT/build/AgenLynk.release.json"
 STAGING="$REPO_ROOT/build/dmg-staging"
 
+# A local/default DMG has incomplete release evidence by definition. Keep it
+# on the prerelease channel unless the caller explicitly supplies a version.
+# An explicitly supplied stable version still reaches the manifest gate below
+# and is rejected unless Developer ID + notarization + stapling all succeeded.
+if [ -z "${ACP_LYNK_APP_VERSION:-}" ]; then
+  if [ "${ACP_LYNK_CODESIGN_IDENTITY:--}" = "-" ] || [ "${ACP_LYNK_NOTARIZE:-0}" != "1" ]; then
+    ACP_LYNK_APP_VERSION=${ACP_LYNK_PRERELEASE_VERSION:-0.4.0-beta.1}
+    export ACP_LYNK_APP_VERSION
+  fi
+fi
+
 cleanup() {
   rm -rf "$STAGING"
 }
@@ -101,7 +112,8 @@ if [ -n "$SIGNING_IDENTITY" ]; then
 fi
 # shellcheck disable=SC2086
 "$BUILD_NODE" "$REPO_ROOT/src/build-release-manifest-cli.js" \
-  --runtime-root "$APP/Contents/Resources/runtime" \
+  --runtime-root "$APP/Contents/Resources/gateway-seed" \
+  --sidecar-root "$APP/Contents/Resources/sidecar" \
   --app-name "AgenLynk.app" \
   --app-version "$APP_VERSION" \
   --app-build "$APP_BUILD" \

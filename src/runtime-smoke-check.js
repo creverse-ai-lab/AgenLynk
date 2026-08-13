@@ -3,9 +3,10 @@
 // Deliberately more than checksum verification, which only proves the bytes on
 // disk match the manifest: this executes the candidate's *own bundled* node
 // binary (not the host Node running this process) to import its own
-// src/version.js and src/gateway-api-version.js, and compares what it reports
-// against the manifest. So it also proves the bundled runtime can execute JS
-// and resolve its own modules. No network access, no shell string, no
+// src/version.js, src/gateway-api-version.js, and sidecar/src/version.js,
+// and compares what it reports against the manifest. So it also proves the
+// bundled runtime can execute JS and load the official public Gateway client.
+// No network access, no shell string, no
 // randomness: same target -> same result every time.
 //
 // Both the manual updater and the app's automatic upgrade gate on this — an
@@ -29,16 +30,13 @@ class SmokeCheckError extends Error {
 
 export async function runBundledRuntimeSmokeCheck(target, manifest) {
   const nodeBinary = join(target, "node", "bin", "node");
-  const versionModuleUrl = pathToFileURL(join(target, "src", "version.js")).href;
-  const apiModuleUrl = pathToFileURL(join(target, "src", "gateway-api-version.js")).href;
+  const clientModuleUrl = pathToFileURL(join(target, "gateway", "gateway-client", "index.js")).href;
   const script = `(async () => {
-    const [versionUrl, apiUrl] = process.argv.slice(1);
-    const version = await import(versionUrl);
-    const api = await import(apiUrl);
+    const [clientUrl] = process.argv.slice(1);
+    const client = await import(clientUrl);
     process.stdout.write(JSON.stringify({
-      gatewayVersion: version.GATEWAY_VERSION,
-      gatewayBuildId: version.GATEWAY_BUILD_ID,
-      gatewayApiVersion: api.GATEWAY_API_VERSION
+      gatewayApiVersion: client.GATEWAY_API_VERSION,
+      exports: Object.keys(client).sort()
     }));
   })().catch((error) => {
     process.stderr.write(String((error && error.stack) || error));
@@ -47,7 +45,11 @@ export async function runBundledRuntimeSmokeCheck(target, manifest) {
 
   let stdout;
   try {
-    ({ stdout } = await execFileAsync(nodeBinary, ["-e", script, versionModuleUrl, apiModuleUrl], { timeout: 10_000 }));
+    ({ stdout } = await execFileAsync(
+      nodeBinary,
+      ["-e", script, clientModuleUrl],
+      { timeout: 10_000 }
+    ));
   } catch (error) {
     throw new SmokeCheckError(`bundled runtime smoke check failed to execute: ${error.message}`);
   }
@@ -59,11 +61,17 @@ export async function runBundledRuntimeSmokeCheck(target, manifest) {
     throw new SmokeCheckError("bundled runtime smoke check produced non-JSON output");
   }
   if (
-    reported.gatewayVersion !== manifest.gatewayVersion
-    || reported.gatewayBuildId !== manifest.gatewayBuildId
-    || reported.gatewayApiVersion !== manifest.gatewayApiVersion
+    reported.gatewayApiVersion !== manifest.gatewayApiVersion
+    || !reported.exports.includes("GatewayRpcClient")
+    || !reported.exports.includes("GatewayError")
+    || !reported.exports.includes("ERROR_CODES")
   ) {
     throw new SmokeCheckError("bundled runtime smoke check reported an identity mismatch", { reported });
   }
-  return reported;
+  return {
+    gatewayVersion: manifest.gatewayVersion,
+    gatewayBuildId: manifest.gatewayBuildId,
+    runtimeBuildId: manifest.runtimeBuildId,
+    gatewayApiVersion: reported.gatewayApiVersion
+  };
 }

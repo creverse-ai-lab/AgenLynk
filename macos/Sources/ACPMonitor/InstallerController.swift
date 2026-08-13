@@ -68,13 +68,18 @@ final class InstallerController {
     ) async throws -> BootstrapResult {
         let nodeURL = try BundledRuntime.locateNode(override: nodeOverride)
         try BundledRuntime.validateVersion(at: nodeURL)
-        let scriptURL = try BundledRuntime.resourceURL("src/bootstrap.js")
+        let scriptURL = try BundledRuntime.stableGatewayResourceURL("src/bootstrap.js")
+        let stableNodeURL = try BundledRuntime.stableNodeURL()
 
         let process = Process()
         let stdout = Pipe()
         let stderr = Pipe()
         process.executableURL = nodeURL
-        process.arguments = [scriptURL.path] + arguments
+        // Preserve the stable runtime/current symlink in import.meta.url so
+        // Gateway's installer records current/node and current/gateway paths
+        // in agent MCP configs instead of a version directory that goes stale
+        // on the next activation.
+        process.arguments = ["--preserve-symlinks", "--preserve-symlinks-main", scriptURL.path] + arguments
         process.standardOutput = stdout
         process.standardError = stderr
         let nodeDirectory = nodeURL.deletingLastPathComponent()
@@ -82,7 +87,7 @@ final class InstallerController {
         process.environment = ProcessInfo.processInfo.environment.merging(
             [
                 "PATH": BundledRuntime.launchPath(nodeDirectory: nodeDirectory),
-                "ACP_GATEWAY_NODE": nodeURL.path,
+                "ACP_GATEWAY_NODE": stableNodeURL.path,
                 "ACP_GATEWAY_RUNTIME_BIN": nodeDirectory.path,
                 "NPM_CONFIG_PREFIX": npmPrefix.path
             ]

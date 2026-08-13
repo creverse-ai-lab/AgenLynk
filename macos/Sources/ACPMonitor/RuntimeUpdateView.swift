@@ -158,6 +158,7 @@ struct RuntimeUpdateView: View {
             VStack(alignment: .leading, spacing: 8) {
                 LabeledContent("AgenLynk", value: appVersion)
                 LabeledContent("Gateway", value: "\(model.gatewayVersion) · build \(model.gatewayBuild)")
+                LabeledContent("Sidecar", value: model.sidecarVersionText)
                 LabeledContent("Monitor API", value: model.monitorApiVersionText)
                 LabeledContent("Node", value: model.runtimeInspection?.current?.nodeVersion ?? "—")
                 LabeledContent("설치 위치", value: model.runtimeInspection?.runtimeRoot ?? "—")

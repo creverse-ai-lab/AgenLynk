@@ -2,7 +2,11 @@
 set -eu
 
 REPO_ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
-SDK=${ACP_MONITOR_SDKROOT:-/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk}
+if [ -n "${ACP_MONITOR_SDKROOT:-}" ]; then
+  SDK=$ACP_MONITOR_SDKROOT
+else
+  SDK=$(xcrun --sdk macosx --show-sdk-path)
+fi
 CACHE_ROOT="$REPO_ROOT/build/cache"
 CHECK_ROOT="$CACHE_ROOT/checks"
 MODULE_CACHE="$CACHE_ROOT/clang-module-cache"
@@ -29,6 +33,19 @@ env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   -o "$OUT"
 
 "$OUT"
+
+PHASE6_OUT="$CHECK_ROOT/phase6-architecture"
+env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
+  swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 $SHARED_FLAGS \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/Models.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/MonitorClient.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/BundledRuntime.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/SidecarController.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/MonitorStore.swift" \
+  "$REPO_ROOT/macos/Tests/ACPMonitorTests/Phase6ArchitectureTests.swift" \
+  -o "$PHASE6_OUT"
+
+"$PHASE6_OUT"
 
 SETTINGS_OUT="$CHECK_ROOT/settings"
 env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \

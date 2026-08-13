@@ -368,7 +368,7 @@ extension PetAgentState {
 
 /// Maps a raw Gateway/local-monitor session status onto the contract's
 /// frozen 8-value state vocabulary. Covers every literal status produced by
-/// `src/gateway-service.js` and `src/local-monitor.js`. This is the single
+/// `src/gateway-service.js` and `sidecar/src/local-monitor.js`. This is the single
 /// classifier both the Pet contract and the legacy `PetSnapshot` derive
 /// their per-agent state from — a cancelled or errored turn is never
 /// reported as `.completed`.
@@ -673,7 +673,7 @@ struct MonitorEvent: Identifiable, Equatable, Sendable {
     /// top-level `text` (`capTextEvent`); every other update goes through the
     /// generic tail that serializes the whole update into `text` and keeps the
     /// real object in `data` — so on those, `text` is JSON and must not be
-    /// shown as a body. `src/local-transcript.js` emits no `data` at all and
+    /// shown as a body. `sidecar/src/local-transcript.js` emits no `data` at all and
     /// writes a human summary into `text`. Hence: `data` wins whenever it
     /// exists, `text` is only trusted without it.
     ///
@@ -815,6 +815,17 @@ struct NoticeEntry: Identifiable, Equatable, Sendable {
         self.text = text
         self.count = count
     }
+
+    /// Newest-first insert: a consecutive duplicate bumps `count` on the
+    /// first row; any other text becomes a new first row, capped at 50.
+    static func record(_ text: String, at date: Date, into log: inout [NoticeEntry]) {
+        if let last = log.first, last.text == text {
+            log[0] = NoticeEntry(at: date, text: text, count: last.count + 1)
+        } else {
+            log.insert(NoticeEntry(at: date, text: text, count: 1), at: 0)
+            if log.count > 50 { log.removeLast(log.count - 50) }
+        }
+    }
 }
 
 struct MonitorRecord: Identifiable, Equatable, Sendable {
@@ -910,12 +921,16 @@ struct GatewayIdentity: Equatable, Sendable {
 struct MonitorMeta: Equatable, Sendable {
     let schemaVersion: Int
     let monitorApiVersion: String
+    let sidecarVersion: String
+    let sidecarBuildId: String
     let gatewayIdentity: GatewayIdentity
     let capabilities: JSONValue
 
     init(_ object: [String: JSONValue]) {
         schemaVersion = object.int("schemaVersion") ?? MonitorCompatibility.supportedSchemaVersion
         monitorApiVersion = object.string("monitorApiVersion") ?? ""
+        sidecarVersion = object.string("sidecarVersion") ?? ""
+        sidecarBuildId = object.string("sidecarBuildId") ?? ""
         gatewayIdentity = GatewayIdentity(object["gatewayIdentity"] ?? .null)
         capabilities = object["capabilities"] ?? .object([:])
     }
@@ -943,7 +958,7 @@ struct InstalledFrontdoors: Equatable, Sendable {
         guard let root = JSONValue(any: raw).objectValue else { throw MonitorDecodeError.invalidMessage }
         return InstalledFrontdoors(
             primary: root.string("primary"),
-            installed: (root.array("installed") ?? []).compactMap(\.stringValue)
+            installed: (root.array("installed") ?? []).compactMap { $0.stringValue }
         )
     }
 }
@@ -951,8 +966,8 @@ struct InstalledFrontdoors: Equatable, Sendable {
 struct MonitorSnapshot: Sendable {
     let schemaVersion: Int
     let monitorApiVersion: String
-    /// The monitor's session/event data revision (additive; nil from an older
-    /// monitor). Unchanged revision means the expensive session/event
+    /// The monitor's session/event/tasks/inbox revision (additive; nil from an
+    /// older monitor). Unchanged revision means the expensive session/event
     /// comparisons can be skipped wholesale on reconciliation.
     let revision: Int?
     let connected: Bool
@@ -1534,6 +1549,55 @@ func monitorFailureGuidance(code: String?) -> String? {
     }
 }
 
+/// Selection identity against the merged live+history log — the same lists
+/// the sidebar and sequence view render. Live-only membership reassigned the
+/// Frontdoor whenever it left the live set and cleared the picked event.
+enum MonitorSelection {
+    struct Result: Equatable, Sendable {
+        var frontdoorId: String?
+        var eventId: String?
+    }
+
+    static func reconcile(
+        selectedFrontdoorId: String?,
+        selectedEventId: String?,
+        liveSessions: [GatewaySession],
+        historySessions: [GatewaySession],
+        liveEvents: [String: [MonitorEvent]],
+        historyEvents: [String: [MonitorEvent]]
+    ) -> Result {
+        var sessionsById: [String: GatewaySession] = [:]
+        for session in historySessions { sessionsById[session.sessionId] = session }
+        for session in liveSessions { sessionsById[session.sessionId] = session }
+        let available = FrontdoorSession.make(sessions: sessionsById.values.filter { !$0.isInternalReview })
+        let frontdoorId: String?
+        if let selectedFrontdoorId, available.contains(where: { $0.id == selectedFrontdoorId }) {
+            frontdoorId = selectedFrontdoorId
+        } else {
+            frontdoorId = available.first(where: \.isActive)?.id ?? available.first?.id
+        }
+
+        var eventsById: [String: MonitorEvent] = [:]
+        for events in historyEvents.values {
+            for event in events { eventsById[event.id] = event }
+        }
+        for events in liveEvents.values {
+            for event in events { eventsById[event.id] = event }
+        }
+        let eventId = selectedEventId.flatMap { eventsById[$0] == nil ? nil : $0 }
+        return Result(frontdoorId: frontdoorId, eventId: eventId)
+    }
+}
+
+/// A connected Gateway whose event subscription paused records that error
+/// as a notice. Overflow arrives as `kind: "state"`, not `kind: "notice"`.
+enum MonitorStreamNotice {
+    static func forPausedSubscription(connected: Bool, streaming: Bool?, error: String?) -> String? {
+        guard connected, streaming == false, let error else { return nil }
+        return error
+    }
+}
+
 func decodeJSONValue(_ data: Data) throws -> JSONValue {
     JSONValue(any: try JSONSerialization.jsonObject(with: data))
 }
@@ -1550,7 +1614,7 @@ struct AppReleaseInfo: Equatable, Sendable {
 }
 
 /// The Gateway version+build the app bundle ships as its runtime seed, read
-/// from Contents/Resources/runtime/runtime-manifest.json. nil in a
+/// from Contents/Resources/gateway-seed/runtime-manifest.json. nil in a
 /// source-tree/dev build that bundles no seed.
 struct SeedGatewayVersion: Equatable, Sendable {
     let gatewayVersion: String
@@ -1607,10 +1671,10 @@ func parseSeedManifest(_ data: Data) -> SeedGatewayVersion? {
 }
 
 /// Work that must finish before the Gateway runtime may be swapped or rolled
-/// back. `MonitorState.restartBlockers()` in src/monitor-state.js decides the
+/// back. `MonitorState.restartBlockers()` in sidecar/src/projection/monitor-state.js decides the
 /// same thing from the Gateway's own state, and the updater refuses to activate
 /// whenever either hands it a non-empty list — so the two must agree exactly.
-/// test/fixtures/restart-blockers.json is replayed against both.
+/// sidecar/test/fixtures/restart-blockers.json is replayed against both.
 ///
 /// Local sessions are excluded: they never run through the Gateway runtime, so
 /// restarting it cannot interrupt them.
@@ -1624,4 +1688,3 @@ func restartBlockerLabels(sessions: [GatewaySession], tasks: [MonitorRecord], in
         pendingInbox > 0 ? "미응답 Inbox \(pendingInbox)개" : nil
     ].compactMap { $0 }
 }
-

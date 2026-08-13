@@ -14,6 +14,7 @@ enum OnboardingLogicChecks {
         try checkCurrentRuntimeParsing()
         try checkRuntimeProvisionerResultParsing()
         try checkBundledRuntimeErrorStableCodes()
+        try checkDevelopmentGatewaySearchRoots()
         print("Swift onboarding logic checks passed")
     }
 
@@ -31,7 +32,7 @@ enum OnboardingLogicChecks {
         guard BundledRuntimeError.nodeNotFound.stableCode == nil else {
             throw CheckError.failed("expected nodeNotFound to carry no stable code")
         }
-        guard BundledRuntimeError.resourceNotFound("src/monitor.js").stableCode == nil else {
+        guard BundledRuntimeError.resourceNotFound("sidecar/src/server/monitor.js").stableCode == nil else {
             throw CheckError.failed("expected resourceNotFound to carry no stable code")
         }
     }
@@ -173,7 +174,7 @@ enum OnboardingLogicChecks {
 
     static func checkRuntimeProvisionerResultParsing() throws {
         let valid = """
-        {"runtimeRoot":"/Users/test/.acp-gateway/runtime/versions/1.3.1-abcdef","gatewayVersion":"1.3.1","gatewayBuildId":"abcdef"}
+        {"runtimeRoot":"/Users/test/.acp-gateway/runtime/versions/1.3.1-abcdef","gatewayVersion":"1.3.1","gatewayBuildId":"abcdef","recoveryNotice":"current.json을 복구했습니다."}
         """
         guard let info = RuntimeProvisioner.parse(valid) else {
             throw CheckError.failed("expected a well-formed runtime-installer-cli.js result to parse")
@@ -181,12 +182,52 @@ enum OnboardingLogicChecks {
         guard info.runtimeRoot == "/Users/test/.acp-gateway/runtime/versions/1.3.1-abcdef" else {
             throw CheckError.failed("expected the parsed runtimeRoot to round-trip exactly")
         }
+        guard info.recoveryNotice == "current.json을 복구했습니다." else {
+            throw CheckError.failed("expected the runtime recovery notice to be preserved")
+        }
 
         guard RuntimeProvisioner.parse("not json") == nil else {
             throw CheckError.failed("expected unparseable runtime-installer-cli.js output to return nil")
         }
         guard RuntimeProvisioner.parse("{}") == nil else {
             throw CheckError.failed("expected output missing required fields to return nil")
+        }
+    }
+
+    static func checkDevelopmentGatewaySearchRoots() throws {
+        let explicit = URL(fileURLWithPath: "/tmp/explicit-gateway")
+        let installed = URL(fileURLWithPath: "/tmp/installed/runtime/versions/1.4.0-deadbeef/gateway")
+        let fetched = URL(fileURLWithPath: "/tmp/agenlynk/build/cache/gateway-runtime")
+
+        let all = BundledRuntime.developmentGatewaySearchRoots(
+            environmentRoot: explicit.path,
+            installedGatewayRoot: installed,
+            fetchedGatewayRoot: fetched
+        )
+        guard all == [explicit, installed, fetched] else {
+            throw CheckError.failed("expected explicit env, then installed runtime, then gateway:fetch cache")
+        }
+
+        let withoutEnv = BundledRuntime.developmentGatewaySearchRoots(
+            environmentRoot: nil,
+            installedGatewayRoot: installed,
+            fetchedGatewayRoot: fetched
+        )
+        guard withoutEnv == [installed, fetched] else {
+            throw CheckError.failed("expected installed runtime before the gateway:fetch cache when env is unset")
+        }
+
+        let emptyEnv = BundledRuntime.developmentGatewaySearchRoots(
+            environmentRoot: "",
+            installedGatewayRoot: nil,
+            fetchedGatewayRoot: fetched
+        )
+        guard emptyEnv == [fetched] else {
+            throw CheckError.failed("expected only the gateway:fetch cache when env and installed runtime are absent")
+        }
+
+        guard all.allSatisfy({ !$0.path.hasSuffix("/ACP") && !$0.path.contains("/ACP/") }) else {
+            throw CheckError.failed("development Gateway roots must not include an ambient sibling ACP checkout")
         }
     }
 }

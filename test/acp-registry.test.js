@@ -11,8 +11,8 @@ import {
   readProviderRegistry,
   setProviderEnabled,
   validateRegistry
-} from "../src/acp-registry.js";
-import { providerConfig } from "../src/providers.js";
+} from "../sidecar/src/app/acp-registry.js";
+import { providerConfig } from "../sidecar/src/app/providers.js";
 
 const registry = {
   version: "1.0.0",

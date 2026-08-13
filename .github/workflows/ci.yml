@@ -10,7 +10,19 @@ permissions:
   contents: read
 
 jobs:
-  validate:
+  node-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run ci
+
+  sidecar-gateway-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -20,4 +32,39 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run ci
+      - name: Run sidecar/Gateway orchestration contract
+        run: node --test sidecar/test/monitor-orchestration.test.js
+
+  swift-unit:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - run: sh macos/scripts/test-models.sh
+
+  swift-build:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - run: swift build --package-path macos -c debug
+
+  package-smoke:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Prepare verified official Node runtime
+        run: echo "ACP_LYNK_NODE_DIST_DIR=$(sh macos/scripts/prepare-node-runtime.sh)" >> "$GITHUB_ENV"
+      - name: Build packaged app
+        env:
+          ACP_LYNK_APP_VERSION: 0.4.0-beta.1
+          ACP_LYNK_BUILD_NUMBER: 6
+        run: sh macos/scripts/build-app.sh
+      - name: Run packaged Gateway and sidecar smoke test
+        run: node scripts/package-smoke.js build/AgenLynk.app

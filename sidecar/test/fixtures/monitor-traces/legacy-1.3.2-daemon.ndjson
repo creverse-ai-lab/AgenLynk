@@ -1,0 +1,8 @@
+{"kind":"meta","traceVersion":1,"name":"legacy-1.3.2-daemon","runner":"monitor-state"}
+{"kind":"state","connected":true,"streaming":true,"error":null}
+{"kind":"set_gateway","gateway":{"gatewayVersion":"1.3.2","gatewayApiVersion":1,"gatewayBuildId":"legacy-build"}}
+{"kind":"set_sessions","sessions":[{"sessionId":"legacy-session","provider":"claude","status":"ready","cwd":"/fixture/project"}]}
+{"kind":"push_event","event":{"sessionId":"legacy-session","sequence":1,"type":"turn_start","ts":"2026-08-07T00:00:00.000Z"}}
+{"kind":"push_event","event":{"sessionId":"legacy-session","sequence":2,"type":"usage_update","ts":"2026-08-07T00:00:01.000Z"}}
+{"kind":"push_event","event":{"sessionId":"legacy-session","sequence":3,"type":"turn_completed","ts":"2026-08-07T00:00:02.000Z"}}
+{"kind":"expected","snapshot":{"schemaVersion":1,"monitorApiVersion":"1.0","connected":true,"streaming":true,"gateway":{"gatewayVersion":"1.3.2","gatewayApiVersion":1,"gatewayBuildId":"legacy-build"},"sessions":[{"sessionId":"legacy-session","provider":"claude","status":"ready","cwd":"/fixture/project"}],"events":{"legacy-session":[{"sessionId":"legacy-session","sequence":1,"type":"turn_start","ts":"2026-08-07T00:00:00.000Z"},{"sessionId":"legacy-session","sequence":3,"type":"turn_completed","ts":"2026-08-07T00:00:02.000Z"}]},"historySessions":[],"historyEvents":{},"tasks":[],"inbox":[]},"projection":{"frontdoorIds":[],"eventRefs":["legacy-session:1","legacy-session:3"]}}

@@ -1,0 +1,56 @@
+{
+  "_comment": "Restart/activation blocker contract. sidecar/src/projection/monitor-state.js's MonitorState.restartBlockers and macOS Models.swift's restartBlockerLabels must turn identical input into identical strings. sidecar/test/monitor-control.test.js and MonitorModelTests.swift each replay every case below.",
+  "cases": [
+    {
+      "name": "counts each blocker category and omits the empty ones",
+      "sessions": [
+        { "sessionId": "a", "status": "running" },
+        { "sessionId": "b", "status": "waiting_permission" },
+        { "sessionId": "c", "status": "idle" }
+      ],
+      "tasks": [{ "status": "working" }, { "status": "completed" }],
+      "inbox": [{ "status": "pending" }, { "status": "pending" }, { "status": "answered" }],
+      "expected": ["진행 중 세션 2개", "진행 중 Task 1개", "미응답 Inbox 2개"]
+    },
+    {
+      "name": "every active session status counts",
+      "sessions": [
+        { "sessionId": "a", "status": "running" },
+        { "sessionId": "b", "status": "waiting_permission" },
+        { "sessionId": "c", "status": "waiting_input" },
+        { "sessionId": "d", "status": "cancelling" },
+        { "sessionId": "e", "status": "restoring" }
+      ],
+      "tasks": [],
+      "inbox": [],
+      "expected": ["진행 중 세션 5개"]
+    },
+    {
+      "name": "local sessions never block a Gateway runtime change",
+      "sessions": [
+        { "sessionId": "local:codex:x", "status": "running", "source": "local" },
+        { "sessionId": "local:codex:y", "status": "waiting_input", "source": "local" }
+      ],
+      "tasks": [],
+      "inbox": [],
+      "expected": []
+    },
+    {
+      "name": "quiet Gateway produces no blockers at all",
+      "sessions": [
+        { "sessionId": "a", "status": "idle" },
+        { "sessionId": "b", "status": "closed" }
+      ],
+      "tasks": [{ "status": "completed" }],
+      "inbox": [{ "status": "answered" }],
+      "expected": []
+    },
+    {
+      "name": "input_required tasks block just like working ones",
+      "sessions": [],
+      "tasks": [{ "status": "input_required" }, { "status": "working" }],
+      "inbox": [],
+      "expected": ["진행 중 Task 2개"]
+    }
+  ]
+}

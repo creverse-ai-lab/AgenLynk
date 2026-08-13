@@ -30,8 +30,11 @@ actor MonitorClient {
         return try InstalledFrontdoors.decode(data)
     }
 
-    func fetchSnapshot(endpoint: MonitorEndpoint) async throws -> MonitorSnapshot {
-        let (data, response) = try await URLSession.shared.data(for: endpoint.request(path: "api/snapshot"))
+    func fetchSnapshot(endpoint: MonitorEndpoint, ifRevision revision: Int? = nil) async throws -> MonitorSnapshot? {
+        var request = endpoint.request(path: "api/snapshot")
+        if let revision { request.setValue("\"monitor-\(revision)\"", forHTTPHeaderField: "If-None-Match") }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode == 304 { return nil }
         try validate(response: response, data: data)
         return try MonitorSnapshot.decode(data)
     }

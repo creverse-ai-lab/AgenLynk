@@ -1,0 +1,20 @@
+{
+  "name": "@creverse-ai-lab/agenlynk-sidecar",
+  "version": "0.4.0",
+  "description": "AgenLynk Monitor API sidecar and local agent projection.",
+  "type": "module",
+  "private": true,
+  "files": [
+    "src/"
+  ],
+  "bin": {
+    "agenlynk-sidecar": "src/server/monitor.js"
+  },
+  "scripts": {
+    "start": "node src/server/monitor.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

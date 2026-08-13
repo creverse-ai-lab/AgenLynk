@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "version": "1.4.0",
+  "apiMajor": 1,
+  "tag": "v1.4.0",
+  "sourceCommit": "a1fdb353777337ca6ec481f8563d77efaea55e95",
+  "asset": {
+    "name": "acp-gateway-runtime-darwin-arm64.tar.gz",
+    "url": "https://github.com/creverse-ai-lab/agent_gateway/releases/download/v1.4.0/acp-gateway-runtime-darwin-arm64.tar.gz",
+    "sha256": "c03ad69362e4f75b115f345aeafccc03fc9895a3ebb539e6fe8342bea16bfc8c"
+  },
+  "runtimeRoot": "acp-gateway-runtime",
+  "publicEntrypoint": "gateway-client/index.js",
+  "platform": "darwin",
+  "arch": "arm64"
+}

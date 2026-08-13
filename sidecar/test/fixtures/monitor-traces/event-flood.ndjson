@@ -1,0 +1,9 @@
+{"kind":"meta","traceVersion":1,"name":"event-flood","runner":"monitor-state","maxEventsPerSession":3}
+{"kind":"state","connected":true,"streaming":true,"error":null}
+{"kind":"set_sessions","sessions":[{"sessionId":"flood","provider":"claude","status":"running","cwd":"/fixture/project"}]}
+{"kind":"push_event","event":{"sessionId":"flood","sequence":2,"type":"agent_message_chunk","ts":"2026-08-13T00:00:02.000Z"}}
+{"kind":"push_event","event":{"sessionId":"flood","sequence":0,"type":"turn_start","ts":"2026-08-13T00:00:00.000Z"}}
+{"kind":"push_event","event":{"sessionId":"flood","sequence":1,"type":"agent_message_chunk","ts":"2026-08-13T00:00:01.000Z"}}
+{"kind":"push_event","event":{"sessionId":"flood","sequence":3,"type":"turn_completed","ts":"2026-08-13T00:00:03.000Z"}}
+{"kind":"push_event","event":{"sessionId":"flood","sequence":2,"type":"agent_message_chunk","ts":"2026-08-13T00:00:02.000Z","text":"duplicate"}}
+{"kind":"expected","snapshot":{"streamHealth":"healthy","diagnostics":{"subscriptionGaps":0,"replayedEvents":0,"reconciliationRuns":0,"overflowDroppedEvents":1,"replayTruncations":0},"eventLimit":3,"events":{"flood":[{"sessionId":"flood","sequence":1,"type":"agent_message_chunk","ts":"2026-08-13T00:00:01.000Z"},{"sessionId":"flood","sequence":2,"type":"agent_message_chunk","ts":"2026-08-13T00:00:02.000Z"},{"sessionId":"flood","sequence":3,"type":"turn_completed","ts":"2026-08-13T00:00:03.000Z"}]}},"projection":{"frontdoorIds":[],"eventRefs":["flood:1","flood:2","flood:3"]}}

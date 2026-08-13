@@ -12,22 +12,26 @@ const cli = new URL("../src/build-release-manifest-cli.js", import.meta.url).pat
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "acp-release-manifest-"));
   const runtimeRoot = join(root, "runtime");
+  const sidecarRoot = join(root, "sidecar");
   await mkdir(runtimeRoot);
+  await mkdir(join(sidecarRoot, "src"), { recursive: true });
   await writeFile(join(runtimeRoot, "runtime-manifest.json"), JSON.stringify({
-    gatewayVersion: "1.3.1",
+    gatewayVersion: "1.4.0",
     gatewayBuildId: "build-id",
     gatewayApiVersion: 1,
     nodeVersion: "22.23.2"
   }));
-  return { root, runtimeRoot, out: join(root, "Lynk.release.json") };
+  await writeFile(join(sidecarRoot, "src/version.js"), 'export const SIDECAR_VERSION = "0.4.0"; export const SIDECAR_BUILD_ID = "sidecar-build-id";\n');
+  return { root, runtimeRoot, sidecarRoot, out: join(root, "Lynk.release.json") };
 }
 
-function validArgs(runtimeRoot, out) {
+function validArgs(runtimeRoot, sidecarRoot, out) {
   return [
     cli,
     "--runtime-root", runtimeRoot,
+    "--sidecar-root", sidecarRoot,
     "--app-name", "Lynk.app",
-    "--app-version", "0.1.0",
+    "--app-version", "0.4.0-beta.1",
     "--app-build", "1",
     "--bundle-id", "com.example.lynk",
     "--min-macos", "14.0",
@@ -43,14 +47,15 @@ function validArgs(runtimeRoot, out) {
 }
 
 test("release manifest CLI writes evidence-backed app, runtime, DMG, and signing fields", async () => {
-  const { root, runtimeRoot, out } = await fixture();
+  const { root, runtimeRoot, sidecarRoot, out } = await fixture();
   try {
-    await execFileAsync(process.execPath, validArgs(runtimeRoot, out));
+    await execFileAsync(process.execPath, validArgs(runtimeRoot, sidecarRoot, out));
     const release = JSON.parse(await readFile(out, "utf8"));
-    assert.equal(release.app.version, "0.1.0");
+    assert.equal(release.app.version, "0.4.0-beta.1");
     assert.equal(release.dmg.bytes, 12345);
     assert.equal(release.dmg.sha256, "a".repeat(64));
-    assert.deepEqual(release.gateway, { version: "1.3.1", buildId: "build-id", apiVersion: 1 });
+    assert.deepEqual(release.gateway, { version: "1.4.0", buildId: "build-id", apiVersion: 1 });
+    assert.deepEqual(release.sidecar, { version: "0.4.0", buildId: "sidecar-build-id" });
     assert.deepEqual(release.signing, { mode: "ad-hoc", identity: null, notarized: false, stapled: false });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -58,9 +63,9 @@ test("release manifest CLI writes evidence-backed app, runtime, DMG, and signing
 });
 
 test("release manifest CLI rejects ambiguous boolean, checksum, and Developer ID evidence", async () => {
-  const { root, runtimeRoot, out } = await fixture();
+  const { root, runtimeRoot, sidecarRoot, out } = await fixture();
   try {
-    const base = validArgs(runtimeRoot, out);
+    const base = validArgs(runtimeRoot, sidecarRoot, out);
     const booleanArgs = [...base];
     booleanArgs[booleanArgs.indexOf("--notarized") + 1] = "1";
     await assert.rejects(execFileAsync(process.execPath, booleanArgs), /must be true or false/);
@@ -72,6 +77,10 @@ test("release manifest CLI rejects ambiguous boolean, checksum, and Developer ID
     const developerIdArgs = [...base];
     developerIdArgs[developerIdArgs.indexOf("--signing-mode") + 1] = "developer-id";
     await assert.rejects(execFileAsync(process.execPath, developerIdArgs), /signing-identity is required/);
+
+    const stableUnsignedArgs = [...base];
+    stableUnsignedArgs[stableUnsignedArgs.indexOf("--app-version") + 1] = "0.4.0";
+    await assert.rejects(execFileAsync(process.execPath, stableUnsignedArgs), /0\.4\.0-beta\.x/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

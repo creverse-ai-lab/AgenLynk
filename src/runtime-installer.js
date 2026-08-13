@@ -1,14 +1,20 @@
 // Copies the app bundle's runtime seed into a single, version-pinned install
-// path (~/.acp-gateway/runtime/versions/<gatewayVersion>-<gatewayBuildId>/)
+// path (~/.acp-gateway/runtime/versions/<gatewayVersion>-<runtimeBuildId>/)
 // and atomically activates it via current.json. This is the only place a
 // packaged Lynk build's Node/monitor/bootstrap should ever run from — the
 // app bundle itself is seed input only (see TODO.md's fixed runtime
 // boundary). install.json (Control identity/state) is never touched here;
 // existing installs keep their identity untouched.
-import { realpath } from "node:fs/promises";
+import { access, realpath, rename, rm, symlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
-import { readManifestFile, verifyRuntimeManifest } from "./runtime-manifest.js";
+import {
+  readManifestFile,
+  runtimePointerIdentityMismatch,
+  runtimeSidecarIdentity,
+  runtimeVersionId,
+  verifyRuntimeManifest
+} from "./runtime-manifest.js";
 import { CURRENT_POINTER_FILE, PREVIOUS_POINTER_FILE, readPointerFile, writePointerFile } from "./runtime-pointer.js";
 import { runBundledRuntimeSmokeCheck } from "./runtime-smoke-check.js";
 import { stageVerifiedRuntime } from "./runtime-staging.js";
@@ -27,23 +33,47 @@ export function defaultRuntimeRoot() {
  *
  * Existing-runtime authority, forward only: a manifest-verified install that
  * `current.json` already points at is kept, *unless* the app's own seed is
- * newer. An older seed must never displace a newer runtime — reinstalling an
- * old DMG once should not roll a machine back. But the reverse was also true
- * before, and that was the bug: a machine that had an older Lynk installed
- * kept running that old Gateway runtime forever no matter how many times the
- * app was updated, because the seed was never even read. The app and the
- * runtime it ships with have to move together.
+ * newer *and* active-work state is explicitly known to be idle. An older seed
+ * must never displace a newer runtime — reinstalling an old DMG once should
+ * not roll a machine back. A newer seed is staged either way, but unknown
+ * Gateway state or non-empty blockers leave the current pointer and symlink
+ * untouched. First install (no valid current) still activates.
  *
  * "Newer" is the manifest's `generatedAt`, the only ordered field the two have
  * in common: gatewayVersion is a release string that does not change on every
  * payload change, and gatewayBuildId is a content hash with no ordering.
  * See seedSupersedes for what happens when it cannot be compared.
  */
+/**
+ * Startup upgrades must not treat missing active-work state as "idle".
+ * Omitted/null/non-structured `blockers` is unknown → defer. Only an
+ * explicit empty list or all-zero counts object is permission to activate.
+ * First install (no valid current) does not consult this.
+ */
+export function resolveStartupBlockers(blockers) {
+  if (blockers === undefined || blockers === null) {
+    return { allowed: false, unknown: true, reasons: ["active-work state unknown"] };
+  }
+  if (Array.isArray(blockers)) {
+    const reasons = blockers.filter((item) => typeof item === "string" && item);
+    return { allowed: reasons.length === 0, unknown: false, reasons };
+  }
+  if (typeof blockers === "object") {
+    const reasons = Object.entries(blockers)
+      .filter(([, value]) => (typeof value === "number" ? value > 0 : Boolean(value)))
+      .map(([key, value]) => `${key}:${value}`);
+    return { allowed: reasons.length === 0, unknown: false, reasons };
+  }
+  return { allowed: false, unknown: true, reasons: ["active-work state unknown"] };
+}
+
 export async function ensureRuntimeInstalled({
   seedRoot,
   runtimeRoot = defaultRuntimeRoot(),
-  smokeCheck = runBundledRuntimeSmokeCheck
+  smokeCheck = runBundledRuntimeSmokeCheck,
+  blockers
 }) {
+  const recoveryNotice = await currentPointerRecoveryNotice(runtimeRoot);
   const existing = await currentRuntimeIfValid(runtimeRoot);
   if (existing && !(await seedSupersedes(seedRoot, existing))) return existing;
 
@@ -56,18 +86,21 @@ export async function ensureRuntimeInstalled({
     if (installed && !(await seedSupersedes(seedRoot, installed))) return installed;
 
     const manifest = await readManifestFile(seedRoot);
-    const versionDir = `${manifest.gatewayVersion}-${manifest.gatewayBuildId}`;
+    const versionDir = runtimeVersionId(manifest);
     const target = join(runtimeRoot, "versions", versionDir);
 
     if (!(await isValid(target, manifest))) {
       await stageAndActivate(seedRoot, runtimeRoot, target, manifest);
     }
 
-    // Same gate the manual updater applies. A replacement that happens without
-    // anyone asking must not be able to leave the machine pointed at a runtime
-    // that cannot start, so a candidate that fails to execute is abandoned and
-    // the working install stays current.
+    // A newer seed may be staged while work is in flight or while Gateway
+    // state cannot be read. Activation still requires an explicit all-clear.
+    // Missing blockers is unknown, not idle — the provisioner therefore
+    // stages on launch and leaves current.json / current untouched.
     if (installed) {
+      const decision = resolveStartupBlockers(blockers);
+      if (!decision.allowed) return installed;
+
       try {
         await smokeCheck(target, manifest);
       } catch (error) {
@@ -87,9 +120,29 @@ export async function ensureRuntimeInstalled({
       runtimeRoot: target,
       gatewayVersion: manifest.gatewayVersion,
       gatewayBuildId: manifest.gatewayBuildId,
-      generatedAt: manifest.generatedAt
+      runtimeBuildId: manifest.runtimeBuildId,
+      ...runtimeSidecarIdentity(manifest),
+      generatedAt: manifest.generatedAt,
+      ...(recoveryNotice ? { recoveryNotice } : {})
     };
   });
+}
+
+async function currentPointerRecoveryNotice(runtimeRoot) {
+  const pointerPath = join(runtimeRoot, CURRENT_POINTER_FILE);
+  try {
+    await access(pointerPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    return `기존 current.json을 읽을 수 없어 bundled runtime으로 복구합니다: ${error.message}`;
+  }
+  try {
+    const pointer = await readPointerFile(runtimeRoot, CURRENT_POINTER_FILE);
+    if (pointer) return null;
+    return "기존 current.json 형식이 잘못되어 검증된 bundled runtime으로 복구했습니다.";
+  } catch (error) {
+    return `기존 current.json이 손상되어 검증된 bundled runtime으로 복구했습니다: ${error.message}`;
+  }
 }
 
 async function currentRuntimeIfValid(runtimeRoot) {
@@ -101,7 +154,7 @@ async function currentRuntimeIfValid(runtimeRoot) {
     const current = await readCurrentRuntime(runtimeRoot);
     if (!current || !(await isConfinedToVersions(runtimeRoot, current.runtimeRoot))) return null;
     const ownManifest = await readManifestFile(current.runtimeRoot);
-    if (ownManifest.gatewayVersion !== current.gatewayVersion || ownManifest.gatewayBuildId !== current.gatewayBuildId) {
+    if (runtimePointerIdentityMismatch(current, ownManifest)) {
       return null;
     }
     await verifyRuntimeManifest(current.runtimeRoot, ownManifest);
@@ -109,6 +162,8 @@ async function currentRuntimeIfValid(runtimeRoot) {
       runtimeRoot: current.runtimeRoot,
       gatewayVersion: current.gatewayVersion,
       gatewayBuildId: current.gatewayBuildId,
+      runtimeBuildId: current.runtimeBuildId,
+      ...runtimeSidecarIdentity(ownManifest),
       generatedAt: ownManifest.generatedAt,
       pinned: current.pinned === true
     };
@@ -210,11 +265,43 @@ export async function activateCurrent(runtimeRoot, target, manifest, { pinned = 
     runtimeRoot: target,
     gatewayVersion: manifest.gatewayVersion,
     gatewayBuildId: manifest.gatewayBuildId,
+    runtimeBuildId: manifest.runtimeBuildId,
+    ...runtimeSidecarIdentity(manifest),
     activatedAt: new Date().toISOString(),
     ...(pinned ? { pinned: true } : {})
   };
   await writePointerFile(runtimeRoot, CURRENT_POINTER_FILE, payload);
+  await updateCurrentSymlink(runtimeRoot, target);
   return payload;
+}
+
+/** Drops both authorities together so a failed first activation cannot leave current.json and the stable symlink pointing at different things. */
+export async function clearCurrentActivation(runtimeRoot) {
+  await rm(join(runtimeRoot, CURRENT_POINTER_FILE), { force: true });
+  await rm(join(runtimeRoot, "current"), { force: true });
+}
+
+/**
+ * Maintains a stable `<runtimeRoot>/current` symlink pointing at the active
+ * version directory, updated atomically on every activation. External
+ * references — chiefly each agent's Control MCP config — can point through it
+ * (`current/node/bin/node`, `current/gateway/src/index.js`) and keep working across
+ * runtime updates, instead of pinning a version dir that goes stale the moment
+ * a newer runtime activates. Best-effort: a filesystem without symlinks must
+ * not break activation, so failure is swallowed.
+ */
+async function updateCurrentSymlink(runtimeRoot, target) {
+  const link = join(runtimeRoot, "current");
+  const temporary = join(runtimeRoot, `current.link.${process.pid}.tmp`);
+  // Relative target so the link survives the runtime tree being relocated.
+  const relativeTarget = relative(runtimeRoot, target);
+  try {
+    await rm(temporary, { force: true });
+    await symlink(relativeTarget, temporary);
+    await rename(temporary, link); // atomic replace on the same volume
+  } catch {
+    await rm(temporary, { force: true }).catch(() => {});
+  }
 }
 
 export async function readCurrentRuntime(runtimeRoot = defaultRuntimeRoot()) {

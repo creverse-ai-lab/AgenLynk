@@ -12,18 +12,29 @@
 // update channel, and no arbitrary download here — that boundary is
 // intentional (see TODO.md's fixed runtime boundary) and separate from
 // developer `git pull` workflows, which never touch this file.
-import { mkdir, readdir, rm } from "node:fs/promises";
+import { access, mkdir, readdir, rm } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
-import { pathExists } from "./fs-paths.js";
 import { runBundledRuntimeSmokeCheck } from "./runtime-smoke-check.js";
-import { GATEWAY_API_VERSION, UnsupportedGatewayApiVersionError } from "./gateway-api-version.js";
-import { activateCurrent, defaultRuntimeRoot, isConfinedToVersions, readCurrentRuntime } from "./runtime-installer.js";
+import { activateCurrent, clearCurrentActivation, defaultRuntimeRoot, isConfinedToVersions, readCurrentRuntime } from "./runtime-installer.js";
 import { withRuntimeLock } from "./runtime-lock.js";
-import { readManifestFile, verifyRuntimeManifest } from "./runtime-manifest.js";
+import {
+  readManifestFile,
+  runtimePointerIdentityMismatch,
+  runtimeSidecarIdentity,
+  runtimeVersionId,
+  verifyRuntimeManifest
+} from "./runtime-manifest.js";
 import { PREVIOUS_POINTER_FILE, readPointerFile, writePointerFile } from "./runtime-pointer.js";
 import { stageVerifiedRuntime } from "./runtime-staging.js";
 
 export { defaultRuntimeRoot };
+
+const SUPPORTED_GATEWAY_API_MAJOR = 1;
+
+async function pathExists(path) {
+  try { await access(path); return true; }
+  catch { return false; }
+}
 
 /** Carries a stable machine-readable `code` (+ optional details) into the JSON envelope's `error` field. */
 class RuntimeUpdaterError extends Error {
@@ -115,11 +126,15 @@ async function verifyCandidate(root, manifest) {
 
 /** Mirrors installer.js's evaluateGatewayCompatibility/assertSupportedGatewayApiVersion: exact-major match only. */
 function assertSupportedGatewayApiVersion(manifest) {
-  if (manifest.gatewayApiVersion === GATEWAY_API_VERSION) return;
-  const error = new UnsupportedGatewayApiVersionError({ reportedGatewayApiVersion: manifest.gatewayApiVersion });
-  const details = { reportedGatewayApiVersion: error.reportedGatewayApiVersion, supportedGatewayApiVersion: error.supportedGatewayApiVersion };
-  if (error.requiredGatewayApiVersion !== undefined) details.requiredGatewayApiVersion = error.requiredGatewayApiVersion;
-  throw new RuntimeUpdaterError(error.code, error.message, details);
+  if (manifest.gatewayApiVersion === SUPPORTED_GATEWAY_API_MAJOR) return;
+  throw new RuntimeUpdaterError(
+    "UNSUPPORTED_GATEWAY_API_VERSION",
+    `Gateway API major ${manifest.gatewayApiVersion} is not supported (expected ${SUPPORTED_GATEWAY_API_MAJOR})`,
+    {
+      reportedGatewayApiVersion: manifest.gatewayApiVersion,
+      supportedGatewayApiVersion: SUPPORTED_GATEWAY_API_MAJOR
+    }
+  );
 }
 
 /** Wraps the shared check in this module's coded-error vocabulary. */
@@ -150,17 +165,14 @@ async function assertKnownGoodPointer(runtimeRoot, pointer, label) {
   }
   const manifest = await readCandidateManifest(pointer.runtimeRoot);
   await verifyCandidate(pointer.runtimeRoot, manifest);
-  if (
-    manifest.gatewayVersion !== pointer.gatewayVersion
-    || manifest.gatewayBuildId !== pointer.gatewayBuildId
-  ) {
+  if (runtimePointerIdentityMismatch(pointer, manifest)) {
     throw new RuntimeUpdaterError(
       "RUNTIME_POINTER_IDENTITY_MISMATCH",
       `${label} target does not match its runtime manifest`,
       { pointer: label }
     );
   }
-  return pointer;
+  return { ...pointer, ...runtimeSidecarIdentity(manifest) };
 }
 
 export async function readPreviousRuntime(runtimeRoot = defaultRuntimeRoot()) {
@@ -197,11 +209,13 @@ export async function inspectRuntime(options) {
         const manifest = await readManifestFile(target);
         summary.gatewayVersion = manifest.gatewayVersion;
         summary.gatewayBuildId = manifest.gatewayBuildId;
+        summary.runtimeBuildId = manifest.runtimeBuildId;
+        Object.assign(summary, runtimeSidecarIdentity(manifest));
         summary.gatewayApiVersion = manifest.gatewayApiVersion;
         // Surfaced so the app can show which Node each installed runtime
         // carries without opening the manifest a second time.
         summary.nodeVersion = manifest.nodeVersion;
-        summary.apiCompatible = manifest.gatewayApiVersion === GATEWAY_API_VERSION;
+        summary.apiCompatible = manifest.gatewayApiVersion === SUPPORTED_GATEWAY_API_MAJOR;
         if (deep) {
           try {
             await verifyRuntimeManifest(target, manifest);
@@ -223,7 +237,7 @@ export async function inspectRuntime(options) {
 
 /**
  * stage: manifest/checksum-verify a seed and copy it into
- * runtimeRoot/versions/<gatewayVersion>-<gatewayBuildId>/ without touching
+ * runtimeRoot/versions/<gatewayVersion>-<runtimeBuildId>/ without touching
  * current.json. Idempotent — re-staging an already-valid target is a no-op.
  * Mirrors runtime-installer.js's stageAndActivate, minus the activation step.
  */
@@ -239,7 +253,7 @@ export async function stageRuntimeCandidate(options) {
     await verifyCandidate(seedRoot, manifest);
     assertSupportedGatewayApiVersion(manifest);
 
-    const versionId = `${manifest.gatewayVersion}-${manifest.gatewayBuildId}`;
+    const versionId = runtimeVersionId(manifest);
     const target = resolveVersionTarget(runtimeRoot, versionId);
 
     if (await pathExists(target)) {
@@ -253,6 +267,8 @@ export async function stageRuntimeCandidate(options) {
           runtimeRoot: target,
           gatewayVersion: manifest.gatewayVersion,
           gatewayBuildId: manifest.gatewayBuildId,
+          runtimeBuildId: manifest.runtimeBuildId,
+          ...runtimeSidecarIdentity(manifest),
           gatewayApiVersion: manifest.gatewayApiVersion,
           alreadyStaged: true
         };
@@ -290,6 +306,8 @@ export async function stageRuntimeCandidate(options) {
       runtimeRoot: target,
       gatewayVersion: manifest.gatewayVersion,
       gatewayBuildId: manifest.gatewayBuildId,
+      runtimeBuildId: manifest.runtimeBuildId,
+      ...runtimeSidecarIdentity(manifest),
       gatewayApiVersion: manifest.gatewayApiVersion,
       alreadyStaged: false
     };
@@ -322,6 +340,8 @@ export async function validateRuntimeCandidate(options) {
       runtimeRoot: target,
       gatewayVersion: manifest.gatewayVersion,
       gatewayBuildId: manifest.gatewayBuildId,
+      runtimeBuildId: manifest.runtimeBuildId,
+      ...runtimeSidecarIdentity(manifest),
       gatewayApiVersion: manifest.gatewayApiVersion,
       smoke
     };
@@ -368,15 +388,23 @@ export async function activateRuntimeCandidate(options) {
       if (previousBeforeSwitch) {
         await activateCurrent(runtimeRoot, previousBeforeSwitch.runtimeRoot, previousBeforeSwitch);
       } else {
-        await rm(join(runtimeRoot, "current.json"), { force: true });
+        await clearCurrentActivation(runtimeRoot);
       }
       throw new RuntimeUpdaterError(
         "POST_ACTIVATION_HEALTH_CHECK_FAILED",
         `post-activation health check failed, restored previous target: ${healthError.message}`,
         {
-          attempted: { gatewayVersion: manifest.gatewayVersion, gatewayBuildId: manifest.gatewayBuildId },
+          attempted: {
+            gatewayVersion: manifest.gatewayVersion,
+            gatewayBuildId: manifest.gatewayBuildId,
+            ...runtimeSidecarIdentity(manifest)
+          },
           restoredTo: previousBeforeSwitch
-            ? { gatewayVersion: previousBeforeSwitch.gatewayVersion, gatewayBuildId: previousBeforeSwitch.gatewayBuildId }
+            ? {
+              gatewayVersion: previousBeforeSwitch.gatewayVersion,
+              gatewayBuildId: previousBeforeSwitch.gatewayBuildId,
+              ...runtimeSidecarIdentity(previousBeforeSwitch)
+            }
             : null
         }
       );
@@ -388,10 +416,16 @@ export async function activateRuntimeCandidate(options) {
         runtimeRoot: target,
         gatewayVersion: manifest.gatewayVersion,
         gatewayBuildId: manifest.gatewayBuildId,
+        ...runtimeSidecarIdentity(manifest),
         gatewayApiVersion: manifest.gatewayApiVersion
       },
       previous: previousBeforeSwitch
-        ? { runtimeRoot: previousBeforeSwitch.runtimeRoot, gatewayVersion: previousBeforeSwitch.gatewayVersion, gatewayBuildId: previousBeforeSwitch.gatewayBuildId }
+        ? {
+          runtimeRoot: previousBeforeSwitch.runtimeRoot,
+          gatewayVersion: previousBeforeSwitch.gatewayVersion,
+          gatewayBuildId: previousBeforeSwitch.gatewayBuildId,
+          ...runtimeSidecarIdentity(previousBeforeSwitch)
+        }
         : null
     };
     });
@@ -422,15 +456,13 @@ export async function rollbackRuntime(options) {
 
     const manifest = await readCandidateManifest(previous.runtimeRoot);
     await verifyCandidate(previous.runtimeRoot, manifest);
-    if (
-      manifest.gatewayVersion !== previous.gatewayVersion
-      || manifest.gatewayBuildId !== previous.gatewayBuildId
-    ) {
+    if (runtimePointerIdentityMismatch(previous, manifest)) {
       throw new RuntimeUpdaterError(
         "PREVIOUS_TARGET_IDENTITY_MISMATCH",
         "recorded previous target does not match its runtime manifest"
       );
     }
+    Object.assign(previous, runtimeSidecarIdentity(manifest));
     assertSupportedGatewayApiVersion(manifest);
     await runSmokeCheck(smokeCheck ?? runBuiltinSmokeCheck, previous.runtimeRoot, manifest);
 
@@ -446,15 +478,23 @@ export async function rollbackRuntime(options) {
       if (currentBeforeRollback) {
         await activateCurrent(runtimeRoot, currentBeforeRollback.runtimeRoot, currentBeforeRollback);
       } else {
-        await rm(join(runtimeRoot, "current.json"), { force: true });
+        await clearCurrentActivation(runtimeRoot);
       }
       throw new RuntimeUpdaterError(
         "POST_ROLLBACK_HEALTH_CHECK_FAILED",
         `post-rollback health check failed, restored current target: ${healthError.message}`,
         {
-          attempted: { gatewayVersion: previous.gatewayVersion, gatewayBuildId: previous.gatewayBuildId },
+          attempted: {
+            gatewayVersion: previous.gatewayVersion,
+            gatewayBuildId: previous.gatewayBuildId,
+            ...runtimeSidecarIdentity(previous)
+          },
           restoredTo: currentBeforeRollback
-            ? { gatewayVersion: currentBeforeRollback.gatewayVersion, gatewayBuildId: currentBeforeRollback.gatewayBuildId }
+            ? {
+              gatewayVersion: currentBeforeRollback.gatewayVersion,
+              gatewayBuildId: currentBeforeRollback.gatewayBuildId,
+              ...runtimeSidecarIdentity(currentBeforeRollback)
+            }
             : null
         }
       );
@@ -464,9 +504,19 @@ export async function rollbackRuntime(options) {
     }
 
     return {
-      activated: { runtimeRoot: previous.runtimeRoot, gatewayVersion: previous.gatewayVersion, gatewayBuildId: previous.gatewayBuildId },
+      activated: {
+        runtimeRoot: previous.runtimeRoot,
+        gatewayVersion: previous.gatewayVersion,
+        gatewayBuildId: previous.gatewayBuildId,
+        ...runtimeSidecarIdentity(previous)
+      },
       rolledBackFrom: currentBeforeRollback
-        ? { runtimeRoot: currentBeforeRollback.runtimeRoot, gatewayVersion: currentBeforeRollback.gatewayVersion, gatewayBuildId: currentBeforeRollback.gatewayBuildId }
+        ? {
+          runtimeRoot: currentBeforeRollback.runtimeRoot,
+          gatewayVersion: currentBeforeRollback.gatewayVersion,
+          gatewayBuildId: currentBeforeRollback.gatewayBuildId,
+          ...runtimeSidecarIdentity(currentBeforeRollback)
+        }
         : null
     };
     });

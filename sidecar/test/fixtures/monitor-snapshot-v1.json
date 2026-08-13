@@ -1,0 +1,141 @@
+{
+  "_comment": "Shared Monitor API v1 characterization fixture. test/monitor-state.test.js constructs this snapshot through MonitorState; MonitorModelTests.swift decodes the same wire payload.",
+  "_input": {
+    "gateway": {
+      "gatewayVersion": "1.3.2",
+      "gatewayApiVersion": 1,
+      "gatewayBuildId": "fixture-build"
+    },
+    "initialSessions": [
+      {
+        "sessionId": "s1",
+        "provider": "codex",
+        "status": "running",
+        "cwd": "/tmp/project",
+        "eventCount": 1
+      },
+      {
+        "sessionId": "old",
+        "provider": "claude",
+        "status": "ready",
+        "cwd": "/tmp/project",
+        "opener": "codex",
+        "openerInstanceId": "main-old"
+      }
+    ],
+    "finalSessions": [
+      {
+        "sessionId": "s1",
+        "provider": "codex",
+        "status": "running",
+        "cwd": "/tmp/project",
+        "eventCount": 1
+      }
+    ],
+    "events": [
+      {
+        "sessionId": "old",
+        "sequence": 1,
+        "type": "turn_end",
+        "ts": "2026-08-06T23:59:00.000Z"
+      },
+      {
+        "sessionId": "s1",
+        "sequence": 0,
+        "type": "turn_start",
+        "ts": "2026-08-07T00:00:00.000Z",
+        "text": "work"
+      }
+    ],
+    "tasks": [
+      {
+        "taskId": "t1",
+        "status": "working",
+        "statusMessage": "running"
+      }
+    ],
+    "inbox": [
+      {
+        "inboxId": "i1",
+        "status": "pending",
+        "type": "permission_request",
+        "sessionId": "s1"
+      }
+    ]
+  },
+  "schemaVersion": 1,
+  "monitorApiVersion": "1.0",
+  "revision": 7,
+  "connected": true,
+  "streaming": true,
+  "streamHealth": "healthy",
+  "diagnostics": {
+    "subscriptionGaps": 0,
+    "replayedEvents": 0,
+    "reconciliationRuns": 0,
+    "overflowDroppedEvents": 0,
+    "replayTruncations": 0
+  },
+  "error": null,
+  "gateway": {
+    "gatewayVersion": "1.3.2",
+    "gatewayApiVersion": 1,
+    "gatewayBuildId": "fixture-build"
+  },
+  "sessions": [
+    {
+      "sessionId": "s1",
+      "provider": "codex",
+      "status": "running",
+      "cwd": "/tmp/project",
+      "eventCount": 1
+    }
+  ],
+  "events": {
+    "s1": [
+      {
+        "sessionId": "s1",
+        "sequence": 0,
+        "type": "turn_start",
+        "ts": "2026-08-07T00:00:00.000Z",
+        "text": "work"
+      }
+    ]
+  },
+  "historySessions": [
+    {
+      "sessionId": "old",
+      "provider": "claude",
+      "status": "ready",
+      "cwd": "/tmp/project",
+      "opener": "codex",
+      "openerInstanceId": "main-old"
+    }
+  ],
+  "historyEvents": {
+    "old": [
+      {
+        "sessionId": "old",
+        "sequence": 1,
+        "type": "turn_end",
+        "ts": "2026-08-06T23:59:00.000Z"
+      }
+    ]
+  },
+  "eventLimit": 2000,
+  "tasks": [
+    {
+      "taskId": "t1",
+      "status": "working",
+      "statusMessage": "running"
+    }
+  ],
+  "inbox": [
+    {
+      "inboxId": "i1",
+      "status": "pending",
+      "type": "permission_request",
+      "sessionId": "s1"
+    }
+  ]
+}
