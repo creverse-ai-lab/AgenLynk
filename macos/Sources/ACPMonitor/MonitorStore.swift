@@ -57,7 +57,7 @@ enum MonitorReducer {
 
     static func applyStateMessage(_ message: [String: JSONValue], to state: inout MonitorReducerState) -> MonitorReducerEffect {
         var effect = MonitorReducerEffect()
-        let removedSessionIds = (message.array("removedSessionIds") ?? []).compactMap(\.stringValue)
+        let removedSessionIds = (message.array("removedSessionIds") ?? []).compactMap { $0.stringValue }
         if !removedSessionIds.isEmpty {
             let priorSessions = Dictionary(state.sessions.map { ($0.sessionId, $0) }, uniquingKeysWith: { _, last in last })
             for sessionId in removedSessionIds {

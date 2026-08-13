@@ -958,7 +958,7 @@ struct InstalledFrontdoors: Equatable, Sendable {
         guard let root = JSONValue(any: raw).objectValue else { throw MonitorDecodeError.invalidMessage }
         return InstalledFrontdoors(
             primary: root.string("primary"),
-            installed: (root.array("installed") ?? []).compactMap(\.stringValue)
+            installed: (root.array("installed") ?? []).compactMap { $0.stringValue }
         )
     }
 }

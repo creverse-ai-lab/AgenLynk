@@ -84,11 +84,12 @@ final class PetController {
             actionsFilePath: actionsFileURL.path
         )
         process.terminationHandler = { [weak self] finished in
+            guard let controller = self else { return }
             Task { @MainActor in
-                guard let self, self.process === finished else { return }
-                self.process = nil
-                try? self.logHandle?.close()
-                self.logHandle = nil
+                guard controller.process === finished else { return }
+                controller.process = nil
+                try? controller.logHandle?.close()
+                controller.logHandle = nil
                 onTermination(finished.terminationStatus)
             }
         }
