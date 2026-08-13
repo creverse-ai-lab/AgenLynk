@@ -962,8 +962,8 @@ struct InstalledFrontdoors: Equatable, Sendable {
 struct MonitorSnapshot: Sendable {
     let schemaVersion: Int
     let monitorApiVersion: String
-    /// The monitor's session/event data revision (additive; nil from an older
-    /// monitor). Unchanged revision means the expensive session/event
+    /// The monitor's session/event/tasks/inbox revision (additive; nil from an
+    /// older monitor). Unchanged revision means the expensive session/event
     /// comparisons can be skipped wholesale on reconciliation.
     let revision: Int?
     let connected: Bool

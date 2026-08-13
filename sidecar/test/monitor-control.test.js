@@ -9,8 +9,7 @@ test("restartBlockers matches the shared blocker contract the Settings UI also i
   for (const { name, sessions, tasks, inbox, expected } of cases) {
     const state = new MonitorState();
     state.setSessions(sessions.map((session) => ({ provider: "codex", cwd: "/tmp/project", ...session })));
-    state.tasks = tasks;
-    state.inbox = inbox;
+    state.setRecords({ tasks, inbox });
     assert.deepEqual(state.restartBlockers(), expected, name);
   }
 });

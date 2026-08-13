@@ -50,4 +50,9 @@ for (const forbidden of [
 const violations = await collectSidecarPrivateImportViolations(join(root, "sidecar/src"));
 assert.deepEqual(violations, [], violations.map((item) => `${item.path}: ${item.patterns.join(",")}`).join("; "));
 
+const monitorSource = await readFile(join(root, "sidecar/src/server/monitor.js"), "utf8");
+assert.doesNotMatch(monitorSource, /\.call\(["'](?:gateway_config|retention_preview)["']/, "sidecar must not probe undeclared Gateway RPC methods");
+assert.doesNotMatch(monitorSource, /(?:error|message)[^\n]*\.includes\(/, "Gateway compatibility must not branch on message substrings");
+assert.doesNotMatch(monitorSource, /\blet gatewaySessions\b/, "MonitorState must own the Gateway session source");
+
 process.stdout.write("AgenLynk ownership and pinned Gateway boundary checks passed\n");

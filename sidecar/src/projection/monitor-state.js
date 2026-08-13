@@ -10,6 +10,9 @@ export class MonitorState {
     this.maxEventsPerSession = maxEventsPerSession;
     this.historyRetentionMs = historyRetentionMs;
     this.sessions = new Map();
+    // Raw Gateway session source retained inside the canonical state owner so
+    // transport callbacks do not maintain a competing module-level copy.
+    this.gatewaySourceSessions = [];
     this.eventsBySession = new Map();
     this.eventSequencesBySession = new Map();
     this.historySessions = new Map();
@@ -25,8 +28,37 @@ export class MonitorState {
     this.connected = false;
     this.streaming = false;
     this.lastError = null;
+    this.streamHealth = "disconnected";
+    this.diagnostics = {
+      subscriptionGaps: 0,
+      replayedEvents: 0,
+      reconciliationRuns: 0,
+      overflowDroppedEvents: 0,
+      replayTruncations: 0
+    };
     this.sseClients = new Set();
     this.revision = 0;
+  }
+
+  setConnection({ connected = this.connected, streaming = this.streaming, error = this.lastError, health } = {}) {
+    const nextHealth = health ?? (connected ? (streaming ? "healthy" : "degraded") : "disconnected");
+    const changed = this.connected !== connected || this.streaming !== streaming
+      || this.lastError !== error || this.streamHealth !== nextHealth;
+    this.connected = connected;
+    this.streaming = streaming;
+    this.lastError = error;
+    this.streamHealth = nextHealth;
+    if (changed) this.revision += 1;
+    return changed;
+  }
+
+  setRecords({ tasks = this.tasks, inbox = this.inbox } = {}) {
+    const changed = JSON.stringify(this.tasks) !== JSON.stringify(tasks)
+      || JSON.stringify(this.inbox) !== JSON.stringify(inbox);
+    this.tasks = tasks;
+    this.inbox = inbox;
+    if (changed) this.revision += 1;
+    return changed;
   }
 
   setSessions(list) {
@@ -40,6 +72,10 @@ export class MonitorState {
     this.sessions = nextSessions;
     if (changed) this.revision += 1;
     return removedSessionIds;
+  }
+
+  setGatewaySourceSessions(list) {
+    this.gatewaySourceSessions = Array.isArray(list) ? list : [];
   }
 
   removeSession(sessionId, { closed = false } = {}) {
@@ -62,22 +98,28 @@ export class MonitorState {
   setGateway(gateway) {
     const changed = JSON.stringify(this.gateway) !== JSON.stringify(gateway);
     this.gateway = gateway;
+    if (changed) this.revision += 1;
     return changed;
   }
 
-  pushEvent(event) {
-    if (!event?.sessionId) return false;
+  pushEvent(event, { replay = false } = {}) {
+    // Gap/truncation markers are subscription control records, never timeline content.
+    if (!event?.sessionId || event.type === "subscription_gap" || event.type === "subscription_replay_truncated") {
+      return false;
+    }
     const events = this.eventsBySession.get(event.sessionId) ?? [];
     const sequences = this.eventSequencesBySession.get(event.sessionId) ?? new Set();
     if (Number.isFinite(event.sequence) && sequences.has(event.sequence)) return false;
 
     events.push(event);
     if (Number.isFinite(event.sequence)) sequences.add(event.sequence);
+    if (events.length > 1 && eventOrder(events.at(-1), events.at(-2)) < 0) events.sort(eventOrder);
     if (events.length > this.maxEventsPerSession) {
       const removed = events.splice(0, events.length - this.maxEventsPerSession);
       for (const item of removed) {
         if (Number.isFinite(item.sequence)) sequences.delete(item.sequence);
       }
+      this.diagnostics.overflowDroppedEvents += removed.length;
     }
     this.eventsBySession.set(event.sessionId, events);
     this.eventSequencesBySession.set(event.sessionId, sequences);
@@ -88,8 +130,71 @@ export class MonitorState {
         updatedAt: event.ts ?? this.sessions.get(event.sessionId).updatedAt
       });
     }
+    if (replay) this.diagnostics.replayedEvents += 1;
     this.revision += 1;
     return true;
+  }
+
+  beginSubscriptionGap(event) {
+    this.diagnostics.subscriptionGaps += 1;
+    this.setConnection({ connected: true, streaming: false, error: "Gateway subscription gap; reconciling", health: "reconciling" });
+    // setConnection may be unchanged during a burst of markers, but every gap
+    // is diagnostics state and therefore still advances the conditional tag.
+    this.revision += 1;
+    return {
+      sessionId: event?.sessionId,
+      fromSequence: Number.isFinite(event?.fromSequence) ? event.fromSequence : 0
+    };
+  }
+
+  noteReplayTruncation(event = {}) {
+    this.diagnostics.replayTruncations += 1;
+    const sessionIds = Array.isArray(event.sessionIds)
+      ? event.sessionIds.filter((sessionId) => typeof sessionId === "string" && sessionId)
+      : event.sessionId ? [event.sessionId] : [];
+    const detail = sessionIds.length ? ` (${sessionIds.join(", ")})` : "";
+    this.setConnection({
+      connected: true,
+      streaming: true,
+      error: `Gateway subscription replay truncated${detail}`,
+      health: "degraded"
+    });
+    return { sessionIds };
+  }
+
+  completeReconciliation({ truncated = false } = {}) {
+    this.diagnostics.reconciliationRuns += 1;
+    if (truncated) {
+      if (this.streamHealth !== "degraded") {
+        this.noteReplayTruncation();
+      } else {
+        this.setConnection({
+          connected: true,
+          streaming: true,
+          error: this.lastError ?? "Gateway subscription replay truncated",
+          health: "degraded"
+        });
+      }
+    } else {
+      this.setConnection({ connected: true, streaming: true, error: null, health: "healthy" });
+    }
+    this.revision += 1;
+  }
+
+  subscriptionCursors(floors = {}) {
+    const sessionIds = new Set([...this.eventsBySession.keys(), ...Object.keys(floors)]);
+    return Object.fromEntries([...sessionIds].map((sessionId) => {
+      const sequences = (this.eventsBySession.get(sessionId) ?? [])
+        .map((event) => event.sequence).filter(Number.isFinite);
+      const next = sequences.length ? Math.max(...sequences) + 1 : 0;
+      const floor = Number.isFinite(floors[sessionId]) ? floors[sessionId] : next;
+      return [sessionId, Math.min(next, floor)];
+    }));
+  }
+
+  snapshotTag(now = Date.now()) {
+    this.pruneHistory(now);
+    return `\"monitor-${this.revision}\"`;
   }
 
   // Returns the sessionIds whose bucket actually changed (an emptied/dropped
@@ -122,17 +227,18 @@ export class MonitorState {
     return changedSessionIds;
   }
 
-  snapshot() {
-    this.pruneHistory();
+  snapshot(now = Date.now()) {
+    this.pruneHistory(now);
     return {
       schemaVersion: MONITOR_SCHEMA_VERSION,
       monitorApiVersion: MONITOR_API_VERSION,
-      // Additive: lets a reconciliation client skip the expensive deep
-      // comparison (and the 200ms cache rebuild it triggers) when nothing
-      // changed since the snapshot it already applied.
+      // Additive: sessions, events, history, tasks, and inbox all participate.
+      // An unchanged revision lets the client skip the expensive deep comparison.
       revision: this.revision,
       connected: this.connected,
       streaming: this.streaming,
+      streamHealth: this.streamHealth,
+      diagnostics: { ...this.diagnostics },
       error: this.lastError,
       gateway: this.gateway,
       sessions: [...this.sessions.values()],
@@ -159,12 +265,16 @@ export class MonitorState {
   }
 
   pruneHistory(now = Date.now()) {
+    let pruned = false;
     for (const [sessionId, expiresAt] of this.historyExpiresAt) {
       if (expiresAt > now) continue;
       this.historySessions.delete(sessionId);
       this.historyEventsBySession.delete(sessionId);
       this.historyExpiresAt.delete(sessionId);
+      pruned = true;
     }
+    if (pruned) this.revision += 1;
+    return pruned;
   }
 
   restartBlockers() {
@@ -219,8 +329,10 @@ function externalEventsSignature(events) {
 }
 
 function eventOrder(left, right) {
-  if (left?.ts !== right?.ts) return String(left?.ts ?? "").localeCompare(String(right?.ts ?? ""));
-  return Number(left?.sequence ?? 0) - Number(right?.sequence ?? 0);
+  const leftSequence = Number.isFinite(left?.sequence) ? left.sequence : Infinity;
+  const rightSequence = Number.isFinite(right?.sequence) ? right.sequence : Infinity;
+  if (leftSequence !== rightSequence) return leftSequence - rightSequence;
+  return String(left?.ts ?? "").localeCompare(String(right?.ts ?? ""));
 }
 
 export function queuedSingleFlight(operation) {

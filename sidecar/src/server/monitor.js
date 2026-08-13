@@ -19,6 +19,13 @@ import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { GatewayRpcClient } from "../gateway/client.js";
+import {
+  decodeGatewaySetup,
+  gatewayFeatureAvailable,
+  isGatewayError,
+  unavailableFeatureError
+} from "../gateway/compatibility.js";
+import { GatewaySubscriptionOwner } from "../gateway/subscription-reconciler.js";
 import { pathIsMissing } from "../app/fs-paths.js";
 import { gatewaySocketPath } from "../app/config.js";
 import { defaultInstallStatePath } from "../app/install-state.js";
@@ -62,7 +69,7 @@ const localScanner = LOCAL_SCANNER_ENABLED ? new LocalAgentScanner({
 // long-lived pre-1.3.2 daemon replays hundreds from its persisted sessions on
 // every subscribe — the monitor cannot assume the daemon it connects to runs
 // its own build, so it drops them again here.
-const IGNORED_EVENT_TYPES = new Set(["usage_update"]);
+const IGNORED_EVENT_TYPES = new Set(["usage_update", "subscription_gap", "subscription_replay_truncated"]);
 
 export function isIgnoredMonitorEvent(event) {
   return IGNORED_EVENT_TYPES.has(event?.type);
@@ -126,10 +133,14 @@ async function main() {
   });
   const state = new MonitorState({ maxEventsPerSession: MAX_EVENTS_PER_SESSION });
   const apiToken = randomBytes(32).toString("base64url");
-  let gatewaySessions = [];
-  let subscriptionActive = false;
-  let subscriptionAttempt = null;
   let agentMutationActive = false;
+  const owner = new GatewaySubscriptionOwner({
+    rpc,
+    state,
+    applySessionSources: (...args) => applySessionSources(...args),
+    refresh: (...args) => refresh(...args),
+    isIgnoredEvent: isIgnoredMonitorEvent
+  });
 
   const onEvent = (event) => {
     if (event?.type === "subscription_error") {
@@ -139,24 +150,50 @@ async function main() {
       // No `notice` is broadcast: this is transient and self-healing, and
       // flashing it on every recoverable drop was the recurring message the
       // user saw. The amber "재연결 중" state is the durable signal instead.
-      subscriptionActive = false;
-      state.streaming = false;
-      state.lastError = event.error ?? "Gateway event subscription failed";
+      owner.markInactive();
+      state.setConnection({
+        connected: true,
+        streaming: false,
+        error: event.error ?? "Gateway event subscription failed",
+        health: "degraded"
+      });
       state.broadcast({ kind: "state", connected: state.connected, streaming: false, error: state.lastError });
       const retry = setTimeout(() => { void ensureSubscription(); }, 500);
       retry.unref?.();
       return;
     }
+    if (event?.type === "subscription_gap") {
+      owner.noteGap(event);
+      state.broadcast({
+        kind: "state",
+        connected: true,
+        streaming: false,
+        streamHealth: state.streamHealth,
+        diagnostics: state.diagnostics,
+        error: state.lastError
+      });
+      void reconcileSubscription();
+      return;
+    }
     if (event?.type === "subscription_replay_truncated") {
-      // Losing some pre-reconnect events is expected for a live monitor and
-      // recovers on the next scan; not worth a user-facing notice.
+      state.noteReplayTruncation(event);
+      state.broadcast({
+        kind: "state",
+        connected: true,
+        streaming: true,
+        streamHealth: state.streamHealth,
+        diagnostics: state.diagnostics,
+        error: state.lastError
+      });
       return;
     }
     if (isIgnoredMonitorEvent(event)) return;
     if (!state.pushEvent(event)) return;
     state.broadcast({ kind: "event", event });
     if (event.type === "session_closed") {
-      gatewaySessions = gatewaySessions.filter((session) => session.sessionId !== event.sessionId);
+      state.setGatewaySourceSessions(
+        state.gatewaySourceSessions.filter((session) => session.sessionId !== event.sessionId)
+      );
       state.removeSession(event.sessionId, { closed: true });
       state.broadcast({ kind: "session_removed", sessionId: event.sessionId });
     }
@@ -164,6 +201,7 @@ async function main() {
     // so nudge a refresh whenever a lifecycle event lands.
     if (!event.type?.endsWith("_chunk")) scheduleRefresh();
   };
+  owner.onEvent = onEvent;
 
   let refreshTimer = null;
   const scheduleRefresh = () => {
@@ -177,21 +215,22 @@ async function main() {
   async function performRefresh() {
     const wasConnected = state.connected;
     const beforeRevision = state.revision;
-    const beforeTasks = JSON.stringify(state.tasks);
-    const beforeInbox = JSON.stringify(state.inbox);
     try {
       const [sessions, tasks, inbox] = await Promise.all([
         rpc.call("session", { action: "list" }),
         rpc.call("task_list", {}),
         rpc.call("inbox", { action: "list" })
       ]);
-      gatewaySessions = sessions.sessions ?? [];
+      state.setGatewaySourceSessions(sessions.sessions ?? []);
       const { removedSessionIds, localEvents } = await applySessionSources();
-      state.tasks = tasks.tasks ?? [];
-      state.inbox = inbox.items ?? [];
-      state.connected = true;
-      state.lastError = null;
-      const recordsChanged = beforeTasks !== JSON.stringify(state.tasks) || beforeInbox !== JSON.stringify(state.inbox);
+      const recordsChanged = state.setRecords({ tasks: tasks.tasks ?? [], inbox: inbox.items ?? [] });
+      const preserveHealth = state.streamHealth === "reconciling" || state.streamHealth === "degraded";
+      state.setConnection({
+        connected: true,
+        streaming: state.streaming,
+        error: preserveHealth ? state.lastError : null,
+        health: preserveHealth ? state.streamHealth : undefined
+      });
       if (state.revision !== beforeRevision || recordsChanged || !wasConnected) {
         state.broadcast({
           kind: "state",
@@ -206,8 +245,7 @@ async function main() {
       }
     } catch (error) {
       const { removedSessionIds, localEvents } = await applySessionSources();
-      state.connected = false;
-      state.lastError = error?.message ?? String(error);
+      state.setConnection({ connected: false, streaming: state.streaming, error: error?.message ?? String(error) });
       state.broadcast({
         kind: "state",
         connected: false,
@@ -229,7 +267,7 @@ async function main() {
   const applySessionSources = queuedSingleFlight(async () => {
     const beforeRevision = state.revision;
     const local = await readLocalProjection();
-    const merged = mergeMonitorSessions(gatewaySessions, local.sessions);
+    const merged = mergeMonitorSessions(state.gatewaySourceSessions, local.sessions);
     const acceptedLocalIds = new Set(merged.filter((session) => session.source === "local").map((session) => session.sessionId));
     const events = Object.fromEntries(Object.entries(local.events).filter(([sessionId]) => acceptedLocalIds.has(sessionId)));
     const removedSessionIds = state.setSessions(merged);
@@ -248,7 +286,7 @@ async function main() {
 
   async function refreshGatewayInfo() {
     try {
-      const gateway = annotateRuntimeSplit(await rpc.call("setup", {}), GATEWAY_RUNTIME_ROOT);
+      const gateway = annotateRuntimeSplit(decodeGatewaySetup(await rpc.call("setup", {})), GATEWAY_RUNTIME_ROOT);
       if (state.setGateway(gateway)) state.broadcast({ kind: "gateway", gateway });
     } catch {
       // setup is best-effort metadata; session/event flow works without it.
@@ -256,32 +294,55 @@ async function main() {
   }
 
   async function ensureSubscription() {
-    if (subscriptionActive) return;
-    if (subscriptionAttempt) return subscriptionAttempt;
-    subscriptionAttempt = (async () => {
-      try {
-        const subscription = await rpc.subscribe({ includeThoughts: true, includeToolEvents: true }, onEvent);
-        gatewaySessions = subscription.sessions ?? [];
-        await applySessionSources();
-        for (const event of subscription.events ?? []) {
-          if (isIgnoredMonitorEvent(event)) continue;
-          state.pushEvent(event);
-        }
-        subscriptionActive = true;
-        state.connected = true;
-        state.streaming = true;
-        state.lastError = null;
-        state.broadcast({ kind: "state", connected: true, streaming: true });
-      } catch (error) {
-        subscriptionActive = false;
-        state.streaming = false;
-        state.lastError = error?.message ?? String(error);
-        console.error(`Gateway connection failed: ${state.lastError}`);
-      } finally {
-        subscriptionAttempt = null;
+    const before = owner.status();
+    try {
+      await owner.ensure();
+      if (owner.subscriptionActive && !before.active) {
+        state.broadcast({
+          kind: "state",
+          connected: true,
+          streaming: true,
+          streamHealth: state.streamHealth,
+          diagnostics: state.diagnostics,
+          error: state.lastError
+        });
       }
-    })();
-    return subscriptionAttempt;
+    } catch (error) {
+      state.setConnection({
+        connected: state.connected,
+        streaming: false,
+        error: error?.message ?? String(error),
+        health: "degraded"
+      });
+      console.error(`Gateway connection failed: ${state.lastError}`);
+    }
+  }
+
+  async function reconcileSubscription() {
+    try {
+      await owner.reconcile();
+      const snapshot = state.snapshot();
+      state.broadcast({
+        kind: "state",
+        connected: true,
+        streaming: true,
+        streamHealth: snapshot.streamHealth,
+        diagnostics: snapshot.diagnostics,
+        sessions: snapshot.sessions,
+        events: snapshot.events,
+        tasks: snapshot.tasks,
+        inbox: snapshot.inbox
+      });
+    } catch (error) {
+      state.setConnection({
+        connected: state.connected,
+        streaming: false,
+        error: error?.message ?? String(error),
+        health: "degraded"
+      });
+      const retry = setTimeout(() => { void reconcileSubscription(); }, 500);
+      retry.unref?.();
+    }
   }
 
   // Bind and announce the HTTP endpoint before connecting to Gateway or
@@ -374,11 +435,19 @@ async function main() {
       return;
     }
     if (url.pathname === "/api/snapshot") {
+      const now = Date.now();
+      const tag = state.snapshotTag(now);
+      if (request.headers["if-none-match"] === tag) {
+        response.writeHead(304, { etag: tag, "cache-control": "no-store" });
+        response.end();
+        return;
+      }
       response.writeHead(200, {
         "content-type": "application/json; charset=utf-8",
-        "cache-control": "no-store"
+        "cache-control": "no-store",
+        etag: tag
       });
-      response.end(JSON.stringify(state.snapshot()));
+      response.end(JSON.stringify(state.snapshot(now)));
       return;
     }
     if (url.pathname === "/api/stream") {
@@ -430,6 +499,15 @@ async function main() {
     if (url.pathname === "/api/session-config" && request.method === "GET") {
       const sessionId = url.searchParams.get("sessionId");
       if (!sessionId) throw new Error("sessionId is required");
+      if (!gatewayFeatureAvailable(state.gateway, "sessionConfig")) {
+        sendJson(response, {
+          ok: true,
+          sessionId,
+          configOptions: [],
+          unavailableReason: state.gateway?.compatibility?.reason ?? "Gateway setup capability is unavailable"
+        });
+        return;
+      }
       const session = state.sessions.get(sessionId);
       if (session?.status === "disconnected") {
         response.writeHead(200, {
@@ -448,9 +526,7 @@ async function main() {
       try {
         result = await rpc.call("config", { action: "list", sessionId });
       } catch (error) {
-        // Compatibility with an already-running pre-native-UI daemon that did
-        // not yet allow observer config reads. New daemons stay read-only here.
-        if (!String(error?.message).includes("Observer access is read-only")) throw error;
+        if (!isGatewayError(error, "CONTROL_ACCESS_DENIED")) throw error;
         result = await controlCall("config", { action: "list", sessionId });
       }
       response.writeHead(200, {
@@ -461,6 +537,7 @@ async function main() {
       return;
     }
     if (url.pathname === "/api/session-config" && request.method === "POST") {
+      if (!gatewayFeatureAvailable(state.gateway, "sessionConfig")) throw unavailableFeatureError("session config");
       const body = await readJsonBody(request);
       if (typeof body.sessionId !== "string" || !body.sessionId) throw new Error("sessionId is required");
       if (typeof body.configId !== "string" || !body.configId) throw new Error("configId is required");
@@ -492,35 +569,24 @@ async function main() {
       const body = await readJsonBody(request);
       const action = body.action ?? "set";
       if (!new Set(["set", "reset"]).has(action)) throw new Error(`Unknown Gateway config action: ${action}`);
-      let result;
-      try {
-        result = await controlCall("gateway_config", action === "set"
-          ? { action, values: body.values ?? {} }
-          : { action, ids: body.ids ?? [] });
-      } catch (error) {
-        if (!String(error?.message).includes("Unknown gateway method: gateway_config")) throw error;
-        await updateGatewaySettings({
-          statePath: identity.statePath,
-          values: action === "set" ? body.values ?? {} : {},
-          resetIds: action === "reset" ? body.ids ?? [] : []
-        });
-        result = gatewaySettingsSnapshot({
-          statePath: identity.statePath,
-          activeValues: activeGatewaySettings(state.gateway, legacyActiveGatewayValues)
-        });
-      }
+      // These are AgenLynk-owned launch settings. Gateway 1.4.0 intentionally
+      // exposes no gateway_config RPC, so never probe an undeclared method.
+      await updateGatewaySettings({
+        statePath: identity.statePath,
+        values: action === "set" ? body.values ?? {} : {},
+        resetIds: action === "reset" ? body.ids ?? [] : []
+      });
+      const result = gatewaySettingsSnapshot({
+        statePath: identity.statePath,
+        activeValues: activeGatewaySettings(state.gateway, legacyActiveGatewayValues)
+      });
       sendJson(response, result);
       return;
     }
     // What a retention change would delete, counted without deleting it. The
     // app asks before saving a value that destroys data.
     if (url.pathname === "/api/retention-preview" && request.method === "POST") {
-      const body = await readJsonBody(request);
-      const args = {};
-      if (Number.isFinite(body.sessionRetentionMs)) args.sessionRetentionMs = body.sessionRetentionMs;
-      if (Number.isFinite(body.artifactSessionLimit)) args.artifactSessionLimit = body.artifactSessionLimit;
-      sendJson(response, await controlCall("retention_preview", args));
-      return;
+      throw unavailableFeatureError("retention preview");
     }
     if (url.pathname === "/api/gateway-restart" && request.method === "POST") {
       const blockers = state.restartBlockers();
@@ -564,10 +630,10 @@ async function main() {
     });
     try {
       const gateway = await starter.call("setup", {}, 15_000);
-      state.setGateway(gateway);
-      state.connected = true;
-      state.lastError = null;
-      state.broadcast({ kind: "gateway", gateway });
+      const decodedGateway = annotateRuntimeSplit(decodeGatewaySetup(gateway), GATEWAY_RUNTIME_ROOT);
+      state.setGateway(decodedGateway);
+      state.setConnection({ connected: true, streaming: state.streaming, error: null });
+      state.broadcast({ kind: "gateway", gateway: decodedGateway });
     } finally {
       starter.close();
     }
@@ -709,7 +775,14 @@ function gatewayIdentity(state, identity) {
 }
 
 function monitorCapabilities(state) {
-  return state.gateway?.capabilities ?? {};
+  return {
+    ...(state.gateway?.capabilities ?? {}),
+    gatewayCompatibility: state.gateway?.compatibility ?? {
+      status: "unknown",
+      reason: "Gateway setup has not completed",
+      features: {}
+    }
+  };
 }
 
 // Stable-code contract for a blocked Gateway restart. A pure function of the

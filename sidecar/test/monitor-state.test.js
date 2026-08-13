@@ -10,13 +10,11 @@ test("MonitorState produces the shared Monitor API v1 snapshot fixture", async (
   const input = fixture._input;
   const state = new MonitorState();
   state.setGateway(input.gateway);
-  state.connected = true;
-  state.streaming = true;
+  state.setConnection({ connected: true, streaming: true, error: null });
   state.setSessions(input.initialSessions);
   for (const event of input.events) state.pushEvent(event);
   state.setSessions(input.finalSessions);
-  state.tasks = input.tasks;
-  state.inbox = input.inbox;
+  state.setRecords({ tasks: input.tasks, inbox: input.inbox });
 
   const expected = { ...fixture };
   delete expected._comment;
@@ -56,6 +54,7 @@ test("setExternalEvents replaces a rewritten turn instead of appending it", () =
 
 test("monitor ingestion drops usage_update from an old daemon's replay", () => {
   assert.equal(isIgnoredMonitorEvent({ type: "usage_update", sessionId: "s1" }), true);
+  assert.equal(isIgnoredMonitorEvent({ type: "subscription_replay_truncated", sessionIds: ["s1"] }), true);
   assert.equal(isIgnoredMonitorEvent({ type: "agent_message_chunk", sessionId: "s1" }), false);
   assert.equal(isIgnoredMonitorEvent(undefined), false);
 
@@ -71,4 +70,36 @@ test("monitor ingestion drops usage_update from an old daemon's replay", () => {
     state.pushEvent(event);
   }
   assert.deepEqual(state.snapshot().events.s1.map((event) => event.type), ["turn_start", "turn_completed"]);
+});
+
+test("replay truncation degrades health, increments diagnostics, and stays out of the timeline", () => {
+  const state = new MonitorState();
+  state.setConnection({ connected: true, streaming: true, error: null });
+  state.pushEvent({ sessionId: "s1", sequence: 0, type: "turn_start" });
+  assert.equal(state.pushEvent({ type: "subscription_replay_truncated", sessionIds: ["s1"] }), false);
+  state.noteReplayTruncation({ type: "subscription_replay_truncated", sessionIds: ["s1"] });
+  const snapshot = state.snapshot();
+  assert.equal(snapshot.streamHealth, "degraded");
+  assert.equal(snapshot.streaming, true);
+  assert.match(snapshot.error ?? "", /truncated/);
+  assert.equal(snapshot.diagnostics.replayTruncations, 1);
+  assert.equal(snapshot.events.s1.some((event) => event.type === "subscription_replay_truncated"), false);
+});
+
+test("expired history changes the snapshot tag and yields a pruned body", () => {
+  const state = new MonitorState({ historyRetentionMs: 1_000 });
+  state.setSessions([{ sessionId: "old", provider: "codex", status: "ready" }]);
+  state.pushEvent({ sessionId: "old", sequence: 1, type: "turn_end", ts: "2026-08-06T23:59:00.000Z" });
+  state.setSessions([]);
+  const expiresAt = state.historyExpiresAt.get("old");
+  const liveNow = expiresAt - 1;
+  const liveTag = state.snapshotTag(liveNow);
+  const live = state.snapshot(liveNow);
+  assert.equal(live.historySessions.length, 1);
+  const expiredTag = state.snapshotTag(expiresAt + 1);
+  assert.notEqual(expiredTag, liveTag);
+  const pruned = state.snapshot(expiresAt + 1);
+  assert.deepEqual(pruned.historySessions, []);
+  assert.deepEqual(pruned.historyEvents, {});
+  assert.ok(pruned.revision > live.revision);
 });

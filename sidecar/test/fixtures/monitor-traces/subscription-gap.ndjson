@@ -1,0 +1,11 @@
+{"kind":"meta","traceVersion":1,"name":"subscription-gap","runner":"monitor-state","maxEventsPerSession":20}
+{"kind":"state","connected":true,"streaming":true,"error":null}
+{"kind":"set_sessions","sessions":[{"sessionId":"session-gap","provider":"grok","status":"running","cwd":"/fixture/project"}]}
+{"kind":"push_event","event":{"sessionId":"session-gap","sequence":0,"type":"turn_start","ts":"2026-08-13T00:00:00.000Z"}}
+{"kind":"push_event","event":{"sessionId":"session-gap","sequence":3,"type":"agent_message_chunk","ts":"2026-08-13T00:00:03.000Z","text":"after"}}
+{"kind":"subscription_gap","event":{"type":"subscription_gap","subscriptionId":"sub-1","sessionId":"session-gap","fromSequence":1,"toSequence":2,"droppedCount":2}}
+{"kind":"replay_event","event":{"sessionId":"session-gap","sequence":2,"type":"agent_message_chunk","ts":"2026-08-13T00:00:02.000Z","text":"two"}}
+{"kind":"replay_event","event":{"sessionId":"session-gap","sequence":1,"type":"agent_message_chunk","ts":"2026-08-13T00:00:01.000Z","text":"one"}}
+{"kind":"replay_event","event":{"sessionId":"session-gap","sequence":3,"type":"agent_message_chunk","ts":"2026-08-13T00:00:03.000Z","text":"duplicate"}}
+{"kind":"reconciled"}
+{"kind":"expected","snapshot":{"connected":true,"streaming":true,"streamHealth":"healthy","diagnostics":{"subscriptionGaps":1,"replayedEvents":2,"reconciliationRuns":1,"overflowDroppedEvents":0,"replayTruncations":0},"events":{"session-gap":[{"sessionId":"session-gap","sequence":0,"type":"turn_start","ts":"2026-08-13T00:00:00.000Z"},{"sessionId":"session-gap","sequence":1,"type":"agent_message_chunk","ts":"2026-08-13T00:00:01.000Z","text":"one"},{"sessionId":"session-gap","sequence":2,"type":"agent_message_chunk","ts":"2026-08-13T00:00:02.000Z","text":"two"},{"sessionId":"session-gap","sequence":3,"type":"agent_message_chunk","ts":"2026-08-13T00:00:03.000Z","text":"after"}]}},"projection":{"frontdoorIds":[],"eventRefs":["session-gap:0","session-gap:1","session-gap:2","session-gap:3"]}}

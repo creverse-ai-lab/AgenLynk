@@ -893,7 +893,9 @@ final class AppModel: ObservableObject {
             // snapshot/stream consumption; throws a stable update-required
             // error if the Monitor's schema/API major isn't supported.
             _ = try await client.fetchMeta(endpoint: endpoint)
-            let snapshot = try await client.fetchSnapshot(endpoint: endpoint)
+            guard let snapshot = try await client.fetchSnapshot(endpoint: endpoint) else {
+                throw MonitorDecodeError.invalidMessage
+            }
             apply(snapshot)
             await loadGatewayConfig()
             await client.startStream(endpoint: endpoint, onMessage: { [weak self] value in
@@ -923,7 +925,10 @@ final class AppModel: ObservableObject {
                 try? await Task.sleep(nanoseconds: 10_000_000_000)
                 guard !Task.isCancelled, let self, self.endpoint?.baseURL == endpoint.baseURL else { return }
                 do {
-                    let snapshot = try await self.client.fetchSnapshot(endpoint: endpoint)
+                    guard let snapshot = try await self.client.fetchSnapshot(
+                        endpoint: endpoint,
+                        ifRevision: self.appliedSnapshotRevision
+                    ) else { continue }
                     guard !Task.isCancelled else { return }
                     self.apply(snapshot)
                     self.updateConnectionPhase()
@@ -953,11 +958,10 @@ final class AppModel: ObservableObject {
         // green forever even after the SSE stream silently died.
         var logCacheChanged = false
         if gateway != snapshot.gateway { gateway = snapshot.gateway }
-        // The monitor's revision covers exactly the session/event data below.
+        // The monitor's revision covers session/event data and tasks/inbox.
         // On the 10s reconciliation an unchanged revision skips four deep
         // comparisons over every retained event (~15ms of main-thread work and
-        // the cache rebuild they can trigger); tasks/inbox are outside the
-        // revision and keep their own cheap checks.
+        // the cache rebuild they can trigger).
         let dataUnchanged = snapshot.revision != nil && snapshot.revision == appliedSnapshotRevision
         if !dataUnchanged {
             if sessions != snapshot.sessions { sessions = snapshot.sessions; logCacheChanged = true }
@@ -967,10 +971,10 @@ final class AppModel: ObservableObject {
                 historyEventsBySession = snapshot.historyEventsBySession
                 logCacheChanged = true
             }
+            if tasks != snapshot.tasks { tasks = snapshot.tasks }
+            if inbox != snapshot.inbox { inbox = snapshot.inbox }
             appliedSnapshotRevision = snapshot.revision
         }
-        if tasks != snapshot.tasks { tasks = snapshot.tasks }
-        if inbox != snapshot.inbox { inbox = snapshot.inbox }
         if logCacheChanged { rebuildLogCache() }
         gatewayConnected = snapshot.connected
         gatewayStreaming = snapshot.streaming
@@ -1144,6 +1148,7 @@ final class AppModel: ObservableObject {
                 accepted.append(event)
             }
             guard !accepted.isEmpty else { continue }
+            if current.count > 1 { current.sort(by: withinSessionEventOrder) }
             if current.count > 2_000 { current.removeFirst(current.count - 2_000) }
             nextEventsBySession[sessionId] = current
 

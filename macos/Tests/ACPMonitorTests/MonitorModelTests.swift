@@ -264,7 +264,7 @@ enum MonitorModelChecks {
         let snapshot = try MonitorSnapshot.decode(data)
         try check(snapshot.schemaVersion == 1, "snapshot should decode the schema version")
         try check(snapshot.monitorApiVersion == "1.0", "snapshot should decode the monitor API version")
-        try check(snapshot.revision == 4, "snapshot should decode the shared state revision")
+        try check(snapshot.revision == 7, "snapshot should decode the shared state revision")
         try check(snapshot.connected, "snapshot should be connected")
         try check(snapshot.streaming, "snapshot should decode the streaming state")
         try check(snapshot.sessions.first?.sessionId == "s1", "session decode failed")
@@ -290,7 +290,9 @@ enum MonitorModelChecks {
             "selection-reset.ndjson",
             "observer-buffer-overflow.ndjson",
             "sidecar-reconnect.ndjson",
-            "legacy-1.3.2-daemon.ndjson"
+            "legacy-1.3.2-daemon.ndjson",
+            "event-flood.ndjson",
+            "subscription-gap.ndjson"
         ]
 
         for name in traceFiles {
@@ -337,7 +339,11 @@ enum MonitorModelChecks {
                 guard let eventValue = step["event"], let event = MonitorEvent(eventValue) else {
                     throw CheckError.failed("push_event did not decode in \(name)")
                 }
-                if event.type != "usage_update" { replay.push(event) }
+                if event.type != "usage_update"
+                    && event.type != "subscription_gap"
+                    && event.type != "subscription_replay_truncated" {
+                    replay.push(event)
+                }
             case "set_gateway":
                 replay.gateway = step["gateway"]
             case "checkpoint":
@@ -375,12 +381,32 @@ enum MonitorModelChecks {
                 }
             case "set_tasks", "set_inbox":
                 break
+            case "subscription_gap":
+                guard let marker = step.object("event") else {
+                    throw CheckError.failed("subscription_gap marker is missing in \(name)")
+                }
+                try check(marker.string("type") == "subscription_gap",
+                          "subscription_gap must stay transport control state in \(name)")
+            case "replay_event":
+                guard let eventValue = step["event"], let event = MonitorEvent(eventValue) else {
+                    throw CheckError.failed("replay_event did not decode in \(name)")
+                }
+                replay.push(event)
+            case "reconciled":
+                break
             default:
                 throw CheckError.failed("unknown step \(kind) in \(name)")
             }
         }
 
-        let snapshotData = try JSONSerialization.data(withJSONObject: snapshotValue.foundationValue)
+        guard var snapshotObject = snapshotValue.objectValue else {
+            throw CheckError.failed("expected snapshot is not an object in \(name)")
+        }
+        // Characterization traces may assert a focused partial snapshot. Add
+        // only the required wire envelope before exercising production decode.
+        snapshotObject["schemaVersion"] = snapshotObject["schemaVersion"] ?? .number(1)
+        snapshotObject["monitorApiVersion"] = snapshotObject["monitorApiVersion"] ?? .string("1.0")
+        let snapshotData = try JSONSerialization.data(withJSONObject: JSONValue.object(snapshotObject).foundationValue)
         let snapshot = try MonitorSnapshot.decode(snapshotData)
         let snapshotFrontdoors = Set(FrontdoorSession.make(
             sessions: snapshot.historySessions + snapshot.sessions
@@ -1529,6 +1555,12 @@ private struct TraceReplay {
         var events = eventsBySession[event.sessionId] ?? []
         if let sequence = event.sequence, events.contains(where: { $0.sequence == sequence }) { return }
         events.append(event)
+        events.sort { left, right in
+            if (left.sequence ?? Int.max) != (right.sequence ?? Int.max) {
+                return (left.sequence ?? Int.max) < (right.sequence ?? Int.max)
+            }
+            return (left.timestamp ?? "") < (right.timestamp ?? "")
+        }
         if events.count > maxEventsPerSession {
             events.removeFirst(events.count - maxEventsPerSession)
         }
@@ -1545,10 +1577,10 @@ private struct TraceReplay {
             unique[event.sequence.map { "sequence:\($0)" } ?? event.id] = event
         }
         historyEventsBySession[sessionId] = unique.values.sorted { left, right in
-            let leftTs = left.timestamp ?? ""
-            let rightTs = right.timestamp ?? ""
-            if leftTs != rightTs { return leftTs < rightTs }
-            return (left.sequence ?? 0) < (right.sequence ?? 0)
+            if (left.sequence ?? Int.max) != (right.sequence ?? Int.max) {
+                return (left.sequence ?? Int.max) < (right.sequence ?? Int.max)
+            }
+            return (left.timestamp ?? "") < (right.timestamp ?? "")
         }.suffix(maxEventsPerSession).map { $0 }
     }
 }

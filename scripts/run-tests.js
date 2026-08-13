@@ -11,6 +11,7 @@ const quick = process.argv.includes("--quick");
 const forwardedArgs = process.argv.slice(2).filter((argument) => argument !== "--quick");
 const slowFiles = new Set([
   "monitor-control.test.js",
+  "monitor-orchestration.test.js",
   "runtime-installer.test.js",
   "runtime-manifest.test.js",
   "runtime-updater.test.js",

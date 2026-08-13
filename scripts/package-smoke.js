@@ -60,7 +60,33 @@ try {
   const ready = await waitForReady(monitor);
   assert.equal(ready.kind, "monitor_ready");
   assert.equal(ready.sidecarVersion, "0.4.0");
-  process.stdout.write(`package smoke: Gateway ${gateway} and sidecar ${sidecar} launched from isolated roots\n`);
+  const headers = { authorization: `Bearer ${ready.apiToken}` };
+  const meta = await waitFor(async () => {
+    const response = await fetch(`${ready.url}/api/meta`, { headers });
+    const value = await response.json();
+    return value.capabilities?.gatewayCompatibility?.status === "supported" ? value : false;
+  }, "sidecar did not decode the Gateway 1.4.0 setup contract");
+  assert.equal(meta.gatewayIdentity.gatewayVersion, "1.4.0");
+
+  const firstSnapshot = await fetch(`${ready.url}/api/snapshot`, { headers });
+  assert.equal(firstSnapshot.status, 200);
+  const tag = firstSnapshot.headers.get("etag");
+  assert.match(tag ?? "", /^"monitor-\d+"$/);
+  const snapshot = await firstSnapshot.json();
+  assert.equal(snapshot.connected, true);
+  assert.equal(snapshot.streaming, true);
+  assert.equal(snapshot.streamHealth, "healthy");
+  const unchanged = await fetch(`${ready.url}/api/snapshot`, {
+    headers: { ...headers, "if-none-match": tag }
+  });
+  assert.equal(unchanged.status, 304);
+
+  const streamAbort = new AbortController();
+  const stream = await fetch(`${ready.url}/api/stream`, { headers, signal: streamAbort.signal });
+  assert.equal(stream.status, 200);
+  assert.match(stream.headers.get("content-type") ?? "", /^text\/event-stream/);
+  streamAbort.abort();
+  process.stdout.write(`package smoke: Gateway 1.4.0 setup/snapshot/SSE and sidecar isolated roots verified (${gateway}, ${sidecar})\n`);
 } finally {
   for (const child of [monitor, daemon]) {
     if (!child || child.exitCode != null) continue;
@@ -72,7 +98,8 @@ try {
 
 async function waitFor(predicate, message) {
   for (let attempt = 0; attempt < 200; attempt += 1) {
-    if (await predicate()) return;
+    const result = await predicate();
+    if (result) return result;
     await new Promise((resolveWait) => setTimeout(resolveWait, 25));
   }
   throw new Error(message);

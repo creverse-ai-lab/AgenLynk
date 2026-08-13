@@ -96,16 +96,17 @@ test("MonitorState blocks Gateway restart while work or inbox responses are acti
     { sessionId: "running", status: "running" },
     { sessionId: "idle", status: "idle" }
   ]);
-  state.tasks = [{ status: "working" }, { status: "completed" }];
-  state.inbox = [{ status: "pending" }, { status: "answered" }];
+  state.setRecords({
+    tasks: [{ status: "working" }, { status: "completed" }],
+    inbox: [{ status: "pending" }, { status: "answered" }]
+  });
   assert.deepEqual(state.restartBlockers(), [
     "진행 중 세션 1개",
     "진행 중 Task 1개",
     "미응답 Inbox 1개"
   ]);
   state.setSessions([{ sessionId: "idle", status: "idle" }]);
-  state.tasks = [];
-  state.inbox = [];
+  state.setRecords({ tasks: [], inbox: [] });
   assert.deepEqual(state.restartBlockers(), []);
 });
 
@@ -143,4 +144,42 @@ test("MonitorState stamps snapshot and SSE envelopes with schema/API version", (
   assert.equal(envelope.monitorApiVersion, MONITOR_API_VERSION);
   assert.equal(envelope.kind, "state");
   assert.equal(envelope.connected, true);
+});
+
+test("subscription gaps are diagnostics, rewind cursors, and never enter the timeline", () => {
+  const state = new MonitorState();
+  state.setConnection({ connected: true, streaming: true, error: null });
+  state.pushEvent({ sessionId: "s1", sequence: 0, type: "turn_start" });
+  state.pushEvent({ sessionId: "s1", sequence: 4, type: "agent_message_chunk" });
+  state.beginSubscriptionGap({ type: "subscription_gap", sessionId: "s1", fromSequence: 1 });
+  assert.deepEqual(state.subscriptionCursors({ s1: 1 }), { s1: 1 });
+  assert.equal(state.snapshot().events.s1.some((event) => event.type === "subscription_gap"), false);
+  assert.equal(state.snapshot().streamHealth, "reconciling");
+});
+
+test("snapshot tag changes for records and stream diagnostics but not unchanged writes", () => {
+  const now = 1_700_000_000_000;
+  const state = new MonitorState();
+  const initial = state.snapshotTag(now);
+  state.setRecords({ tasks: [], inbox: [] });
+  assert.equal(state.snapshotTag(now), initial);
+  state.setRecords({ tasks: [{ taskId: "t1" }] });
+  const records = state.snapshotTag(now);
+  assert.notEqual(records, initial);
+  state.beginSubscriptionGap({ sessionId: "s1", fromSequence: 0 });
+  assert.notEqual(state.snapshotTag(now), records);
+});
+
+test("history expiry before ETag computation is a non-304 snapshot-equivalent change", () => {
+  const state = new MonitorState({ historyRetentionMs: 5_000 });
+  state.setSessions([{ sessionId: "old", provider: "codex", status: "ready" }]);
+  state.pushEvent({ sessionId: "old", sequence: 1, type: "turn_end" });
+  state.setSessions([]);
+  const expiresAt = state.historyExpiresAt.get("old");
+  const ifNoneMatch = state.snapshotTag(expiresAt - 1);
+  const nextTag = state.snapshotTag(expiresAt + 1);
+  assert.notEqual(nextTag, ifNoneMatch);
+  const body = state.snapshot(expiresAt + 1);
+  assert.equal(nextTag, `"monitor-${body.revision}"`);
+  assert.deepEqual(body.historySessions, []);
 });

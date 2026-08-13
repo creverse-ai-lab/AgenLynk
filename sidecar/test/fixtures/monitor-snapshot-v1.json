@@ -65,9 +65,17 @@
   },
   "schemaVersion": 1,
   "monitorApiVersion": "1.0",
-  "revision": 4,
+  "revision": 7,
   "connected": true,
   "streaming": true,
+  "streamHealth": "healthy",
+  "diagnostics": {
+    "subscriptionGaps": 0,
+    "replayedEvents": 0,
+    "reconciliationRuns": 0,
+    "overflowDroppedEvents": 0,
+    "replayTruncations": 0
+  },
   "error": null,
   "gateway": {
     "gatewayVersion": "1.3.2",

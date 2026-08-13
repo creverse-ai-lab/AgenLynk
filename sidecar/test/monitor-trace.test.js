@@ -7,7 +7,7 @@ import { isIgnoredMonitorEvent } from "../src/server/monitor.js";
 const traceDirectory = new URL("./fixtures/monitor-traces/", import.meta.url);
 const SNAPSHOT_KEYS = [
   "schemaVersion", "monitorApiVersion", "revision", "connected", "streaming",
-  "error", "gateway", "sessions", "events", "historySessions", "historyEvents",
+  "streamHealth", "diagnostics", "error", "gateway", "sessions", "events", "historySessions", "historyEvents",
   "eventLimit", "tasks", "inbox"
 ];
 
@@ -40,16 +40,21 @@ function replayMonitorState(trace) {
   for (const step of trace.steps) {
     switch (step.kind) {
     case "state":
-      if (Object.hasOwn(step, "connected")) state.connected = step.connected;
-      if (Object.hasOwn(step, "streaming")) state.streaming = step.streaming;
-      if (Object.hasOwn(step, "error")) state.lastError = step.error;
+      state.setConnection({
+        connected: Object.hasOwn(step, "connected") ? step.connected : state.connected,
+        streaming: Object.hasOwn(step, "streaming") ? step.streaming : state.streaming,
+        error: Object.hasOwn(step, "error") ? step.error : state.lastError
+      });
       if (Object.hasOwn(step, "sessions")) state.setSessions(step.sessions);
       break;
     case "set_gateway": state.setGateway(step.gateway); break;
     case "set_sessions": state.setSessions(step.sessions); break;
     case "push_event": if (!isIgnoredMonitorEvent(step.event)) state.pushEvent(step.event); break;
-    case "set_tasks": state.tasks = step.tasks; break;
-    case "set_inbox": state.inbox = step.inbox; break;
+    case "set_tasks": state.setRecords({ tasks: step.tasks }); break;
+    case "set_inbox": state.setRecords({ inbox: step.inbox }); break;
+    case "subscription_gap": state.beginSubscriptionGap(step.event); break;
+    case "replay_event": state.pushEvent(step.event, { replay: true }); break;
+    case "reconciled": state.completeReconciliation(); break;
     case "checkpoint": assertSubset(state.snapshot(), step.snapshot, `${trace.meta.name}.checkpoint`); break;
     default: throw new Error(`Unknown monitor-state step: ${step.kind}`);
     }

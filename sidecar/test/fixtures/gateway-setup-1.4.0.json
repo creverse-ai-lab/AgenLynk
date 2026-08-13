@@ -1,0 +1,24 @@
+{
+  "_comment": "Golden declaration fields consumed from the pinned Gateway 1.4.0 setup response.",
+  "setup": {
+    "ok": true,
+    "gatewayVersion": "1.4.0",
+    "gatewayApiVersion": 1,
+    "stateSchemaVersion": 5,
+    "responseProfiles": ["current", "compact", "diagnostic"],
+    "persistence": { "healthy": true, "error": null },
+    "lifecycle": {},
+    "resourceLimits": {},
+    "metrics": {},
+    "alerts": [],
+    "detected": [],
+    "providers": []
+  },
+  "expected": {
+    "status": "supported",
+    "subscriptionGaps": true,
+    "sessionConfig": true,
+    "gatewayConfigRpc": false,
+    "retentionPreviewRpc": false
+  }
+}
