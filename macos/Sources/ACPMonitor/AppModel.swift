@@ -1062,8 +1062,12 @@ final class AppModel: ObservableObject {
             // A streaming pause with the Gateway still connected is a
             // subscription drop; log its reason even though the bar only
             // turns amber for it.
-            if gatewayConnected, message.bool("streaming") == false, let error = message.string("error") {
-                recordNotice(error)
+            if let notice = MonitorStreamNotice.forPausedSubscription(
+                connected: gatewayConnected,
+                streaming: message.bool("streaming"),
+                error: message.string("error")
+            ) {
+                recordNotice(notice)
             }
             if logCacheChanged { rebuildLogCache() }
             reconcileSelections()
@@ -1095,14 +1099,7 @@ final class AppModel: ObservableObject {
     }
 
     private func recordNotice(_ text: String) {
-        // Collapse a repeating error into one entry with a count instead of
-        // fifty identical rows.
-        if let last = noticeLog.first, last.text == text {
-            noticeLog[0] = NoticeEntry(at: Date(), text: text, count: last.count + 1)
-        } else {
-            noticeLog.insert(NoticeEntry(at: Date(), text: text, count: 1), at: 0)
-            if noticeLog.count > 50 { noticeLog.removeLast(noticeLog.count - 50) }
-        }
+        NoticeEntry.record(text, at: Date(), into: &noticeLog)
     }
 
     private func updateConnectionPhase() {
@@ -1300,19 +1297,16 @@ final class AppModel: ObservableObject {
         // time a Frontdoor briefly left the live list, and DashboardView's
         // onChange(selectedFrontdoorId) then cleared the selected event — the
         // reported "clicking an event, it deselects on update" bug.
-        let available = logFrontdoorSessions
-        if let selectedFrontdoorId, !available.contains(where: { $0.id == selectedFrontdoorId }) {
-            self.selectedFrontdoorId = available.first(where: \.isActive)?.id ?? available.first?.id
-        } else if selectedFrontdoorId == nil {
-            selectedFrontdoorId = available.first(where: \.isActive)?.id ?? available.first?.id
-        }
-        // Check the merged log the sequence view actually renders, not the
-        // live-only buckets: a selected event whose session moved to history is
-        // still on screen and must stay selected.
-        if let selectedEventId,
-           !logEventsBySession.values.joined().contains(where: { $0.id == selectedEventId }) {
-            self.selectedEventId = nil
-        }
+        let next = MonitorSelection.reconcile(
+            selectedFrontdoorId: selectedFrontdoorId,
+            selectedEventId: selectedEventId,
+            liveSessions: sessions,
+            historySessions: historySessions,
+            liveEvents: eventsBySession,
+            historyEvents: historyEventsBySession
+        )
+        if selectedFrontdoorId != next.frontdoorId { selectedFrontdoorId = next.frontdoorId }
+        if selectedEventId != next.eventId { selectedEventId = next.eventId }
         if let selectedSessionId,
            !visibleLogSessions.contains(where: { $0.sessionId == selectedSessionId }) {
             self.selectedSessionId = selectedFrontdoor?.root?.sessionId ?? selectedFrontdoor?.workers.first?.sessionId

@@ -1,7 +1,28 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { MonitorState } from "../src/monitor-state.js";
 import { isIgnoredMonitorEvent } from "../src/monitor.js";
+
+test("MonitorState produces the shared Monitor API v1 snapshot fixture", async () => {
+  const fixtureUrl = new URL("./fixtures/monitor-snapshot-v1.json", import.meta.url);
+  const fixture = JSON.parse(await readFile(fixtureUrl, "utf8"));
+  const input = fixture._input;
+  const state = new MonitorState();
+  state.setGateway(input.gateway);
+  state.connected = true;
+  state.streaming = true;
+  state.setSessions(input.initialSessions);
+  for (const event of input.events) state.pushEvent(event);
+  state.setSessions(input.finalSessions);
+  state.tasks = input.tasks;
+  state.inbox = input.inbox;
+
+  const expected = { ...fixture };
+  delete expected._comment;
+  delete expected._input;
+  assert.deepEqual(state.snapshot(), expected);
+});
 
 test("setExternalEvents reports only the local buckets that changed", () => {
   const state = new MonitorState();

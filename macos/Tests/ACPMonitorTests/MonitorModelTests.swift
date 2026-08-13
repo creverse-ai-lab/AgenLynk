@@ -4,6 +4,7 @@ import Foundation
 enum MonitorModelChecks {
     static func main() throws {
         try snapshotDecodesSessionsEventsTasksAndInbox()
+        try characterizationTracesDecodeExpectedSnapshots()
         try snapshotRejectsUnsupportedSchemaMajorWithoutPartialDecode()
         try compatibilityDistinguishesIncompatibleFromUpdateRequired()
         try monitorApiVersionParsesMajorMinorAndRejectsMalformedStrings()
@@ -255,31 +256,281 @@ enum MonitorModelChecks {
     }
 
     private static func snapshotDecodesSessionsEventsTasksAndInbox() throws {
-        let data = Data(#"""
-        {
-          "schemaVersion":1,
-          "monitorApiVersion":"1.0",
-          "connected":true,
-          "gateway":{"gatewayVersion":"1.3.1"},
-          "sessions":[{"sessionId":"s1","provider":"codex","status":"running","cwd":"/tmp/project","eventCount":2}],
-          "events":{"s1":[{"sessionId":"s1","sequence":0,"type":"turn_start","ts":"2026-08-07T00:00:00.000Z","text":"work"}]},
-          "historySessions":[{"sessionId":"old","provider":"claude","status":"ready","cwd":"/tmp/project","opener":"codex","openerInstanceId":"main-old"}],
-          "historyEvents":{"old":[{"sessionId":"old","sequence":1,"type":"turn_end","ts":"2026-08-06T23:59:00.000Z"}]},
-          "tasks":[{"taskId":"t1","status":"working","statusMessage":"running"}],
-          "inbox":[{"inboxId":"i1","status":"pending","type":"permission_request","sessionId":"s1"}]
-        }
-        """#.utf8)
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let fixtureURL = repoRoot.appendingPathComponent("test/fixtures/monitor-snapshot-v1.json")
+        let data = try Data(contentsOf: fixtureURL)
         let snapshot = try MonitorSnapshot.decode(data)
         try check(snapshot.schemaVersion == 1, "snapshot should decode the schema version")
         try check(snapshot.monitorApiVersion == "1.0", "snapshot should decode the monitor API version")
+        try check(snapshot.revision == 4, "snapshot should decode the shared state revision")
         try check(snapshot.connected, "snapshot should be connected")
-        try check(snapshot.streaming, "snapshot should default streaming to connected for compatibility")
+        try check(snapshot.streaming, "snapshot should decode the streaming state")
         try check(snapshot.sessions.first?.sessionId == "s1", "session decode failed")
         try check(snapshot.eventsBySession["s1"]?.first?.type == "turn_start", "event decode failed")
         try check(snapshot.historySessions.first?.sessionId == "old", "history session decode failed")
         try check(snapshot.historyEventsBySession["old"]?.first?.type == "turn_end", "history event decode failed")
         try check(snapshot.tasks.first?.id == "t1", "task decode failed")
         try check(snapshot.inbox.first?.id == "i1", "inbox decode failed")
+    }
+
+    /// Reads the same ordered NDJSON characterization fixtures the Node
+    /// replay harness executes. Swift consumes the shared *input* lines through
+    /// production decoders, then runs the same `MonitorSelection` /
+    /// `MonitorStreamNotice` helpers `AppModel` calls.
+    private static func characterizationTracesDecodeExpectedSnapshots() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let traceRoot = repoRoot.appendingPathComponent("test/fixtures/monitor-traces")
+        let traceFiles = [
+            "cold-start-gateway-meta-delay.ndjson",
+            "frontdoor-disappears.ndjson",
+            "selection-reset.ndjson",
+            "observer-buffer-overflow.ndjson",
+            "sidecar-reconnect.ndjson",
+            "legacy-1.3.2-daemon.ndjson"
+        ]
+
+        for name in traceFiles {
+            try replayCharacterizationTrace(
+                name: name,
+                url: traceRoot.appendingPathComponent(name)
+            )
+        }
+    }
+
+    private static func replayCharacterizationTrace(name: String, url: URL) throws {
+        let text = try String(contentsOf: url, encoding: .utf8)
+        let records = try text.split(whereSeparator: \Character.isNewline).map {
+            try decodeJSONValue(Data($0.utf8))
+        }
+        guard let meta = records.first?.objectValue,
+              meta.string("kind") == "meta",
+              meta.int("traceVersion") == 1,
+              let expected = records.last?.objectValue,
+              expected.string("kind") == "expected",
+              let snapshotValue = expected["snapshot"] else {
+            throw CheckError.failed("malformed characterization trace: \(name)")
+        }
+
+        var replay = TraceReplay(maxEventsPerSession: meta.int("maxEventsPerSession") ?? 2_000)
+        var delayedMeta: MonitorMeta?
+        var selectedFrontdoorId: String?
+
+        for stepValue in records.dropFirst().dropLast() {
+            guard let step = stepValue.objectValue, let kind = step.string("kind") else {
+                throw CheckError.failed("malformed step in \(name)")
+            }
+            switch kind {
+            case "state":
+                if let values = step.array("sessions") {
+                    replay.setSessions(try decodeTraceSessions(values, name: name))
+                }
+            case "set_sessions":
+                replay.setSessions(try decodeTraceSessions(step.array("sessions") ?? [], name: name))
+                if selectedFrontdoorId == nil {
+                    selectedFrontdoorId = replay.sessions.compactMap(\.openerInstanceId).first
+                }
+            case "push_event":
+                guard let eventValue = step["event"], let event = MonitorEvent(eventValue) else {
+                    throw CheckError.failed("push_event did not decode in \(name)")
+                }
+                if event.type != "usage_update" { replay.push(event) }
+            case "set_gateway":
+                replay.gateway = step["gateway"]
+            case "checkpoint":
+                if let metaValue = step["meta"] {
+                    delayedMeta = try decodeTraceMeta(metaValue, name: name)
+                    try check(delayedMeta?.gatewayIdentity.gatewayVersion == nil,
+                              "cold-start meta must decode a null gateway identity in \(name)")
+                    try check(delayedMeta?.gatewayIdentity.gatewayBuildId == nil,
+                              "cold-start meta must tolerate null setup values in \(name)")
+                }
+                if let sse = step.object("sse") {
+                    try check(sse.string("kind") == "state", "disappearance SSE must be kind=state in \(name)")
+                    try check((sse.array("sessions") ?? []).isEmpty, "disappearance SSE sessions must be empty in \(name)")
+                    let removed = Set((sse.array("removedSessionIds") ?? []).compactMap(\.stringValue))
+                    try check(removed == Set(replay.lastRemovedSessionIds),
+                              "removedSessionIds diverged in \(name): \(removed) != \(replay.lastRemovedSessionIds)")
+                }
+            case "socket_flow":
+                guard let eventValue = step["event"], MonitorEvent(eventValue) != nil else {
+                    throw CheckError.failed("socket_flow event did not decode in \(name)")
+                }
+            case "initial_subscription", "restored_subscription":
+                if let eventValue = step["event"] {
+                    try check(MonitorEvent(eventValue) != nil, "\(kind) event did not decode in \(name)")
+                }
+                for value in step.array("replay") ?? [] {
+                    try check(MonitorEvent(value) != nil, "replay event did not decode in \(name)")
+                }
+                if let args = step.object("args") {
+                    try check(args.bool("includeThoughts") == true && args.bool("includeToolEvents") == true,
+                              "subscribe args must match production observer in \(name)")
+                }
+                if let truncated = step.object("cursorTruncated") {
+                    replay.cursorTruncated = truncated.values.contains { $0.boolValue == true }
+                }
+            case "set_tasks", "set_inbox":
+                break
+            default:
+                throw CheckError.failed("unknown step \(kind) in \(name)")
+            }
+        }
+
+        let snapshotData = try JSONSerialization.data(withJSONObject: snapshotValue.foundationValue)
+        let snapshot = try MonitorSnapshot.decode(snapshotData)
+        let snapshotFrontdoors = Set(FrontdoorSession.make(
+            sessions: snapshot.historySessions + snapshot.sessions
+        ).map(\.id))
+        let snapshotEvents = Set(
+            snapshot.eventsBySession.values.joined().map { "\($0.sessionId):\($0.sequence ?? -1)" }
+            + snapshot.historyEventsBySession.values.joined().map { "\($0.sessionId):\($0.sequence ?? -1)" }
+        )
+        let projection = expected.object("projection") ?? [:]
+        let expectedFrontdoors = Set((projection.array("frontdoorIds") ?? []).compactMap(\.stringValue))
+        let expectedEvents = Set((projection.array("eventRefs") ?? []).compactMap(\.stringValue))
+        try check(snapshotFrontdoors == expectedFrontdoors,
+                  "Frontdoor projection diverged for \(name): \(snapshotFrontdoors) != \(expectedFrontdoors)")
+        try check(snapshotEvents == expectedEvents,
+                  "event projection diverged for \(name): \(snapshotEvents) != \(expectedEvents)")
+
+        if replay.touchedState {
+            let replayedFrontdoors = Set(FrontdoorSession.make(sessions: replay.mergedSessions).map(\.id))
+            try check(replayedFrontdoors == snapshotFrontdoors,
+                      "Swift step replay diverged from Node snapshot frontdoors for \(name): \(replayedFrontdoors) != \(snapshotFrontdoors)")
+            try check(replay.mergedEventRefs == snapshotEvents,
+                      "Swift step replay diverged from Node snapshot events for \(name): \(replay.mergedEventRefs) != \(snapshotEvents)")
+            if replay.sessions.isEmpty && !replay.historySessions.isEmpty {
+                let historyFrontdoors = FrontdoorSession.make(sessions: replay.historySessions)
+                try check(!historyFrontdoors.isEmpty || expectedFrontdoors.isEmpty,
+                          "history-only Frontdoor must stay visible in \(name)")
+                try check(!replay.historyEventsBySession.values.joined().isEmpty || expectedEvents.isEmpty,
+                          "history-only log events must stay visible in \(name)")
+            }
+        }
+
+        if let declaredFrontdoor = projection.string("selectedFrontdoorId"),
+           let declaredEvent = projection.string("selectedEventRef") {
+            let kept = MonitorSelection.reconcile(
+                selectedFrontdoorId: declaredFrontdoor,
+                selectedEventId: declaredEvent,
+                liveSessions: snapshot.sessions,
+                historySessions: snapshot.historySessions,
+                liveEvents: snapshot.eventsBySession,
+                historyEvents: snapshot.historyEventsBySession
+            )
+            try check(kept.frontdoorId == declaredFrontdoor,
+                      "MonitorSelection must keep a history-only Frontdoor after live sessions disappear in \(name)")
+            try check(kept.eventId == declaredEvent,
+                      "MonitorSelection must keep a history-only event after live sessions disappear in \(name)")
+        } else if let declared = projection.string("selectedFrontdoorId") ?? selectedFrontdoorId {
+            let visible = replay.touchedState
+                ? Set(FrontdoorSession.make(sessions: replay.mergedSessions).map(\.id))
+                : snapshotFrontdoors
+            try check(visible.contains(declared),
+                      "selected history-only Frontdoor is not selectable after live sessions disappear in \(name)")
+        }
+
+        if let expectedMeta = expected["meta"] {
+            let decoded = try decodeTraceMeta(expectedMeta, name: name)
+            try check(decoded.gatewayIdentity.rootId == meta.string("rootId"),
+                      "final MonitorMeta rootId diverged in \(name)")
+            try check(decoded.gatewayIdentity.gatewayVersion != nil,
+                      "final MonitorMeta must decode setup identity in \(name)")
+            try check(delayedMeta != nil, "null gateway identity meta must decode before setup in \(name)")
+            if let gateway = snapshot.gateway?.objectValue {
+                try check(decoded.gatewayIdentity.gatewayVersion == gateway.string("gatewayVersion"),
+                          "MonitorMeta gatewayVersion must follow setup in \(name)")
+                try check(decoded.gatewayIdentity.gatewayBuildId == gateway.string("gatewayBuildId"),
+                          "MonitorMeta gatewayBuildId must follow setup in \(name)")
+            }
+        }
+
+        if let transport = expected.object("transport") {
+            if let sseState = transport.object("sseState") {
+                try check(sseState.string("kind") == "state",
+                          "subscription_error must map to SSE kind=state in \(name)")
+                try check(sseState.bool("streaming") == false,
+                          "subscription_error SSE must pause streaming in \(name)")
+                try check(sseState.bool("connected") == true,
+                          "subscription_error SSE must keep connected in \(name)")
+                try check(sseState.string("error") == "Gateway subscriber is too slow",
+                          "subscription_error SSE must carry the socket error in \(name)")
+                try check(transport["noticeWrites"] == nil,
+                          "subscription_error must not be characterized as a notice write count")
+                let expectedNotice = expected.string("pausedSubscriptionNotice") ?? sseState.string("error")
+                let notice = MonitorStreamNotice.forPausedSubscription(
+                    connected: sseState.bool("connected") ?? false,
+                    streaming: sseState.bool("streaming"),
+                    error: sseState.string("error")
+                )
+                try check(notice == expectedNotice,
+                          "connected streaming=false state must record exactly one overflow notice in \(name)")
+                guard let notice else {
+                    throw CheckError.failed("paused-subscription notice is missing in \(name)")
+                }
+                var noticeLog: [NoticeEntry] = []
+                NoticeEntry.record(notice, at: Date(timeIntervalSince1970: 1), into: &noticeLog)
+                NoticeEntry.record(notice, at: Date(timeIntervalSince1970: 2), into: &noticeLog)
+                try check(noticeLog.count == 1 && noticeLog[0].text == notice && noticeLog[0].count == 2,
+                          "consecutive overflow notices must collapse to one row with count=2 in \(name)")
+                NoticeEntry.record("Gateway 연결 끊김", at: Date(timeIntervalSince1970: 3), into: &noticeLog)
+                try check(noticeLog.count == 2 && noticeLog[0].text == "Gateway 연결 끊김" && noticeLog[0].count == 1,
+                          "a distinct notice must become the new first row in \(name)")
+                try check(noticeLog[1].text == notice && noticeLog[1].count == 2,
+                          "the collapsed overflow row must stay under a distinct newer notice in \(name)")
+                try check(
+                    MonitorStreamNotice.forPausedSubscription(
+                        connected: false, streaming: false, error: sseState.string("error")
+                    ) == nil,
+                    "a disconnected state must not use the paused-subscription notice path in \(name)"
+                )
+                try check(
+                    MonitorStreamNotice.forPausedSubscription(
+                        connected: true, streaming: true, error: sseState.string("error")
+                    ) == nil,
+                    "a still-streaming state must not record an overflow notice in \(name)"
+                )
+                try check(
+                    MonitorStreamNotice.forPausedSubscription(
+                        connected: true, streaming: false, error: nil
+                    ) == nil,
+                    "a streaming pause without an error must not record an overflow notice in \(name)"
+                )
+            }
+            if let sse = transport.array("sse")?.first?.objectValue {
+                try check(sse.string("kind") == "state" && (sse.array("sessions") ?? []).isEmpty,
+                          "disappearance transport SSE must be sessions=[] in \(name)")
+                try check(!(sse.array("removedSessionIds") ?? []).isEmpty,
+                          "disappearance transport SSE must include removedSessionIds in \(name)")
+            }
+            if transport.object("cursorTruncated") != nil {
+                try check(replay.cursorTruncated, "reconnect fixture must include cursorTruncated=true in \(name)")
+                try check((transport.array("receivedTypes") ?? []).contains { $0.stringValue == "subscription_replay_truncated" },
+                          "cursorTruncated=true must surface subscription_replay_truncated in \(name)")
+            }
+            if let args = transport.object("subscribeArgs") {
+                try check(args.bool("includeThoughts") == true && args.bool("includeToolEvents") == true,
+                          "restored subscribe args must match production observer in \(name)")
+            }
+        }
+    }
+
+    private static func decodeTraceSessions(_ values: [JSONValue], name: String) throws -> [GatewaySession] {
+        try values.map { value in
+            guard let session = GatewaySession(value) else {
+                throw CheckError.failed("session did not decode in \(name)")
+            }
+            return session
+        }
+    }
+
+    private static func decodeTraceMeta(_ value: JSONValue, name: String) throws -> MonitorMeta {
+        let data = try JSONSerialization.data(withJSONObject: value.foundationValue)
+        return try MonitorMeta.decode(data)
     }
 
     private static func snapshotRejectsUnsupportedSchemaMajorWithoutPartialDecode() throws {
@@ -1225,6 +1476,80 @@ enum MonitorModelChecks {
 
     private static func check(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         if !condition() { throw CheckError.failed(message) }
+    }
+}
+
+/// Local replay of monitor-state mutations using public production types.
+/// Mirrors current `MonitorState` archive/cap/dedup so Swift can consume the
+/// shared trace inputs instead of only decoding the final expected snapshot.
+private struct TraceReplay {
+    var sessions: [GatewaySession] = []
+    var eventsBySession: [String: [MonitorEvent]] = [:]
+    var historySessions: [GatewaySession] = []
+    var historyEventsBySession: [String: [MonitorEvent]] = [:]
+    var gateway: JSONValue?
+    var lastRemovedSessionIds: [String] = []
+    var cursorTruncated = false
+    var touchedState = false
+    let maxEventsPerSession: Int
+
+    var mergedSessions: [GatewaySession] {
+        var byId: [String: GatewaySession] = [:]
+        for session in historySessions { byId[session.sessionId] = session }
+        for session in sessions { byId[session.sessionId] = session }
+        return Array(byId.values)
+    }
+
+    var mergedEventRefs: Set<String> {
+        Set(
+            eventsBySession.values.joined().map { "\($0.sessionId):\($0.sequence ?? -1)" }
+            + historyEventsBySession.values.joined().map { "\($0.sessionId):\($0.sequence ?? -1)" }
+        )
+    }
+
+    mutating func setSessions(_ next: [GatewaySession]) {
+        touchedState = true
+        let nextIds = Set(next.map(\.sessionId))
+        let liveIds = Set(sessions.map(\.sessionId)).union(eventsBySession.keys)
+        lastRemovedSessionIds = liveIds.filter { !nextIds.contains($0) }
+        var sessionById: [String: GatewaySession] = [:]
+        for session in historySessions { sessionById[session.sessionId] = session }
+        for session in sessions { sessionById[session.sessionId] = session }
+        for sessionId in lastRemovedSessionIds {
+            archive(sessionId: sessionId, session: sessionById[sessionId])
+        }
+        sessions = next
+        for sessionId in lastRemovedSessionIds {
+            eventsBySession.removeValue(forKey: sessionId)
+        }
+    }
+
+    mutating func push(_ event: MonitorEvent) {
+        touchedState = true
+        var events = eventsBySession[event.sessionId] ?? []
+        if let sequence = event.sequence, events.contains(where: { $0.sequence == sequence }) { return }
+        events.append(event)
+        if events.count > maxEventsPerSession {
+            events.removeFirst(events.count - maxEventsPerSession)
+        }
+        eventsBySession[event.sessionId] = events
+    }
+
+    private mutating func archive(sessionId: String, session: GatewaySession?) {
+        let current = eventsBySession[sessionId] ?? []
+        guard let session, !current.isEmpty else { return }
+        historySessions.removeAll { $0.sessionId == sessionId }
+        historySessions.append(session)
+        var unique: [String: MonitorEvent] = [:]
+        for event in (historyEventsBySession[sessionId] ?? []) + current {
+            unique[event.sequence.map { "sequence:\($0)" } ?? event.id] = event
+        }
+        historyEventsBySession[sessionId] = unique.values.sorted { left, right in
+            let leftTs = left.timestamp ?? ""
+            let rightTs = right.timestamp ?? ""
+            if leftTs != rightTs { return leftTs < rightTs }
+            return (left.sequence ?? 0) < (right.sequence ?? 0)
+        }.suffix(maxEventsPerSession).map { $0 }
     }
 }
 

@@ -815,6 +815,17 @@ struct NoticeEntry: Identifiable, Equatable, Sendable {
         self.text = text
         self.count = count
     }
+
+    /// Newest-first insert: a consecutive duplicate bumps `count` on the
+    /// first row; any other text becomes a new first row, capped at 50.
+    static func record(_ text: String, at date: Date, into log: inout [NoticeEntry]) {
+        if let last = log.first, last.text == text {
+            log[0] = NoticeEntry(at: date, text: text, count: last.count + 1)
+        } else {
+            log.insert(NoticeEntry(at: date, text: text, count: 1), at: 0)
+            if log.count > 50 { log.removeLast(log.count - 50) }
+        }
+    }
 }
 
 struct MonitorRecord: Identifiable, Equatable, Sendable {
@@ -1531,6 +1542,55 @@ func monitorFailureGuidance(code: String?) -> String? {
         "진행 중인 세션·Task·미응답 요청이 끝나면 다시 시도하세요."
     default:
         nil
+    }
+}
+
+/// Selection identity against the merged live+history log — the same lists
+/// the sidebar and sequence view render. Live-only membership reassigned the
+/// Frontdoor whenever it left the live set and cleared the picked event.
+enum MonitorSelection {
+    struct Result: Equatable, Sendable {
+        var frontdoorId: String?
+        var eventId: String?
+    }
+
+    static func reconcile(
+        selectedFrontdoorId: String?,
+        selectedEventId: String?,
+        liveSessions: [GatewaySession],
+        historySessions: [GatewaySession],
+        liveEvents: [String: [MonitorEvent]],
+        historyEvents: [String: [MonitorEvent]]
+    ) -> Result {
+        var sessionsById: [String: GatewaySession] = [:]
+        for session in historySessions { sessionsById[session.sessionId] = session }
+        for session in liveSessions { sessionsById[session.sessionId] = session }
+        let available = FrontdoorSession.make(sessions: sessionsById.values.filter { !$0.isInternalReview })
+        let frontdoorId: String?
+        if let selectedFrontdoorId, available.contains(where: { $0.id == selectedFrontdoorId }) {
+            frontdoorId = selectedFrontdoorId
+        } else {
+            frontdoorId = available.first(where: \.isActive)?.id ?? available.first?.id
+        }
+
+        var eventsById: [String: MonitorEvent] = [:]
+        for events in historyEvents.values {
+            for event in events { eventsById[event.id] = event }
+        }
+        for events in liveEvents.values {
+            for event in events { eventsById[event.id] = event }
+        }
+        let eventId = selectedEventId.flatMap { eventsById[$0] == nil ? nil : $0 }
+        return Result(frontdoorId: frontdoorId, eventId: eventId)
+    }
+}
+
+/// A connected Gateway whose event subscription paused records that error
+/// as a notice. Overflow arrives as `kind: "state"`, not `kind: "notice"`.
+enum MonitorStreamNotice {
+    static func forPausedSubscription(connected: Bool, streaming: Bool?, error: String?) -> String? {
+        guard connected, streaming == false, let error else { return nil }
+        return error
     }
 }
 

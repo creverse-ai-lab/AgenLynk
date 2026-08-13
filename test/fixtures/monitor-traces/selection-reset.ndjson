@@ -1,0 +1,8 @@
+{"kind":"meta","traceVersion":1,"name":"selection-reset","runner":"monitor-state"}
+{"kind":"state","connected":true,"streaming":true,"error":null}
+{"kind":"set_sessions","sessions":[{"sessionId":"worker-selected","provider":"claude","status":"running","cwd":"/fixture/project","role":"worker","opener":"codex","openerInstanceId":"main-selected","createdAt":"2026-08-07T00:00:00.000Z"}]}
+{"kind":"push_event","event":{"sessionId":"worker-selected","sequence":7,"type":"tool_call","turnId":"turn-1","ts":"2026-08-07T00:00:01.000Z","text":"inspect"}}
+{"kind":"push_event","event":{"sessionId":"worker-selected","sequence":7,"type":"tool_call","turnId":"turn-1","ts":"2026-08-07T00:00:01.000Z","text":"inspect"}}
+{"kind":"push_event","event":{"sessionId":"worker-selected","sequence":6,"type":"tool_call","turnId":"turn-1","ts":"2026-08-07T00:00:00.000Z","text":"earlier"}}
+{"kind":"set_sessions","sessions":[]}
+{"kind":"expected","snapshot":{"schemaVersion":1,"monitorApiVersion":"1.0","connected":true,"streaming":true,"sessions":[],"events":{},"historySessions":[{"sessionId":"worker-selected","provider":"claude","status":"running","cwd":"/fixture/project","role":"worker","opener":"codex","openerInstanceId":"main-selected","createdAt":"2026-08-07T00:00:00.000Z"}],"historyEvents":{"worker-selected":[{"sessionId":"worker-selected","sequence":6,"type":"tool_call","turnId":"turn-1","ts":"2026-08-07T00:00:00.000Z","text":"earlier"},{"sessionId":"worker-selected","sequence":7,"type":"tool_call","turnId":"turn-1","ts":"2026-08-07T00:00:01.000Z","text":"inspect"}]}},"projection":{"frontdoorIds":["main-selected"],"eventRefs":["worker-selected:6","worker-selected:7"],"selectedFrontdoorId":"main-selected","selectedEventRef":"worker-selected:7"}}
