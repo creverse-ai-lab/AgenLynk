@@ -305,7 +305,7 @@ enum MonitorModelChecks {
 
     private static func replayCharacterizationTrace(name: String, url: URL) throws {
         let text = try String(contentsOf: url, encoding: .utf8)
-        let records = try text.split(whereSeparator: \Character.isNewline).map {
+        let records = try text.split(whereSeparator: { $0.isNewline }).map {
             try decodeJSONValue(Data($0.utf8))
         }
         guard let meta = records.first?.objectValue,
@@ -357,7 +357,7 @@ enum MonitorModelChecks {
                 if let sse = step.object("sse") {
                     try check(sse.string("kind") == "state", "disappearance SSE must be kind=state in \(name)")
                     try check((sse.array("sessions") ?? []).isEmpty, "disappearance SSE sessions must be empty in \(name)")
-                    let removed = Set((sse.array("removedSessionIds") ?? []).compactMap(\.stringValue))
+                    let removed = Set((sse.array("removedSessionIds") ?? []).compactMap { $0.stringValue })
                     try check(removed == Set(replay.lastRemovedSessionIds),
                               "removedSessionIds diverged in \(name): \(removed) != \(replay.lastRemovedSessionIds)")
                 }
@@ -416,8 +416,8 @@ enum MonitorModelChecks {
             + snapshot.historyEventsBySession.values.joined().map { "\($0.sessionId):\($0.sequence ?? -1)" }
         )
         let projection = expected.object("projection") ?? [:]
-        let expectedFrontdoors = Set((projection.array("frontdoorIds") ?? []).compactMap(\.stringValue))
-        let expectedEvents = Set((projection.array("eventRefs") ?? []).compactMap(\.stringValue))
+        let expectedFrontdoors = Set((projection.array("frontdoorIds") ?? []).compactMap { $0.stringValue })
+        let expectedEvents = Set((projection.array("eventRefs") ?? []).compactMap { $0.stringValue })
         try check(snapshotFrontdoors == expectedFrontdoors,
                   "Frontdoor projection diverged for \(name): \(snapshotFrontdoors) != \(expectedFrontdoors)")
         try check(snapshotEvents == expectedEvents,
@@ -535,7 +535,9 @@ enum MonitorModelChecks {
             }
             if transport.object("cursorTruncated") != nil {
                 try check(replay.cursorTruncated, "reconnect fixture must include cursorTruncated=true in \(name)")
-                try check((transport.array("receivedTypes") ?? []).contains { $0.stringValue == "subscription_replay_truncated" },
+                try check((transport.array("receivedTypes") ?? []).contains { value in
+                    value.stringValue == "subscription_replay_truncated"
+                },
                           "cursorTruncated=true must surface subscription_replay_truncated in \(name)")
             }
             if let args = transport.object("subscribeArgs") {
@@ -1403,7 +1405,7 @@ enum MonitorModelChecks {
         for entry in cases {
             guard let fixture = entry.objectValue,
                   let name = fixture.string("name"),
-                  let expected = fixture.array("expected")?.compactMap(\.stringValue) else {
+                  let expected = fixture.array("expected")?.compactMap({ $0.stringValue }) else {
                 throw CheckError.failed("malformed restart-blocker fixture case")
             }
             let sessions = (fixture.array("sessions") ?? []).compactMap { value -> GatewaySession? in

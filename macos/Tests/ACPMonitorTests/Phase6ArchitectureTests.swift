@@ -84,7 +84,7 @@ enum Phase6ArchitectureChecks {
                 contentsOf: root.appendingPathComponent("sidecar/test/fixtures/monitor-traces/\(name)"),
                 encoding: .utf8
             )
-            guard let last = trace.split(whereSeparator: \Character.isNewline).last,
+            guard let last = trace.split(whereSeparator: { $0.isNewline }).last,
                   let raw = try JSONSerialization.jsonObject(with: Data(last.utf8)) as? [String: Any],
                   var expected = raw["snapshot"] as? [String: Any] else {
                 throw Phase6CheckError.failed("malformed Phase 5 trace \(name)")
