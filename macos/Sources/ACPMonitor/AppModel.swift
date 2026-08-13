@@ -37,15 +37,15 @@ final class AppModel: ObservableObject {
     /// so only its row shows progress.
     @Published private(set) var installingFrontdoor: String?
     @Published private(set) var phase: ConnectionPhase = .idle
-    @Published private(set) var gateway: JSONValue?
-    @Published private(set) var sessions: [GatewaySession] = []
-    @Published private(set) var eventsBySession: [String: [MonitorEvent]] = [:]
-    @Published private(set) var historySessions: [GatewaySession] = []
-    @Published private(set) var historyEventsBySession: [String: [MonitorEvent]] = [:]
-    @Published private(set) var logSessions: [GatewaySession] = []
-    @Published private(set) var logEventsBySession: [String: [MonitorEvent]] = [:]
-    @Published private(set) var tasks: [MonitorRecord] = []
-    @Published private(set) var inbox: [MonitorRecord] = []
+    var gateway: JSONValue? { monitorStore.state.gateway }
+    var sessions: [GatewaySession] { monitorStore.state.sessions }
+    var eventsBySession: [String: [MonitorEvent]] { monitorStore.state.eventsBySession }
+    var historySessions: [GatewaySession] { monitorStore.state.historySessions }
+    var historyEventsBySession: [String: [MonitorEvent]] { monitorStore.state.historyEventsBySession }
+    var logSessions: [GatewaySession] { monitorStore.state.logSessions }
+    var logEventsBySession: [String: [MonitorEvent]] { monitorStore.state.logEventsBySession }
+    var tasks: [MonitorRecord] { monitorStore.state.tasks }
+    var inbox: [MonitorRecord] { monitorStore.state.inbox }
     @Published var selectedFrontdoorId: String?
     @Published var selectedSessionId: String?
     @Published var selectedEventId: String?
@@ -54,12 +54,12 @@ final class AppModel: ObservableObject {
     /// could be read. Every notice and disconnect lands here with a timestamp,
     /// newest first, so the user can open the list and actually read them.
     @Published private(set) var noticeLog: [NoticeEntry] = []
-    @Published private(set) var agentCatalog: [ACPAgentCatalogItem] = []
-    @Published private(set) var agentCatalogLoading = false
-    @Published private(set) var agentCatalogMutationId: String?
-    @Published private(set) var agentCatalogSource = "—"
-    @Published private(set) var agentCatalogStale = false
-    @Published private(set) var agentCatalogError: String?
+    var agentCatalog: [ACPAgentCatalogItem] { agentCatalogStore.agents }
+    var agentCatalogLoading: Bool { agentCatalogStore.loading }
+    var agentCatalogMutationId: String? { agentCatalogStore.mutationId }
+    var agentCatalogSource: String { agentCatalogStore.source }
+    var agentCatalogStale: Bool { agentCatalogStore.stale }
+    var agentCatalogError: String? { agentCatalogStore.error }
     @Published private(set) var gatewayConfigOptions: [GatewayConfigOption] = []
     @Published private(set) var gatewayConfigLoading = false
     @Published private(set) var gatewayConfigSaving = false
@@ -71,8 +71,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var sessionConfigSaving = false
     @Published private(set) var sessionConfigError: String?
     @Published private(set) var sessionConfigUnavailableReason: String?
-    @Published private(set) var petRunning = false
-    @Published private(set) var petError: String?
+    var petRunning: Bool { petStore.running }
+    var petError: String? { petStore.error }
     @Published private(set) var runtimeInspection: RuntimeInspection?
     @Published private(set) var runtimeLoading = false
     @Published private(set) var runtimeBusy = false
@@ -89,19 +89,37 @@ final class AppModel: ObservableObject {
     let settings = AppSettings()
     private let sidecar = SidecarController()
     private let client = MonitorClient()
-    private let pet = PetController()
+    private let petStore = PetStore()
     private let installer = InstallerController()
     private let runtimeProvisioner = RuntimeProvisioner()
-    private let runtimeUpdater = RuntimeUpdaterController()
+    private let runtimeManager = GatewayRuntimeManager()
+    private let appUpdateService = AppUpdateService()
+    private let agentCatalogStore = AgentCatalogStore()
+    private let monitorStore = MonitorStore()
+    private var storeCancellables = Set<AnyCancellable>()
     private var startupCheckStarted = false
     private var startTask: Task<Void, Never>?
     private var reconciliationTask: Task<Void, Never>?
-    private var streamFlushTask: Task<Void, Never>?
-    private var pendingStreamEvents: [MonitorEvent] = []
     private var endpoint: MonitorEndpoint?
-    private var gatewayConnected = false
-    private var gatewayStreaming = false
     private var sidecarStreamConnected = false
+    private var connectionGeneration = 0
+    private var isStopping = false
+
+    init() {
+        agentCatalogStore.objectWillChange
+            .sink { [weak self] in self?.objectWillChange.send() }
+            .store(in: &storeCancellables)
+        petStore.objectWillChange
+            .sink { [weak self] in self?.objectWillChange.send() }
+            .store(in: &storeCancellables)
+        monitorStore.objectWillChange
+            .sink { [weak self] in self?.objectWillChange.send() }
+            .store(in: &storeCancellables)
+        monitorStore.$logRevision
+            .dropFirst()
+            .sink { [weak self] _ in self?.invalidateEventCaches() }
+            .store(in: &storeCancellables)
+    }
 
     var gatewayVersion: String {
         gateway?.objectValue?.string("gatewayVersion") ?? "—"
@@ -118,11 +136,11 @@ final class AppModel: ObservableObject {
     /// regardless of kind. This is the liveness signal the menu bar shows: it
     /// keeps ticking while agents are idle, so "no active agent" and "no data
     /// arriving" stay distinguishable.
-    @Published private(set) var lastStreamMessageAt: Date?
+    var lastStreamMessageAt: Date? { monitorStore.state.lastStreamMessageAt }
     /// Time of the last agent event, as opposed to a state/heartbeat message.
-    @Published private(set) var lastAgentEventAt: Date?
+    var lastAgentEventAt: Date? { monitorStore.state.lastAgentEventAt }
 
-    var streamingLive: Bool { gatewayConnected && gatewayStreaming }
+    var streamingLive: Bool { monitorStore.state.connected && monitorStore.state.streaming }
 
     /// Every known Frontdoor and Worker with its normalized contract state.
     /// Uses the same `PetActivityProjection` the Pet renderer consumes, so the
@@ -316,9 +334,12 @@ final class AppModel: ObservableObject {
         case .provisioningRuntime, .runtimeError, .onboarding:
             return
         case .ready:
+            guard !isStopping else { return }
             if settings.petEnabled && !petRunning { startPet() }
             guard startTask == nil else { return }
-            startTask = Task { [weak self] in await self?.connect() }
+            connectionGeneration += 1
+            let generation = connectionGeneration
+            startTask = Task { [weak self] in await self?.connect(generation: generation) }
         }
     }
 
@@ -410,30 +431,32 @@ final class AppModel: ObservableObject {
     }
 
     func reconnect() {
+        guard !isStopping else { return }
+        connectionGeneration += 1
+        let generation = connectionGeneration
         startTask?.cancel()
         reconciliationTask?.cancel()
-        streamFlushTask?.cancel()
-        streamFlushTask = nil
-        pendingStreamEvents.removeAll(keepingCapacity: true)
-        startTask = Task { [weak self] in await self?.connect(restartSidecar: true) }
-    }
-
-    func stop() {
-        startTask?.cancel()
-        reconciliationTask?.cancel()
-        streamFlushTask?.cancel()
-        startTask = nil
-        reconciliationTask = nil
-        streamFlushTask = nil
-        pendingStreamEvents.removeAll(keepingCapacity: true)
         endpoint = nil
         sidecarStreamConnected = false
-        gatewayConnected = false
-        gatewayStreaming = false
-        Task { await client.stop() }
-        sidecar.stop()
-        pet.stop()
-        petRunning = false
+        monitorStore.resetForNewSidecar()
+        startTask = Task { [weak self] in
+            await self?.connect(restartSidecar: true, generation: generation)
+        }
+    }
+
+    func stop() async {
+        isStopping = true
+        connectionGeneration += 1
+        startTask?.cancel()
+        reconciliationTask?.cancel()
+        startTask = nil
+        reconciliationTask = nil
+        monitorStore.stop()
+        endpoint = nil
+        sidecarStreamConnected = false
+        await client.stop()
+        await sidecar.stop()
+        petStore.stop()
         installer.cancel()
         runtimeProvisioner.cancel()
     }
@@ -443,9 +466,7 @@ final class AppModel: ObservableObject {
         if enabled {
             startPet()
         } else {
-            pet.stop()
-            petRunning = false
-            petError = nil
+            petStore.stop()
         }
     }
 
@@ -456,25 +477,16 @@ final class AppModel: ObservableObject {
 
     func resetSettings() {
         settings.reset()
-        pet.stop()
-        petRunning = false
-        petError = nil
+        petStore.stop()
     }
 
     func loadAgentCatalog(refresh: Bool = false) async {
         if endpoint == nil { await ensureStarted() }
         guard let endpoint else {
-            agentCatalogError = "Gateway monitor가 아직 연결되지 않았습니다."
+            agentCatalogStore.setConnectionUnavailable()
             return
         }
-        agentCatalogLoading = true
-        agentCatalogError = nil
-        do {
-            apply(try await client.fetchAgentCatalog(endpoint: endpoint, refresh: refresh))
-        } catch {
-            agentCatalogError = error.localizedDescription
-        }
-        agentCatalogLoading = false
+        await agentCatalogStore.load(client: client, endpoint: endpoint, refresh: refresh)
     }
 
     func installAgent(_ agent: ACPAgentCatalogItem) async {
@@ -575,12 +587,11 @@ final class AppModel: ObservableObject {
     }
 
     func loadRuntimeInspection() async {
-        guard runtimeUpdater.isAvailable, !runtimeLoading else { return }
+        guard runtimeManager.isAvailable, !runtimeLoading else { return }
         runtimeLoading = true
         defer { runtimeLoading = false }
         do {
-            let value = try await runtimeUpdater.run("inspect")
-            runtimeInspection = RuntimeInspection(value)
+            runtimeInspection = try await runtimeManager.inspect()
             runtimeError = nil
         } catch {
             runtimeError = error.localizedDescription
@@ -606,9 +617,7 @@ final class AppModel: ObservableObject {
     /// from Contents/Resources/gateway-seed/runtime-manifest.json. nil in a
     /// source-tree/dev build that bundles no seed.
     var seedGatewayVersion: SeedGatewayVersion? {
-        guard let url = Bundle.main.resourceURL?.appendingPathComponent("gateway-seed/runtime-manifest.json"),
-              let data = try? Data(contentsOf: url) else { return nil }
-        return parseSeedManifest(data)
+        runtimeManager.seedGatewayVersion
     }
 
     /// True when the installed runtime's build differs from the seed the app
@@ -633,20 +642,8 @@ final class AppModel: ObservableObject {
         appUpdateChecking = true
         appUpdateError = nil
         defer { appUpdateChecking = false }
-        var request = URLRequest(url: URL(string: "https://api.github.com/repos/creverse-ai-lab/agenlynk/releases")!)
-        request.timeoutInterval = 10
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                appUpdateError = "확인 실패"
-                return
-            }
-            if let release = parseGitHubReleases(data) {
-                latestAppRelease = release
-            } else {
-                appUpdateError = "확인 실패"
-            }
+            latestAppRelease = try await appUpdateService.latestRelease()
         } catch {
             appUpdateError = "확인 실패"
         }
@@ -656,7 +653,7 @@ final class AppModel: ObservableObject {
     /// idempotent, so this is safe to press when already up to date.
     func updateRuntimeFromAppSeed() async {
         guard !runtimeBusy else { return }
-        guard let seedRoot = BundledRuntime.seedRuntimeRoot()?.path else {
+        guard runtimeManager.isAvailable else {
             runtimeError = "이 빌드에는 설치할 Gateway runtime seed가 없습니다."
             return
         }
@@ -665,20 +662,11 @@ final class AppModel: ObservableObject {
         runtimeError = nil
         runtimeNotice = nil
         do {
-            let staged = RuntimeOperationResult(try await runtimeUpdater.run("stage", arguments: ["--seed", seedRoot]))
-            guard staged.ok, let versionId = staged.versionId else {
-                runtimeError = staged.errorMessage ?? "runtime staging에 실패했습니다."
-                return
-            }
-            if runtimeInspection?.currentVersionId == versionId {
-                runtimeNotice = "이미 최신 runtime(\(versionId))을 사용 중입니다."
-                await loadRuntimeInspection()
-                return
-            }
-            let activated = RuntimeOperationResult(try await runtimeUpdater.run(
-                "activate", arguments: ["--version", versionId], blockers: runtimeActivationBlockers
-            ))
-            await finishRuntimeChange(activated, successNotice: "\(versionId)로 전환했습니다. Gateway를 다시 시작하면 적용됩니다.")
+            let change = try await runtimeManager.activateBundledSeed(
+                currentVersionId: runtimeInspection?.currentVersionId,
+                blockers: runtimeActivationBlockers
+            )
+            finishRuntimeChange(change)
         } catch {
             runtimeError = error.localizedDescription
         }
@@ -691,28 +679,29 @@ final class AppModel: ObservableObject {
         runtimeError = nil
         runtimeNotice = nil
         do {
-            let result = RuntimeOperationResult(try await runtimeUpdater.run(
-                "rollback", blockers: runtimeActivationBlockers
-            ))
-            await finishRuntimeChange(result, successNotice: "이전 runtime으로 되돌렸습니다. Gateway를 다시 시작하면 적용됩니다.")
+            finishRuntimeChange(try await runtimeManager.rollback(blockers: runtimeActivationBlockers))
         } catch {
             runtimeError = error.localizedDescription
         }
     }
 
-    private func finishRuntimeChange(_ result: RuntimeOperationResult, successNotice: String) async {
-        if result.ok {
-            runtimeNotice = successNotice
-        } else if result.errorCode == "ACTIVATION_BLOCKED" || result.errorCode == "ROLLBACK_BLOCKED" {
-            // Deferred, not failed: the same blocker rule a safe restart uses.
+    private func finishRuntimeChange(_ change: GatewayRuntimeChange) {
+        runtimeInspection = change.inspection ?? runtimeInspection
+        switch change.outcome {
+        case let .activated(versionId):
+            runtimeNotice = "\(versionId)로 전환했습니다. Gateway를 다시 시작하면 적용됩니다."
+        case .rolledBack:
+            runtimeNotice = "이전 runtime으로 되돌렸습니다. Gateway를 다시 시작하면 적용됩니다."
+        case let .alreadyCurrent(versionId):
+            runtimeNotice = "이미 최신 runtime(\(versionId))을 사용 중입니다."
+        case .blocked:
             let detail = runtimeActivationBlockers.joined(separator: ", ")
             runtimeError = "진행 중인 작업이 있어 적용을 보류했습니다\(detail.isEmpty ? "" : " (\(detail))"). 끝난 뒤 다시 시도하세요."
-        } else if result.errorCode == "NO_PREVIOUS_TARGET" {
+        case .noPrevious:
             runtimeError = "되돌릴 이전 runtime이 없습니다."
-        } else {
-            runtimeError = result.errorMessage ?? "runtime 적용에 실패했습니다."
+        case let .failed(message):
+            runtimeError = message
         }
-        await loadRuntimeInspection()
     }
 
     /// What the Gateway would delete if these retention values were applied.
@@ -877,31 +866,44 @@ final class AppModel: ObservableObject {
         return "\(base) \(guidance)"
     }
 
-    private func connect(restartSidecar: Bool = false) async {
+    private func connectionIsCurrent(_ generation: Int) -> Bool {
+        !isStopping && !Task.isCancelled && connectionGeneration == generation
+    }
+
+    private func connect(restartSidecar: Bool = false, generation: Int) async {
+        guard connectionIsCurrent(generation) else { return }
         phase = .starting
         reconciliationTask?.cancel()
         reconciliationTask = nil
-        if restartSidecar { sidecar.stop() }
+        if restartSidecar {
+            await sidecar.stop()
+            guard connectionIsCurrent(generation) else { return }
+        }
         do {
             let endpoint = try await sidecar.start(nodeOverride: settings.nodePath)
+            guard connectionIsCurrent(generation) else { return }
             self.endpoint = endpoint
             // A fresh monitor counts revisions from zero; a stale baseline
             // could coincide with the new numbering and skip a real change.
-            appliedSnapshotRevision = nil
+            monitorStore.resetForNewSidecar()
             sidecarStreamConnected = false
             // Authenticated compatibility handshake before any normal
             // snapshot/stream consumption; throws a stable update-required
             // error if the Monitor's schema/API major isn't supported.
             _ = try await client.fetchMeta(endpoint: endpoint)
+            guard connectionIsCurrent(generation) else { return }
             guard let snapshot = try await client.fetchSnapshot(endpoint: endpoint) else {
                 throw MonitorDecodeError.invalidMessage
             }
+            guard connectionIsCurrent(generation) else { return }
             apply(snapshot)
             await loadGatewayConfig()
+            guard connectionIsCurrent(generation) else { return }
             await client.startStream(endpoint: endpoint, onMessage: { [weak self] value in
-                self?.apply(streamMessage: value)
+                guard let self, self.connectionIsCurrent(generation) else { return }
+                self.apply(streamMessage: value)
             }, onState: { [weak self] connected, error in
-                guard let self else { return }
+                guard let self, self.connectionIsCurrent(generation) else { return }
                 self.sidecarStreamConnected = connected
                 if !connected {
                     self.phase = .disconnected(error ?? "Dashboard 데이터 스트림이 끊겼습니다.")
@@ -909,27 +911,31 @@ final class AppModel: ObservableObject {
                     self.updateConnectionPhase()
                 }
             })
-            startReconciliation(endpoint: endpoint)
+            guard connectionIsCurrent(generation) else { return }
+            startReconciliation(endpoint: endpoint, generation: generation)
         } catch {
-            gatewayConnected = false
-            gatewayStreaming = false
+            guard connectionIsCurrent(generation) else { return }
+            monitorStore.setConnection(connected: false, streaming: false)
             sidecarStreamConnected = false
             phase = .disconnected(describeConnectFailure(error))
         }
     }
 
-    private func startReconciliation(endpoint: MonitorEndpoint) {
+    private func startReconciliation(endpoint: MonitorEndpoint, generation: Int) {
         reconciliationTask?.cancel()
         reconciliationTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 10_000_000_000)
-                guard !Task.isCancelled, let self, self.endpoint?.baseURL == endpoint.baseURL else { return }
+                guard !Task.isCancelled,
+                      let self,
+                      self.connectionIsCurrent(generation),
+                      self.endpoint?.baseURL == endpoint.baseURL else { return }
                 do {
                     guard let snapshot = try await self.client.fetchSnapshot(
                         endpoint: endpoint,
-                        ifRevision: self.appliedSnapshotRevision
+                        ifRevision: self.monitorStore.state.appliedSnapshotRevision
                     ) else { continue }
-                    guard !Task.isCancelled else { return }
+                    guard self.connectionIsCurrent(generation) else { return }
                     self.apply(snapshot)
                     self.updateConnectionPhase()
                 } catch {
@@ -940,46 +946,11 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Advances a heartbeat timestamp at most once per second. The published
-    /// value only drives 1-second-granularity labels, so finer updates are
-    /// pure re-render churn.
-    private func markHeartbeat(_ heartbeat: inout Date?) {
-        let now = Date()
-        if heartbeat.map({ now.timeIntervalSince($0) >= 1 }) ?? true { heartbeat = now }
-    }
-
-    /// The monitor revision of the last fully-applied snapshot; nil until one
-    /// applies or when the monitor predates the revision field.
-    private var appliedSnapshotRevision: Int?
-
     private func apply(_ snapshot: MonitorSnapshot) {
-        // Deliberately NOT a heartbeat update: snapshots also arrive from the
-        // periodic HTTP reconciliation, which would keep the staleness signal
-        // green forever even after the SSE stream silently died.
-        var logCacheChanged = false
-        if gateway != snapshot.gateway { gateway = snapshot.gateway }
-        // The monitor's revision covers session/event data and tasks/inbox.
-        // On the 10s reconciliation an unchanged revision skips four deep
-        // comparisons over every retained event (~15ms of main-thread work and
-        // the cache rebuild they can trigger).
-        let dataUnchanged = snapshot.revision != nil && snapshot.revision == appliedSnapshotRevision
-        if !dataUnchanged {
-            if sessions != snapshot.sessions { sessions = snapshot.sessions; logCacheChanged = true }
-            if eventsBySession != snapshot.eventsBySession { eventsBySession = snapshot.eventsBySession; logCacheChanged = true }
-            if historySessions != snapshot.historySessions { historySessions = snapshot.historySessions; logCacheChanged = true }
-            if historyEventsBySession != snapshot.historyEventsBySession {
-                historyEventsBySession = snapshot.historyEventsBySession
-                logCacheChanged = true
-            }
-            if tasks != snapshot.tasks { tasks = snapshot.tasks }
-            if inbox != snapshot.inbox { inbox = snapshot.inbox }
-            appliedSnapshotRevision = snapshot.revision
-        }
-        if logCacheChanged { rebuildLogCache() }
-        gatewayConnected = snapshot.connected
-        gatewayStreaming = snapshot.streaming
-        if !snapshot.connected {
-            let nextPhase = ConnectionPhase.disconnected(snapshot.error ?? "Gateway에 연결되지 않았습니다.")
+        // HTTP reconciliation is deliberately not a stream heartbeat.
+        let effect = monitorStore.apply(snapshot)
+        if let error = effect.disconnectedError {
+            let nextPhase = ConnectionPhase.disconnected(error)
             if phase != nextPhase { phase = nextPhase }
         }
         reconcileSelections()
@@ -988,96 +959,27 @@ final class AppModel: ObservableObject {
 
     private func apply(streamMessage value: JSONValue) {
         guard let message = value.objectValue, let kind = message.string("kind") else { return }
-        // The UI shows these at 1-second granularity, but the stream delivers
-        // 30–100 token chunks per second. Publishing every arrival would fire
-        // objectWillChange per chunk and defeat the 100ms event batching by
-        // re-evaluating every observing view anyway; throttle to the precision
-        // the consumers actually display.
-        markHeartbeat(&lastStreamMessageAt)
+        monitorStore.markStreamMessage()
         switch kind {
         case "event":
             if let eventValue = message["event"], let event = MonitorEvent(eventValue) {
-                markHeartbeat(&lastAgentEventAt)
-                enqueue(event)
+                monitorStore.enqueue(event)
             }
         case "state":
-            var logCacheChanged = false
-            if let values = message.array("sessions") {
-                let nextSessions = values.compactMap(GatewaySession.init)
-                if sessions != nextSessions {
-                    sessions = nextSessions
-                    logCacheChanged = true
-                }
-                let validSessionIds = Set(sessions.map(\.sessionId))
-                let nextEvents = eventsBySession.filter { validSessionIds.contains($0.key) }
-                if eventsBySession != nextEvents {
-                    eventsBySession = nextEvents
-                    logCacheChanged = true
-                }
-            }
-            for sessionId in (message.array("removedSessionIds") ?? []).compactMap(\.stringValue) {
-                if eventsBySession.removeValue(forKey: sessionId) != nil { logCacheChanged = true }
-            }
-            // Local (non-Gateway) sessions never produce "event" messages; the
-            // monitor ships their rewritten buckets here instead. Replace whole
-            // buckets rather than appending — the local scanner re-projects a
-            // turn in place, so appending would duplicate every edited turn.
-            if let buckets = message.object("events") {
-                var eventsChanged = false
-                for (sessionId, value) in buckets {
-                    let nextEvents = (value.arrayValue ?? []).compactMap(MonitorEvent.init)
-                    if nextEvents.isEmpty {
-                        // An emptied bucket means the transcript window dropped
-                        // it; /api/snapshot omits the key entirely, so mirror
-                        // that instead of leaving an empty one behind to churn
-                        // the next reconciliation's comparison.
-                        if eventsBySession.removeValue(forKey: sessionId) != nil { eventsChanged = true }
-                        continue
-                    }
-                    if eventsBySession[sessionId] == nextEvents { continue }
-                    eventsBySession[sessionId] = nextEvents
-                    eventsChanged = true
-                }
-                if eventsChanged {
-                    logCacheChanged = true
-                    // Local transcript growth is agent activity, and it is the
-                    // only activity signal a local-only session ever emits.
-                    markHeartbeat(&lastAgentEventAt)
-                }
-            }
-            if let values = message.array("tasks") {
-                let nextTasks = values.enumerated().map { MonitorRecord($0.element, fallbackKind: "task", index: $0.offset) }
-                if tasks != nextTasks { tasks = nextTasks }
-            }
-            if let values = message.array("inbox") {
-                let nextInbox = values.enumerated().map { MonitorRecord($0.element, fallbackKind: "inbox", index: $0.offset) }
-                if inbox != nextInbox { inbox = nextInbox }
-            }
-            if let connected = message.bool("connected") { gatewayConnected = connected }
-            if let streaming = message.bool("streaming") { gatewayStreaming = streaming }
-            if gatewayConnected { updateConnectionPhase() }
-            else {
-                let nextPhase = ConnectionPhase.disconnected(message.string("error") ?? "Gateway 연결 끊김")
+            let effect = monitorStore.applyStateMessage(message)
+            if monitorStore.state.connected { updateConnectionPhase() }
+            else if let error = effect.disconnectedError {
+                let nextPhase = ConnectionPhase.disconnected(error)
                 if phase != nextPhase {
                     phase = nextPhase
-                    recordNotice(message.string("error") ?? "Gateway 연결 끊김")
+                    recordNotice(error)
                 }
             }
-            // A streaming pause with the Gateway still connected is a
-            // subscription drop; log its reason even though the bar only
-            // turns amber for it.
-            if let notice = MonitorStreamNotice.forPausedSubscription(
-                connected: gatewayConnected,
-                streaming: message.bool("streaming"),
-                error: message.string("error")
-            ) {
-                recordNotice(notice)
-            }
-            if logCacheChanged { rebuildLogCache() }
+            if let notice = effect.pausedSubscriptionNotice { recordNotice(notice) }
             reconcileSelections()
             syncPetSnapshot()
         case "gateway":
-            gateway = message["gateway"]
+            monitorStore.setGateway(message["gateway"])
             Task { await loadGatewayConfig() }
         case "notice":
             let text = noticeText(message["event"])
@@ -1085,7 +987,8 @@ final class AppModel: ObservableObject {
             recordNotice(text)
         case "session_removed":
             guard let sessionId = message.string("sessionId") else { break }
-            removeSession(sessionId)
+            monitorStore.removeSession(sessionId)
+            reconcileSelections()
             syncPetSnapshot()
         default:
             break
@@ -1109,9 +1012,9 @@ final class AppModel: ObservableObject {
     private func updateConnectionPhase() {
         guard sidecarStreamConnected else { return }
         let nextPhase: ConnectionPhase
-        if gatewayConnected && gatewayStreaming {
+        if monitorStore.state.connected && monitorStore.state.streaming {
             nextPhase = .connected
-        } else if gatewayConnected {
+        } else if monitorStore.state.connected {
             nextPhase = .degraded("Gateway 조회 가능 · 실시간 이벤트 재연결 중")
         } else {
             nextPhase = .disconnected("Gateway에 연결되지 않았습니다.")
@@ -1119,181 +1022,27 @@ final class AppModel: ObservableObject {
         if phase != nextPhase { phase = nextPhase }
     }
 
-    private func enqueue(_ event: MonitorEvent) {
-        pendingStreamEvents.append(event)
-        guard streamFlushTask == nil else { return }
-        streamFlushTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 100_000_000)
-            guard !Task.isCancelled, let self else { return }
-            self.flushPendingStreamEvents()
-        }
-    }
-
-    private func flushPendingStreamEvents() {
-        streamFlushTask = nil
-        guard !pendingStreamEvents.isEmpty else { return }
-        let pending = pendingStreamEvents
-        pendingStreamEvents.removeAll(keepingCapacity: true)
-
-        var nextEventsBySession = eventsBySession
-        var nextLogEventsBySession = logEventsBySession
-        for (sessionId, additions) in Dictionary(grouping: pending, by: \.sessionId) {
-            var current = nextEventsBySession[sessionId] ?? []
-            var currentSequences = Set(current.compactMap(\.sequence))
-            var accepted: [MonitorEvent] = []
-            accepted.reserveCapacity(additions.count)
-            for event in additions {
-                if let sequence = event.sequence, !currentSequences.insert(sequence).inserted { continue }
-                current.append(event)
-                accepted.append(event)
-            }
-            guard !accepted.isEmpty else { continue }
-            if current.count > 1 { current.sort(by: withinSessionEventOrder) }
-            if current.count > 2_000 { current.removeFirst(current.count - 2_000) }
-            nextEventsBySession[sessionId] = current
-
-            var logged = nextLogEventsBySession[sessionId] ?? []
-            let loggedIds = Set(logged.map(\.id))
-            let tail = logged.last
-            let fresh = accepted.filter { !loggedIds.contains($0.id) }
-            logged.append(contentsOf: fresh)
-            if logged.count > 2_000 { logged.removeFirst(logged.count - 2_000) }
-            // Events arrive sequence-ordered per session; the sort only needs
-            // to run when this batch actually lands out of order (a replay
-            // after reconnect). Re-sorting 2000 events per 100ms flush was
-            // measurable main-thread time for a case that almost never occurs.
-            let appendedInOrder = zip(fresh, fresh.dropFirst()).allSatisfy { !withinSessionEventOrder($1, $0) }
-                && (tail == nil || fresh.first == nil || !withinSessionEventOrder(fresh.first!, tail!))
-            if logged.count > 1 && !appendedInOrder { logged.sort(by: withinSessionEventOrder) }
-            nextLogEventsBySession[sessionId] = logged
-        }
-        if eventsBySession != nextEventsBySession { eventsBySession = nextEventsBySession }
-        if logEventsBySession != nextLogEventsBySession {
-            logEventsBySession = nextLogEventsBySession
-            invalidateEventCaches()
-        }
-    }
-
-    private func removeSession(_ sessionId: String) {
-        sessions.removeAll { $0.sessionId == sessionId }
-        eventsBySession.removeValue(forKey: sessionId)
-        rebuildLogCache()
-        reconcileSelections()
-    }
-
-    /// The merged per-session inputs of the last rebuild, so an unchanged
-    /// session's merge (dictionary insert of every event + a sort) is skipped.
-    /// Rebuilds run several times a second during a busy turn, and re-merging
-    /// all sessions at the caps measured at ~200ms of main-thread stall each —
-    /// while typically only one session's events actually changed.
-    private var logMergeInputs: [String: (live: [MonitorEvent], history: [MonitorEvent])] = [:]
-
-    private func rebuildLogCache() {
-        var sessionsById: [String: GatewaySession] = [:]
-        for session in historySessions { sessionsById[session.sessionId] = session }
-        for session in sessions { sessionsById[session.sessionId] = session }
-        let nextSessions = Array(sessionsById.values)
-            .sorted { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
-
-        var nextEvents = logEventsBySession
-        var nextInputs: [String: (live: [MonitorEvent], history: [MonitorEvent])] = [:]
-        let sessionIds = Set(eventsBySession.keys).union(historyEventsBySession.keys)
-        for sessionId in sessionIds {
-            let live = eventsBySession[sessionId] ?? []
-            let history = historyEventsBySession[sessionId] ?? []
-            nextInputs[sessionId] = (live, history)
-            // Array equality here is cheap in the common case: unchanged
-            // sessions share storage with the previous pass (CoW), so the
-            // comparison is pointer identity, not element-by-element.
-            if let previous = logMergeInputs[sessionId],
-               previous.live == live, previous.history == history,
-               nextEvents[sessionId] != nil {
-                continue
-            }
-            var eventsById: [String: MonitorEvent] = [:]
-            for event in history { eventsById[event.id] = event }
-            for event in live { eventsById[event.id] = event }
-            nextEvents[sessionId] = Array(eventsById.values).sorted(by: withinSessionEventOrder)
-        }
-        // Sessions that vanished from both sources drop out of the cache.
-        for sessionId in nextEvents.keys where nextInputs[sessionId] == nil {
-            nextEvents.removeValue(forKey: sessionId)
-        }
-        logMergeInputs = nextInputs
-
-        if logSessions != nextSessions {
-            logSessions = nextSessions
-            invalidateEventCaches()
-        }
-        if logEventsBySession != nextEvents {
-            logEventsBySession = nextEvents
-            invalidateEventCaches()
-        }
-    }
-
     private func mutateAgent(_ agent: ACPAgentCatalogItem, body: [String: JSONValue]) async {
         guard let endpoint else {
-            agentCatalogError = "Gateway monitor가 아직 연결되지 않았습니다."
+            agentCatalogStore.setConnectionUnavailable()
             return
         }
-        agentCatalogMutationId = agent.registryId
-        agentCatalogError = nil
-        do {
-            apply(try await client.mutateAgentCatalog(endpoint: endpoint, body: body))
-        } catch {
-            agentCatalogError = error.localizedDescription
-        }
-        agentCatalogMutationId = nil
-    }
-
-    private func apply(_ snapshot: ACPAgentCatalogSnapshot) {
-        agentCatalog = snapshot.agents
-        agentCatalogSource = snapshot.source
-        agentCatalogStale = snapshot.stale
-        agentCatalogError = snapshot.warning
+        await agentCatalogStore.mutate(client: client, endpoint: endpoint, agent: agent, body: body)
     }
 
     private func startPet() {
-        do {
-            let projection = PetActivityProjection.make(sessions: realtimeSessions, inbox: realtimeInbox)
-            // start() writes the files itself; the skip-identical baseline in
-            // syncPetSnapshot must reflect that write.
-            lastPetProjection = projection
-            try pet.start(
-                executablePath: settings.resolvedPetExecutablePath,
-                projection: projection
-            ) { [weak self] status in
-                guard let self else { return }
-                self.petRunning = false
-                if self.settings.petEnabled {
-                    self.petError = "Pet이 종료되었습니다 (exit \(status))."
-                }
-            }
-            petRunning = true
-            petError = nil
-        } catch {
-            petRunning = false
-            petError = error.localizedDescription
-        }
+        petStore.start(
+            executablePath: settings.resolvedPetExecutablePath,
+            projection: PetActivityProjection.make(sessions: realtimeSessions, inbox: realtimeInbox),
+            enabled: { [weak self] in self?.settings.petEnabled == true }
+        )
     }
 
-    /// The projection last written to the contract files. State messages
-    /// arrive several times a second during a turn, but the projection usually
-    /// only changes on real state transitions — skipping identical writes
-    /// spares two atomic file writes + chmods per message.
-    private var lastPetProjection: PetActivityProjection?
-
     private func syncPetSnapshot() {
-        guard settings.petEnabled, petRunning else { return }
-        let projection = PetActivityProjection.make(sessions: realtimeSessions, inbox: realtimeInbox)
-        guard projection != lastPetProjection else { return }
-        do {
-            try pet.update(projection)
-            lastPetProjection = projection
-            if petRunning { petError = nil }
-        } catch {
-            petError = "Pet 상태 공유 실패: \(error.localizedDescription)"
-        }
+        petStore.sync(
+            projection: PetActivityProjection.make(sessions: realtimeSessions, inbox: realtimeInbox),
+            enabled: settings.petEnabled
+        )
     }
 
     private func reconcileSelections() {

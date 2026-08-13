@@ -55,4 +55,23 @@ assert.doesNotMatch(monitorSource, /\.call\(["'](?:gateway_config|retention_prev
 assert.doesNotMatch(monitorSource, /(?:error|message)[^\n]*\.includes\(/, "Gateway compatibility must not branch on message substrings");
 assert.doesNotMatch(monitorSource, /\blet gatewaySessions\b/, "MonitorState must own the Gateway session source");
 
+const appModelSource = await readFile(join(root, "macos/Sources/ACPMonitor/AppModel.swift"), "utf8");
+assert.doesNotMatch(appModelSource, /\b(?:Process|URLSession|FileManager)\b/, "AppModel must not own process, network, or filesystem primitives");
+const sidecarControllerSource = await readFile(join(root, "macos/Sources/ACPMonitor/SidecarController.swift"), "utf8");
+assert.doesNotMatch(sidecarControllerSource, /\.waitUntilExit\s*\(/, "sidecar shutdown must use the bounded actor path");
+for (const typeName of ["SidecarProcessActor", "GatewayRuntimeManager", "AppUpdateService", "AgentCatalogStore", "MonitorReducer", "MonitorStore", "PetStore"]) {
+  const matches = await collectMatches(join(root, "macos/Sources/ACPMonitor"), new RegExp(`(?:actor|class|enum)\\s+${typeName}\\b`));
+  assert.ok(matches.length > 0, `Phase 6 boundary ${typeName} is missing`);
+}
+
 process.stdout.write("AgenLynk ownership and pinned Gateway boundary checks passed\n");
+
+async function collectMatches(directory, pattern) {
+  const matches = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".swift")) continue;
+    const source = await readFile(join(directory, entry.name), "utf8");
+    if (pattern.test(source)) matches.push(entry.name);
+  }
+  return matches;
+}

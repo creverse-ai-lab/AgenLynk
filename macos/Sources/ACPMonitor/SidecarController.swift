@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 enum SidecarError: LocalizedError {
@@ -13,12 +14,6 @@ enum SidecarError: LocalizedError {
         }
     }
 
-    /// Same `monitor_*` stable-code vocabulary as `MonitorDecodeError`/
-    /// `MonitorClientError` (see Models.swift). A handshake line that never
-    /// parsed into a well-formed `monitor_ready` message is the same
-    /// malformed/missing-contract situation as a decode failure; an exit
-    /// with no ready message at all carries no version information to
-    /// classify, so it stays uncoded.
     var stableCode: String? {
         switch self {
         case .invalidReadyMessage: "monitor_api_incompatible"
@@ -27,37 +22,94 @@ enum SidecarError: LocalizedError {
     }
 }
 
-final class SidecarController {
+struct SidecarProcessStopResult: Equatable, Sendable {
+    let forceTerminationUsed: Bool
+    let stopped: Bool
+}
+
+/// Shared bounded shutdown policy. The async probes make the policy directly
+/// testable with a fake process while production keeps `Process` actor-isolated.
+enum BoundedProcessTermination {
+    static func stop(
+        timeoutNanoseconds: UInt64,
+        pollNanoseconds: UInt64 = 25_000_000,
+        isRunning: @escaping @Sendable () async -> Bool,
+        terminate: @escaping @Sendable () async -> Void,
+        forceTerminate: @escaping @Sendable () async -> Void
+    ) async -> SidecarProcessStopResult {
+        guard await isRunning() else {
+            return SidecarProcessStopResult(forceTerminationUsed: false, stopped: true)
+        }
+        await terminate()
+        if await waitUntilStopped(
+            timeoutNanoseconds: timeoutNanoseconds,
+            pollNanoseconds: pollNanoseconds,
+            isRunning: isRunning
+        ) {
+            return SidecarProcessStopResult(forceTerminationUsed: false, stopped: true)
+        }
+        await forceTerminate()
+        let stopped = await waitUntilStopped(
+            timeoutNanoseconds: timeoutNanoseconds,
+            pollNanoseconds: pollNanoseconds,
+            isRunning: isRunning
+        )
+        return SidecarProcessStopResult(forceTerminationUsed: true, stopped: stopped)
+    }
+
+    private static func waitUntilStopped(
+        timeoutNanoseconds: UInt64,
+        pollNanoseconds: UInt64,
+        isRunning: @escaping @Sendable () async -> Bool
+    ) async -> Bool {
+        let started = DispatchTime.now().uptimeNanoseconds
+        while await isRunning() {
+            let elapsed = DispatchTime.now().uptimeNanoseconds - started
+            if elapsed >= timeoutNanoseconds { return false }
+            try? await Task.sleep(nanoseconds: min(pollNanoseconds, timeoutNanoseconds - elapsed))
+        }
+        return true
+    }
+}
+
+/// Owns the sidecar `Process`, pipes, readiness task, and shutdown lifecycle.
+/// No `Process` operation runs on MainActor and shutdown never calls the
+/// blocking `waitUntilExit()` API.
+actor SidecarProcessActor {
+    struct LaunchResult: Sendable {
+        let endpoint: MonitorEndpoint
+        let meta: MonitorMeta
+    }
+
     private var process: Process?
     private var outputPipe: Pipe?
-    private var readyTask: Task<(MonitorEndpoint, MonitorMeta), Error>?
+    private var readyTask: Task<LaunchResult, Error>?
     private var generation = 0
 
-    /// Version/compatibility metadata parsed from the last accepted
-    /// `monitor_ready` message. Never carries the `apiToken`.
-    private(set) var meta: MonitorMeta?
+    private struct ProcessResources {
+        let process: Process?
+        let outputPipe: Pipe?
+        let readyTask: Task<LaunchResult, Error>?
+    }
 
-    func start(nodeOverride: String = "") async throws -> MonitorEndpoint {
-        stop()
+    func start(nodeOverride: String = "") async throws -> LaunchResult {
         generation += 1
         let startGeneration = generation
+        let previous = detachCurrentProcess()
+        await stop(resources: previous)
+        guard generation == startGeneration, !Task.isCancelled else { throw CancellationError() }
         let nodeURL = try BundledRuntime.locateNode(override: nodeOverride)
         try BundledRuntime.validateVersion(at: nodeURL)
         let scriptURL = try BundledRuntime.sidecarResourceURL("src/server/monitor.js")
         let gatewayClientURL = try BundledRuntime.gatewayResourceURL("gateway-client/index.js")
-        let gatewayRuntimeRoot = gatewayClientURL
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let process = Process()
+        let gatewayRuntimeRoot = gatewayClientURL.deletingLastPathComponent().deletingLastPathComponent()
+        let launched = Process()
         let output = Pipe()
 
-        process.executableURL = nodeURL
-        // The monitor reads Codex's SQLite database through node:sqlite, which
-        // is still flagged experimental in Node 22. Silence that one warning
-        // rather than every warning, so real ones still reach the log.
-        process.arguments = ["--disable-warning=ExperimentalWarning", scriptURL.path]
-        process.standardOutput = output
-        process.standardError = FileHandle.standardError
+        launched.executableURL = nodeURL
+        launched.arguments = ["--disable-warning=ExperimentalWarning", scriptURL.path]
+        launched.standardOutput = output
+        launched.standardError = FileHandle.standardError
         let path = BundledRuntime.launchPath(nodeDirectory: nodeURL.deletingLastPathComponent())
         let monitorEnvironment = [
             "ACP_GATEWAY_MONITOR_PORT": "0",
@@ -71,20 +123,15 @@ final class SidecarController {
             "NPM_CONFIG_PREFIX": FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".npm-global").path
         ]
-        process.environment = ProcessInfo.processInfo.environment.merging(monitorEnvironment) { _, appValue in appValue }
+        launched.environment = ProcessInfo.processInfo.environment.merging(monitorEnvironment) { _, appValue in appValue }
 
-        try process.run()
-        self.process = process
+        try launched.run()
+        process = launched
         outputPipe = output
-
-        let readyTask = Task.detached(priority: .userInitiated) {
+        let task = Task.detached(priority: .userInitiated) {
             var pending = Data()
-            while process.isRunning || !pending.isEmpty {
+            while true {
                 try Task.checkCancellation()
-                // read(upToCount:) can wait for the full requested length on a
-                // pipe while the long-lived sidecar keeps stdout open. Read the
-                // bytes currently available so the short monitor_ready line is
-                // delivered immediately.
                 let chunk = output.fileHandleForReading.availableData
                 if chunk.isEmpty { break }
                 pending.append(chunk)
@@ -96,48 +143,119 @@ final class SidecarController {
                           let rawURL = value["url"] as? String,
                           let url = URL(string: rawURL),
                           let apiToken = value["apiToken"] as? String else { continue }
-                    // Reject an unsupported schema/API major up front instead of
-                    // handing back an endpoint the rest of the app can't safely
-                    // talk to; do not partially decode an incompatible message.
                     let object = JSONValue(any: value).objectValue ?? [:]
                     try MonitorCompatibility.validate(object)
-                    return (MonitorEndpoint(baseURL: url, apiToken: apiToken), MonitorMeta(object))
+                    return LaunchResult(
+                        endpoint: MonitorEndpoint(baseURL: url, apiToken: apiToken),
+                        meta: MonitorMeta(object)
+                    )
                 }
             }
-            if process.isRunning { throw SidecarError.invalidReadyMessage }
-            if process.terminationStatus != 0 { throw SidecarError.processExited(process.terminationStatus) }
             throw SidecarError.invalidReadyMessage
         }
-        self.readyTask = readyTask
+        readyTask = task
         do {
-            let (endpoint, meta) = try await readyTask.value
-            if generation == startGeneration {
-                self.readyTask = nil
-                self.meta = meta
-            }
-            return endpoint
+            let result = try await task.value
+            guard generation == startGeneration,
+                  !Task.isCancelled,
+                  process === launched else { throw CancellationError() }
+            readyTask = nil
+            return result
         } catch {
-            if generation == startGeneration {
-                self.readyTask = nil
-                stop()
+            let reportedError: Error
+            if error is CancellationError {
+                reportedError = error
+            } else if !launched.isRunning, launched.terminationStatus != 0 {
+                reportedError = SidecarError.processExited(launched.terminationStatus)
+            } else {
+                reportedError = error
             }
-            throw error
+            if generation == startGeneration {
+                let failed = detachCurrentProcess(matching: launched)
+                await stop(resources: failed)
+            }
+            throw reportedError
         }
     }
 
-    func stop() {
+    @discardableResult
+    func stop(timeoutNanoseconds: UInt64 = 750_000_000) async -> SidecarProcessStopResult {
         generation += 1
-        readyTask?.cancel()
-        readyTask = nil
-        meta = nil
-        if let process, process.isRunning {
-            process.terminate()
-            process.waitUntilExit()
-        }
-        self.process = nil
-        outputPipe?.fileHandleForReading.closeFile()
-        outputPipe = nil
+        let resources = detachCurrentProcess()
+        return await stop(resources: resources, timeoutNanoseconds: timeoutNanoseconds)
     }
 
-    deinit { stop() }
+    private func detachCurrentProcess(matching expected: Process? = nil) -> ProcessResources {
+        if let expected, process !== expected {
+            return ProcessResources(process: nil, outputPipe: nil, readyTask: nil)
+        }
+        let resources = ProcessResources(process: process, outputPipe: outputPipe, readyTask: readyTask)
+        process = nil
+        outputPipe = nil
+        readyTask = nil
+        return resources
+    }
+
+    @discardableResult
+    private func stop(
+        resources: ProcessResources,
+        timeoutNanoseconds: UInt64 = 750_000_000
+    ) async -> SidecarProcessStopResult {
+        resources.readyTask?.cancel()
+        guard let stopping = resources.process else {
+            close(resources.outputPipe)
+            return SidecarProcessStopResult(forceTerminationUsed: false, stopped: true)
+        }
+        guard stopping.isRunning else {
+            close(resources.outputPipe)
+            return SidecarProcessStopResult(forceTerminationUsed: false, stopped: true)
+        }
+        let pid = stopping.processIdentifier
+        stopping.terminate()
+        if await waitUntilStopped(stopping, timeoutNanoseconds: timeoutNanoseconds) {
+            close(resources.outputPipe)
+            return SidecarProcessStopResult(forceTerminationUsed: false, stopped: true)
+        }
+        if stopping.isRunning { _ = Darwin.kill(pid, SIGKILL) }
+        let stopped = await waitUntilStopped(stopping, timeoutNanoseconds: timeoutNanoseconds)
+        close(resources.outputPipe)
+        return SidecarProcessStopResult(forceTerminationUsed: true, stopped: stopped)
+    }
+
+    private func waitUntilStopped(_ process: Process, timeoutNanoseconds: UInt64) async -> Bool {
+        let started = DispatchTime.now().uptimeNanoseconds
+        while process.isRunning {
+            let elapsed = DispatchTime.now().uptimeNanoseconds - started
+            if elapsed >= timeoutNanoseconds { return false }
+            try? await Task.sleep(nanoseconds: min(25_000_000, timeoutNanoseconds - elapsed))
+        }
+        return true
+    }
+
+    private func close(_ pipe: Pipe?) {
+        pipe?.fileHandleForReading.closeFile()
+    }
+}
+
+/// MainActor-facing facade. It retains only value-type handshake metadata;
+/// process ownership remains inside `SidecarProcessActor`.
+@MainActor
+final class SidecarController {
+    private let processActor: SidecarProcessActor
+    private(set) var meta: MonitorMeta?
+
+    init(processActor: SidecarProcessActor = SidecarProcessActor()) {
+        self.processActor = processActor
+    }
+
+    func start(nodeOverride: String = "") async throws -> MonitorEndpoint {
+        let result = try await processActor.start(nodeOverride: nodeOverride)
+        meta = result.meta
+        return result.endpoint
+    }
+
+    func stop() async {
+        meta = nil
+        await processActor.stop()
+    }
 }

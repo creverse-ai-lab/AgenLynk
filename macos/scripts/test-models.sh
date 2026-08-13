@@ -30,6 +30,19 @@ env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
 
 "$OUT"
 
+PHASE6_OUT="$CHECK_ROOT/phase6-architecture"
+env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
+  swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 $SHARED_FLAGS \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/Models.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/MonitorClient.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/BundledRuntime.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/SidecarController.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/MonitorStore.swift" \
+  "$REPO_ROOT/macos/Tests/ACPMonitorTests/Phase6ArchitectureTests.swift" \
+  -o "$PHASE6_OUT"
+
+"$PHASE6_OUT"
+
 SETTINGS_OUT="$CHECK_ROOT/settings"
 env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 \

@@ -2,14 +2,30 @@ import AppKit
 import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    var terminationHandler: (() -> Void)?
-    func applicationWillTerminate(_ notification: Notification) { terminationHandler?() }
+    var terminationHandler: (() async -> Void)?
+    private var terminating = false
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let terminationHandler, !terminating else { return terminating ? .terminateLater : .terminateNow }
+        terminating = true
+        Task {
+            await terminationHandler()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
 }
 
 @main
 struct ACPMonitorApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var model = AppModel()
+    @StateObject private var model: AppModel
+
+    init() {
+        let model = AppModel()
+        _model = StateObject(wrappedValue: model)
+        appDelegate.terminationHandler = { [weak model] in await model?.stop() }
+    }
 
     var body: some Scene {
         // `Window`, not `WindowGroup`: the dashboard is a single, unique
@@ -21,7 +37,6 @@ struct ACPMonitorApp: App {
             DashboardView()
                 .environmentObject(model)
                 .environmentObject(model.settings)
-                .onAppear { appDelegate.terminationHandler = { model.stop() } }
         }
         .defaultSize(width: 1420, height: 880)
 
