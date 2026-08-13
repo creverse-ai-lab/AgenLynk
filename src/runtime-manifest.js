@@ -81,8 +81,12 @@ export async function assertRequiredFilesExist(root, files = REQUIRED_RUNTIME_FI
 }
 
 function assertGatewayLock(lock) {
-  if (lock?.schemaVersion !== 1 || lock.version !== "1.4.0" || lock.tag !== "v1.4.0" || lock.apiMajor !== 1) {
-    throw new Error("gateway.lock.json must pin Gateway v1.4.0 API major 1");
+  if (lock?.schemaVersion !== 1
+    || typeof lock.version !== "string"
+    || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(lock.version)
+    || lock.tag !== `v${lock.version}`
+    || lock.apiMajor !== 1) {
+    throw new Error("gateway.lock.json must identify a versioned Gateway API major 1 release");
   }
   if (!/^[a-f0-9]{40}$/.test(lock.sourceCommit ?? "") || !/^[a-f0-9]{64}$/.test(lock.asset?.sha256 ?? "")) {
     throw new Error("gateway.lock.json release identity is invalid");

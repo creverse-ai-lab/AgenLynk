@@ -921,12 +921,16 @@ struct GatewayIdentity: Equatable, Sendable {
 struct MonitorMeta: Equatable, Sendable {
     let schemaVersion: Int
     let monitorApiVersion: String
+    let sidecarVersion: String
+    let sidecarBuildId: String
     let gatewayIdentity: GatewayIdentity
     let capabilities: JSONValue
 
     init(_ object: [String: JSONValue]) {
         schemaVersion = object.int("schemaVersion") ?? MonitorCompatibility.supportedSchemaVersion
         monitorApiVersion = object.string("monitorApiVersion") ?? ""
+        sidecarVersion = object.string("sidecarVersion") ?? ""
+        sidecarBuildId = object.string("sidecarBuildId") ?? ""
         gatewayIdentity = GatewayIdentity(object["gatewayIdentity"] ?? .null)
         capabilities = object["capabilities"] ?? .object([:])
     }

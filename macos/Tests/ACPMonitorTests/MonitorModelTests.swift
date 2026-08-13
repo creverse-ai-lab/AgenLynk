@@ -650,6 +650,8 @@ enum MonitorModelChecks {
         {
           "schemaVersion":1,
           "monitorApiVersion":"1.0",
+          "sidecarVersion":"0.4.0",
+          "sidecarBuildId":"sidecar-build",
           "gatewayIdentity":{"rootId":"root-1","gatewayApiVersion":1,"gatewayVersion":null,"gatewayBuildId":null},
           "capabilities":{"agentUpdates":true}
         }
@@ -657,6 +659,8 @@ enum MonitorModelChecks {
         let meta = try MonitorMeta.decode(data)
         try check(meta.schemaVersion == 1, "meta should decode the schema version")
         try check(meta.monitorApiVersion == "1.0", "meta should decode the monitor API version")
+        try check(meta.sidecarVersion == "0.4.0", "meta should decode the sidecar version")
+        try check(meta.sidecarBuildId == "sidecar-build", "meta should decode the sidecar build id")
         try check(meta.gatewayIdentity.rootId == "root-1", "meta should decode the gateway identity root id")
         try check(meta.gatewayIdentity.gatewayApiVersion == 1, "meta should decode the gateway API version")
         try check(meta.gatewayIdentity.gatewayVersion == nil, "a missing Gateway setup value should decode as nil, not crash")

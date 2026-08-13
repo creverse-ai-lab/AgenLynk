@@ -51,8 +51,15 @@ try {
     throw new Error(`--signing-mode must be ad-hoc or developer-id, got: ${signingMode}`);
   }
   const signingIdentity = args["signing-identity"] || null;
+  const appVersion = requireArg(args, "app-version");
+  const notarized = requireBooleanArg(args, "notarized");
+  const stapled = requireBooleanArg(args, "stapled");
   if (signingMode === "developer-id" && !signingIdentity) {
     throw new Error("--signing-identity is required for developer-id signing");
+  }
+  const releaseEvidenceComplete = signingMode === "developer-id" && notarized && stapled;
+  if (!releaseEvidenceComplete && !/^0\.4\.0-beta\.[0-9]+$/.test(appVersion)) {
+    throw new Error("unsigned or incomplete release evidence requires a 0.4.0-beta.x app version");
   }
   if (!Number.isInteger(runtimeManifest.gatewayApiVersion)) {
     throw new Error("runtime manifest is missing an integer gatewayApiVersion");
@@ -66,7 +73,7 @@ try {
     generatedAt: new Date().toISOString(),
     app: {
       name: requireArg(args, "app-name"),
-      version: requireArg(args, "app-version"),
+      version: appVersion,
       buildNumber: requireArg(args, "app-build"),
       bundleId: requireArg(args, "bundle-id"),
       minimumMacOS: requireArg(args, "min-macos"),
@@ -96,8 +103,8 @@ try {
     signing: {
       mode: signingMode,
       identity: signingIdentity,
-      notarized: requireBooleanArg(args, "notarized"),
-      stapled: requireBooleanArg(args, "stapled")
+      notarized,
+      stapled
     }
   };
 

@@ -174,13 +174,16 @@ enum OnboardingLogicChecks {
 
     static func checkRuntimeProvisionerResultParsing() throws {
         let valid = """
-        {"runtimeRoot":"/Users/test/.acp-gateway/runtime/versions/1.3.1-abcdef","gatewayVersion":"1.3.1","gatewayBuildId":"abcdef"}
+        {"runtimeRoot":"/Users/test/.acp-gateway/runtime/versions/1.3.1-abcdef","gatewayVersion":"1.3.1","gatewayBuildId":"abcdef","recoveryNotice":"current.json을 복구했습니다."}
         """
         guard let info = RuntimeProvisioner.parse(valid) else {
             throw CheckError.failed("expected a well-formed runtime-installer-cli.js result to parse")
         }
         guard info.runtimeRoot == "/Users/test/.acp-gateway/runtime/versions/1.3.1-abcdef" else {
             throw CheckError.failed("expected the parsed runtimeRoot to round-trip exactly")
+        }
+        guard info.recoveryNotice == "current.json을 복구했습니다." else {
+            throw CheckError.failed("expected the runtime recovery notice to be preserved")
         }
 
         guard RuntimeProvisioner.parse("not json") == nil else {

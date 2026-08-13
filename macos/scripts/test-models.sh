@@ -2,7 +2,11 @@
 set -eu
 
 REPO_ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
-SDK=${ACP_MONITOR_SDKROOT:-/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk}
+if [ -n "${ACP_MONITOR_SDKROOT:-}" ]; then
+  SDK=$ACP_MONITOR_SDKROOT
+else
+  SDK=$(xcrun --sdk macosx --show-sdk-path)
+fi
 CACHE_ROOT="$REPO_ROOT/build/cache"
 CHECK_ROOT="$CACHE_ROOT/checks"
 MODULE_CACHE="$CACHE_ROOT/clang-module-cache"

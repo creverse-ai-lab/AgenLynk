@@ -128,6 +128,13 @@ final class AppModel: ObservableObject {
     /// The Monitor API version the sidecar reported at handshake.
     var monitorApiVersionText: String { sidecar.meta?.monitorApiVersion ?? "—" }
 
+    var sidecarVersionText: String {
+        guard let meta = sidecar.meta else { return "—" }
+        let version = meta.sidecarVersion.isEmpty ? "—" : meta.sidecarVersion
+        let build = meta.sidecarBuildId.isEmpty ? "—" : meta.sidecarBuildId
+        return "\(version) · build \(build)"
+    }
+
     var gatewayBuild: String {
         gateway?.objectValue?.string("gatewayBuildId") ?? "—"
     }
@@ -350,7 +357,10 @@ final class AppModel: ObservableObject {
     private func performStartupCheck() async {
         startupPhase = .provisioningRuntime
         do {
-            _ = try await runtimeProvisioner.ensureInstalled()
+            if let installed = try await runtimeProvisioner.ensureInstalled(),
+               let recoveryNotice = installed.recoveryNotice {
+                runtimeNotice = recoveryNotice
+            }
         } catch {
             startupPhase = .runtimeError(error.localizedDescription)
             return

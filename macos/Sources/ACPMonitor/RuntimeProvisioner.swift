@@ -12,6 +12,7 @@ struct InstalledRuntimeInfo: Equatable {
     let runtimeRoot: String
     let gatewayVersion: String
     let gatewayBuildId: String
+    let recoveryNotice: String?
 }
 
 enum RuntimeProvisionerError: LocalizedError {
@@ -73,6 +74,11 @@ final class RuntimeProvisioner {
               let runtimeRoot = object["runtimeRoot"] as? String, !runtimeRoot.isEmpty,
               let gatewayVersion = object["gatewayVersion"] as? String,
               let gatewayBuildId = object["gatewayBuildId"] as? String else { return nil }
-        return InstalledRuntimeInfo(runtimeRoot: runtimeRoot, gatewayVersion: gatewayVersion, gatewayBuildId: gatewayBuildId)
+        return InstalledRuntimeInfo(
+            runtimeRoot: runtimeRoot,
+            gatewayVersion: gatewayVersion,
+            gatewayBuildId: gatewayBuildId,
+            recoveryNotice: object["recoveryNotice"] as? String
+        )
     }
 }

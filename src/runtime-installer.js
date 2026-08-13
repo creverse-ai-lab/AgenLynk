@@ -5,7 +5,7 @@
 // app bundle itself is seed input only (see TODO.md's fixed runtime
 // boundary). install.json (Control identity/state) is never touched here;
 // existing installs keep their identity untouched.
-import { realpath, rename, rm, symlink } from "node:fs/promises";
+import { access, realpath, rename, rm, symlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 import {
@@ -73,6 +73,7 @@ export async function ensureRuntimeInstalled({
   smokeCheck = runBundledRuntimeSmokeCheck,
   blockers
 }) {
+  const recoveryNotice = await currentPointerRecoveryNotice(runtimeRoot);
   const existing = await currentRuntimeIfValid(runtimeRoot);
   if (existing && !(await seedSupersedes(seedRoot, existing))) return existing;
 
@@ -121,9 +122,27 @@ export async function ensureRuntimeInstalled({
       gatewayBuildId: manifest.gatewayBuildId,
       runtimeBuildId: manifest.runtimeBuildId,
       ...runtimeSidecarIdentity(manifest),
-      generatedAt: manifest.generatedAt
+      generatedAt: manifest.generatedAt,
+      ...(recoveryNotice ? { recoveryNotice } : {})
     };
   });
+}
+
+async function currentPointerRecoveryNotice(runtimeRoot) {
+  const pointerPath = join(runtimeRoot, CURRENT_POINTER_FILE);
+  try {
+    await access(pointerPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    return `기존 current.json을 읽을 수 없어 bundled runtime으로 복구합니다: ${error.message}`;
+  }
+  try {
+    const pointer = await readPointerFile(runtimeRoot, CURRENT_POINTER_FILE);
+    if (pointer) return null;
+    return "기존 current.json 형식이 잘못되어 검증된 bundled runtime으로 복구했습니다.";
+  } catch (error) {
+    return `기존 current.json이 손상되어 검증된 bundled runtime으로 복구했습니다: ${error.message}`;
+  }
 }
 
 async function currentRuntimeIfValid(runtimeRoot) {

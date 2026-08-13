@@ -10,7 +10,11 @@ CONTENTS="$APP/Contents"
 PET_APP="$CONTENTS/Helpers/LynkPet.app"
 PET_CONTENTS="$PET_APP/Contents"
 PET_EXECUTABLE="$PET_CONTENTS/MacOS/LynkPet"
-SDK=${ACP_MONITOR_SDKROOT:-/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk}
+if [ -n "${ACP_MONITOR_SDKROOT:-}" ]; then
+  SDK=$ACP_MONITOR_SDKROOT
+else
+  SDK=$(xcrun --sdk macosx --show-sdk-path)
+fi
 MODULE_CACHE="$CACHE_ROOT/clang-module-cache"
 SWIFTPM_CACHE="$CACHE_ROOT/swiftpm-module-cache"
 
@@ -35,9 +39,8 @@ fi
 cp -R "$PET_RESOURCE_BUNDLE" "$PET_CONTENTS/Resources/ACPMonitor_LynkPet.bundle"
 
 # Optional build-time version overrides. The checked-in Info.plist stays the
-# source of truth (still pre-1.0 — see macos/Resources/Info.plist) until
-# there is actual release evidence; a release build sets these explicitly
-# instead. The staged Info.plist is what build-release-manifest-cli.js later
+# source of truth. A prerelease or release build can still set these explicitly.
+# The staged Info.plist is what build-release-manifest-cli.js later
 # reads, so overriding it here (rather than only recording the env var) is
 # what keeps the app bundle and release manifest from ever disagreeing.
 if [ -n "${ACP_LYNK_APP_VERSION:-}" ]; then
