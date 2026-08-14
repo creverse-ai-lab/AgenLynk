@@ -38,14 +38,14 @@ final class RuntimeProvisioner {
     /// development). Throws an actionable error if a seed exists but fails
     /// to install/verify. The shared runner's watchdog bounds a hung seed
     /// Node — previously a first-install hang pinned startup forever.
-    func ensureInstalled() async throws -> InstalledRuntimeInfo? {
+    func ensureInstalled(forceRepair: Bool = false) async throws -> InstalledRuntimeInfo? {
         guard let seedRoot = BundledRuntime.seedRuntimeRoot() else { return nil }
         let result: SeedNodeProcess.Result
         do {
             result = try await SeedNodeProcess.run(
                 seedRoot: seedRoot,
                 script: "app-runtime/runtime-installer-cli.js",
-                arguments: ["--seed", seedRoot.path],
+                arguments: ["--seed", seedRoot.path] + (forceRepair ? ["--force-repair"] : []),
                 onSpawn: { [weak self] spawned in self?.process = spawned }
             )
             process = nil

@@ -92,6 +92,10 @@ actor SidecarProcessActor {
         let readyTask: Task<LaunchResult, Error>?
     }
 
+    func isRunning() -> Bool {
+        process?.isRunning == true
+    }
+
     func start(nodeOverride: String = "") async throws -> LaunchResult {
         generation += 1
         let startGeneration = generation
@@ -257,5 +261,9 @@ final class SidecarController {
     func stop() async {
         meta = nil
         await processActor.stop()
+    }
+
+    func isRunning() async -> Bool {
+        await processActor.isRunning()
     }
 }

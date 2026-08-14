@@ -1522,9 +1522,15 @@ func crossSessionEventOrder(_ lhs: MonitorEvent, _ rhs: MonitorEvent) -> Bool {
 /// code with no visible sign; a safe restart respawns from the monitor's
 /// runtime and heals it.
 func runtimeSplitWarning(gateway: JSONValue?) -> String? {
-    guard let split = gateway?.objectValue?.object("runtimeSplit"),
-          let daemonRoot = split.string("daemonRuntimeRoot") else { return nil }
-    return "실행 중인 Gateway가 다른 runtime(\(daemonRoot))에서 동작하고 있습니다. Gateway 구성에서 '적용 및 안전 재시작'을 실행하면 현재 runtime으로 전환됩니다."
+    guard let split = gateway?.objectValue?.object("runtimeSplit") else { return nil }
+    if let daemonRoot = split.string("daemonRuntimeRoot") {
+        return "실행 중인 Gateway가 다른 runtime(\(daemonRoot))에서 동작하고 있습니다. Gateway 구성에서 '적용 및 안전 재시작'을 실행하면 현재 runtime으로 전환됩니다."
+    }
+    if let daemonBuildId = split.string("daemonBuildId"),
+       let monitorBuildId = split.string("monitorBuildId") {
+        return "실행 중인 Gateway build(\(daemonBuildId))가 설치된 runtime build(\(monitorBuildId))와 다릅니다. Gateway 구성에서 '적용 및 안전 재시작'을 실행하면 현재 runtime으로 전환됩니다."
+    }
+    return nil
 }
 
 /// User-facing guidance per stable monitor failure code. The codes come from
@@ -1628,18 +1634,57 @@ func parseReleaseVersion(_ tag: String) -> String {
     return trimmed
 }
 
-/// Compares two dotted versions by numeric part, treating a missing part as 0
-/// so `1.0` and `1.0.0` are equal. Non-numeric parts count as 0. Semantic, not
-/// lexical: `0.3.4 < 0.3.10`.
+/// Semantic-version precedence, including prereleases: numeric core components
+/// compare numerically, a prerelease sorts below the matching stable version,
+/// and prerelease identifiers follow SemVer numeric/lexical ordering. Build
+/// metadata does not affect precedence.
 func compareSemanticVersions(_ lhs: String, _ rhs: String) -> ComparisonResult {
-    let left = lhs.split(separator: ".").map { Int($0) ?? 0 }
-    let right = rhs.split(separator: ".").map { Int($0) ?? 0 }
-    for index in 0..<max(left.count, right.count) {
-        let a = index < left.count ? left[index] : 0
-        let b = index < right.count ? right[index] : 0
+    let left = semanticVersionComponents(lhs)
+    let right = semanticVersionComponents(rhs)
+    for index in 0..<max(left.core.count, right.core.count) {
+        let a = index < left.core.count ? left.core[index] : 0
+        let b = index < right.core.count ? right.core[index] : 0
         if a != b { return a < b ? .orderedAscending : .orderedDescending }
     }
+
+    switch (left.prerelease, right.prerelease) {
+    case (nil, nil):
+        return .orderedSame
+    case (.some, nil):
+        return .orderedAscending
+    case (nil, .some):
+        return .orderedDescending
+    case let (.some(leftIdentifiers), .some(rightIdentifiers)):
+        for index in 0..<min(leftIdentifiers.count, rightIdentifiers.count) {
+            let a = leftIdentifiers[index]
+            let b = rightIdentifiers[index]
+            if a == b { continue }
+            switch (Int(a), Int(b)) {
+            case let (.some(leftNumber), .some(rightNumber)):
+                return leftNumber < rightNumber ? .orderedAscending : .orderedDescending
+            case (.some, nil):
+                return .orderedAscending
+            case (nil, .some):
+                return .orderedDescending
+            case (nil, nil):
+                return a < b ? .orderedAscending : .orderedDescending
+            }
+        }
+        if leftIdentifiers.count != rightIdentifiers.count {
+            return leftIdentifiers.count < rightIdentifiers.count ? .orderedAscending : .orderedDescending
+        }
+    }
     return .orderedSame
+}
+
+private func semanticVersionComponents(_ value: String) -> (core: [Int], prerelease: [String]?) {
+    let withoutBuild = value.split(separator: "+", maxSplits: 1, omittingEmptySubsequences: false)[0]
+    let parts = withoutBuild.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+    let core = parts[0].split(separator: ".", omittingEmptySubsequences: false).map { Int($0) ?? 0 }
+    let prerelease = parts.count > 1
+        ? parts[1].split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        : nil
+    return (core, prerelease)
 }
 
 /// Parses the GitHub `GET /releases` array. The newest entry is `releases[0]`

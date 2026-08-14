@@ -5,9 +5,9 @@
 // app bundle itself is seed input only (see TODO.md's fixed runtime
 // boundary). install.json (Control identity/state) is never touched here;
 // existing installs keep their identity untouched.
-import { access, realpath, rename, rm, symlink } from "node:fs/promises";
+import { access, readdir, readlink, realpath, rename, rm, symlink } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   readManifestFile,
   runtimePointerIdentityMismatch,
@@ -73,8 +73,8 @@ export async function ensureRuntimeInstalled({
   smokeCheck = runBundledRuntimeSmokeCheck,
   blockers
 }) {
-  const recoveryNotice = await currentPointerRecoveryNotice(runtimeRoot);
-  const existing = await currentRuntimeIfValid(runtimeRoot);
+  const initialInspection = await inspectCurrentRuntime(runtimeRoot);
+  const existing = initialInspection.runtime;
   if (existing && !(await seedSupersedes(seedRoot, existing))) return existing;
 
   // Same advisory lock as the updater's mutations: the provisioner runs on
@@ -82,8 +82,27 @@ export async function ensureRuntimeInstalled({
   // a user-driven stage/activate over the same versions/ tree.
   return withRuntimeLock(runtimeRoot, async () => {
     // Re-check under the lock: whoever held it may have just installed.
-    const installed = await currentRuntimeIfValid(runtimeRoot);
-    if (installed && !(await seedSupersedes(seedRoot, installed))) return installed;
+    const inspection = await inspectCurrentRuntime(runtimeRoot);
+    let installed = inspection.runtime;
+    const recoveryNotice = inspection.issue
+      ? `기존 current.json 또는 runtime이 손상되어 안전 복구가 필요합니다: ${inspection.issue}`
+      : null;
+    let repairingManagedRuntime = false;
+
+    if (!installed && inspection.issue) {
+      const recovered = await runtimeFromCurrentSymlinkIfValid(runtimeRoot);
+      if (recovered) {
+        // The stable symlink still identifies the runtime already in use. Repair
+        // only the pointer metadata; do not switch versions or bypass blockers.
+        await activateCurrent(runtimeRoot, recovered.runtimeRoot, recovered, { pinned: recovered.pinned });
+        installed = recovered;
+      } else {
+        repairingManagedRuntime = await hasManagedRuntimeVersions(runtimeRoot);
+      }
+    }
+    if (installed && !(await seedSupersedes(seedRoot, installed))) {
+      return recoveryNotice ? { ...installed, recoveryNotice } : installed;
+    }
 
     const manifest = await readManifestFile(seedRoot);
     const versionDir = runtimeVersionId(manifest);
@@ -97,22 +116,31 @@ export async function ensureRuntimeInstalled({
     // state cannot be read. Activation still requires an explicit all-clear.
     // Missing blockers is unknown, not idle — the provisioner therefore
     // stages on launch and leaves current.json / current untouched.
-    if (installed) {
+    if (installed || repairingManagedRuntime) {
       const decision = resolveStartupBlockers(blockers);
-      if (!decision.allowed) return installed;
+      if (!decision.allowed) {
+        if (installed) return recoveryNotice ? { ...installed, recoveryNotice } : installed;
+        throw new Error(
+          `기존 runtime을 안전하게 확인할 수 없어 bundled runtime 활성화를 보류합니다 (${decision.reasons.join(", ")})`
+        );
+      }
 
       try {
         await smokeCheck(target, manifest);
       } catch (error) {
         throw new Error(
-          `seed runtime failed its smoke check, keeping ${installed.gatewayVersion} (${installed.gatewayBuildId}): ${error.message}`
+          installed
+            ? `seed runtime failed its smoke check, keeping ${installed.gatewayVersion} (${installed.gatewayBuildId}): ${error.message}`
+            : `seed runtime failed its smoke check while repairing an invalid current runtime: ${error.message}`
         );
       }
       // Record what is being replaced so the app's rollback has a target. The
       // updater does this on every activation; an automatic upgrade that
       // skipped it would leave the user with no way back from a bad build.
-      const currentPointer = await readPointerFile(runtimeRoot, CURRENT_POINTER_FILE);
-      if (currentPointer) await writePointerFile(runtimeRoot, PREVIOUS_POINTER_FILE, currentPointer);
+      if (installed) {
+        const currentPointer = await readPointerFile(runtimeRoot, CURRENT_POINTER_FILE);
+        if (currentPointer) await writePointerFile(runtimeRoot, PREVIOUS_POINTER_FILE, currentPointer);
+      }
     }
 
     await activateCurrent(runtimeRoot, target, manifest);
@@ -128,47 +156,66 @@ export async function ensureRuntimeInstalled({
   });
 }
 
-async function currentPointerRecoveryNotice(runtimeRoot) {
+async function inspectCurrentRuntime(runtimeRoot) {
   const pointerPath = join(runtimeRoot, CURRENT_POINTER_FILE);
   try {
     await access(pointerPath);
   } catch (error) {
-    if (error?.code === "ENOENT") return null;
-    return `기존 current.json을 읽을 수 없어 bundled runtime으로 복구합니다: ${error.message}`;
+    if (error?.code === "ENOENT") return { runtime: null, issue: null };
+    return { runtime: null, issue: `current.json을 읽을 수 없습니다: ${error.message}` };
   }
   try {
-    const pointer = await readPointerFile(runtimeRoot, CURRENT_POINTER_FILE);
-    if (pointer) return null;
-    return "기존 current.json 형식이 잘못되어 검증된 bundled runtime으로 복구했습니다.";
-  } catch (error) {
-    return `기존 current.json이 손상되어 검증된 bundled runtime으로 복구했습니다: ${error.message}`;
-  }
-}
-
-async function currentRuntimeIfValid(runtimeRoot) {
-  try {
-    // readCurrentRuntime only swallows ENOENT (nothing installed yet); a
-    // malformed current.json (bad JSON, wrong shape) throws, and is treated
-    // here the same as "absent" so it falls through to seed repair below
-    // instead of crashing the caller.
     const current = await readCurrentRuntime(runtimeRoot);
-    if (!current || !(await isConfinedToVersions(runtimeRoot, current.runtimeRoot))) return null;
+    if (!current) return { runtime: null, issue: "current.json 형식이 올바르지 않습니다" };
+    if (!(await isConfinedToVersions(runtimeRoot, current.runtimeRoot))) {
+      return { runtime: null, issue: "current runtime이 관리되는 versions 경로 밖을 가리킵니다" };
+    }
     const ownManifest = await readManifestFile(current.runtimeRoot);
     if (runtimePointerIdentityMismatch(current, ownManifest)) {
-      return null;
+      return { runtime: null, issue: "current.json identity가 runtime manifest와 일치하지 않습니다" };
     }
     await verifyRuntimeManifest(current.runtimeRoot, ownManifest);
     return {
-      runtimeRoot: current.runtimeRoot,
-      gatewayVersion: current.gatewayVersion,
-      gatewayBuildId: current.gatewayBuildId,
-      runtimeBuildId: current.runtimeBuildId,
-      ...runtimeSidecarIdentity(ownManifest),
-      generatedAt: ownManifest.generatedAt,
-      pinned: current.pinned === true
+      runtime: runtimeInfo(current.runtimeRoot, ownManifest, { pinned: current.pinned === true }),
+      issue: null
     };
+  } catch (error) {
+    return { runtime: null, issue: error?.message ?? String(error) };
+  }
+}
+
+async function runtimeFromCurrentSymlinkIfValid(runtimeRoot) {
+  try {
+    const linkTarget = await readlink(join(runtimeRoot, "current"));
+    const target = isAbsolute(linkTarget) ? linkTarget : resolve(runtimeRoot, linkTarget);
+    if (!(await isConfinedToVersions(runtimeRoot, target))) return null;
+    const manifest = await readManifestFile(target);
+    await verifyRuntimeManifest(target, manifest);
+    return runtimeInfo(target, manifest);
   } catch {
     return null;
+  }
+}
+
+function runtimeInfo(runtimeRoot, manifest, { pinned = false } = {}) {
+  return {
+    runtimeRoot,
+    gatewayVersion: manifest.gatewayVersion,
+    gatewayBuildId: manifest.gatewayBuildId,
+    runtimeBuildId: manifest.runtimeBuildId,
+    ...runtimeSidecarIdentity(manifest),
+    generatedAt: manifest.generatedAt,
+    pinned
+  };
+}
+
+async function hasManagedRuntimeVersions(runtimeRoot) {
+  try {
+    const entries = await readdir(join(runtimeRoot, "versions"), { withFileTypes: true });
+    return entries.some((entry) => entry.isDirectory());
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
   }
 }
 

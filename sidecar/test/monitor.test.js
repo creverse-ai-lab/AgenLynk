@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 import {
   MONITOR_API_VERSION,
@@ -75,17 +76,38 @@ test("MonitorState marks a close event and removes its Live data on removal", ()
   assert.deepEqual(state.snapshot().sessions, [], "a stale refresh must not resurrect an explicitly closed session");
 });
 
-test("MonitorState broadcasts gateway changes and drops slow SSE clients", () => {
-  const state = new MonitorState();
+test("MonitorState coalesces SSE frames during backpressure and resumes on drain", () => {
+  const state = new MonitorState({ sseBackpressureTimeoutMs: 1_000 });
   assert.equal(state.setGateway({ gatewayVersion: "1.0.0" }), true);
   assert.equal(state.setGateway({ gatewayVersion: "1.0.0" }), false);
+  const slowClient = new EventEmitter();
+  const frames = [];
+  let firstWrite = true;
   let ended = false;
-  const slowClient = {
-    write() { return false; },
-    end() { ended = true; }
+  slowClient.write = (frame) => {
+    frames.push(frame);
+    if (firstWrite) {
+      firstWrite = false;
+      return false;
+    }
+    return true;
   };
-  state.sseClients.add(slowClient);
-  state.broadcast({ kind: "state" });
+  slowClient.end = () => { ended = true; };
+  state.addSseClient(slowClient);
+  state.broadcast({ kind: "state", revision: 1 });
+  state.broadcast({ kind: "state", revision: 2 });
+  state.broadcast({ kind: "event", event: { sequence: 1 } });
+  state.broadcast({ kind: "event", event: { sequence: 2 } });
+  assert.equal(ended, false, "write(false) means queued backpressure, not a closed response");
+  assert.equal(state.sseClients.size, 1);
+  assert.equal(frames.length, 1, "later frames must be coalesced while the response drains");
+  slowClient.emit("drain");
+  assert.equal(frames.length, 4);
+  assert.equal(JSON.parse(frames[1].replace(/^data: /, "").trim()).revision, 2);
+  assert.equal(JSON.parse(frames[2].replace(/^data: /, "").trim()).event.sequence, 1);
+  assert.equal(JSON.parse(frames[3].replace(/^data: /, "").trim()).event.sequence, 2);
+  assert.equal(ended, false);
+  state.closeSseClients();
   assert.equal(ended, true);
   assert.equal(state.sseClients.size, 0);
 });
@@ -108,6 +130,17 @@ test("MonitorState blocks Gateway restart while work or inbox responses are acti
   state.setSessions([{ sessionId: "idle", status: "idle" }]);
   state.setRecords({ tasks: [], inbox: [] });
   assert.deepEqual(state.restartBlockers(), []);
+});
+
+test("MonitorState ignores malformed session entries instead of crashing refresh", () => {
+  const state = new MonitorState();
+  assert.doesNotThrow(() => state.setSessions([
+    null,
+    {},
+    { sessionId: "", status: "running" },
+    { sessionId: "valid", status: "idle" }
+  ]));
+  assert.deepEqual(state.snapshot().sessions.map((session) => session.sessionId), ["valid"]);
 });
 
 test("MonitorState replaces local events and ignores local work as a Gateway restart blocker", () => {
