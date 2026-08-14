@@ -1,7 +1,8 @@
 {
   "name": "agenlynk",
   "version": "0.4.0",
-  "description": "Native macOS monitor and sidecar for the pinned ACP Gateway runtime.",
+  "description": "Open-source macOS app that ties local AI agents together and monitors delegated work.",
+  "license": "Apache-2.0",
   "type": "module",
   "private": true,
   "files": [

@@ -42,6 +42,9 @@ temp/
 *.tgz
 
 # Editors and operating systems
+# Generated README capture frames
+docs/images/raw/
+
 .DS_Store
 Thumbs.db
 .idea/
