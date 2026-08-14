@@ -1,137 +1,161 @@
 <p align="center">
-  <img src="macos/Resources/AppIcon.svg" width="112" alt="AgenLynk" />
+  <img src="macos/Resources/AppIcon.svg" width="96" alt="AgenLynk" />
 </p>
 
 <h1 align="center">AgenLynk</h1>
 
 <p align="center">
-  <b>0.4.0 Beta 2</b>
+  <b>0.4.0 beta</b> · Apache-2.0 · macOS 14+ · Apple Silicon
 </p>
 
 <p align="center">
-  여러 AI 에이전트가 무엇을 하고 있는지 한 화면에서 지켜보는 <b>macOS 메뉴바 모니터링 앱</b>
+  여러 에이전트에게 일을 나누다 보면, 누가 무엇을 하고 있는지 놓치기 쉽습니다.<br/>
+  AgenLynk는 그 흐름을 메뉴바와 한 화면에서 보여 줍니다.
 </p>
 
 <p align="center">
   <img alt="platform" src="https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white">
-  <img alt="app" src="https://img.shields.io/badge/AgenLynk-0.4.0--beta.2-1461FA">
-  <img alt="runtime" src="https://img.shields.io/badge/runtime-ACP%20Gateway%201.4.0-6E7681">
-  <img alt="node" src="https://img.shields.io/badge/Node-22%2B-339933?logo=nodedotjs&logoColor=white">
+  <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-1461FA">
+  <img alt="app" src="https://img.shields.io/badge/AgenLynk-0.4.0--beta-1461FA">
 </p>
+
+<p align="center">
+  <img src="docs/images/dashboard.png" alt="AgenLynk 대시보드. Frontdoor에서 Worker로 이어지는 시퀀스 다이어그램" width="920" />
+</p>
+
+## 사용 방법
+
+[Releases](https://github.com/creverse-ai-lab/agenlynk/releases)에서 `AgenLynk.dmg`를 받아 `AgenLynk.app`을 **Applications**로 옮긴 뒤 실행합니다. 시스템에 Node를 따로 설치할 필요는 없습니다.
+
+처음 실행하면 대시보드 대신 설치 화면이 열립니다. 대화에 쓸 에이전트(Codex / Claude / Grok)를 하나 이상 고르면, 앱이 포함된 Gateway 런타임을 설치하고 모니터링을 시작합니다. 서명은 ad-hoc이므로 다른 Mac에서는 `우클릭 → 열기`로 실행하세요.
+
+그다음부터는 화면이 하는 일이 전부입니다.
+
+1. **메뉴바 아이콘**  
+   에이전트가 진행 중인지, 응답을 기다리는지 창을 열지 않고 확인합니다. `대시보드 열기`로 전체 화면으로 들어갑니다.
+
+   <p align="center">
+     <img src="docs/images/menubar.png" alt="메뉴바 팝오버. 진행 중인 세션과 라이브 그래프" width="420" />
+   </p>
+
+2. **왼쪽 — Frontdoor 세션**  
+   지금 떠 있는 대화 세션 목록입니다. 하나를 고르면 가운데가 그 작업만 보여 줍니다.
+3. **가운데 — 시퀀스 다이어그램**  
+   Frontdoor에서 Worker로 나간 **호출**과 다시 돌아온 **응답**이 같은 시간축 위에 그려집니다. 아직 돌아오지 않은 호출은 점선으로 남습니다. 선택된 에이전트가 지금 하는 일(도구 실행 중 · 사고 중 · 답변 생성 중 · 권한 대기)이 상태 단어보다 먼저 보입니다.
+4. **오른쪽 — 선택 이벤트**  
+   클릭한 이벤트의 실제 응답 본문을 먼저 보여 줍니다. 원본 JSON은 접혀 있습니다.
+5. **설정**  
+   메뉴바 팝오버의 톱니바퀴, 또는 대시보드 툴바의 설정으로 엽니다. 탭이 다섯 개입니다.
+
+## 설정
+
+<p align="center">
+  <img src="docs/images/settings-acp.png" alt="설정 · ACP 연결. Frontdoor MCP 설치와 Worker 어댑터" width="720" />
+</p>
+
+혼자 실행 중인 Claude · Codex · Grok 세션은 MCP 없이도 보입니다.  
+한 에이전트가 다른 에이전트에게 일을 넘긴 관계까지 보려면 **ACP 연결**에서 Frontdoor MCP를 추가하세요.
+
+### 화면
+
+대시보드에 무엇을 그릴지 정합니다.
+
+- **활성 세션만 표시** — 끝난 세션을 목록에서 숨깁니다.
+- **AI thought 표시** / **Tool call 표시** — 시퀀스에 사고 과정과 도구 호출을 넣을지 고릅니다. 끄면 호출·응답만 남습니다.
+- **Observer 다시 연결** — 모니터만 다시 붙입니다. Gateway나 실행 중인 에이전트는 멈추지 않습니다.
+- Node 경로는 비워 두면 됩니다. 앱이 포함한 Node를 씁니다.
+
+### Gateway 구성
+
+Gateway가 세션을 얼마나 남기고, 자원을 얼마나 쓸지 정합니다. 값은 밀리초가 아니라 일·시간·분 단위로 입력합니다.
+
+- **변경 저장** — 값을 기록만 합니다. 아직 적용되지 않은 항목은 `재시작 대기`로 표시됩니다.
+- **적용 및 안전 재시작** — 저장한 값을 실제로 켭니다. 진행 중인 세션·Task·미응답 요청이 있으면 재시작이 막힙니다.
+- 보존 기간을 줄이면 오래된 기록이 삭제됩니다. 그 경우 확인 창이 뜹니다. 진행 중이거나 고정(pinned)한 세션은 지우지 않습니다.
+- `ENV`로 표시된 항목은 환경변수로 잠겨 있어 여기서 바꿀 수 없습니다.
+
+나머지 값은 기본값으로 두면 됩니다. 다만 이 탭 **맨 아래**의 **서브에이전트 대화 기록**은 영향이 큽니다.
+
+- 기본값은 꺼져 있습니다. 꺼 두면 Claude Worker가 안에서 띄운 Task 서브에이전트의 대화는 모으지 않습니다. Worker가 돌려준 결과는 그대로 보입니다.
+- 켜면 그 서브에이전트의 메시지, 도구 호출, 사고 과정까지 시퀀스에 들어옵니다. 위임 한 건당 이벤트가 크게 늘어나므로, 안쪽 대화까지 봐야 할 때만 켜세요.
+- 다른 Gateway 설정과 같이 **적용 및 안전 재시작** 뒤에 반영됩니다.
+
+### ACP 연결
+
+에이전트를 Gateway에 붙이는 화면입니다. 설정에서 가장 자주 쓰는 탭입니다.
+
+- **Frontdoor MCP 설치** — Codex / Claude / Grok에 Control MCP를 넣습니다. 이 에이전트가 다른 에이전트에게 일을 넘기는 것을 추적하려면 여기가 필요합니다. 이미 된 것은 `설치됨`입니다. 처음 설치에서 고른 것은 `기본`으로 표시됩니다.
+- 아래 목록은 공식 ACP registry의 Worker입니다. `Install`로 추가하고, 스위치로 On/Off 합니다.
+- **Off**는 새 세션에서만 그 에이전트를 막습니다. 이미 돌아가는 작업은 끊지 않고, 설치 파일도 지우지 않습니다.
+- 업데이트가 있으면 해당 줄에 `업데이트`가 나타납니다.
+
+### Pet
+
+데스크톱에 상태 오버레이를 띄웁니다.
+
+- **Agent status pet 사용**을 켜면 기본 Pet이 뜹니다.
+- 경로를 비워 두면 앱에 들어 있는 Pet을 씁니다. 다른 실행 파일을 지정할 수도 있습니다.
+- Pet은 읽기만 합니다. 여기서 에이전트를 설치하거나 끄지 않습니다.
+
+### 버전·업데이트
+
+앱, Gateway 런타임, ACP 어댑터를 각각 비교합니다.
+
+- **AgenLynk 앱** — 새 버전이 있으면 `다운로드`로 DMG를 받습니다. Applications의 앱을 교체하세요.
+- **Gateway 런타임** — 지금 쓰는 런타임이 이 앱에 들어 있는 것보다 오래됐으면 `이 앱의 runtime 설치 및 적용`으로 올립니다. 더 오래된 쪽으로는 자동으로 내려가지 않습니다.
+- **ACP 어댑터** — 여기에서는 개수만 보여 줍니다. 실제 업데이트는 **ACP 연결** 탭에서 합니다.
+- **이전 버전으로 롤백**은 바로 전에 쓰던 런타임이 남아 있을 때만 켜집니다.
+
+## 이 앱이 하는 일
+
+AgenLynk는 Claude, Codex, Grok 같은 **로컬 AI 에이전트를 하나로 묶는 오픈소스 macOS 앱**입니다. 이미 사용 중인 에이전트를 연결하고, 한 에이전트가 다른 에이전트에게 일을 위임하는 과정까지 실행·모니터링합니다.
+
+코드를 새로 짜는 멀티 에이전트 프레임워크가 아닙니다. 로컬에서 여러 에이전트를 오케스트레이션하는 데스크톱 앱이며, 그 안에 **ACP Gateway** 런타임이 함께 들어 있습니다.
+
+AgenLynk is an open-source macOS app that ties multiple local AI agents together — Claude, Codex, and Grok — including delegated work from one agent to another. It is not a coding framework. It is a local multi-agent gateway with a live monitor.
+
+로컬 한 대의 Mac, 한 명의 사용자를 기준으로 합니다.
 
 ---
 
-Claude에게 물어봤다가, Codex로 코드를 고치고, Grok에게 리뷰를 맡기다 보면 — 지금 어떤 에이전트가 무슨 일을 하고 있는지 놓치기 쉽습니다.
-
-**AgenLynk**는 로컬에서 도는 AI 에이전트들과, 한 에이전트가 다른 에이전트에게 위임한 작업까지 실시간으로 보여주는 macOS 앱입니다. 내부에는 여러 AI를 ACP로 발견·실행·관리하는 **ACP Gateway** 런타임이 함께 들어 있습니다.
-
-## 다운로드
-
-### 1. DMG로 설치 (권장)
-
-[**Releases 페이지**](https://github.com/creverse-ai-lab/agenlynk/releases)에서 최신 `AgenLynk.dmg`를 내려받아 `AgenLynk.app`을 **Applications 폴더로** 옮긴 뒤 실행하세요.
-
-현재 테스트 배포 버전은 **[0.4.0 Beta 2](https://github.com/creverse-ai-lab/AgenLynk/releases/tag/v0.4.0-beta.2)**입니다. 정식 배포 전 베타 버전이므로 테스트 용도로 사용하세요.
-
-- 최초 실행 시 대시보드 대신 **설치 화면**이 먼저 뜹니다. 대화용 Frontdoor(Codex / Claude / Grok)를 하나 이상 골라 설치하면, 앱이 번들된 Gateway 런타임을 `~/.acp-gateway/`에 설치·검증한 뒤 모니터링을 시작합니다.
-- 시스템에 별도로 Node를 깔 필요가 없습니다. 필요한 Node 22 런타임이 앱에 포함돼 있습니다.
-- 서명은 ad-hoc이므로 다른 Mac에서 처음 열 때 Gatekeeper 경고가 나올 수 있습니다. `우클릭 → 열기`로 실행하세요.
-
-> Apple Silicon(arm64) · macOS 14(Sonoma) 이상
-
-### 2. 소스에서 직접 빌드 (clone)
+## 소스에서 빌드
 
 ```bash
 git clone https://github.com/creverse-ai-lab/agenlynk.git
 cd agenlynk
 npm ci
 
-# 개발용 빠른 빌드 (번들 Node 없이 시스템 Node 사용)
-npm run macos:build && npm run macos:run
-
-# 배포용 DMG (번들 Node 포함 + 검증)
-npm run macos:dmg      # build/AgenLynk.dmg 생성
-npm run macos:verify   # 서명·런타임 인벤토리·번들 Node 실행 검증
+npm run macos:build && npm run macos:run   # 개발용 (시스템 Node)
+npm run macos:dmg                          # 배포용 DMG
+npm run macos:verify                       # 서명·런타임·번들 Node 검증
 ```
 
-## 무엇을 보여주나요
+개발 세부와 Gateway CLI 단독 운영은 [`macos/README.md`](macos/README.md)를 참고하세요.
 
-- **대시보드 시퀀스 다이어그램** — Frontdoor(작업 폴더명 또는 직접 지정한 이름)에서 Worker로 뻗어 나가는 **호출**과 다시 돌아오는 **응답**을 하나의 시간축 위에 표시합니다. 아직 응답하지 않은 호출은 한눈에 구분됩니다.
-- **선택 에이전트 활동** — 클릭한 에이전트가 지금 *무엇을 하는지*(도구 실행 중 · 사고 중 · 답변 생성 중 · 권한 대기 …)를 상태 대신 앞세워 보여줍니다.
-- **메뉴바 팝오버** — 실행 중인 세션의 라이브 그래프와, 데스크톱을 떠다니는 Pet 오버레이.
-- **응답 본문 우선** — 이벤트 상세는 JSON 껍데기가 아니라 실제로 받은 텍스트를 먼저 보여주고, 원본 JSON은 접이식으로 둡니다. 조각으로 나뉘어 들어온 스트림 응답은 합쳐서 표시합니다.
-
-## 두 가지 모니터링 경로
-
-| | 감지 방법 | MCP 필요? | 보이는 것 |
-|---|---|:---:|---|
-| **로컬 스캐너** | Codex/Claude/Grok/Orca의 트랜스크립트를 감시 | ❌ | 단독 실행 세션(Frontdoor) |
-| **Control MCP** | 에이전트를 Gateway로 태움 | ✅ | 위임(delegation)·Worker·서브에이전트·실시간 이벤트 |
-
-단독으로 도는 에이전트는 MCP 없이도 보입니다. **위임 관계와 워커까지** 온전히 추적하려면 설정 → *ACP 연결* → **Frontdoor MCP 설치**에서 해당 에이전트를 추가하세요(이미 설치된 것은 "설치됨"으로 표시됩니다).
-
-## 설정
-
-macOS 표준 설정 창에서:
-
-- **Gateway 구성** — 지원 런타임 옵션 전체를 한국어·영어로 함께 설명. 보존 기간·주기 값은 밀리초가 아니라 일·시간·분·초 등 자연 단위로 입력합니다. 보존 기간을 줄이면 삭제 확인을 받습니다.
-- **ACP 연결** — 공식 ACP registry의 Worker 어댑터 설치/On·Off, 그리고 Frontdoor MCP 추가 설치.
-- **버전·업데이트** — 설치된 Gateway 런타임 버전 확인, 앱에 포함된 런타임으로 업데이트, 이전 버전으로 롤백.
-- **Pet** — 데스크톱 Pet 오버레이 On/Off.
-
-앱을 업데이트하면 포함된 런타임이 기존 설치보다 새로울 때 자동으로 교체되고(더 오래된 것으로 되돌아가지 않음), 교체 전 실행 가능 여부를 검사하며 롤백 대상을 남깁니다.
-
----
-
-## 엔진: ACP Gateway
-
-AgenLynk가 위임을 추적할 수 있는 것은 내부의 **ACP Gateway** 덕분입니다. 사용자가 대화하는 AI(**오케스트레이터 / Main**)가 로컬의 여러 AI **Worker**를 발견·실행하고, 장기 작업·권한 요청·결과 회수까지 관리하는 미들웨어입니다.
-
-- ACP 세션과 provider 프로세스를 daemon이 계속 유지합니다.
-- MCP가 재시작되어도 Worker 세션을 복구할 수 있습니다.
-- 모델·권한·질문·취소·결과 수집을 오케스트레이터가 통제하고, Worker에는 Gateway 제어 권한을 넘기지 않습니다.
-- 로컬 단일 사용자·단일 머신을 기준으로 합니다.
-
-```mermaid
-flowchart LR
-    U["사용자"] <--> M["오케스트레이터 AI<br/>(Main)"]
-    M <-->|"Control MCP"| G["ACP Gateway daemon"]
-    G <-->|"ACP"| C["Claude Worker"]
-    G <-->|"ACP"| X["Grok Worker"]
-    G <-->|"ACP"| O["Codex Worker"]
-    G --- S[("세션·Task·Inbox 상태")]
-```
-
-- **ACP**([Agent Client Protocol](https://agentclientprotocol.com/))는 에이전트를 실행·대화하고 작업 상태를 관리하는 규격입니다. 현재 구현 범위는 로컬 단일 머신의 ACP agent와 Unix socket 통신입니다.
-- **MCP**(Model Context Protocol)는 오케스트레이터가 Gateway를 조작하는 입구입니다. 장시간 작업을 task handle로 시작해 상태·결과를 다시 조회하는 **MCP Tasks** 흐름을 지원합니다.
-
-CLI를 직접 호출하거나 단순 MCP wrapper로 감싸는 방식과 달리, Gateway는 연결과 분리된 장시간 작업, 증분 이벤트 재생, 권한 요청 왕복, 재시작 후 재연결, 중복 없는 결과 회수를 제공합니다.
-
-Gateway를 CLI로 단독 설치·운영하는 방법과 개발 세부 사항은 [`macos/README.md`](macos/README.md)를 참고하세요.
-
-## 개발
+### 테스트
 
 ```bash
 npm test              # 전체 회귀 (Node) — release gate
-npm run test:quick    # 일상 개발용 빠른 검사
-npm run macos:test    # Swift 모델·설정·Pet·온보딩 체크
-npm run macos:dmg     # AgenLynk.dmg 빌드
-npm run macos:verify  # 완성 DMG 검증
+npm run test:quick    # 일상 개발용
+npm run macos:test    # Swift 모델·설정·Pet·온보딩
 ```
 
-앱 UI는 SwiftUI(`macos/Sources/`), Monitor sidecar는 Node(`sidecar/`)입니다. DMG는 `gateway.lock.json`에 고정된 공식 Gateway 1.4.0 artifact와 단일 Node를 `Contents/Resources/gateway-seed/`에, 앱 버전과 함께 움직이는 sidecar를 `Contents/Resources/sidecar/`에 분리해 담습니다. Gateway seed는 최초 실행 때 `~/.acp-gateway/runtime/versions/<Gateway버전>-<runtimeBuildId>/`로 복사·검증되며, sidecar는 앱 리소스에서 실행됩니다. 소스 트리에서 Gateway를 쓰려면 `npm run gateway:fetch`로 `build/cache/gateway-runtime`을 만들거나 `ACP_LYNK_GATEWAY_DEVELOPMENT_ROOT`를 지정하세요. 형제 `../ACP` 체크아웃은 쓰지 않습니다.
+앱 UI는 SwiftUI(`macos/Sources/`), Monitor sidecar는 Node(`sidecar/`)입니다. DMG는 `gateway.lock.json`에 고정된 Gateway 1.4.0 artifact와 Node를 `Contents/Resources/gateway-seed/`에, 앱과 함께 움직이는 sidecar를 `Contents/Resources/sidecar/`에 담습니다. 소스 트리에서 Gateway를 쓰려면 `npm run gateway:fetch` 또는 `ACP_LYNK_GATEWAY_DEVELOPMENT_ROOT`를 사용하세요.
 
-## 버전 이력 (앱)
+## 버전
 
 | 버전 | 주요 내용 |
 |---|---|
-| **0.4.0 Beta 2** | 공식 ACP Gateway **1.4.0** 고정 · 스트리밍 역압(backpressure) 시 이벤트 순서·연결 안정성 개선 · 손상된 Gateway 런타임 복구와 강제 복구 흐름 보강 · sidecar 자동 재시작 및 세션 복구 강화 · 활성화 실패 시 이전 런타임·pin 상태 롤백 보장 · prerelease 버전 비교와 Gateway 빌드 불일치 경고 수정 · 인증 회귀 테스트 확대 |
-| **0.3.5** | 앱 내 업데이트 확인(앱 / Gateway 런타임 / ACP 어댑터를 각 소스와 비교해 업데이트) · 시퀀스 다이어그램 방향키 스크롤 |
-| **0.3.4** | Frontdoor 설치 상태를 실제 에이전트 config로 감지 · 온보딩 다중 Frontdoor 설치 · 대시보드 3버그(사라지는 Frontdoor / 선택 풀림 / 반복 알림) 수정 |
-| **0.3.3** | Frontdoor 이름을 폴더명 기반으로 + 직접 이름 지정(저장 유지) · 시퀀스 다이어그램 개선(고정 헤더, 타임라인 위의 호출/응답 화살표) · 선택 에이전트 활동 표시 |
-| **0.2.0** | **AgenLynk로 리네임** · Pet을 단일 Canvas로 렌더해 CPU 절감 · DMG 190MB→111MB 경량화 · 이중 언어 Gateway 설정 · 서브에이전트 트랜스크립트 수집(설정 게이트) |
+| **0.4.0** | 공식 Gateway 1.4.0 artifact를 고정해 사용 · 앱 / Gateway / 어댑터 업데이트 확인 |
+| **0.3.5** | 시퀀스 다이어그램 방향키 스크롤 |
+| **0.3.4** | Frontdoor 설치 상태를 실제 에이전트 config로 감지 · 온보딩 다중 설치 |
+| **0.3.3** | Frontdoor 이름 지정 · 시퀀스 다이어그램 호출/응답 화살표 · 선택 에이전트 활동 |
+| **0.2.0** | AgenLynk로 리네임 · Pet Canvas 렌더 · DMG 경량화 |
 
-> ACP Gateway는 앱 버전과 독립적으로 관리되며 AgenLynk 0.4.0은 공식 Gateway 1.4.0 release artifact를 고정해 사용합니다.
+## 라이선스
+
+AgenLynk는 [Apache License 2.0](LICENSE)으로 배포합니다.  
+앱에 포함되는 ACP Gateway 런타임은 [agent_gateway](https://github.com/creverse-ai-lab/agent_gateway)의 라이선스를 따릅니다. 번들 Node.js는 MIT입니다.
 
 ## Credits
 
