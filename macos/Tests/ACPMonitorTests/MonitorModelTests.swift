@@ -7,6 +7,7 @@ enum MonitorModelChecks {
         try characterizationTracesDecodeExpectedSnapshots()
         try snapshotRejectsUnsupportedSchemaMajorWithoutPartialDecode()
         try compatibilityDistinguishesIncompatibleFromUpdateRequired()
+        try semanticVersionsOrderPrereleasesBelowStableReleases()
         try monitorApiVersionParsesMajorMinorAndRejectsMalformedStrings()
         try monitorMetaDecodesGatewayIdentityAndToleratesNullSetupValues()
         try monitorMetaRejectsMissingMonitorApiVersion()
@@ -43,6 +44,15 @@ enum MonitorModelChecks {
         try runtimeInspectionSurfacesAPinnedRollback()
         try mergedChunkBodyRebuildsTheWholeStreamedMessage()
         print("Swift model checks passed")
+    }
+
+    private static func semanticVersionsOrderPrereleasesBelowStableReleases() throws {
+        try check(compareSemanticVersions("0.4.0-beta.1", "0.4.0") == .orderedAscending, "beta.1 must update to the matching stable release")
+        try check(compareSemanticVersions("0.4.0", "0.4.0-beta.1") == .orderedDescending, "stable must sort after its prerelease")
+        try check(compareSemanticVersions("0.4.0-beta.2", "0.4.0-beta.10") == .orderedAscending, "numeric prerelease identifiers compare numerically")
+        try check(compareSemanticVersions("0.4.0-beta", "0.4.0-beta.1") == .orderedAscending, "a shorter equal prerelease sorts first")
+        try check(compareSemanticVersions("0.4.0+build.2", "0.4.0+build.1") == .orderedSame, "build metadata must not change precedence")
+        try check(compareSemanticVersions("0.3.10", "0.4.0-beta.1") == .orderedAscending, "numeric core ordering must remain semantic")
     }
 
     private static func petSnapshotMapsGatewayStateAndPendingInbox() throws {
@@ -884,6 +894,13 @@ enum MonitorModelChecks {
             throw CheckError.failed("an annotated split must produce a user warning")
         }
         try check(warning.contains("/Users/x/dev/checkout"), "the warning must name the foreign runtime root")
+        let buildSplit = JSONValue.object([
+            "runtimeSplit": .object([
+                "daemonBuildId": .string("old"),
+                "monitorBuildId": .string("new")
+            ])
+        ])
+        try check(runtimeSplitWarning(gateway: buildSplit)?.contains("old") == true, "a build-id split must surface as a warning")
         try check(runtimeSplitWarning(gateway: .object(["gatewayVersion": .string("1.3.1")])) == nil, "no annotation, no warning")
         try check(runtimeSplitWarning(gateway: nil) == nil, "no gateway info, no warning")
     }

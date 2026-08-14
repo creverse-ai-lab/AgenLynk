@@ -175,6 +175,14 @@ async function assertKnownGoodPointer(runtimeRoot, pointer, label) {
   return { ...pointer, ...runtimeSidecarIdentity(manifest) };
 }
 
+async function restorePreviousPointer(runtimeRoot, pointer) {
+  if (pointer) {
+    await writePointerFile(runtimeRoot, PREVIOUS_POINTER_FILE, pointer);
+    return;
+  }
+  await rm(join(runtimeRoot, PREVIOUS_POINTER_FILE), { force: true });
+}
+
 export async function readPreviousRuntime(runtimeRoot = defaultRuntimeRoot()) {
   return readPointerFile(runtimeRoot, PREVIOUS_POINTER_FILE);
 }
@@ -377,6 +385,7 @@ export async function activateRuntimeCandidate(options) {
       await readCurrentRuntime(runtimeRoot),
       "current"
     );
+    const recordedPreviousBeforeSwitch = await readPointerFile(runtimeRoot, PREVIOUS_POINTER_FILE);
     if (previousBeforeSwitch) {
       await writePointerFile(runtimeRoot, PREVIOUS_POINTER_FILE, previousBeforeSwitch);
     }
@@ -386,10 +395,13 @@ export async function activateRuntimeCandidate(options) {
       await runSmokeCheck(healthCheck ?? runBuiltinSmokeCheck, target, manifest);
     } catch (healthError) {
       if (previousBeforeSwitch) {
-        await activateCurrent(runtimeRoot, previousBeforeSwitch.runtimeRoot, previousBeforeSwitch);
+        await activateCurrent(runtimeRoot, previousBeforeSwitch.runtimeRoot, previousBeforeSwitch, {
+          pinned: previousBeforeSwitch.pinned === true
+        });
       } else {
         await clearCurrentActivation(runtimeRoot);
       }
+      await restorePreviousPointer(runtimeRoot, recordedPreviousBeforeSwitch);
       throw new RuntimeUpdaterError(
         "POST_ACTIVATION_HEALTH_CHECK_FAILED",
         `post-activation health check failed, restored previous target: ${healthError.message}`,
@@ -476,7 +488,9 @@ export async function rollbackRuntime(options) {
       await runSmokeCheck(healthCheck ?? runBuiltinSmokeCheck, previous.runtimeRoot, manifest);
     } catch (healthError) {
       if (currentBeforeRollback) {
-        await activateCurrent(runtimeRoot, currentBeforeRollback.runtimeRoot, currentBeforeRollback);
+        await activateCurrent(runtimeRoot, currentBeforeRollback.runtimeRoot, currentBeforeRollback, {
+          pinned: currentBeforeRollback.pinned === true
+        });
       } else {
         await clearCurrentActivation(runtimeRoot);
       }

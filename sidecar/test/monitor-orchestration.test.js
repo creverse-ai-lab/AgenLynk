@@ -35,6 +35,13 @@ test("live sidecar make-before-break rewind keeps old events and promotes one su
   try {
     const ready = await waitForReady(child, () => stderr);
     const headers = { authorization: `Bearer ${ready.apiToken}` };
+    const unauthorized = await fetch(`${ready.url}/api/snapshot`);
+    assert.equal(unauthorized.status, 401);
+    assert.equal((await unauthorized.json()).code, "monitor_unauthorized");
+    const unauthorizedStream = await fetch(`${ready.url}/api/stream`);
+    assert.equal(unauthorizedStream.status, 401);
+    const unauthorizedMutation = await fetch(`${ready.url}/api/gateway-restart`, { method: "POST" });
+    assert.equal(unauthorizedMutation.status, 401);
     const control = await waitFor(async () => {
       try { return JSON.parse(await readFile(controlFile, "utf8")); }
       catch { return false; }

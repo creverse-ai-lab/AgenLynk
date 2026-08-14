@@ -52,17 +52,10 @@ const AUTO_START_GATEWAY = booleanEnv("ACP_GATEWAY_MONITOR_AUTOSTART", true);
 const EXPECTED_PARENT_PID = optionalPositiveIntegerEnv("ACP_GATEWAY_MONITOR_PARENT_PID");
 const REFRESH_INTERVAL_MS = 3_000;
 const GATEWAY_RUNTIME_ROOT = process.env.ACP_GATEWAY_ACTIVE_ROOT ?? null;
-// Keep the scanner's cost policy with the rest of the user-editable Gateway
-// settings. The sidecar is restarted after changing these options, so one
-// immutable scanner instance owns its cursors and watcher for its lifetime.
-const monitorSettings = resolveGatewaySettings();
-const LOCAL_SCANNER_ENABLED = monitorSettings.localScannerEnabled;
-const LOCAL_SCAN_INTERVAL_MS = monitorSettings.localScanIntervalMs;
-const localScanner = LOCAL_SCANNER_ENABLED ? new LocalAgentScanner({
-  discoveryIntervalSeconds: monitorSettings.localDiscoveryIntervalMs / 1_000,
-  conversationWindowMs: monitorSettings.localTranscriptWindowMs,
-  maxConversationRecords: monitorSettings.localTranscriptRecordLimit
-}) : null;
+const EXPECTED_GATEWAY_BUILD_ID = expectedGatewayBuildId(GATEWAY_RUNTIME_ROOT);
+// Initialized inside main() so corrupt settings are reported through its
+// guarded startup path instead of throwing while this module is imported.
+let localScanner = null;
 
 // Token accounting is not timeline content, and a session accumulates one of
 // these per turn. Gateway 1.3.2+ already drops them at ingestion, but a
@@ -121,6 +114,16 @@ function loadIdentity() {
 
 async function main() {
   const identity = loadIdentity();
+  // Keep the scanner's cost policy with the rest of the user-editable Gateway
+  // settings. The sidecar is restarted after changing these options, so one
+  // immutable scanner instance owns its cursors and watcher for its lifetime.
+  const monitorSettings = resolveGatewaySettings();
+  const localScanIntervalMs = monitorSettings.localScanIntervalMs;
+  localScanner = monitorSettings.localScannerEnabled ? new LocalAgentScanner({
+    discoveryIntervalSeconds: monitorSettings.localDiscoveryIntervalMs / 1_000,
+    conversationWindowMs: monitorSettings.localTranscriptWindowMs,
+    maxConversationRecords: monitorSettings.localTranscriptRecordLimit
+  }) : null;
   // A pre-config-API daemon reports most active values through setup, but not
   // every newly introduced setting. Defaults/environment represent what that
   // old process actually booted with; persisted values may only be staged.
@@ -244,7 +247,16 @@ async function main() {
         });
       }
     } catch (error) {
-      const { removedSessionIds, localEvents } = await applySessionSources();
+      let removedSessionIds = [];
+      let localEvents = null;
+      try {
+        ({ removedSessionIds, localEvents } = await applySessionSources());
+      } catch (projectionError) {
+        // The RPC failure is already the primary connection error. A malformed
+        // projection must not escape this recovery path as an unhandled
+        // rejection and terminate the sidecar.
+        console.error(`Session projection recovery failed: ${projectionError.message}`);
+      }
       state.setConnection({ connected: false, streaming: state.streaming, error: error?.message ?? String(error) });
       state.broadcast({
         kind: "state",
@@ -286,7 +298,11 @@ async function main() {
 
   async function refreshGatewayInfo() {
     try {
-      const gateway = annotateRuntimeSplit(decodeGatewaySetup(await rpc.call("setup", {})), GATEWAY_RUNTIME_ROOT);
+      const gateway = annotateRuntimeSplit(
+        decodeGatewaySetup(await rpc.call("setup", {})),
+        GATEWAY_RUNTIME_ROOT,
+        EXPECTED_GATEWAY_BUILD_ID
+      );
       if (state.setGateway(gateway)) state.broadcast({ kind: "gateway", gateway });
     } catch {
       // setup is best-effort metadata; session/event flow works without it.
@@ -411,7 +427,7 @@ async function main() {
       // view down. Without this catch an unhandled rejection kills the process.
       console.error(`Local session refresh failed: ${error.message}`);
     });
-  }, LOCAL_SCAN_INTERVAL_MS);
+  }, localScanIntervalMs);
   localInterval.unref();
 
   async function handleRequest(request, response) {
@@ -457,8 +473,8 @@ async function main() {
         connection: "keep-alive"
       });
       response.write("retry: 2000\n\n");
-      state.sseClients.add(response);
-      request.on("close", () => state.sseClients.delete(response));
+      state.addSseClient(response);
+      request.on("close", () => state.removeSseClient(response));
       return;
     }
     if (url.pathname === "/api/agents" && request.method === "GET") {
@@ -630,7 +646,11 @@ async function main() {
     });
     try {
       const gateway = await starter.call("setup", {}, 15_000);
-      const decodedGateway = annotateRuntimeSplit(decodeGatewaySetup(gateway), GATEWAY_RUNTIME_ROOT);
+      const decodedGateway = annotateRuntimeSplit(
+        decodeGatewaySetup(gateway),
+        GATEWAY_RUNTIME_ROOT,
+        EXPECTED_GATEWAY_BUILD_ID
+      );
       state.setGateway(decodedGateway);
       state.setConnection({ connected: true, streaming: state.streaming, error: null });
       state.broadcast({ kind: "gateway", gateway: decodedGateway });
@@ -647,7 +667,7 @@ async function main() {
     clearInterval(interval);
     clearInterval(localInterval);
     if (parentWatch) clearInterval(parentWatch);
-    for (const client of state.sseClients) client.end();
+    state.closeSseClients();
     rpc.close();
     await new Promise((resolve) => server.close(resolve));
   };
@@ -814,7 +834,27 @@ export function annotateRuntimeSplit(gateway, monitorRuntimeRoot, monitorBuildId
     && monitorBuildId && daemonBuildId !== monitorBuildId) {
     return { ...gateway, runtimeSplit: { daemonBuildId, monitorBuildId } };
   }
+  if (monitorBuildId) {
+    return {
+      ...gateway,
+      runtimeIdentity: daemonBuildId
+        ? { status: "verified", daemonBuildId, monitorBuildId }
+        : { status: "unverified", monitorBuildId, reason: "Gateway setup does not expose gatewayBuildId" }
+    };
+  }
   return gateway;
+}
+
+function expectedGatewayBuildId(gatewayRuntimeRoot) {
+  if (!gatewayRuntimeRoot) return null;
+  try {
+    const manifest = JSON.parse(readFileSync(join(gatewayRuntimeRoot, "..", "runtime-manifest.json"), "utf8"));
+    return typeof manifest.gatewayBuildId === "string" && manifest.gatewayBuildId
+      ? manifest.gatewayBuildId
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 export function restartBlockedError(blockers) {

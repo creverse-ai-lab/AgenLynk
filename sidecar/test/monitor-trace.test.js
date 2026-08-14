@@ -13,9 +13,12 @@ const SNAPSHOT_KEYS = [
 
 const traceFiles = (await readdir(traceDirectory)).filter((name) => name.endsWith(".ndjson")).sort();
 for (const file of traceFiles) {
-  test(`characterization trace: ${file}`, async () => {
+  test(`characterization trace: ${file}`, async (context) => {
     const trace = await loadTrace(new URL(file, traceDirectory));
-    if (trace.meta.runner !== "monitor-state") return;
+    if (trace.meta.runner !== "monitor-state") {
+      context.skip(`transport runner ${trace.meta.runner} is owned by the pinned Gateway and consumed by Swift compatibility tests`);
+      return;
+    }
     const result = replayMonitorState(trace);
     assertGeneratedSnapshot(result.snapshot);
     assert.deepEqual(result.projection, projectSnapshot(result.snapshot));

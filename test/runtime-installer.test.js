@@ -142,3 +142,48 @@ test("explicit empty blockers still allow a superseding seed to activate", async
     assert.ok((await lstat(join(runtimeRoot, "current"))).isSymbolicLink());
   } finally { await rm(workspace, { recursive: true, force: true }); }
 });
+
+test("malformed current.json recovers the verified active symlink without switching during active work", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "agenlynk-installer-"));
+  try {
+    const runtimeRoot = join(workspace, "runtime");
+    const firstSeed = join(workspace, "seed-a");
+    const newerSeed = join(workspace, "seed-b");
+    await seed(firstSeed, { marker: "a" }, "2026-01-01T00:00:00.000Z");
+    await seed(newerSeed, { marker: "b" }, "2026-02-01T00:00:00.000Z");
+    const first = await ensureRuntimeInstalled({ seedRoot: firstSeed, runtimeRoot, smokeCheck: async () => ({}) });
+    await writeFile(join(runtimeRoot, "current.json"), "{malformed\n");
+
+    const recovered = await ensureRuntimeInstalled({
+      seedRoot: newerSeed,
+      runtimeRoot,
+      smokeCheck: async () => ({}),
+      blockers: { activeSessions: 1 }
+    });
+
+    assert.equal(recovered.runtimeBuildId, first.runtimeBuildId);
+    assert.equal((await readCurrentRuntime(runtimeRoot)).runtimeBuildId, first.runtimeBuildId);
+    assert.equal(await realpath(join(runtimeRoot, "current")), await realpath(first.runtimeRoot));
+    assert.match(recovered.recoveryNotice, /안전 복구/);
+  } finally { await rm(workspace, { recursive: true, force: true }); }
+});
+
+test("invalid active runtime fails closed when active-work state is unknown", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "agenlynk-installer-"));
+  try {
+    const runtimeRoot = join(workspace, "runtime");
+    const firstSeed = join(workspace, "seed-a");
+    const repairSeed = join(workspace, "seed-b");
+    await seed(firstSeed, { marker: "a" }, "2026-01-01T00:00:00.000Z");
+    await seed(repairSeed, { marker: "b" }, "2026-02-01T00:00:00.000Z");
+    const first = await ensureRuntimeInstalled({ seedRoot: firstSeed, runtimeRoot, smokeCheck: async () => ({}) });
+    await writeFile(join(first.runtimeRoot, "gateway/src/index.js"), "tampered\n");
+
+    await assert.rejects(
+      ensureRuntimeInstalled({ seedRoot: repairSeed, runtimeRoot, smokeCheck: async () => ({}) }),
+      /활성화를 보류/
+    );
+    assert.equal((await readCurrentRuntime(runtimeRoot)).runtimeBuildId, first.runtimeBuildId);
+    assert.equal(await realpath(join(runtimeRoot, "current")), await realpath(first.runtimeRoot));
+  } finally { await rm(workspace, { recursive: true, force: true }); }
+});

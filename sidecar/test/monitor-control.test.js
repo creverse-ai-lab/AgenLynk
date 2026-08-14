@@ -28,4 +28,10 @@ test("runtime-root and build mismatches are flagged as split brain", () => {
   assert.equal(annotateRuntimeSplit({ runtimeRoot: monitorRoot }, monitorRoot).runtimeSplit, undefined);
   const stale = annotateRuntimeSplit({ runtimeRoot: monitorRoot, gatewayBuildId: "old" }, monitorRoot, "new");
   assert.deepEqual(stale.runtimeSplit, { daemonBuildId: "old", monitorBuildId: "new" });
+  const unverified = annotateRuntimeSplit({ gatewayVersion: "1.4.0" }, monitorRoot, "new");
+  assert.deepEqual(unverified.runtimeIdentity, {
+    status: "unverified",
+    monitorBuildId: "new",
+    reason: "Gateway setup does not expose gatewayBuildId"
+  });
 });
