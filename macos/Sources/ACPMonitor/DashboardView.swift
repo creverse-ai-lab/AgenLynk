@@ -3,6 +3,7 @@ import SwiftUI
 struct DashboardView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
+    @State private var showForceRepairConfirmation = false
 
     var body: some View {
         Group {
@@ -18,6 +19,17 @@ struct DashboardView: View {
             }
         }
         .task { model.startIfNeeded() }
+        .confirmationDialog(
+            "손상된 Gateway runtime을 교체하시겠습니까?",
+            isPresented: $showForceRepairConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("bundled runtime으로 강제 복구", role: .destructive) {
+                model.forceRuntimeRepair()
+            }
+        } message: {
+            Text("검증 가능한 기존 runtime을 찾지 못한 경우에만 사용하세요. 실행 중인 Gateway 작업이 있다면 먼저 종료해야 합니다.")
+        }
     }
 
     private func runtimeErrorView(_ message: String) -> some View {
@@ -25,8 +37,14 @@ struct DashboardView: View {
             ACPLogoMark().frame(width: 40, height: 40)
             Text("Gateway runtime 설치 실패").font(.title2.weight(.semibold))
             Text(message).foregroundStyle(.red).font(.callout)
-            Button("다시 시도") { model.retryRuntimeProvisioning() }
-                .buttonStyle(.borderedProminent)
+            HStack {
+                Button("다시 시도") { model.retryRuntimeProvisioning() }
+                    .buttonStyle(.borderedProminent)
+                Button("손상된 runtime 복구…", role: .destructive) {
+                    showForceRepairConfirmation = true
+                }
+                .buttonStyle(.bordered)
+            }
         }
         .padding(32)
         .frame(minWidth: 560, minHeight: 420, alignment: .topLeading)

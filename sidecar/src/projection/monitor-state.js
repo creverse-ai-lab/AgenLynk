@@ -4,9 +4,15 @@
 // changes meaning; additive fields do not require a bump.
 export const MONITOR_SCHEMA_VERSION = 1;
 export const MONITOR_API_VERSION = "1.0";
+const MAX_PENDING_SSE_FRAMES = 512;
+const MAX_PENDING_SSE_BYTES = 4 * 1024 * 1024;
 
 export class MonitorState {
-  constructor({ maxEventsPerSession = 2000, historyRetentionMs = 65 * 60 * 1000 } = {}) {
+  constructor({
+    maxEventsPerSession = 2000,
+    historyRetentionMs = 65 * 60 * 1000,
+    sseBackpressureTimeoutMs = 10_000
+  } = {}) {
     this.maxEventsPerSession = maxEventsPerSession;
     this.historyRetentionMs = historyRetentionMs;
     this.sessions = new Map();
@@ -37,7 +43,32 @@ export class MonitorState {
       replayTruncations: 0
     };
     this.sseClients = new Set();
+    this.sseBackpressure = new Map();
+    this.sseBackpressureTimeoutMs = sseBackpressureTimeoutMs;
     this.revision = 0;
+  }
+
+  addSseClient(client) {
+    this.sseClients.add(client);
+  }
+
+  removeSseClient(client, { end = false } = {}) {
+    this.sseClients.delete(client);
+    const pending = this.sseBackpressure.get(client);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.sseBackpressure.delete(client);
+    }
+    if (!end) return;
+    try {
+      client.end();
+    } catch {
+      // The response is already closed.
+    }
+  }
+
+  closeSseClients() {
+    for (const client of [...this.sseClients]) this.removeSseClient(client, { end: true });
   }
 
   setConnection({ connected = this.connected, streaming = this.streaming, error = this.lastError, health } = {}) {
@@ -63,7 +94,9 @@ export class MonitorState {
 
   setSessions(list) {
     const nextSessions = new Map(list
-      .filter((session) => !this.closedSessionIds.has(session.sessionId))
+      .filter((session) => session && typeof session === "object"
+        && typeof session.sessionId === "string" && session.sessionId
+        && !this.closedSessionIds.has(session.sessionId))
       .map((session) => [session.sessionId, session]));
     const removedSessionIds = [...new Set([...this.sessions.keys(), ...this.eventsBySession.keys()])]
       .filter((sessionId) => !nextSessions.has(sessionId));
@@ -294,17 +327,79 @@ export class MonitorState {
     const envelope = { ...message, schemaVersion: MONITOR_SCHEMA_VERSION, monitorApiVersion: MONITOR_API_VERSION };
     const frame = `data: ${JSON.stringify(envelope)}\n\n`;
     for (const client of this.sseClients) {
+      const pending = this.sseBackpressure.get(client);
+      if (pending) {
+        if (!this.#enqueueSseFrame(pending, envelope.kind, frame)) {
+          this.removeSseClient(client, { end: true });
+        }
+        continue;
+      }
       try {
         if (client.write(frame)) continue;
       } catch {
-        // A closed response is handled like a slow response below.
+        this.removeSseClient(client, { end: true });
+        continue;
       }
-      this.sseClients.delete(client);
+      this.#waitForSseDrain(client);
+    }
+  }
+
+  #waitForSseDrain(client) {
+    const onDrain = () => {
+      const pending = this.sseBackpressure.get(client);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      this.sseBackpressure.delete(client);
+      this.#flushSseQueue(client, pending.queue);
+    };
+    const timer = setTimeout(() => {
+      this.removeSseClient(client, { end: true });
+    }, this.sseBackpressureTimeoutMs);
+    timer.unref?.();
+    this.sseBackpressure.set(client, { queue: [], bytes: 0, timer });
+    if (typeof client.once === "function") {
+      client.once("drain", onDrain);
+    } else {
+      // ServerResponse always exposes `once`; defensive fallback for custom
+      // transports/tests that do not implement the writable stream contract.
+      this.removeSseClient(client, { end: true });
+    }
+  }
+
+  #enqueueSseFrame(pending, kind, frame) {
+    // Only consecutive state snapshots supersede one another. Incremental
+    // event/session/gateway frames retain order so backpressure never becomes
+    // silent data loss. The bounded queue still evicts a client that cannot
+    // drain within a safe memory budget; its reconnect begins with a snapshot.
+    const last = pending.queue.at(-1);
+    if (kind === "state" && last?.kind === "state") {
+      pending.bytes -= Buffer.byteLength(last.frame);
+      last.frame = frame;
+      pending.bytes += Buffer.byteLength(frame);
+    } else {
+      pending.queue.push({ kind, frame });
+      pending.bytes += Buffer.byteLength(frame);
+    }
+    return pending.queue.length <= MAX_PENDING_SSE_FRAMES && pending.bytes <= MAX_PENDING_SSE_BYTES;
+  }
+
+  #flushSseQueue(client, queue) {
+    if (!this.sseClients.has(client)) return;
+    while (queue.length) {
+      const next = queue.shift();
       try {
-        client.end();
+        if (client.write(next.frame)) continue;
       } catch {
-        // The client is already gone.
+        this.removeSseClient(client, { end: true });
+        return;
       }
+      this.#waitForSseDrain(client);
+      const pending = this.sseBackpressure.get(client);
+      if (pending) {
+        pending.queue = queue;
+        pending.bytes = queue.reduce((total, item) => total + Buffer.byteLength(item.frame), 0);
+      }
+      return;
     }
   }
 }

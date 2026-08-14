@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { buildRuntimeManifest } from "../src/runtime-manifest.js";
 import { readCurrentRuntime } from "../src/runtime-installer.js";
-import { activateRuntimeCandidate, inspectRuntime, pruneRuntimeVersions, rollbackRuntime, stageRuntimeCandidate, validateRuntimeCandidate } from "../src/runtime-updater.js";
+import { activateRuntimeCandidate, inspectRuntime, pruneRuntimeVersions, readPreviousRuntime, rollbackRuntime, stageRuntimeCandidate, validateRuntimeCandidate } from "../src/runtime-updater.js";
 import { writeRuntimeSeed } from "./fixtures/runtime-seed.js";
 
 async function smokeSeed(root, marker) {
@@ -62,12 +62,16 @@ test("post-activation failure restores the previous verified target", async () =
   const workspace = await mkdtemp(join(tmpdir(), "agenlynk-updater-"));
   try {
     const runtimeRoot = join(workspace, "runtime");
+    const z = join(workspace, "z");
     const a = join(workspace, "a");
     const b = join(workspace, "b");
+    await smokeSeed(z, "z");
     await smokeSeed(a, "a");
     await smokeSeed(b, "b");
+    const stagedZ = await stageRuntimeCandidate({ runtimeRoot, seedRoot: z });
     const stagedA = await stageRuntimeCandidate({ runtimeRoot, seedRoot: a });
     const stagedB = await stageRuntimeCandidate({ runtimeRoot, seedRoot: b });
+    await activateRuntimeCandidate({ runtimeRoot, versionId: stagedZ.versionId });
     await activateRuntimeCandidate({ runtimeRoot, versionId: stagedA.versionId });
     const failed = await activateRuntimeCandidate({
       runtimeRoot,
@@ -77,6 +81,7 @@ test("post-activation failure restores the previous verified target", async () =
     });
     assert.equal(failed.error.code, "POST_ACTIVATION_HEALTH_CHECK_FAILED");
     assert.equal((await readCurrentRuntime(runtimeRoot)).runtimeBuildId, stagedA.runtimeBuildId);
+    assert.equal((await readPreviousRuntime(runtimeRoot)).runtimeBuildId, stagedZ.runtimeBuildId);
     assert.equal(await realpath(join(runtimeRoot, "current")), await realpath(stagedA.runtimeRoot));
   } finally { await rm(workspace, { recursive: true, force: true }); }
 });

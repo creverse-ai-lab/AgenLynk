@@ -5,7 +5,7 @@
 <h1 align="center">AgenLynk</h1>
 
 <p align="center">
-  <b>beta 0.3.5</b>
+  <b>0.4.0 Beta 2</b>
 </p>
 
 <p align="center">
@@ -14,7 +14,7 @@
 
 <p align="center">
   <img alt="platform" src="https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white">
-  <img alt="app" src="https://img.shields.io/badge/AgenLynk-0.3.5--beta-1461FA">
+  <img alt="app" src="https://img.shields.io/badge/AgenLynk-0.4.0--beta.2-1461FA">
   <img alt="runtime" src="https://img.shields.io/badge/runtime-ACP%20Gateway%201.4.0-6E7681">
   <img alt="node" src="https://img.shields.io/badge/Node-22%2B-339933?logo=nodedotjs&logoColor=white">
 </p>
@@ -30,6 +30,8 @@ Claude에게 물어봤다가, Codex로 코드를 고치고, Grok에게 리뷰를
 ### 1. DMG로 설치 (권장)
 
 [**Releases 페이지**](https://github.com/creverse-ai-lab/agenlynk/releases)에서 최신 `AgenLynk.dmg`를 내려받아 `AgenLynk.app`을 **Applications 폴더로** 옮긴 뒤 실행하세요.
+
+현재 테스트 배포 버전은 **[0.4.0 Beta 2](https://github.com/creverse-ai-lab/AgenLynk/releases/tag/v0.4.0-beta.2)**입니다. 정식 배포 전 베타 버전이므로 테스트 용도로 사용하세요.
 
 - 최초 실행 시 대시보드 대신 **설치 화면**이 먼저 뜹니다. 대화용 Frontdoor(Codex / Claude / Grok)를 하나 이상 골라 설치하면, 앱이 번들된 Gateway 런타임을 `~/.acp-gateway/`에 설치·검증한 뒤 모니터링을 시작합니다.
 - 시스템에 별도로 Node를 깔 필요가 없습니다. 필요한 Node 22 런타임이 앱에 포함돼 있습니다.
@@ -123,6 +125,7 @@ npm run macos:verify  # 완성 DMG 검증
 
 | 버전 | 주요 내용 |
 |---|---|
+| **0.4.0 Beta 2** | 공식 ACP Gateway **1.4.0** 고정 · 스트리밍 역압(backpressure) 시 이벤트 순서·연결 안정성 개선 · 손상된 Gateway 런타임 복구와 강제 복구 흐름 보강 · sidecar 자동 재시작 및 세션 복구 강화 · 활성화 실패 시 이전 런타임·pin 상태 롤백 보장 · prerelease 버전 비교와 Gateway 빌드 불일치 경고 수정 · 인증 회귀 테스트 확대 |
 | **0.3.5** | 앱 내 업데이트 확인(앱 / Gateway 런타임 / ACP 어댑터를 각 소스와 비교해 업데이트) · 시퀀스 다이어그램 방향키 스크롤 |
 | **0.3.4** | Frontdoor 설치 상태를 실제 에이전트 config로 감지 · 온보딩 다중 Frontdoor 설치 · 대시보드 3버그(사라지는 Frontdoor / 선택 풀림 / 반복 알림) 수정 |
 | **0.3.3** | Frontdoor 이름을 폴더명 기반으로 + 직접 이름 지정(저장 유지) · 시퀀스 다이어그램 개선(고정 헤더, 타임라인 위의 호출/응답 화살표) · 선택 에이전트 활동 표시 |

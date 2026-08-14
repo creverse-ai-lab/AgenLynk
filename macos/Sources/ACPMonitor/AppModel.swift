@@ -102,6 +102,8 @@ final class AppModel: ObservableObject {
     private var reconciliationTask: Task<Void, Never>?
     private var endpoint: MonitorEndpoint?
     private var sidecarStreamConnected = false
+    private var sidecarRestartAttempts = 0
+    private var sidecarRestartTask: Task<Void, Never>?
     private var connectionGeneration = 0
     private var isStopping = false
 
@@ -354,10 +356,10 @@ final class AppModel: ObservableObject {
     /// (no-op in source-tree development, see RuntimeProvisioner), then
     /// decide whether an existing Control identity lets us skip straight to
     /// the dashboard or first-run onboarding is needed.
-    private func performStartupCheck() async {
+    private func performStartupCheck(forceRepair: Bool = false) async {
         startupPhase = .provisioningRuntime
         do {
-            if let installed = try await runtimeProvisioner.ensureInstalled(),
+            if let installed = try await runtimeProvisioner.ensureInstalled(forceRepair: forceRepair),
                let recoveryNotice = installed.recoveryNotice {
                 runtimeNotice = recoveryNotice
             }
@@ -376,6 +378,15 @@ final class AppModel: ObservableObject {
         startupCheckStarted = false
         startupPhase = .checking
         startIfNeeded()
+    }
+
+    /// User-confirmed recovery for the rare state where neither current.json
+    /// nor the stable current symlink identifies a verified runtime. Normal
+    /// startup never takes this path automatically.
+    func forceRuntimeRepair() {
+        guard case .runtimeError = startupPhase else { return }
+        startupPhase = .provisioningRuntime
+        Task { [weak self] in await self?.performStartupCheck(forceRepair: true) }
     }
 
     /// Runs the bundled bootstrap (--install-all --front-door <target>
@@ -440,12 +451,18 @@ final class AppModel: ObservableObject {
         await startTask?.value
     }
 
-    func reconnect() {
+    func reconnect(resetRestartBackoff: Bool = true) {
         guard !isStopping else { return }
+        if resetRestartBackoff {
+            sidecarRestartAttempts = 0
+            sidecarRestartTask?.cancel()
+            sidecarRestartTask = nil
+        }
         connectionGeneration += 1
         let generation = connectionGeneration
         startTask?.cancel()
         reconciliationTask?.cancel()
+        sidecarRestartTask?.cancel()
         endpoint = nil
         sidecarStreamConnected = false
         monitorStore.resetForNewSidecar()
@@ -459,8 +476,10 @@ final class AppModel: ObservableObject {
         connectionGeneration += 1
         startTask?.cancel()
         reconciliationTask?.cancel()
+        sidecarRestartTask?.cancel()
         startTask = nil
         reconciliationTask = nil
+        sidecarRestartTask = nil
         monitorStore.stop()
         endpoint = nil
         sidecarStreamConnected = false
@@ -917,7 +936,12 @@ final class AppModel: ObservableObject {
                 self.sidecarStreamConnected = connected
                 if !connected {
                     self.phase = .disconnected(error ?? "Dashboard 데이터 스트림이 끊겼습니다.")
+                    Task { [weak self] in
+                        await self?.restartSidecarIfExited(generation: generation)
+                    }
                 } else {
+                    self.sidecarRestartTask?.cancel()
+                    self.sidecarRestartTask = nil
                     self.updateConnectionPhase()
                 }
             })
@@ -947,12 +971,30 @@ final class AppModel: ObservableObject {
                     ) else { continue }
                     guard self.connectionIsCurrent(generation) else { return }
                     self.apply(snapshot)
+                    self.sidecarRestartAttempts = 0
                     self.updateConnectionPhase()
                 } catch {
+                    if !(await self.sidecar.isRunning()) {
+                        await self.restartSidecarIfExited(generation: generation)
+                        return
+                    }
                     // SSE의 재연결 상태가 사용자에게 노출된다. Snapshot 보정 실패는
                     // 다음 주기에 다시 시도해 일시적인 경합으로 Live를 끊지 않는다.
                 }
             }
+        }
+    }
+
+    private func restartSidecarIfExited(generation: Int) async {
+        guard connectionIsCurrent(generation), !(await sidecar.isRunning()), sidecarRestartTask == nil else { return }
+        sidecarRestartAttempts += 1
+        let exponent = min(sidecarRestartAttempts - 1, 4)
+        let delay = UInt64(500_000_000) * UInt64(1 << exponent)
+        sidecarRestartTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: delay)
+            guard !Task.isCancelled, let self, self.connectionIsCurrent(generation) else { return }
+            self.sidecarRestartTask = nil
+            self.reconnect(resetRestartBackoff: false)
         }
     }
 
