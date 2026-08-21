@@ -14,7 +14,7 @@ const sidecarPackage = JSON.parse(await readFile(join(root, "sidecar/package.jso
 const lock = await readGatewayLock(join(root, "gateway.lock.json"));
 
 assert.equal(packageDocument.name, "agenlynk");
-assert.equal(packageDocument.version, "0.4.0");
+assert.equal(packageDocument.version, "0.4.1");
 assert.equal(packageDocument.dependencies, undefined, "root package must not carry Gateway dependencies");
 assert.deepEqual(Object.keys(packageDocument.bin), ["agenlynk-sidecar"]);
 assert.equal(sidecarPackage.version, SIDECAR_VERSION);
