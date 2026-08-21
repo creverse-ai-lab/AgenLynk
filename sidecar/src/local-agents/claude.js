@@ -1,4 +1,5 @@
-// Claude Code transcripts (~/.claude/projects/**/*.jsonl).
+// Claude Code transcripts (~/.claude/projects/<project>/<session>.jsonl and
+// <project>/<session>/subagents/agent-*.jsonl).
 //
 // Claude ships no database, so the transcript is the only source for both the
 // session's state and the Gateway workers it launched. Parenthood is taken
@@ -71,19 +72,54 @@ export async function claudeTranscriptSignal(path, modified, stem) {
   return { ...signal, links };
 }
 
+async function directoryEntries(root) {
+  try {
+    return await readdir(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+
+async function* subagentTranscriptPaths(sessionDirectory) {
+  const subagents = join(sessionDirectory, "subagents");
+  for (const entry of await directoryEntries(subagents)) {
+    if (entry.isFile() && entry.name.startsWith("agent-") && entry.name.endsWith(".jsonl")) {
+      yield join(subagents, entry.name);
+    }
+  }
+}
+
+async function* projectTranscriptPaths(projectRoot, entries = null) {
+  const projectEntries = entries ?? await directoryEntries(projectRoot);
+  for (const entry of projectEntries) {
+    const path = join(projectRoot, entry.name);
+    if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      yield path;
+    } else if (entry.isDirectory()) {
+      // Claude stores nested workers only in this exact location. Do not
+      // recurse through tool-results, worktrees, or arbitrary future folders.
+      yield* subagentTranscriptPaths(path);
+    }
+  }
+}
+
 async function* transcriptPaths(root) {
   let entries;
-  try {
-    entries = await readdir(root, { withFileTypes: true });
-  } catch {
+  entries = await directoryEntries(root);
+  if (!entries.length) return;
+
+  // Tests and custom roots may point directly at one project directory.
+  const directTranscripts = entries.some((entry) => entry.isFile() && entry.name.endsWith(".jsonl"));
+  if (directTranscripts) {
+    yield* projectTranscriptPaths(root, entries);
     return;
   }
+
+  // The normal root contains one directory per project. Only inspect each
+  // project's top-level transcripts and exact subagent transcript folder.
   for (const entry of entries) {
-    const path = join(root, entry.name);
     if (entry.isDirectory()) {
-      yield* transcriptPaths(path);
-    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
-      yield path;
+      yield* projectTranscriptPaths(join(root, entry.name));
     }
   }
 }
@@ -92,12 +128,13 @@ async function* transcriptPaths(root) {
  * `cache` maps transcript path -> { fingerprint, signal, modified }.
  *
  * Two modes:
- * - Full walk (`dirtyPaths` null): enumerate + stat everything, rebuilding the
- *   cache from only the paths seen, so deletions drop out.
+ * - Structured scan (`dirtyPaths` null): enumerate only Claude's documented
+ *   top-level and subagent transcript locations, rebuilding the cache from
+ *   paths seen so deletions drop out.
  * - Incremental (`dirtyPaths` a Set, from an fs watcher): only the dirty paths
  *   are stat'ed/re-read; every other cached entry is reused with ZERO
- *   syscalls. The full walk on this machine costs ~550 stat/readdir syscalls
- *   every 2s — the scanner's dominant steady-state cost once lsof was cached.
+ *   syscalls. This remains available to focused callers and tests; production
+ *   uses the structured scan so it never installs a recursive home watcher.
  */
 export async function detectClaudeSessions(root, now, readyAfter, staleAfter, parents = null, cache = new Map(), dirtyPaths = null) {
   const states = {};

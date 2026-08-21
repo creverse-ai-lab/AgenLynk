@@ -20,6 +20,7 @@ struct EventSequenceView: View {
     private let headerHeight = 82.0
     private let eventRowHeight = 44.0
     private let bodyTopInset = 10.0
+    private let relationNodeSpacing = 8.0
 
     var body: some View {
         // Derived once per body pass. The computed-property forms re-ran
@@ -28,8 +29,14 @@ struct EventSequenceView: View {
         // event array once per edge — measurable milliseconds at 10 passes/s
         // during a busy turn.
         let diagram = collapseSequenceEvents(events)
+        // A page is a self-contained slice of the sequence. Deriving headers
+        // from the full history left unrelated lanes (for example an older
+        // Grok worker) pinned ahead of the Frontdoor even when that provider
+        // had no event on the page currently being viewed.
+        let pageEntries = SequencePageLayout.entries(in: diagram, page: page, pageSize: pageSize)
+        let pageEventValues = pageEntries.map(\.event)
         let marks = sessionEventMarks()
-        let lanes = makeSequenceLanes(sessions: sessions, events: events)
+        let lanes = makeSequenceLanes(sessions: sessions, events: pageEventValues)
         let laneIndex = lanes.enumerated().reduce(into: [String: Int]()) { result, item in
             result[item.element.session.sessionId] = item.offset
         }
@@ -48,7 +55,7 @@ struct EventSequenceView: View {
                 returned: hasReturned(lane.session, turnEndEventId: turnEndId)
             )
         }
-        let nodes = pageEvents(in: diagram).compactMap { entry -> SequenceDiagramNode? in
+        let nodes = pageEntries.compactMap { entry -> SequenceDiagramNode? in
             guard let index = laneIndex[entry.event.sessionId] else { return nil }
             return SequenceDiagramNode(laneIndex: index, event: entry.event, collapsedCount: entry.count)
         }
@@ -243,7 +250,7 @@ struct EventSequenceView: View {
                                     )
                                 }
                                 .buttonStyle(.plain)
-                                .frame(width: laneWidth - 24, height: eventRowHeight - 12)
+                                .frame(width: eventNodeWidth, height: eventRowHeight - 12)
                                 .position(x: laneX(node.laneIndex), y: y)
                             }
 
@@ -303,11 +310,25 @@ struct EventSequenceView: View {
         timeWidth + laneWidth * (Double(index) + 0.5)
     }
 
+    private var eventNodeWidth: Double { laneWidth - 24 }
+
+    private func relationCapsuleWidth(_ edge: SequenceCallEdge, response: Bool) -> Double {
+        if response { return 58 }
+        return edge.childDepth <= 1 ? 88 : 112
+    }
+
     /// The label that sits on a call/응답 arrow at its anchoring event's row.
     /// Selecting it jumps to the arrow's own event (the call's first event, the
     /// 응답's turn_end) so the two stay tied together.
     @ViewBuilder private func relationCapsule(_ edge: SequenceCallEdge, response: Bool, y: Double) -> some View {
-        let midX = (laneX(edge.parentIndex) + laneX(edge.childIndex)) / 2
+        let capsuleWidth = relationCapsuleWidth(edge, response: response)
+        let capsuleX = SequenceRelationLayout.centerX(
+            parentX: laneX(edge.parentIndex),
+            childX: laneX(edge.childIndex),
+            eventNodeWidth: eventNodeWidth,
+            relationWidth: capsuleWidth,
+            spacing: relationNodeSpacing
+        )
         let eventId = response ? edge.returnEventId : edge.eventId
         Button {
             followLatestEvent = false
@@ -316,7 +337,7 @@ struct EventSequenceView: View {
             Label(response ? "응답" : edge.childDepthLabel, systemImage: response ? "arrow.uturn.left" : "arrow.right")
                 .font(.caption2.weight(.medium))
                 .lineLimit(1)
-                .padding(.horizontal, 6)
+                .frame(width: capsuleWidth)
                 .padding(.vertical, 2)
                 .background(.background, in: Capsule())
                 .overlay(
@@ -328,7 +349,7 @@ struct EventSequenceView: View {
         }
         .buttonStyle(.plain)
         .disabled(eventId == nil)
-        .position(x: midX, y: y)
+        .position(x: capsuleX, y: y)
         .help(
             response
                 ? "\(edge.child.provider) \(edge.child.model ?? "default") 응답 반환"
@@ -374,17 +395,10 @@ struct EventSequenceView: View {
         )
     }
 
-    private func pageEvents(in values: [SequenceEventEntry]) -> ArraySlice<SequenceEventEntry> {
-        let end = max(0, values.count - page * pageSize)
-        let start = max(0, end - pageSize)
-        return values[start..<end]
-    }
-
     private func pageRangeLabel(for values: [SequenceEventEntry]) -> String {
         guard !values.isEmpty else { return "0 / 0" }
-        let end = max(0, values.count - page * pageSize)
-        let start = max(0, end - pageSize)
-        return "\(start + 1)–\(end) / \(values.count)"
+        let range = SequencePageLayout.range(totalCount: values.count, page: page, pageSize: pageSize)
+        return "\(range.lowerBound + 1)–\(range.upperBound) / \(values.count)"
     }
 }
 

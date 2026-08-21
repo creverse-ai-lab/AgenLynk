@@ -1,11 +1,20 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { detectClaudeSessions } from "../src/local-agents/claude.js";
 import { discover, poll, prune } from "../src/local-agents/codex.js";
-import { cliProcessStates, recordGrokAcpLinks } from "../src/local-agents/grok.js";
+import {
+  cliProcessStates,
+  grokEventPaths,
+  grokLsofArgs,
+  grokTranscriptPaths,
+  isMultiplexedGrokProcess,
+  isProxiedGrokProcess,
+  parseGrokEventPaths,
+  recordGrokAcpLinks
+} from "../src/local-agents/grok.js";
 import { detectOrcaSessions } from "../src/local-agents/orca.js";
 import {
   externalParent,
@@ -220,14 +229,92 @@ test("a grok process is only reported while its transcript shows an open turn", 
       [20, [21, "/usr/local/bin/grok", "grok agent stdio"]],
       [21, [1, "python3", "python3 pet_acp_proxy.py --provider grok"]]
     ]);
-    const eventPaths = new Map([[10, active], [11, ended], [20, active]]);
+    const eventPaths = new Map([[10, [active]], [11, [ended]], [20, [active]]]);
     const parents = new Map([[linkKey("grok", "grok-session"), ["one", 100]]]);
 
     const states = await cliProcessStates(processes, eventPaths, 100, {}, parents);
-    assert.deepEqual(Object.keys(states), ["grok-cli-10"]);
-    assert.equal(states["grok-cli-10"].parent, "one");
-    assert.equal(states["grok-cli-10"].cwd, "/work", "the session directory encodes the cwd");
-    assert.equal(states["grok-cli-10"].link_session, "grok-session");
+    assert.deepEqual(Object.keys(states), ["grok:grok-session"]);
+    assert.equal(states["grok:grok-session"].session, "grok-session");
+    assert.equal(states["grok:grok-session"].parent, "one");
+    assert.equal(states["grok:grok-session"].cwd, "/work", "the session directory encodes the cwd");
+    assert.equal(states["grok:grok-session"].link_session, "grok-session");
+    assert.equal(isProxiedGrokProcess(processes, 20), true);
+    assert.equal(isMultiplexedGrokProcess("/usr/local/bin/grok", "grok agent stdio"), true);
+  });
+});
+
+test("all events.jsonl files held by a grok pid are retained and active sessions are reported", async () => {
+  await withTempDirectory(async (root) => {
+    const inactive = join(root, "%2Fwork", "inactive-session", "events.jsonl");
+    const active = join(root, "%2Fwork", "active-session", "events.jsonl");
+    const ended = join(root, "%2Fwork", "ended-session", "events.jsonl");
+    const alsoActive = join(root, "%2Fother", "second-active-session", "events.jsonl");
+    await mkdir(dirname(inactive), { recursive: true });
+    await mkdir(dirname(active), { recursive: true });
+    await mkdir(dirname(ended), { recursive: true });
+    await mkdir(dirname(alsoActive), { recursive: true });
+    await writeFile(inactive, '{"type":"mcp_config_resolved"}\n');
+    await writeFile(active, '{"type":"turn_started"}\n{"type":"phase_changed"}\n');
+    await writeFile(ended, '{"type":"turn_started"}\n{"type":"turn_ended"}\n');
+    await writeFile(alsoActive, '{"type":"turn_started"}\n');
+
+    const parsed = parseGrokEventPaths([
+      "p10",
+      `n${inactive}`,
+      `n${active}`,
+      `n${active}`,
+      `n${ended}`,
+      `n${alsoActive}`,
+      "p11",
+      "n/tmp/not-a-transcript.json"
+    ].join("\n"));
+    assert.deepEqual(parsed.get(10), [inactive, active, ended, alsoActive]);
+    assert.equal(parsed.has(11), false);
+    const cached = await grokEventPaths(
+      [10],
+      new Map([[10, { paths: parsed.get(10), at: 100 }]]),
+      101
+    );
+    assert.deepEqual(cached.get(10), parsed.get(10), "cache hits retain every transcript path");
+
+    const processes = new Map([[10, [1, "/usr/local/bin/grok", "grok agent stdio"]]]);
+    const states = await cliProcessStates(processes, parsed, 100);
+    assert.deepEqual(Object.keys(states), ["grok:active-session", "grok:second-active-session"]);
+    assert.equal(states["grok:active-session"].session, "active-session");
+    assert.equal(states["grok:active-session"].pid, 10);
+    assert.equal(states["grok:active-session"].cwd, "/work");
+    assert.equal(states["grok:second-active-session"].cwd, "/other");
+  });
+});
+
+test("grok process inspection is limited to exact agent-owned transcript files", async () => {
+  await withTempDirectory(async (root) => {
+    const transcript = join(root, "%2Fwork", "session-one", "events.jsonl");
+    const unrelated = join(root, "%2Fwork", "session-one", "terminal", "events.jsonl");
+    await mkdir(dirname(transcript), { recursive: true });
+    await mkdir(dirname(unrelated), { recursive: true });
+    await writeFile(transcript, '{"type":"turn_started"}\n');
+    await writeFile(unrelated, '{"type":"turn_started"}\n');
+
+    const oldTranscript = join(root, "%2Fold", "old-session", "events.jsonl");
+    await mkdir(dirname(oldTranscript), { recursive: true });
+    await writeFile(oldTranscript, '{"type":"turn_started"}\n');
+    const oldTime = new Date(Date.now() - 700_000);
+    await utimes(oldTranscript, oldTime, oldTime);
+
+    const canonicalTranscript = await realpath(transcript);
+    const candidates = await grokTranscriptPaths(root);
+    assert.deepEqual(candidates, [canonicalTranscript]);
+    const args = grokLsofArgs([10, 11], candidates);
+    assert.deepEqual(args.slice(0, 5), ["-a", "-p", "10,11", "-Fn", "--"]);
+    assert.deepEqual(args.slice(5), [canonicalTranscript], "lsof receives only the allowlisted transcript path");
+
+    const parsed = parseGrokEventPaths([
+      "p10",
+      `n${canonicalTranscript}`,
+      "n/Users/test/Documents/private/events.jsonl"
+    ].join("\n"), new Set(candidates));
+    assert.deepEqual(parsed.get(10), [canonicalTranscript], "unexpected open files are rejected defensively");
   });
 });
 
@@ -279,6 +366,31 @@ test("claude transcripts yield state, expire on their own lifetime, and cache by
     await rm(transcript);
     assert.deepEqual(await detectClaudeSessions(claude, now, 5, 600, parents, cache), {});
     assert.equal(cache.size, 0, "a deleted transcript drops out of the cache");
+  });
+});
+
+test("claude scanning reads only top-level and exact subagent transcript locations", async () => {
+  await withTempDirectory(async (root) => {
+    const project = join(root, "project-one");
+    const main = join(project, "main-session.jsonl");
+    const child = join(project, "main-session", "subagents", "agent-child.jsonl");
+    const unrelated = join(project, "tool-results", "nested.jsonl");
+    await mkdir(dirname(child), { recursive: true });
+    await mkdir(dirname(unrelated), { recursive: true });
+    const now = Date.now() / 1000;
+    const timestamp = new Date(now * 1000).toISOString();
+    const record = (sessionId) => JSON.stringify({
+      type: "user", sessionId, timestamp, message: { content: [{ type: "text" }] }
+    }) + "\n";
+    await writeFile(main, record("main-session"));
+    await writeFile(child, record("child-session"));
+    await writeFile(unrelated, record("must-not-be-read"));
+
+    const cache = new Map();
+    const detected = await detectClaudeSessions(root, now, 5, 600, new Map(), cache);
+    assert.deepEqual(Object.keys(detected).sort(), ["child-session", "main-session"]);
+    assert.deepEqual([...cache.keys()].sort(), [child, main].sort());
+    assert.ok(!cache.has(unrelated), "arbitrary nested JSONL files stay outside the scanner");
   });
 });
 
@@ -354,6 +466,40 @@ test("orca panes map to states and expire by their own lifetime", async () => {
   });
 });
 
+test("codex discovery stays database-scoped and rejects rollout paths outside its transcript root", async () => {
+  await withTempDirectory(async (root) => {
+    const sessions = join(root, "sessions");
+    const database = join(root, "state.sqlite");
+    const inside = join(sessions, "2026", "rollout-inside.jsonl");
+    const outside = join(root, "rollout-outside.jsonl");
+    await mkdir(dirname(inside), { recursive: true });
+    await writeFile(inside, '{"type":"session_meta","payload":{"id":"inside"}}\n');
+    await writeFile(outside, '{"type":"session_meta","payload":{"id":"outside"}}\n');
+    const now = Math.floor(Date.now() / 1000);
+    await createCodexDatabase(database, {
+      threads: [
+        { id: "inside", model: "gpt", cwd: "/work", rolloutPath: inside, updatedAt: now },
+        { id: "outside", model: "gpt", cwd: "/work", rolloutPath: outside, updatedAt: now }
+      ]
+    });
+
+    const cursors = new Map();
+    await discover({ root: sessions, cursors, retired: new Map(), staleAfter: 600, now, database });
+    assert.deepEqual([...cursors.keys()], [inside], "database rows cannot escape the transcript root");
+
+    const noDatabase = new Map();
+    await discover({
+      root: sessions,
+      cursors: noDatabase,
+      retired: new Map(),
+      staleAfter: 600,
+      now,
+      database: join(root, "missing.sqlite")
+    });
+    assert.equal(noDatabase.size, 0, "a missing database must not trigger a recursive production walk");
+  });
+});
+
 test("codex cursors tail transcripts incrementally and identify the real session id", async () => {
   await withTempDirectory(async (root) => {
     const sessions = join(root, "sessions");
@@ -370,7 +516,9 @@ test("codex cursors tail transcripts incrementally and identify the real session
     const parents = new Map();
     const now = Date.now() / 1000;
 
-    await discover({ root: sessions, cursors, retired, staleAfter: 600, now, database: null });
+    await discover({
+      root: sessions, cursors, retired, staleAfter: 600, now, database: null, allowTreeFallback: true
+    });
     assert.equal(cursors.size, 1, "a fresh transcript is picked up");
     await poll({ cursors, states, parents, now });
     assert.equal(states.one.state, "running", "the session_meta id replaces the filename stem");
@@ -532,7 +680,9 @@ test("codex cursor advances by bytes so multibyte transcripts do not re-parse fo
     const states = {};
     const parents = new Map();
     const now = Date.now() / 1000;
-    await discover({ root: sessions, cursors, retired, staleAfter: 600, now, database: null });
+    await discover({
+      root: sessions, cursors, retired, staleAfter: 600, now, database: null, allowTreeFallback: true
+    });
     await poll({ cursors, states, parents, now });
     assert.equal(
       cursors.get(transcript).offset,
@@ -559,7 +709,9 @@ test("a transcript atomically replaced with same-sized content is re-read", asyn
     const states = {};
     const parents = new Map();
     const now = Date.now() / 1000;
-    await discover({ root: sessions, cursors, retired, staleAfter: 600, now, database: null });
+    await discover({
+      root: sessions, cursors, retired, staleAfter: 600, now, database: null, allowTreeFallback: true
+    });
     await poll({ cursors, states, parents, now });
     assert.equal(states.aa.state, "running");
 

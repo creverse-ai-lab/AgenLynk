@@ -5,7 +5,7 @@
 <h1 align="center">AgenLynk</h1>
 
 <p align="center">
-  <b>0.4.0 beta</b> · Apache-2.0 · macOS 14+ · Apple Silicon
+  <b>0.4.1 beta 1</b> · Apache-2.0 · macOS 14+ · Apple Silicon
 </p>
 
 <p align="center">
@@ -16,7 +16,7 @@
 <p align="center">
   <img alt="platform" src="https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white">
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-1461FA">
-  <img alt="app" src="https://img.shields.io/badge/AgenLynk-0.4.0--beta-1461FA">
+  <img alt="app" src="https://img.shields.io/badge/AgenLynk-0.4.1--beta.1-1461FA">
 </p>
 
 <p align="center">
@@ -142,10 +142,11 @@ npm run macos:test    # Swift 모델·설정·Pet·온보딩
 
 앱 UI는 SwiftUI(`macos/Sources/`), Monitor sidecar는 Node(`sidecar/`)입니다. DMG는 `gateway.lock.json`에 고정된 Gateway 1.4.0 artifact와 Node를 `Contents/Resources/gateway-seed/`에, 앱과 함께 움직이는 sidecar를 `Contents/Resources/sidecar/`에 담습니다. 소스 트리에서 Gateway를 쓰려면 `npm run gateway:fetch` 또는 `ACP_LYNK_GATEWAY_DEVELOPMENT_ROOT`를 사용하세요.
 
-## 버전
+## 버전 및 수정 이력
 
 | 버전 | 주요 내용 |
 |---|---|
+| **0.4.1 beta 1** | Codex · Claude · Grok 로컬 세션과 ACP 서브에이전트 감지 개선 · 페이지별 Frontdoor 표시 오류 수정 · 호출/이벤트 캡슐 겹침 수정 · 에이전트 기록 탐색 범위를 필요한 세션 파일로 제한 |
 | **0.4.0** | 공식 Gateway 1.4.0 artifact를 고정해 사용 · 앱 / Gateway / 어댑터 업데이트 확인 |
 | **0.3.5** | 시퀀스 다이어그램 방향키 스크롤 |
 | **0.3.4** | Frontdoor 설치 상태를 실제 에이전트 config로 감지 · 온보딩 다중 설치 |

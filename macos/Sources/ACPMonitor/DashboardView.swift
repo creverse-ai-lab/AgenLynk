@@ -192,7 +192,7 @@ struct DashboardView: View {
             )
             Divider()
             EventSequenceView(
-                sessions: model.visibleLogSessions,
+                sessions: model.selectedFrontdoor?.members ?? model.visibleLogSessions,
                 events: model.selectedEvents,
                 selectedSessionId: $model.selectedSessionId,
                 selectedEventId: $model.selectedEventId,

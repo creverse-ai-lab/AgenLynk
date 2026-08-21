@@ -89,12 +89,18 @@ test("gateway-owned provider sessions are deduplicated by ACP or Gateway id", ()
     { provider: "grok", session: "nested-worker", parent: "provider-worker", state: "running", time: 102 }
   ] });
   const merged = mergeMonitorSessions([
-    { sessionId: "gateway-worker", acpSessionId: "provider-worker", openerInstanceId: "main" }
+    // Gateway 1.4 omits topology; the duplicate provider transcript supplies
+    // it before that local record is removed.
+    { sessionId: "gateway-worker", acpSessionId: "provider-worker", provider: "claude", status: "running" }
   ], local.sessions);
 
   assert.deepEqual(merged.map((session) => session.sessionId), [
     "gateway-worker", "local:codex:main", "local:grok:nested-worker"
   ]);
+  assert.equal(merged[0].opener, "codex");
+  assert.equal(merged[0].openerInstanceId, "main");
+  assert.equal(merged[0].role, "worker");
+  assert.equal(merged[0].parentSessionId, "local:codex:main");
   assert.equal(merged[1].openerInstanceId, merged[0].openerInstanceId);
   assert.equal(merged[2].parentSessionId, "gateway-worker", "a local subagent must connect to its Gateway parent");
 });

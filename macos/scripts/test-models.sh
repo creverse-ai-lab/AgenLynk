@@ -56,6 +56,15 @@ env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
 
 "$SETTINGS_OUT"
 
+SEQUENCE_LAYOUT_OUT="$CHECK_ROOT/sequence-relation-layout"
+env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
+  swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/SequenceRelationLayout.swift" \
+  "$REPO_ROOT/macos/Tests/ACPMonitorTests/SequenceRelationLayoutTests.swift" \
+  -o "$SEQUENCE_LAYOUT_OUT"
+
+"$SEQUENCE_LAYOUT_OUT"
+
 PET_CONTROLLER_OUT="$CHECK_ROOT/pet-controller"
 env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 $SHARED_FLAGS \

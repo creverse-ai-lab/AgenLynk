@@ -12,7 +12,7 @@ if (!entrypoint.endsWith("/gateway-client/index.js")) {
 
 const client = await import(pathToFileURL(entrypoint).href);
 if (client.GATEWAY_API_VERSION !== 1 || typeof client.GatewayRpcClient !== "function") {
-  throw new Error("Gateway public client is incompatible with AgenLynk 0.4.0");
+  throw new Error("Gateway public client is incompatible with AgenLynk 0.4.1");
 }
 
 export const {

@@ -21,7 +21,7 @@ async function fixture() {
     gatewayApiVersion: 1,
     nodeVersion: "22.23.2"
   }));
-  await writeFile(join(sidecarRoot, "src/version.js"), 'export const SIDECAR_VERSION = "0.4.0"; export const SIDECAR_BUILD_ID = "sidecar-build-id";\n');
+  await writeFile(join(sidecarRoot, "src/version.js"), 'export const SIDECAR_VERSION = "0.4.1"; export const SIDECAR_BUILD_ID = "sidecar-build-id";\n');
   return { root, runtimeRoot, sidecarRoot, out: join(root, "Lynk.release.json") };
 }
 
@@ -31,7 +31,7 @@ function validArgs(runtimeRoot, sidecarRoot, out) {
     "--runtime-root", runtimeRoot,
     "--sidecar-root", sidecarRoot,
     "--app-name", "Lynk.app",
-    "--app-version", "0.4.0-beta.1",
+    "--app-version", "0.4.1-beta.1",
     "--app-build", "1",
     "--bundle-id", "com.example.lynk",
     "--min-macos", "14.0",
@@ -51,11 +51,11 @@ test("release manifest CLI writes evidence-backed app, runtime, DMG, and signing
   try {
     await execFileAsync(process.execPath, validArgs(runtimeRoot, sidecarRoot, out));
     const release = JSON.parse(await readFile(out, "utf8"));
-    assert.equal(release.app.version, "0.4.0-beta.1");
+    assert.equal(release.app.version, "0.4.1-beta.1");
     assert.equal(release.dmg.bytes, 12345);
     assert.equal(release.dmg.sha256, "a".repeat(64));
     assert.deepEqual(release.gateway, { version: "1.4.0", buildId: "build-id", apiVersion: 1 });
-    assert.deepEqual(release.sidecar, { version: "0.4.0", buildId: "sidecar-build-id" });
+    assert.deepEqual(release.sidecar, { version: "0.4.1", buildId: "sidecar-build-id" });
     assert.deepEqual(release.signing, { mode: "ad-hoc", identity: null, notarized: false, stapled: false });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -79,8 +79,8 @@ test("release manifest CLI rejects ambiguous boolean, checksum, and Developer ID
     await assert.rejects(execFileAsync(process.execPath, developerIdArgs), /signing-identity is required/);
 
     const stableUnsignedArgs = [...base];
-    stableUnsignedArgs[stableUnsignedArgs.indexOf("--app-version") + 1] = "0.4.0";
-    await assert.rejects(execFileAsync(process.execPath, stableUnsignedArgs), /0\.4\.0-beta\.x/);
+    stableUnsignedArgs[stableUnsignedArgs.indexOf("--app-version") + 1] = "0.4.1";
+    await assert.rejects(execFileAsync(process.execPath, stableUnsignedArgs), /0\.4\.1-beta\.x/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -6,7 +6,6 @@
 // holds those live over socket RPC, and the old watcher only produced them for
 // `mergeMonitorSessions` to throw away again.
 
-import { watch } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { detectClaudeSessions } from "./claude.js";
@@ -60,15 +59,6 @@ export class LocalAgentScanner {
     this.processStates = {};
     this.grokEventPathCache = new Map();
     this.lastProcessScan = 0;
-    // FSEvents watcher over the Claude projects tree. While healthy, each
-    // discovery only touches transcripts the watcher marked dirty; a periodic
-    // full walk self-heals anything the watcher missed (directory renames,
-    // dropped events), and any watcher failure falls back to walking.
-    this.claudeWatcher = null;
-    this.claudeDirty = new Set();
-    this.claudeWatchBroken = false;
-    this.lastClaudeFullWalk = 0;
-    this.claudeFullWalkIntervalSeconds = paths.claudeFullWalkIntervalSeconds ?? 60;
     // Parent links are in-memory now. The old watcher reloaded them from its
     // snapshot file; here a monitor restart simply rediscovers them from the
     // transcripts on the next scan.
@@ -134,7 +124,9 @@ export class LocalAgentScanner {
     }
 
     if (now - this.lastProcessScan >= (this.processScanIntervalSeconds ?? PROCESS_SCAN_INTERVAL_SECONDS)) {
-      this.processStates = await detectCliProcesses(now, this.processStates, this.parents, this.grokEventPathCache);
+      this.processStates = await detectCliProcesses(
+        now, this.processStates, this.parents, this.grokEventPathCache, this.grokRoot, this.staleAfter
+      );
       this.lastProcessScan = now;
     }
     // Copy each carried-over entry: later stages mutate item.parent in place,
@@ -143,8 +135,7 @@ export class LocalAgentScanner {
       Object.entries(this.processStates).map(([key, item]) => [key, { ...item }])
     );
     Object.assign(detected, await detectClaudeSessions(
-      this.claudeRoot, now, this.readyAfter, this.staleAfter, this.parents, this.claudeCache,
-      this.#claudeDirtySnapshot(now)
+      this.claudeRoot, now, this.readyAfter, this.staleAfter, this.parents, this.claudeCache
     ));
 
     // Orca drives the same underlying CLI sessions, so its richer status wins
@@ -164,52 +155,6 @@ export class LocalAgentScanner {
       }
     }
     this.detectedStates = detected;
-  }
-
-  /**
-   * The dirty set for this discovery pass, or null to force a full walk.
-   * Null when: the watcher cannot run (fallback), an event arrived that the
-   * incremental path cannot attribute (broken/renamed), or the periodic
-   * self-heal walk is due.
-   */
-  #claudeDirtySnapshot(now) {
-    this.#ensureClaudeWatcher();
-    const healDue = now - this.lastClaudeFullWalk >= this.claudeFullWalkIntervalSeconds;
-    if (!this.claudeWatcher || this.claudeWatchBroken || healDue) {
-      this.claudeWatchBroken = false;
-      this.claudeDirty.clear();
-      this.lastClaudeFullWalk = now;
-      return null;
-    }
-    const dirty = this.claudeDirty;
-    this.claudeDirty = new Set();
-    return dirty;
-  }
-
-  #ensureClaudeWatcher() {
-    if (this.claudeWatcher) return;
-    try {
-      this.claudeWatcher = watch(this.claudeRoot, { recursive: true }, (_eventType, filename) => {
-        if (typeof filename !== "string" || !filename) {
-          // An event we cannot attribute to a path: the next pass walks.
-          this.claudeWatchBroken = true;
-          return;
-        }
-        if (filename.endsWith(".jsonl")) this.claudeDirty.add(join(this.claudeRoot, filename));
-      });
-      this.claudeWatcher.unref();
-      this.claudeWatcher.on("error", () => {
-        // Missing root, exhausted watch descriptors, ... — fall back to
-        // walking; the next #ensureClaudeWatcher call retries.
-        this.claudeWatcher?.close();
-        this.claudeWatcher = null;
-        this.claudeWatchBroken = true;
-      });
-      // Everything before the watcher existed is unknown: walk once.
-      this.claudeWatchBroken = true;
-    } catch {
-      this.claudeWatcher = null;
-    }
   }
 
   async #orcaHomes() {

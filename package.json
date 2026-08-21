@@ -1,6 +1,6 @@
 {
   "name": "agenlynk",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Open-source macOS app that ties local AI agents together and monitors delegated work.",
   "license": "Apache-2.0",
   "type": "module",

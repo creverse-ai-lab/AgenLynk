@@ -29,7 +29,7 @@ STAGING="$REPO_ROOT/build/dmg-staging"
 # and is rejected unless Developer ID + notarization + stapling all succeeded.
 if [ -z "${ACP_LYNK_APP_VERSION:-}" ]; then
   if [ "${ACP_LYNK_CODESIGN_IDENTITY:--}" = "-" ] || [ "${ACP_LYNK_NOTARIZE:-0}" != "1" ]; then
-    ACP_LYNK_APP_VERSION=${ACP_LYNK_PRERELEASE_VERSION:-0.4.0-beta.1}
+    ACP_LYNK_APP_VERSION=${ACP_LYNK_PRERELEASE_VERSION:-0.4.1-beta.1}
     export ACP_LYNK_APP_VERSION
   fi
 fi
@@ -56,11 +56,10 @@ mkdir -p "$STAGING"
 cp -R "$APP" "$STAGING/AgenLynk.app"
 ln -s /Applications "$STAGING/Applications"
 
-# ULMO (LZMA) rather than the conventional UDZO (zlib): the payload is
-# dominated by a 245MB agent binary and a 107MB Node binary, and LZMA takes the
-# image from ~158MB to ~109MB. It costs about a minute of build time and needs
-# macOS 10.15+ to mount, which is far below the app's own 14.0 minimum.
-hdiutil create -volname AgenLynk -srcfolder "$STAGING" -ov -format ULMO "$DMG"
+# Use the conventional kernel-compatible zlib image. ULMO can produce a
+# smaller file, but some macOS versions can inspect it while still refusing to
+# verify or mount it with `resource temporarily unavailable`.
+hdiutil create -volname AgenLynk -srcfolder "$STAGING" -ov -format UDZO "$DMG"
 cleanup
 
 if [ "${ACP_LYNK_NOTARIZE:-0}" = "1" ]; then

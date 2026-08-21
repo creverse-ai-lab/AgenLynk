@@ -108,6 +108,31 @@ export function mergeMonitorSessions(gatewaySessions, localSessions) {
     [session?.sessionId, session?.sessionId],
     [session?.acpSessionId, session?.sessionId]
   ]).filter(([key, value]) => key && value));
+  const localByProviderId = new Map((Array.isArray(localSessions) ? localSessions : [])
+    .flatMap((session) => [
+      [session?.localSessionId, session],
+      [session?.sessionId, session]
+    ])
+    .filter(([key, value]) => key && value));
+  const resolvedParentSessionId = (session) => gatewaySessionIdByProviderId.get(session?.parentLocalSessionId)
+    ?? session?.parentSessionId
+    ?? null;
+  // Gateway 1.4 session records do not carry the Frontdoor topology fields.
+  // The same provider transcript is already present in the local scan and has
+  // those fields; preserve its topology on the authoritative Gateway record
+  // before dropping the duplicate local record.
+  const enrichedGateway = gateway.map((session) => {
+    const localMatch = localByProviderId.get(session?.acpSessionId)
+      ?? localByProviderId.get(session?.sessionId);
+    if (!localMatch) return session;
+    return {
+      ...session,
+      opener: session.opener ?? localMatch.opener,
+      openerInstanceId: session.openerInstanceId ?? localMatch.openerInstanceId,
+      role: session.role ?? localMatch.role,
+      parentSessionId: session.parentSessionId ?? resolvedParentSessionId(localMatch)
+    };
+  });
   const ownedWorkerIds = new Set(gateway.flatMap((session) => [
     session?.sessionId,
     session?.acpSessionId
@@ -116,8 +141,7 @@ export function mergeMonitorSessions(gatewaySessions, localSessions) {
     .filter((session) => !ownedWorkerIds.has(session.localSessionId))
     .map((session) => ({
       ...session,
-      parentSessionId: gatewaySessionIdByProviderId.get(session.parentLocalSessionId)
-        ?? session.parentSessionId
+      parentSessionId: resolvedParentSessionId(session)
     }));
-  return [...gateway, ...local];
+  return [...enrichedGateway, ...local];
 }

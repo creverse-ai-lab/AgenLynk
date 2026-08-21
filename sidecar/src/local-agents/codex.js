@@ -2,11 +2,12 @@
 //
 // Discovery comes from Codex's thread database when it is available: `threads`
 // already stores every live thread's exact `rollout_path`, so one query
-// replaces a recursive walk of ~/.codex/sessions. A directory scan remains as
-// the fallback for Orca account homes and for a missing/unreadable database.
+// replaces a recursive walk of ~/.codex/sessions. Production discovery stays
+// database-only: if the database is unavailable, privacy wins over exhaustive
+// detection and the scanner does not walk the whole transcript tree.
 
 import { open, readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isConversationRecord } from "../local-transcript.js";
 import { readRecord } from "./jsonl.js";
 import { recordExternalParent } from "./parent-links.js";
@@ -83,6 +84,14 @@ async function* rolloutPaths(root) {
   }
 }
 
+export function isAllowedRolloutPath(root, path) {
+  if (typeof root !== "string" || !root || typeof path !== "string" || !isAbsolute(path)) return false;
+  const name = basename(path);
+  if (!name.startsWith("rollout-") || !name.endsWith(".jsonl")) return false;
+  const child = relative(resolve(root), resolve(path));
+  return child !== "" && child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child);
+}
+
 /**
  * Adds cursors for transcripts worth following. `retired` remembers files this
  * scanner gave up on, keyed by the mtime it saw, so a retired file is only
@@ -96,6 +105,7 @@ export async function discover({
   staleAfter,
   now,
   database = null,
+  allowTreeFallback = false,
   conversationWindowMs,
   maxConversationRecords
 }) {
@@ -103,6 +113,10 @@ export async function discover({
   // candidates cost zero syscalls to consider — discovery runs every 2s, and
   // a stat per candidate was pure duplication of what the DB just reported.
   const consider = async (path, knownModified = null) => {
+    // A rollout_path comes from another program's database. Never let a
+    // malformed or tampered row turn the monitor into an arbitrary file
+    // reader outside the agent-owned transcript directory.
+    if (!isAllowedRolloutPath(root, path)) return;
     let modified = knownModified;
     if (modified == null) {
       try {
@@ -142,6 +156,7 @@ export async function discover({
     }
     return;
   }
+  if (!allowTreeFallback) return;
   for await (const path of rolloutPaths(root)) await consider(path);
 }
 
