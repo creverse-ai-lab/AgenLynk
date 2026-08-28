@@ -104,3 +104,46 @@ test("gateway-owned provider sessions are deduplicated by ACP or Gateway id", ()
   assert.equal(merged[1].openerInstanceId, merged[0].openerInstanceId);
   assert.equal(merged[2].parentSessionId, "gateway-worker", "a local subagent must connect to its Gateway parent");
 });
+
+// Regression: before the frontdoor's gateway tool response is scanned, the
+// worker's transcript roots to itself. Copying that self-rooted identity onto
+// the Gateway record promoted every not-yet-linked running worker to a false
+// Frontdoor row of its own.
+test("an unlinked gateway worker is never promoted to a Frontdoor", () => {
+  const local = projectLocalSnapshot({ sessions: [
+    { provider: "claude", session: "frontdoor-uuid", state: "running", time: 100, cwd: "/repo" },
+    { provider: "claude", session: "worker-uuid", state: "running", time: 101, cwd: "/repo" }
+  ] });
+  const merged = mergeMonitorSessions([
+    { sessionId: "acp-1", acpSessionId: "worker-uuid", provider: "claude", status: "running" }
+  ], local.sessions);
+
+  const gatewayRecord = merged.find((session) => session.sessionId === "acp-1");
+  assert.equal(gatewayRecord.role, "worker", "a Gateway session is opened by a Main, never a Frontdoor");
+  assert.equal(gatewayRecord.openerInstanceId, undefined, "a self-rooted identity must not be copied");
+  const frontdoors = merged.filter((session) => session.role === "frontdoor");
+  assert.deepEqual(frontdoors.map((session) => session.openerInstanceId), ["frontdoor-uuid"],
+    "only the real Frontdoor keeps a root identity");
+});
+
+// Regression: the transcript that proves a worker's parent leaves the scan
+// seconds after its turn ends, which stripped the Gateway record's topology
+// again — workers detached from their Frontdoor between turns and their
+// events vanished from the Frontdoor's sequence view.
+test("worker attribution is remembered after its transcript goes stale", () => {
+  const workerTopology = new Map();
+  const linked = projectLocalSnapshot({ sessions: [
+    { provider: "claude", session: "frontdoor-uuid", state: "running", time: 100, cwd: "/repo" },
+    { provider: "claude", session: "worker-uuid", parent: "frontdoor-uuid", state: "running", time: 101, cwd: "/repo" }
+  ] });
+  const gateway = [{ sessionId: "acp-1", acpSessionId: "worker-uuid", provider: "claude", status: "running" }];
+
+  const first = mergeMonitorSessions(gateway, linked.sessions, workerTopology);
+  assert.equal(first[0].openerInstanceId, "frontdoor-uuid");
+
+  // The worker went idle; readyAfter expired and its transcript left the scan.
+  const second = mergeMonitorSessions([{ ...gateway[0], status: "idle" }], [], workerTopology);
+  assert.equal(second[0].role, "worker");
+  assert.equal(second[0].openerInstanceId, "frontdoor-uuid", "attribution survives the transcript going stale");
+  assert.equal(second[0].parentSessionId, "local:claude:frontdoor-uuid");
+});

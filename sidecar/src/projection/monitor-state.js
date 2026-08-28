@@ -19,6 +19,11 @@ export class MonitorState {
     // Raw Gateway session source retained inside the canonical state owner so
     // transport callbacks do not maintain a competing module-level copy.
     this.gatewaySourceSessions = [];
+    // Proven Frontdoor/Worker topology per Gateway session. The transcript
+    // that proves a worker's parent goes stale right after its turn ends, so
+    // the merge keeps the last proven attribution here for the session's
+    // lifetime (see mergeMonitorSessions).
+    this.workerTopology = new Map();
     this.eventsBySession = new Map();
     this.eventSequencesBySession = new Map();
     this.historySessions = new Map();
@@ -118,6 +123,7 @@ export class MonitorState {
     this.eventsBySession.delete(sessionId);
     this.eventSequencesBySession.delete(sessionId);
     this.externalEventSignatures.delete(sessionId);
+    this.workerTopology.delete(sessionId);
     if (closed && !this.closedSessionIds.has(sessionId)) {
       this.closedSessionIds.add(sessionId);
       this.closedSessionOrder.push(sessionId);

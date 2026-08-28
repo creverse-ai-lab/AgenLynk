@@ -279,7 +279,7 @@ async function main() {
   const applySessionSources = queuedSingleFlight(async () => {
     const beforeRevision = state.revision;
     const local = await readLocalProjection();
-    const merged = mergeMonitorSessions(state.gatewaySourceSessions, local.sessions);
+    const merged = mergeMonitorSessions(state.gatewaySourceSessions, local.sessions, state.workerTopology);
     const acceptedLocalIds = new Set(merged.filter((session) => session.source === "local").map((session) => session.sessionId));
     const events = Object.fromEntries(Object.entries(local.events).filter(([sessionId]) => acceptedLocalIds.has(sessionId)));
     const removedSessionIds = state.setSessions(merged);
