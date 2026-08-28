@@ -98,7 +98,7 @@ export function projectLocalSnapshot(snapshot) {
   return { sessions, events };
 }
 
-export function mergeMonitorSessions(gatewaySessions, localSessions) {
+export function mergeMonitorSessions(gatewaySessions, localSessions, workerTopology = null) {
   // ownedWorkerIds is LOAD-BEARING even though the scanner no longer produces
   // Gateway sessions itself: an ACP claude worker writes a transcript under
   // ~/.claude/projects like any other claude session, so the local scanner
@@ -121,16 +121,38 @@ export function mergeMonitorSessions(gatewaySessions, localSessions) {
   // The same provider transcript is already present in the local scan and has
   // those fields; preserve its topology on the authoritative Gateway record
   // before dropping the duplicate local record.
+  //
+  // Two invariants guard the Frontdoor sidebar here:
+  // - A Gateway session is always opened by a Main, so its role is "worker"
+  //   no matter what the transcript scan currently believes. An unlinked
+  //   worker transcript roots to itself, and copying that self-rooted
+  //   frontdoor identity used to promote every not-yet-linked worker to a
+  //   false Frontdoor row of its own.
+  // - Attribution is sticky. The transcript that proves a worker's parent
+  //   goes stale seconds after the turn ends; `workerTopology` (owned by the
+  //   caller, pruned on session removal) keeps the proven topology for the
+  //   session's remaining lifetime instead of letting it evaporate.
   const enrichedGateway = gateway.map((session) => {
     const localMatch = localByProviderId.get(session?.acpSessionId)
       ?? localByProviderId.get(session?.sessionId);
-    if (!localMatch) return session;
+    const proven = localMatch?.openerInstanceId
+      && localMatch.openerInstanceId !== localMatch.localSessionId
+      ? {
+        opener: localMatch.opener ?? null,
+        openerInstanceId: localMatch.openerInstanceId,
+        parentSessionId: resolvedParentSessionId(localMatch)
+      }
+      : null;
+    if (proven && workerTopology && session?.sessionId) workerTopology.set(session.sessionId, proven);
+    const topology = proven ?? workerTopology?.get(session?.sessionId) ?? null;
     return {
       ...session,
-      opener: session.opener ?? localMatch.opener,
-      openerInstanceId: session.openerInstanceId ?? localMatch.openerInstanceId,
-      role: session.role ?? localMatch.role,
-      parentSessionId: session.parentSessionId ?? resolvedParentSessionId(localMatch)
+      role: session.role ?? "worker",
+      ...(topology ? {
+        opener: session.opener ?? topology.opener,
+        openerInstanceId: session.openerInstanceId ?? topology.openerInstanceId,
+        parentSessionId: session.parentSessionId ?? topology.parentSessionId
+      } : {})
     };
   });
   const ownedWorkerIds = new Set(gateway.flatMap((session) => [

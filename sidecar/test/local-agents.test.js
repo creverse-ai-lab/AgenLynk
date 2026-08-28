@@ -438,6 +438,64 @@ test("only mcpMeta.structuredContent can make a claude session a parent", async 
   });
 });
 
+// Task subagent records reuse the PARENT's sessionId and are distinguished
+// only by isSidechain/agentId. Keying them by sessionId made every subagent
+// scan overwrite the parent session's state with child activity.
+test("claude subagent records project as child sessions instead of overwriting the parent", async () => {
+  await withTempDirectory(async (root) => {
+    const project = join(root, "project");
+    const main = join(project, "main-session.jsonl");
+    const child = join(project, "main-session", "subagents", "agent-abc.jsonl");
+    await mkdir(dirname(child), { recursive: true });
+    const now = Date.now() / 1000;
+    const timestamp = new Date(now * 1000).toISOString();
+
+    await writeFile(main, JSON.stringify({
+      type: "assistant", sessionId: "main-session", timestamp, cwd: "/repo",
+      message: { content: [{ type: "text" }] }
+    }) + "\n");
+    await writeFile(child, JSON.stringify({
+      type: "assistant", sessionId: "main-session", isSidechain: true, agentId: "abc", timestamp,
+      message: { content: [{ type: "text" }] }
+    }) + "\n");
+
+    const detected = await detectClaudeSessions(root, now, 5, 600, new Map());
+    assert.deepEqual(Object.keys(detected).sort(), ["abc", "main-session"]);
+    assert.equal(detected["main-session"].state, "running");
+    assert.equal(detected["main-session"].parent, null, "the parent stays a root");
+    assert.equal(detected.abc.parent, "main-session", "the subagent hangs under its parent session");
+  });
+});
+
+// The parents map is in-memory: after a monitor restart the links must be
+// rediscoverable even when the frontdoor is deep inside a long turn and the
+// gateway response record sits far behind the recent-record budget. Otherwise
+// every still-running worker comes back as a parentless false Frontdoor.
+test("the first read of a transcript recovers gateway links beyond the recent-record budget", async () => {
+  await withTempDirectory(async (root) => {
+    const claude = join(root, "claude");
+    await mkdir(claude, { recursive: true });
+    const now = Date.now() / 1000;
+    const timestamp = new Date(now * 1000).toISOString();
+
+    const linkRecord = JSON.stringify({
+      type: "user", sessionId: "orchestrator", timestamp,
+      mcpMeta: { structuredContent: { ok: true, sessionId: "acp-1", acpSessionId: "gw-worker", provider: "claude" } },
+      message: { content: [{ type: "tool_result", content: [{ type: "text", text: "ok" }] }] }
+    });
+    const filler = (index) => JSON.stringify({
+      type: "assistant", sessionId: "orchestrator", timestamp,
+      message: { content: [{ type: "text", text: `step ${index}` }] }
+    });
+    const records = [linkRecord, ...Array.from({ length: 150 }, (_, index) => filler(index))];
+    await writeFile(join(claude, "orchestrator.jsonl"), records.join("\n") + "\n");
+
+    const parents = new Map();
+    await detectClaudeSessions(claude, now, 5, 600, parents, new Map());
+    assert.equal(externalParent(parents, "claude", "gw-worker"), "orchestrator");
+  });
+});
+
 test("orca panes map to states and expire by their own lifetime", async () => {
   await withTempDirectory(async (root) => {
     const status = join(root, "orca-status.json");

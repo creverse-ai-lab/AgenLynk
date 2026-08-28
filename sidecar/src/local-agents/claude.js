@@ -43,8 +43,20 @@ export function claudeTimestamp(record, fallback) {
   return Number.isFinite(milliseconds) ? milliseconds / 1000 : fallback;
 }
 
-/** The newest state signal in a transcript, plus any proven gateway links. */
-export async function claudeTranscriptSignal(path, modified, stem) {
+/**
+ * The newest state signal in a transcript, plus any proven gateway links.
+ *
+ * Task subagent records share the parent's `sessionId` and are told apart only
+ * by `isSidechain`/`agentId`. Keying their signal by `agentId` (with the
+ * parent recorded) keeps them from overwriting the parent session's state.
+ *
+ * `collectAllLinks` scans the whole file for gateway links instead of stopping
+ * at the recent-record budget. The in-memory parents map dies with the
+ * process, and on the first read of a transcript the link records may sit far
+ * behind a long turn — without a full pass, every worker opened before a
+ * monitor restart would come back as a parentless false Frontdoor.
+ */
+export async function claudeTranscriptSignal(path, modified, stem, { collectAllLinks = false } = {}) {
   let signal = null;
   const links = [];
   let scanned = 0;
@@ -57,16 +69,26 @@ export async function claudeTranscriptSignal(path, modified, stem) {
     if (signal === null) {
       const found = claudeSignal(record);
       if (found) {
-        signal = {
-          state: found[0],
-          event: found[1],
-          time: claudeTimestamp(record, modified),
-          session: record?.sessionId ?? record?.session_id ?? stem,
-          cwd: record?.cwd ?? null
-        };
+        const sessionId = record?.sessionId ?? record?.session_id ?? stem;
+        const agentId = record?.isSidechain === true && typeof record?.agentId === "string" && record.agentId
+          ? record.agentId
+          : null;
+        if (record?.isSidechain === true && !agentId) {
+          // Legacy interleaved sidechain record with no agent identity: child
+          // activity must not pose as the main line's state.
+        } else {
+          signal = {
+            state: found[0],
+            event: found[1],
+            time: claudeTimestamp(record, modified),
+            session: agentId ?? sessionId,
+            parent: agentId ? sessionId : null,
+            cwd: record?.cwd ?? null
+          };
+        }
       }
     }
-    if (signal !== null && scanned >= MAX_SCANNED_RECORDS) break;
+    if (!collectAllLinks && signal !== null && scanned >= MAX_SCANNED_RECORDS) break;
   }
   if (!signal) return null;
   return { ...signal, links };
@@ -155,9 +177,12 @@ export async function detectClaudeSessions(root, now, readyAfter, staleAfter, pa
     ].join(":");
     const cached = cache.get(path);
     const stem = path.split("/").pop().replace(/\.jsonl$/, "");
+    // First sight of this path (a new transcript, or every transcript after a
+    // monitor restart) pays one full pass to recover links; later re-reads
+    // stay on the cheap recent-record budget.
     const signal = cached && cached.fingerprint === fingerprint
       ? cached.signal
-      : await claudeTranscriptSignal(path, modified, stem);
+      : await claudeTranscriptSignal(path, modified, stem, { collectAllLinks: !cached });
     return { fingerprint, signal, modified };
   };
 
@@ -203,7 +228,7 @@ export async function detectClaudeSessions(root, now, readyAfter, staleAfter, pa
         event: signal.event,
         time: signal.time,
         pid: null,
-        parent: externalParent(parents ?? new Map(), "claude", signal.session),
+        parent: signal.parent ?? externalParent(parents ?? new Map(), "claude", signal.session),
         engine: "claude-cli",
         cwd: signal.cwd,
         link_session: signal.session
