@@ -31,7 +31,7 @@ function validArgs(runtimeRoot, sidecarRoot, out) {
     "--runtime-root", runtimeRoot,
     "--sidecar-root", sidecarRoot,
     "--app-name", "Lynk.app",
-    "--app-version", "0.4.1-beta.1",
+    "--app-version", "0.4.1-beta.2",
     "--app-build", "1",
     "--bundle-id", "com.example.lynk",
     "--min-macos", "14.0",
@@ -51,7 +51,7 @@ test("release manifest CLI writes evidence-backed app, runtime, DMG, and signing
   try {
     await execFileAsync(process.execPath, validArgs(runtimeRoot, sidecarRoot, out));
     const release = JSON.parse(await readFile(out, "utf8"));
-    assert.equal(release.app.version, "0.4.1-beta.1");
+    assert.equal(release.app.version, "0.4.1-beta.2");
     assert.equal(release.dmg.bytes, 12345);
     assert.equal(release.dmg.sha256, "a".repeat(64));
     assert.deepEqual(release.gateway, { version: "1.4.0", buildId: "build-id", apiVersion: 1 });
