@@ -6,6 +6,7 @@
 // holds those live over socket RPC, and the old watcher only produced them for
 // `mergeMonitorSessions` to throw away again.
 
+import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { detectClaudeSessions } from "./claude.js";
@@ -61,6 +62,7 @@ export class LocalAgentScanner {
     // Grok process facts, refreshed on their own slower cadence.
     this.processStates = {};
     this.grokEventPathCache = new Map();
+    this.grokLinkCache = new Map();
     this.lastProcessScan = 0;
     // Parent links are in-memory now. The old watcher reloaded them from its
     // snapshot file; here a monitor restart simply rediscovers them from the
@@ -150,7 +152,7 @@ export class LocalAgentScanner {
     );
     Object.assign(detected, orcaStates);
 
-    if (await recordGrokAcpLinks(detected, this.parents, now, this.grokRoot)) {
+    if (await recordGrokAcpLinks(detected, this.parents, now, this.grokRoot, this.grokLinkCache)) {
       for (const item of Object.values(detected)) {
         if (["claude", "grok", "codex"].includes(item.provider) && !item.parent) {
           item.parent = externalParent(this.parents, item.provider, item.link_session ?? item.session);
@@ -162,7 +164,6 @@ export class LocalAgentScanner {
 
   async #orcaHomes() {
     if (!this.orcaAccounts) return [];
-    const { readdir } = await import("node:fs/promises");
     try {
       const entries = await readdir(this.orcaAccounts, { withFileTypes: true });
       return entries.filter((entry) => entry.isDirectory()).map((entry) => join(this.orcaAccounts, entry.name, "home"));

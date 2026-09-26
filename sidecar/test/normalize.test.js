@@ -3,6 +3,7 @@ import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { slimRecord } from "../src/local-agents/jsonl.js";
 import { RecordTail } from "../src/local-agents/tail.js";
 import { GatewayEventNormalizer, grokUsage, normalizeGrokUpdates } from "../src/normalize/acp.js";
 import { ClaudeUsageAccumulator, normalizeClaudeRecords } from "../src/normalize/claude.js";
@@ -315,4 +316,42 @@ test("every provider reports per-turn token use for the forecast", () => {
   const running = normalizeGrokUpdates(grokTurn.slice(0, -1)).session.turns;
   assert.equal(running[0].running, true);
   assert.equal(running[0].totalTokens, null, "Grok settles a turn's tokens only when it ends");
+});
+
+test("slimmed window records normalize to the same events as the originals", () => {
+  const huge = `line one\n${"y".repeat(100_000)}`;
+  const records = [
+    { type: "user", timestamp: "2026-08-07T00:00:00.000Z", uuid: "u1", message: { role: "user", content: [{ type: "text", text: huge }] } },
+    { type: "assistant", timestamp: "2026-08-07T00:00:01.000Z", uuid: "a1", message: { id: "m1", role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: huge } }] } },
+    { type: "user", timestamp: "2026-08-07T00:00:02.000Z", uuid: "u2", toolUseResult: { stdout: huge, stderr: "" }, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: huge }] } }
+  ];
+  const slimmed = records.map((record) => slimRecord(record));
+  assert.ok(JSON.stringify(slimmed).length < JSON.stringify(records).length / 5);
+  assert.deepEqual(normalizeClaudeRecords(slimmed), normalizeClaudeRecords(records));
+  const small = { type: "user", message: { content: "short" } };
+  assert.equal(slimRecord(small), small, "a record with nothing to cut is returned as is");
+});
+
+test("RecordTail keeps a character budget whatever the record count", async () => {
+  await withTempDirectory(async (root) => {
+    const path = join(root, "t.jsonl");
+    const now = Date.now();
+    await writeFile(path, `${Array.from({ length: 10 }, (_, n) => JSON.stringify({ n, timestamp: new Date(now).toISOString(), pad: "z".repeat(1_000) })).join("\n")}\n`);
+    const tail = new RecordTail(path, { maxChars: 3_500 });
+    await tail.poll(now);
+    assert.deepEqual(tail.records.map((record) => record.n), [7, 8, 9]);
+    assert.ok(tail.chars <= 3_500);
+  });
+});
+
+test("Claude usage totals survive folding old message ids", () => {
+  const assistant = (id, input, output) => ({ type: "assistant", message: { id, usage: { input_tokens: input, output_tokens: output } } });
+  const bounded = new ClaudeUsageAccumulator({ openMessageLimit: 2 });
+  const unbounded = new ClaudeUsageAccumulator({ openMessageLimit: Infinity });
+  for (const record of [assistant("m1", 1, 1), assistant("m1", 1, 2), assistant("m2", 5, 5), assistant("m3", 7, 1), assistant("m4", 2, 2), assistant("m4", 2, 3)]) {
+    bounded.add(record);
+    unbounded.add(record);
+  }
+  assert.ok(bounded.byMessage.size <= 2);
+  assert.deepEqual(bounded.totals(), unbounded.totals());
 });

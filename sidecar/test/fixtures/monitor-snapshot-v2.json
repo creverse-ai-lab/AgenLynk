@@ -321,6 +321,7 @@
     ]
   },
   "eventLimit": 2000,
+  "snapshotEventLimit": 200,
   "tasks": [
     {
       "taskId": "t1",

@@ -32,7 +32,7 @@ function isToolResultRecord(record) {
 }
 
 /** A record belongs to the session line being normalized. */
-function inScope(record, agentId) {
+export function inScope(record, agentId) {
   if (agentId) return record?.agentId === agentId;
   return record?.isSidechain !== true;
 }
@@ -237,9 +237,17 @@ export function normalizeClaudeRecords(records, { agentId = null } = {}) {
  * writes one record per content block and repeats the same message usage on
  * each, so totals are kept per message id (last wins) and summed.
  */
+const USAGE_PARTS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "reasoningTokens"];
+// Message ids whose usage may still be repeated. Claude repeats a message's
+// usage only on that message's own (adjacent) records, so older ids are
+// folded into a running sum instead of being remembered forever.
+const OPEN_MESSAGE_LIMIT = 256;
+
 export class ClaudeUsageAccumulator {
-  constructor() {
+  constructor({ openMessageLimit = OPEN_MESSAGE_LIMIT } = {}) {
     this.byMessage = new Map();
+    this.openMessageLimit = openMessageLimit;
+    this.folded = null;
   }
 
   add(record) {
@@ -248,6 +256,8 @@ export class ClaudeUsageAccumulator {
     const usage = message.usage;
     const id = message.id ?? record.uuid;
     if (!id || !usage || typeof usage !== "object") return false;
+    // Re-set moves the id to the newest end, so folding takes the oldest.
+    this.byMessage.delete(id);
     this.byMessage.set(id, {
       inputTokens: finite(usage.input_tokens),
       outputTokens: finite(usage.output_tokens),
@@ -255,14 +265,20 @@ export class ClaudeUsageAccumulator {
       cacheWriteTokens: finite(usage.cache_creation_input_tokens),
       reasoningTokens: finite(usage.output_tokens_details?.thinking_tokens)
     });
+    while (this.byMessage.size > this.openMessageLimit) {
+      const [oldest, parts] = this.byMessage.entries().next().value;
+      this.byMessage.delete(oldest);
+      this.folded ??= Object.fromEntries(USAGE_PARTS.map((field) => [field, 0]));
+      for (const field of USAGE_PARTS) this.folded[field] += parts[field] ?? 0;
+    }
     return true;
   }
 
   totals() {
-    if (!this.byMessage.size) return null;
-    const total = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 };
+    if (!this.byMessage.size && !this.folded) return null;
+    const total = Object.fromEntries(USAGE_PARTS.map((field) => [field, this.folded?.[field] ?? 0]));
     for (const usage of this.byMessage.values()) {
-      for (const field of Object.keys(total)) total[field] += usage[field] ?? 0;
+      for (const field of USAGE_PARTS) total[field] += usage[field] ?? 0;
     }
     // Canonical inputTokens include cached input (as Codex and Grok report
     // it); Claude reports the three parts separately.

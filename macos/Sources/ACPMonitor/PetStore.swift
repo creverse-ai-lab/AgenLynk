@@ -31,12 +31,14 @@ final class PetStore: ObservableObject {
 
     func sync(projection: PetActivityProjection, enabled: Bool) {
         guard enabled, running, projection != lastProjection else { return }
-        do {
-            try controller.update(projection)
-            lastProjection = projection
-            error = nil
-        } catch {
-            self.error = "Pet 상태 공유 실패: \(error.localizedDescription)"
+        lastProjection = projection
+        // The two atomic file writes run off the main actor, in order.
+        controller.scheduleUpdate(projection) { [weak self] failure in
+            guard let self else { return }
+            // A failed write is retried with the next sync, not skipped as unchanged.
+            if failure != nil { self.lastProjection = nil }
+            let message = failure.map { "Pet 상태 공유 실패: \($0.localizedDescription)" }
+            if self.error != message { self.error = message }
         }
     }
 

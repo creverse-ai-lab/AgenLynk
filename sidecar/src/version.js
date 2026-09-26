@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 
 export const SIDECAR_VERSION = "0.4.1";
 export const SIDECAR_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-export const SIDECAR_RUNTIME_ROOT = dirname(SIDECAR_ROOT);
 export const SIDECAR_BUILD_ID = computeSidecarBuildId(SIDECAR_ROOT);
 
 export function computeSidecarBuildId(sidecarRoot) {

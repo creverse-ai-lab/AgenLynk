@@ -6,13 +6,37 @@
 // Any database failure disables persistence and the monitor keeps working
 // from memory — history is a convenience, never a reason to go down.
 
-import { chmodSync, mkdirSync, statSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 export const MONITOR_DB_SCHEMA_VERSION = 1;
 const DEFAULT_FLUSH_MS = 250;
 const DEFAULT_RETENTION_DAYS = 14;
+// Rows kept per session. Memory holds far fewer (the EventStore cap); this
+// bounds what a session that stays live for weeks can pile up on disk.
+const DEFAULT_MAX_EVENTS_PER_SESSION = 10_000;
+const DATABASE_FILE_SUFFIXES = ["", "-wal", "-shm"];
+
+/** Total size of a database and its WAL/SHM files, whether open or not. */
+export function databaseFileBytes(path) {
+  let bytes = 0;
+  let exists = false;
+  for (const suffix of DATABASE_FILE_SUFFIXES) {
+    try {
+      bytes += statSync(`${path}${suffix}`).size;
+      exists = true;
+    } catch {
+      // Not present.
+    }
+  }
+  return { exists, bytes };
+}
+
+/** Deletes a database and its WAL/SHM files. */
+export function removeDatabaseFiles(path) {
+  for (const suffix of DATABASE_FILE_SUFFIXES) rmSync(`${path}${suffix}`, { force: true });
+}
 
 export function defaultMonitorDatabasePath(env = process.env) {
   return env.ACP_GATEWAY_MONITOR_DB || join(homedir(), ".acp-gateway", "agenlynk", "monitor.db");
@@ -42,11 +66,18 @@ export class SqliteMonitorStore {
     }
   }
 
-  constructor(database, { flushMs = DEFAULT_FLUSH_MS, retentionDays = DEFAULT_RETENTION_DAYS, now = () => Date.now(), path = null } = {}) {
+  constructor(database, {
+    flushMs = DEFAULT_FLUSH_MS,
+    retentionDays = DEFAULT_RETENTION_DAYS,
+    maxEventsPerSession = DEFAULT_MAX_EVENTS_PER_SESSION,
+    now = () => Date.now(),
+    path = null
+  } = {}) {
     this.database = database;
     this.path = path;
     this.flushMs = flushMs;
     this.retentionDays = retentionDays;
+    this.maxEventsPerSession = maxEventsPerSession;
     this.now = now;
     this.pendingEvents = new Map();
     this.pendingSessions = new Map();
@@ -161,18 +192,10 @@ export class SqliteMonitorStore {
     if (this.failed) return { available: false };
     this.flush();
     const count = (sql) => Number(this.database.prepare(sql).get()?.n ?? 0);
-    let bytes = 0;
-    for (const suffix of ["", "-wal", "-shm"]) {
-      try {
-        bytes += statSync(`${this.path}${suffix}`).size;
-      } catch {
-        // Not present.
-      }
-    }
     return {
       available: true,
       path: this.path,
-      bytes,
+      bytes: databaseFileBytes(this.path).bytes,
       sessions: count("SELECT count(*) AS n FROM sessions"),
       events: count("SELECT count(*) AS n FROM events"),
       retentionDays: this.retentionDays
@@ -232,7 +255,9 @@ export class SqliteMonitorStore {
 
   /**
    * Deletes sessions (and their events) not updated within the retention
-   * window, except the ids in `keep` (live sessions). Returns deleted count.
+   * window, except the ids in `keep` (live sessions); events whose session
+   * has no row (and is not in `keep`); and, in every session, events beyond
+   * the newest `maxEventsPerSession`. Returns the deleted session count.
    */
   prune({ keep = new Set(), retentionDays = this.retentionDays } = {}) {
     if (this.failed) return 0;
@@ -243,15 +268,29 @@ export class SqliteMonitorStore {
       .all(cutoff)
       .map((row) => row.session_id)
       .filter((sessionId) => !keep.has(sessionId));
-    if (!stale.length) return 0;
+    const orphans = this.database
+      .prepare("SELECT DISTINCT e.session_id FROM events e LEFT JOIN sessions s ON s.session_id = e.session_id WHERE s.session_id IS NULL")
+      .all()
+      .map((row) => row.session_id)
+      .filter((sessionId) => !keep.has(sessionId));
+    const oversized = this.database
+      .prepare("SELECT session_id FROM events GROUP BY session_id HAVING count(*) > ?")
+      .all(this.maxEventsPerSession)
+      .map((row) => row.session_id);
+    if (!stale.length && !orphans.length && !oversized.length) return 0;
     try {
       this.database.exec("BEGIN");
       const deleteEvents = this.database.prepare("DELETE FROM events WHERE session_id = ?");
       const deleteSession = this.database.prepare("DELETE FROM sessions WHERE session_id = ?");
+      const trimEvents = this.database.prepare(`DELETE FROM events WHERE session_id = ? AND sequence < (
+        SELECT sequence FROM events WHERE session_id = ? ORDER BY sequence DESC LIMIT 1 OFFSET ?
+      )`);
       for (const sessionId of stale) {
         deleteEvents.run(sessionId);
         deleteSession.run(sessionId);
       }
+      for (const sessionId of orphans) deleteEvents.run(sessionId);
+      for (const sessionId of oversized) trimEvents.run(sessionId, sessionId, this.maxEventsPerSession - 1);
       this.database.exec("COMMIT");
     } catch (error) {
       try {

@@ -12,6 +12,10 @@ import { reversedRecords } from "./jsonl.js";
 import { externalParent, gatewayResponseLinks, linkKey } from "./parent-links.js";
 
 const MAX_SCANNED_RECORDS = 120;
+// The link-recovery pass reads at most this much of a transcript's tail. A
+// worker opened further back than that is still known from the worker
+// ledger (MonitorState.formerWorkerIds), which survives restarts.
+const LINK_SCAN_BYTES = 16 * 1024 * 1024;
 /** A running Claude turn goes stale fast; a finished one lingers briefly. */
 const RUNNING_LIFETIME_SECONDS = 30;
 
@@ -52,17 +56,18 @@ export function claudeTimestamp(record, fallback) {
  * by `isSidechain`/`agentId`. Keying their signal by `agentId` (with the
  * parent recorded) keeps them from overwriting the parent session's state.
  *
- * `collectAllLinks` scans the whole file for gateway links instead of stopping
- * at the recent-record budget. The in-memory parents map dies with the
- * process, and on the first read of a transcript the link records may sit far
- * behind a long turn — without a full pass, every worker opened before a
- * monitor restart would come back as a parentless false Frontdoor.
+ * `collectAllLinks` scans far past the recent-record budget for gateway
+ * links. The in-memory parents map dies with the process, and on the first
+ * read of a transcript the link records may sit far behind a long turn —
+ * without this pass, every worker opened before a monitor restart would come
+ * back as a parentless false Frontdoor. The pass stops after LINK_SCAN_BYTES
+ * of the file's tail so a restart does not parse every large transcript.
  */
 export async function claudeTranscriptSignal(path, modified, stem, { collectAllLinks = false } = {}) {
   let signal = null;
   const links = [];
   let scanned = 0;
-  for await (const record of reversedRecords(path)) {
+  for await (const record of reversedRecords(path, collectAllLinks ? { maxBytes: LINK_SCAN_BYTES } : {})) {
     scanned += 1;
     const structured = record?.mcpMeta?.structuredContent;
     if (structured && typeof structured === "object" && !Array.isArray(structured)) {

@@ -7,7 +7,8 @@
 // permission" show up the moment they happen for all three CLIs.
 
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { join } from "node:path";
+import { isWithin } from "../app/fs-paths.js";
 import { HookNormalizer, readHookPayload } from "../normalize/hook.js";
 
 const DEFAULT_STALE_AFTER_MS = 10 * 60 * 1000;
@@ -79,7 +80,7 @@ export class HookSessions {
       entry.statusAt = Date.parse(statusAt) || receivedAt;
       entry.event = hook.event;
     }
-    return { sessionId: `local:${provider}:${entry.session}`, events, status };
+    return { sessionId: `local:${provider}:${entry.session}`, localSessionId: entry.session, events, status };
   }
 
   /**
@@ -128,10 +129,4 @@ export class HookSessions {
     }
     return merged;
   }
-}
-
-function isWithin(root, path) {
-  if (typeof root !== "string" || typeof path !== "string" || !isAbsolute(path)) return false;
-  const child = relative(resolve(root), resolve(path));
-  return child !== "" && child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child);
 }

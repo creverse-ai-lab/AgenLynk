@@ -13,6 +13,7 @@ struct MenuBarPipelineTests {
         try pipelineFollowsParentLinksAndOrdersByUrgency()
         try waitReasonAndCurrentStepComeFromEvents()
         try manyQuietStepsFoldButWaitingOnesStay()
+        try pipelineAndSequenceShareOneTree()
         print("Swift menu bar pipeline checks passed")
     }
 
@@ -41,6 +42,31 @@ struct MenuBarPipelineTests {
         if let status { object["status"] = .string(status) }
         guard let value = MonitorEvent(.object(object)) else { throw CheckError.failed("event \(id) did not decode") }
         return value
+    }
+
+    /// The menu bar and the sequence lay out the same `SessionTree`: same
+    /// parents, same depths, including a parent cycle and a dangling link.
+    private static func pipelineAndSequenceShareOneTree() throws {
+        let sessions = [
+            try session("root", status: "running", role: "frontdoor"),
+            try session("w1", status: "running", parent: "root", created: "2026-09-26T00:01:00.000Z"),
+            try session("w2", status: "running", parent: "w1", created: "2026-09-26T00:02:00.000Z"),
+            try session("w3", status: "idle", parent: "missing", created: "2026-09-26T00:03:00.000Z"),
+            try session("c1", status: "idle", parent: "c2", created: "2026-09-26T00:04:00.000Z"),
+            try session("c2", status: "idle", parent: "c1", created: "2026-09-26T00:05:00.000Z")
+        ]
+        guard let frontdoor = FrontdoorSession.make(sessions: sessions).first else {
+            throw CheckError.failed("frontdoor fixture")
+        }
+        let pipeline = MenuBarPipeline.pipelineOrder(frontdoor).map { "\($0.session.sessionId):\($0.depth)" }
+        let tree = SessionTree.order(frontdoor.members).map { "\($0.session.sessionId):\($0.depth)" }
+        try check(pipeline == tree, "the menu bar order is the shared tree: \(pipeline) vs \(tree)")
+        try check(tree == ["root:0", "w1:1", "w2:2", "w3:1", "c1:1", "c2:2"],
+                  "parents first, a dangling parent hangs off the Frontdoor, a cycle one level down: \(tree)")
+        let parents = Dictionary(uniqueKeysWithValues: SessionTree.order(frontdoor.members).map { ($0.session.sessionId, $0.parentSessionId) })
+        try check(parents["w2"] == "w1" && parents["w3"] == "root", "the sequence's call edges follow the same parents")
+        let lanes = SessionTree.withAncestors(of: ["w2"], in: sessions).map(\.sessionId)
+        try check(lanes == ["root", "w1", "w2"], "a lane brings its ancestors along: \(lanes)")
     }
 
     private static func pipelineFollowsParentLinksAndOrdersByUrgency() throws {

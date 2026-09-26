@@ -13,9 +13,9 @@ struct MonitoringConsentChoices: View {
     var disabled = false
 
     static let choices: [(id: String, label: String, file: String)] = [
-        ("claude", "Claude Code", "~/.claude/settings.json"),
-        ("codex", "Codex", "~/.codex/hooks.json"),
-        ("grok", "Grok", "~/.grok/hooks/agenlynk.json")
+        ("claude", cliProductName("claude"), "~/.claude/settings.json"),
+        ("codex", cliProductName("codex"), "~/.codex/hooks.json"),
+        ("grok", cliProductName("grok"), "~/.grok/hooks/agenlynk.json")
     ]
 
     /// The CLIs whose config directory exists, read the same way the sidecar

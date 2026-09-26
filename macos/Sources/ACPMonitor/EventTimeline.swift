@@ -174,8 +174,29 @@ enum EventTimeline {
     /// The trailing tool run of a session's timeline, when its newest item is
     /// one — what "지금 무엇을 하는가" should summarize instead of one call.
     static func trailingToolGroup(_ events: [MonitorEvent]) -> ToolCallGroup? {
-        guard case let .tools(group)? = group(events).last else { return nil }
+        guard case let .tools(group)? = lastItem(events) else { return nil }
         return group
+    }
+
+    /// `group(events).last`, found by walking back over the trailing run of
+    /// tool calls only — a session's newest item without grouping its whole
+    /// timeline. The run rule is `group`'s: a call joins the one before it
+    /// when both are tool calls of the same session and the same known turn.
+    static func lastItem(_ events: [MonitorEvent]) -> TimelineItem? {
+        guard let last = events.last else { return nil }
+        guard last.kind == "tool_call" else { return .event(last) }
+        var start = events.count - 1
+        while start > 0 {
+            let previous = events[start - 1]
+            let current = events[start]
+            guard previous.kind == "tool_call",
+                  current.turnId != nil,
+                  previous.sessionId == current.sessionId,
+                  previous.turnId == current.turnId else { break }
+            start -= 1
+        }
+        let run = Array(events[start...])
+        return run.count >= 2 ? .tools(ToolCallGroup(events: run)) : .event(last)
     }
 
     /// The `before` cursor for loading a session's older events: its lowest

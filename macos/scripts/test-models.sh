@@ -28,7 +28,8 @@ SHARED_FLAGS="-I $SHARED_DIR -L $SHARED_DIR -lACPShared"
 env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 $SHARED_FLAGS \
   "$REPO_ROOT/macos/Sources/ACPMonitor/Models.swift" \
-  "$REPO_ROOT/macos/Sources/ACPMonitor/GraphProjection.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/TimeText.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/SessionTree.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/EventTimeline.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/MenuBarPipeline.swift" \
   "$REPO_ROOT/macos/Tests/ACPMonitorTests/MonitorModelTests.swift" \
@@ -40,6 +41,8 @@ PIPELINE_OUT="$CHECK_ROOT/menubar-pipeline"
 env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 $SHARED_FLAGS \
   "$REPO_ROOT/macos/Sources/ACPMonitor/Models.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/TimeText.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/SessionTree.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/EventTimeline.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/MenuBarPipeline.swift" \
   "$REPO_ROOT/macos/Tests/ACPMonitorTests/MenuBarPipelineTests.swift" \
@@ -51,6 +54,8 @@ PHASE6_OUT="$CHECK_ROOT/phase6-architecture"
 env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 $SHARED_FLAGS \
   "$REPO_ROOT/macos/Sources/ACPMonitor/Models.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/TimeText.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/SessionTree.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/MonitorClient.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/BundledRuntime.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/SidecarController.swift" \
@@ -82,6 +87,8 @@ PET_CONTROLLER_OUT="$CHECK_ROOT/pet-controller"
 env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 $SHARED_FLAGS \
   "$REPO_ROOT/macos/Sources/ACPMonitor/Models.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/TimeText.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/SessionTree.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/PetController.swift" \
   "$REPO_ROOT/macos/Tests/ACPMonitorTests/PetControllerTests.swift" \
   -o "$PET_CONTROLLER_OUT"

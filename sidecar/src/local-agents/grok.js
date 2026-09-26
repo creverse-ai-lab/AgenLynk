@@ -57,39 +57,87 @@ export async function grokAcpLinks(sessionDirectory, limit = GROK_LINK_SCAN_LIMI
   return links;
 }
 
-/** Attributes gateway workers to the grok CLI session that launched them. */
-export async function recordGrokAcpLinks(states, parents, now, grokRoot = null) {
+const GROK_LINK_LOGS = ["updates.jsonl", "chat_history.jsonl"];
+
+/** size:mtime of the logs grokAcpLinks reads; null when the directory is gone. */
+async function grokLinkFingerprint(sessionDirectory) {
+  try {
+    if (!(await stat(sessionDirectory)).isDirectory()) return null;
+  } catch {
+    return null;
+  }
+  const parts = [];
+  for (const name of GROK_LINK_LOGS) {
+    try {
+      const metadata = await stat(join(sessionDirectory, name));
+      parts.push(`${metadata.size}:${metadata.mtimeMs}`);
+    } catch {
+      parts.push("-");
+    }
+  }
+  return parts.join("|");
+}
+
+/**
+ * Attributes gateway workers to the grok CLI session that launched them.
+ * `cache` (session -> {directory, fingerprint, links}) skips the directory
+ * search and the log rescan while a session's logs are unchanged; discovery
+ * runs every few seconds and the logs rarely grow between passes.
+ */
+export async function recordGrokAcpLinks(states, parents, now, grokRoot = null, cache = null) {
   if (!parents) return false;
   const root = grokRoot ?? join(homedir(), ".grok", "sessions");
   let changed = false;
+  let directories = null;
+  const current = new Set();
   for (const item of Object.values(states)) {
     if (item?.provider !== "grok") continue;
     const link = item.link_session ?? item.session;
-    let directories;
-    try {
-      directories = await readdir(root, { withFileTypes: true });
-    } catch {
-      return changed;
-    }
-    for (const entry of directories) {
-      if (!entry.isDirectory()) continue;
-      const candidate = join(root, entry.name, link);
-      try {
-        if (!(await stat(candidate)).isDirectory()) continue;
-      } catch {
-        continue;
-      }
-      for (const [provider, acpSession] of await grokAcpLinks(candidate)) {
-        if (acpSession === link) continue;
-        const key = linkKey(provider, acpSession);
-        if (parents.get(key)?.[0] !== link) {
-          parents.set(key, [link, now]);
-          changed = true;
+    current.add(link);
+    const cached = cache?.get(link) ?? null;
+    let candidate = null;
+    let fingerprint = cached ? await grokLinkFingerprint(cached.directory) : null;
+    if (fingerprint != null) {
+      candidate = cached.directory;
+    } else {
+      if (!directories) {
+        try {
+          directories = await readdir(root, { withFileTypes: true });
+        } catch {
+          return changed;
         }
       }
-      break;
+      for (const entry of directories) {
+        if (!entry.isDirectory()) continue;
+        const path = join(root, entry.name, link);
+        try {
+          if (!(await stat(path)).isDirectory()) continue;
+        } catch {
+          continue;
+        }
+        candidate = path;
+        break;
+      }
+      if (!candidate) {
+        cache?.delete(link);
+        continue;
+      }
+      fingerprint = await grokLinkFingerprint(candidate);
+    }
+    const links = cached && cached.directory === candidate && cached.fingerprint === fingerprint
+      ? cached.links
+      : await grokAcpLinks(candidate);
+    cache?.set(link, { directory: candidate, fingerprint, links });
+    for (const [provider, acpSession] of links) {
+      if (acpSession === link) continue;
+      const key = linkKey(provider, acpSession);
+      if (parents.get(key)?.[0] !== link) {
+        parents.set(key, [link, now]);
+        changed = true;
+      }
     }
   }
+  if (cache) for (const link of [...cache.keys()]) if (!current.has(link)) cache.delete(link);
   return changed;
 }
 

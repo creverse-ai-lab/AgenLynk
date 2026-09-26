@@ -453,3 +453,22 @@ test("a hook state from before per-CLI consent keeps every CLI that was not turn
     assert.equal(status.targets.grok.installed, false);
   });
 });
+
+test("only the newest few backups of each config file are kept", async () => {
+  await withTempDirectory(async (root) => {
+    const { env } = await fakeHomes(root);
+    let now = Date.parse("2026-08-07T00:00:00.000Z");
+    for (let round = 0; round < 8; round += 1) {
+      installHooks({ env, consent: true, now: now += 1_000 });
+      uninstallHooks({ env, now: now += 1_000 });
+    }
+    const backups = await readdir(join(env.AGENLYNK_HOME, "backups"));
+    const perFile = new Map();
+    for (const name of backups) {
+      const file = name.replace(/\.[^.]+\.bak$/, "");
+      perFile.set(file, (perFile.get(file) ?? 0) + 1);
+    }
+    assert.ok(perFile.size >= 2, "both existing files were backed up");
+    for (const [file, count] of perFile) assert.equal(count, 5, `${file} keeps five backups`);
+  });
+});

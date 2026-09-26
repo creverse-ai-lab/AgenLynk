@@ -26,7 +26,13 @@ const TITLE_FROM_PROMPT_LIMIT = 60;
 function sessionTitle(facts, events, raw) {
   if (typeof facts.title === "string" && facts.title.trim()) return facts.title.trim();
   if (typeof raw.task === "string" && raw.task.trim()) return raw.task.trim();
-  const prompt = [...(events ?? [])].reverse().find((event) => event.kind === "turn_start" && event.title)?.title;
+  let prompt = null;
+  for (let index = (events?.length ?? 0) - 1; index >= 0; index -= 1) {
+    if (events[index].kind === "turn_start" && events[index].title) {
+      prompt = events[index].title;
+      break;
+    }
+  }
   if (!prompt) return null;
   const line = prompt.replace(/\s+/g, " ").trim();
   return line.length > TITLE_FROM_PROMPT_LIMIT ? `${line.slice(0, TITLE_FROM_PROMPT_LIMIT - 1)}…` : line;
@@ -161,6 +167,34 @@ function localCapabilities(provider, timeline, hooked) {
   if (hooked || provider === "codex") capabilities.push("permission");
   if (hooked) capabilities.push("live");
   return capabilities;
+}
+
+/**
+ * Which local timelines to hand to the event store on this pass: the ones
+ * whose window changed, plus any accepted session not handed over since it
+ * (re)appeared. Everything else is the same window the store already merged.
+ */
+export class LocalEventDelivery {
+  constructor() {
+    this.delivered = new Set();
+  }
+
+  /**
+   * @param {Record<string, object[]>} events monitor session id -> window
+   * @param {Set<string>} changedSessionIds sessions whose window changed
+   * @param {Set<string>} acceptedIds local sessions the merge kept
+   */
+  select(events, changedSessionIds, acceptedIds) {
+    const selected = {};
+    for (const [sessionId, values] of Object.entries(events ?? {})) {
+      if (!acceptedIds.has(sessionId)) continue;
+      if (changedSessionIds.has(sessionId) || !this.delivered.has(sessionId)) selected[sessionId] = values;
+    }
+    // A session that leaves the local view is handed over again in full
+    // when it returns (its store bucket may have expired meanwhile).
+    this.delivered = new Set(Object.keys(events ?? {}).filter((sessionId) => acceptedIds.has(sessionId)));
+    return selected;
+  }
 }
 
 export function mergeMonitorSessions(gatewaySessions, localSessions, workerTopology = null, formerWorkerIds = null) {

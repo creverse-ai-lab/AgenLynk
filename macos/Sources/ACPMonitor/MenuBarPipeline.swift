@@ -119,36 +119,11 @@ struct MenuBarPipeline: Equatable, Sendable {
     }
 
     /// Depth-first from the Frontdoor, following `parentSessionId`; a worker
-    /// whose parent is not in the group hangs off the Frontdoor.
+    /// whose parent is not in the group hangs off the Frontdoor. The same
+    /// `SessionTree` resolution the dashboard sequence lays its lanes out by.
     static func pipelineOrder(_ frontdoor: FrontdoorSession) -> [(session: GatewaySession, depth: Int)] {
-        let members = frontdoor.members
-        let ids = Set(members.map(\.sessionId))
-        let rootId = frontdoor.root?.sessionId
-        var children: [String: [GatewaySession]] = [:]
-        var tops: [GatewaySession] = []
-        for session in frontdoor.workers {
-            if let parent = session.parentSessionId, ids.contains(parent), parent != session.sessionId {
-                children[parent, default: []].append(session)
-            } else if let rootId {
-                children[rootId, default: []].append(session)
-            } else {
-                tops.append(session)
-            }
-        }
-        var result: [(GatewaySession, Int)] = []
-        var visited = Set<String>()
-        func visit(_ session: GatewaySession, depth: Int) {
-            guard visited.insert(session.sessionId).inserted else { return }
-            result.append((session, depth))
-            for child in (children[session.sessionId] ?? []).sorted(by: { ($0.createdAt ?? "") < ($1.createdAt ?? "") }) {
-                visit(child, depth: depth + 1)
-            }
-        }
-        if let root = frontdoor.root { visit(root, depth: 0) }
-        for top in tops.sorted(by: { ($0.createdAt ?? "") < ($1.createdAt ?? "") }) { visit(top, depth: 0) }
-        // A cycle or a dangling link must not drop a session from the card.
-        for session in members where !visited.contains(session.sessionId) { visit(session, depth: 1) }
-        return result.map { (session: $0.0, depth: $0.1) }
+        SessionTree.order(frontdoor.members, firstRootId: frontdoor.root?.sessionId)
+            .map { (session: $0.session, depth: $0.depth) }
     }
 
     private static func stage(_ session: GatewaySession, depth: Int, events: [MonitorEvent]) -> Stage {
@@ -179,7 +154,7 @@ struct MenuBarPipeline: Equatable, Sendable {
             guard let request = events.last(where: { $0.kind == "input_request" && $0.isInFlight }) else {
                 return "사용자 입력이 필요합니다"
             }
-            return (request.body ?? request.title).map { oneLine($0, limit: 44) } ?? "사용자 입력이 필요합니다"
+            return (request.body ?? request.title).map { oneLineText($0, limit: 43) } ?? "사용자 입력이 필요합니다"
         default:
             return nil
         }
@@ -187,19 +162,14 @@ struct MenuBarPipeline: Equatable, Sendable {
 
     /// The newest thing the turn is doing, a run of tool calls summarized.
     private static func currentStep(_ events: [MonitorEvent]) -> String? {
-        guard let last = EventTimeline.group(events).last else { return nil }
+        guard let last = EventTimeline.lastItem(events) else { return nil }
         switch last {
         case let .tools(group):
             return group.summary(titleLimit: 24)
         case let .event(event):
             if event.kind == "tool_call" { return "도구 호출: \(event.compactToolTitle(limit: 30))" }
-            if event.kind == "turn_start" { return "시작: \(oneLine(event.title ?? event.body ?? "새 턴", limit: 36))" }
+            if event.kind == "turn_start" { return "시작: \(oneLineText(event.title ?? event.body ?? "새 턴", limit: 35))" }
             return event.kindLabel
         }
-    }
-
-    private static func oneLine(_ text: String, limit: Int) -> String {
-        let line = text.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
-        return line.count > limit ? String(line.prefix(limit - 1)) + "…" : line
     }
 }

@@ -242,3 +242,88 @@ test("the worker ledger outlives the monitor and a zero history retention", asyn
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("a window larger than the cap is not re-inserted on every pass", () => {
+  const written = [];
+  const persistence = { writeEvents: (sessionId, events) => written.push(...events), writeSession() {} };
+  const state = new MonitorState({ maxEventsPerSession: 3, persistence });
+  const window = Array.from({ length: 5 }, (_, index) => localEvent(`m${index}`, `2026-08-07T00:00:0${index}Z`));
+
+  const first = state.setExternalEvents({ s: window });
+  assert.deepEqual(first.s.map((event) => event.key), ["m2", "m3", "m4"], "what the cap evicted is not news");
+  assert.equal(written.length, 5, "the first pass still persists the whole window");
+  const sequences = state.eventsFor("s").map((event) => event.sequence);
+
+  for (let pass = 0; pass < 3; pass += 1) {
+    assert.deepEqual(state.setExternalEvents({ s: window }), {}, "the same window is not a change");
+  }
+  assert.equal(written.length, 5, "evicted events are not written again");
+  assert.deepEqual(state.eventsFor("s").map((event) => event.sequence), sequences);
+
+  // A genuinely new event still lands.
+  const next = state.setExternalEvents({ s: [...window, localEvent("m5", "2026-08-07T00:00:05Z")] });
+  assert.deepEqual(next.s.map((event) => event.key), ["m5"]);
+  assert.deepEqual(state.eventsFor("s").map((event) => event.key), ["m3", "m4", "m5"]);
+});
+
+test("the snapshot carries only each session's newest events, serialized once per revision", () => {
+  const state = new MonitorState({ maxEventsPerSession: 50, snapshotEventLimit: 4 });
+  state.setSessions([{ sessionId: "s", status: "running" }]);
+  const window = Array.from({ length: 10 }, (_, index) => localEvent(`m${index}`, new Date(Date.UTC(2026, 7, 7, 0, 0, index)).toISOString()));
+  state.setExternalEvents({ s: window });
+
+  const snapshot = state.snapshot();
+  assert.equal(snapshot.eventLimit, 50);
+  assert.equal(snapshot.snapshotEventLimit, 4);
+  assert.deepEqual(snapshot.events.s.map((event) => event.key), ["m6", "m7", "m8", "m9"]);
+  assert.equal(state.eventsFor("s").length, 10, "memory keeps the rest for paging");
+  assert.equal(state.store.page("s", { before: snapshot.events.s[0].sequence, limit: 3 }).map((event) => event.key).join(), "m3,m4,m5");
+
+  const json = state.snapshotJson();
+  assert.equal(state.snapshotJson(), json, "unchanged revision reuses the serialized body");
+  state.setExternalEvents({ s: [localEvent("m10", "2026-08-07T00:00:10Z")] });
+  assert.notEqual(state.snapshotJson(), json);
+  assert.deepEqual(JSON.parse(state.snapshotJson()).events.s.map((event) => event.key), ["m7", "m8", "m9", "m10"]);
+});
+
+test("events of a session that was never listed do not outlive it", () => {
+  const state = new MonitorState({ historyRetentionMs: 1_000 });
+  // Closed before any session list named it.
+  state.pushEvent({ sessionId: "ghost", sequence: 1, type: "turn_start", ts: "2026-08-07T00:00:00Z" });
+  assert.ok(state.store.has("ghost"));
+  state.removeSession("ghost", { closed: true });
+  assert.equal(state.store.has("ghost"), false);
+  assert.equal(state.gatewaySeen.has("ghost"), false);
+  assert.equal(state.gatewayCursors.has("ghost"), false);
+
+  // Events that beat a list which never names them expire on the history clock.
+  state.pushEvent({ sessionId: "orphan", sequence: 1, type: "turn_start", ts: "2026-08-07T00:00:00Z" });
+  state.setSessions([{ sessionId: "live", status: "running" }]);
+  state.pushEvent({ sessionId: "live", sequence: 1, type: "turn_start", ts: "2026-08-07T00:00:00Z" });
+  state.pruneHistory(Date.now());
+  assert.ok(state.store.has("orphan"), "kept within the retention window");
+  state.pruneHistory(Date.now() + 2_000);
+  assert.equal(state.store.has("orphan"), false);
+  assert.equal(state.gatewaySeen.has("orphan"), false);
+  assert.ok(state.store.has("live"), "a live session is never an orphan");
+});
+
+test("history prune caps events per session and drops events without a session row", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "agenlynk-prune-"));
+  try {
+    const store = await SqliteMonitorStore.open(join(directory, "monitor.db"), { flushMs: 1, maxEventsPerSession: 3 });
+    store.writeSession({ sessionId: "long", provider: "codex", updatedAt: new Date().toISOString() });
+    store.writeEvents("long", Array.from({ length: 6 }, (_, index) => ({
+      sessionId: "long", key: `k${index}`, sequence: index + 1, ts: "2026-08-07T00:00:00Z"
+    })));
+    store.writeEvents("orphan", [{ sessionId: "orphan", key: "k", sequence: 1, ts: "2026-08-07T00:00:00Z" }]);
+    store.writeEvents("pending", [{ sessionId: "pending", key: "k", sequence: 1, ts: "2026-08-07T00:00:00Z" }]);
+    store.prune({ keep: new Set(["pending"]) });
+    assert.deepEqual(store.readEvents("long").map((event) => event.key), ["k3", "k4", "k5"]);
+    assert.deepEqual(store.readEvents("orphan"), []);
+    assert.equal(store.readEvents("pending").length, 1, "an id in keep is not an orphan yet");
+    store.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

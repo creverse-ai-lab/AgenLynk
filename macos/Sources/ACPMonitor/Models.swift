@@ -426,6 +426,17 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
     let provider: String
     let root: GatewaySession?
     let workers: [GatewaySession]
+    /// The newest member update, computed once: sort comparators and card
+    /// ordering read it many times per pass.
+    let updatedAt: String?
+
+    init(id: String, provider: String, root: GatewaySession?, workers: [GatewaySession]) {
+        self.id = id
+        self.provider = provider
+        self.root = root
+        self.workers = workers
+        updatedAt = ((root.map { [$0] } ?? []) + workers).compactMap(\.updatedAt).max()
+    }
 
     /// The working folder names the Frontdoor — it is stable and meaningful,
     /// and it is what tells two concurrent Frontdoors apart. A designated title
@@ -496,7 +507,6 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
     }
     var activeWorkerCount: Int { workers.filter(\.isActive).count }
     var workspaceCount: Int { Set(members.map(\.cwd).filter { !$0.isEmpty }).count }
-    var updatedAt: String? { members.compactMap(\.updatedAt).max() }
     var latestTask: String? {
         members
             .sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
@@ -751,9 +761,19 @@ private func petContractAction(for state: PetAgentState) -> PetPresentationActio
 /// Pet renderer must never receive a full prompt or unbounded event text.
 private func boundedTaskText(_ text: String?) -> String? {
     guard let text else { return nil }
-    let collapsed = text.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !collapsed.isEmpty else { return nil }
-    return String(collapsed.prefix(200))
+    let collapsed = oneLineText(text, limit: 200, ellipsis: false)
+    return collapsed.isEmpty ? nil : collapsed
+}
+
+/// The one line a label shows of any text: newlines become spaces, the ends
+/// are trimmed, and past `limit` characters it is cut (with "…" unless
+/// `ellipsis` is false). Every row, tooltip and contract field that shortens
+/// text goes through here.
+func oneLineText(_ text: String, limit: Int? = nil, ellipsis: Bool = true) -> String {
+    let line = text.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let limit, line.count > limit else { return line }
+    let cut = String(line.prefix(limit))
+    return ellipsis ? cut.trimmingCharacters(in: .whitespaces) + "…" : cut
 }
 
 /// The Agent Map's legacy state/graph projection. Unchanged in shape and
@@ -995,6 +1015,25 @@ struct MonitorEvent: Identifiable, Equatable, Sendable {
     let detail: [String: JSONValue]
     let payload: JSONValue
 
+    /// Identity and display fields only. `payload` is the raw JSON these were
+    /// read from; deep-comparing it on every upsert and state diff was the
+    /// dominant cost of a busy stream, and nothing on screen reads it except
+    /// the raw-JSON disclosure.
+    static func == (lhs: MonitorEvent, rhs: MonitorEvent) -> Bool {
+        lhs.id == rhs.id
+            && lhs.sequence == rhs.sequence
+            && lhs.kind == rhs.kind
+            && lhs.status == rhs.status
+            && lhs.timestamp == rhs.timestamp
+            && lhs.endedAt == rhs.endedAt
+            && lhs.turnId == rhs.turnId
+            && lhs.toolCallId == rhs.toolCallId
+            && lhs.title == rhs.title
+            && lhs.body == rhs.body
+            && lhs.sources == rhs.sources
+            && lhs.detail == rhs.detail
+    }
+
     init?(_ value: JSONValue) {
         guard let object = value.objectValue,
               let sessionId = object.string("sessionId"),
@@ -1047,9 +1086,7 @@ struct MonitorEvent: Identifiable, Equatable, Sendable {
             ?? detail["toolName"]?.stringValue
             ?? detail["name"]?.stringValue
             ?? kindLabel
-        let oneLine = raw.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
-        guard oneLine.count > limit else { return oneLine }
-        return String(oneLine.prefix(limit)).trimmingCharacters(in: .whitespaces) + "…"
+        return oneLineText(raw, limit: limit)
     }
 
     /// How a permission / input request stands: waiting, approved, denied or
@@ -1090,7 +1127,7 @@ struct MonitorEvent: Identifiable, Equatable, Sendable {
     /// of the body, else the kind.
     var summary: String {
         if let title { return title }
-        if let body { return String(body.replacingOccurrences(of: "\n", with: " ").prefix(140)) }
+        if let body { return oneLineText(body, limit: 140, ellipsis: false) }
         return kindLabel
     }
 
@@ -1142,6 +1179,18 @@ func providerDisplayLabel(_ provider: String) -> String {
     case "grok": "Grok"
     case "", "unknown": "알 수 없는 CLI"
     default: provider.capitalized
+    }
+}
+
+/// A CLI's product name where the user installs or configures it
+/// (onboarding, agent catalog, hook consent, monitoring settings): the one
+/// map every setup surface reads, so none spells a CLI differently.
+func cliProductName(_ provider: String) -> String {
+    switch provider.lowercased() {
+    case "claude": "Claude Code"
+    case "codex": "Codex"
+    case "grok": "Grok"
+    default: providerDisplayLabel(provider)
     }
 }
 
@@ -1225,16 +1274,6 @@ func sessionStatusLabel(_ status: String) -> String {
 /// record is done ("완료"), not resting.
 func recordStatusLabel(_ status: String) -> String {
     status == "completed" ? "완료" : sessionStatusLabel(status)
-}
-
-/// "방금", "12초 전", "3분 전", "2시간 전", "4일 전".
-func relativeTimeText(from date: Date, to now: Date) -> String {
-    let seconds = Int(now.timeIntervalSince(date).rounded())
-    if seconds < 3 { return "방금" }
-    if seconds < 60 { return "\(seconds)초 전" }
-    if seconds < 3_600 { return "\(seconds / 60)분 전" }
-    if seconds < 86_400 { return "\(seconds / 3_600)시간 전" }
-    return "\(seconds / 86_400)일 전"
 }
 
 private func nonEmptyText(_ text: String?) -> String? {
@@ -1406,6 +1445,38 @@ struct InstalledFrontdoors: Equatable, Sendable {
 enum MonitorReducerDefaults {
     /// Matches the sidecar's default `maxEventsPerSession`.
     static let eventLimit = 2_000
+    /// Older events paged in per session. Past it the oldest paged events
+    /// fall off, so scrolling far up a long session stays bounded.
+    static let pagedEventLimit = 5_000
+    /// History sessions whose events stay loaded besides the open one.
+    static let browsedSessionLimit = 5
+    /// Rows of "지난 기록" kept in memory.
+    static let browsedHistoryLimit = 500
+}
+
+/// Recently used keys, oldest first, at most `capacity` besides the pinned
+/// one (the history session on screen, which never drops).
+struct RecentKeys: Equatable, Sendable {
+    let capacity: Int
+    private(set) var keys: [String] = []
+
+    init(capacity: Int) { self.capacity = max(0, capacity) }
+
+    /// Marks `key` as just used; returns the keys that fell off.
+    @discardableResult
+    mutating func touch(_ key: String, pinned: String?) -> [String] {
+        keys.removeAll { $0 == key }
+        keys.append(key)
+        var evicted: [String] = []
+        while keys.filter({ $0 != pinned }).count > capacity,
+              let oldest = keys.firstIndex(where: { $0 != pinned }) {
+            evicted.append(keys.remove(at: oldest))
+        }
+        return evicted
+    }
+
+    mutating func remove(_ key: String) { keys.removeAll { $0 == key } }
+    mutating func removeAll() { keys.removeAll() }
 }
 
 struct MonitorSnapshot: Sendable {
@@ -2110,24 +2181,52 @@ func crossSessionEventOrder(_ lhs: MonitorEvent, _ rhs: MonitorEvent) -> Bool {
 /// past `limit` (the sidecar's `eventLimit`). A later duplicate of one id in
 /// the same batch wins.
 func upsertMonitorEvents(_ changes: [MonitorEvent], into bucket: [MonitorEvent], limit: Int) -> [MonitorEvent] {
-    guard !changes.isEmpty else { return bucket }
     var result = bucket
-    var indexById: [String: Int] = [:]
-    indexById.reserveCapacity(result.count + changes.count)
-    for (index, event) in result.enumerated() { indexById[event.id] = index }
-    for event in changes {
-        if let index = indexById[event.id] {
-            result[index] = event
-        } else {
-            indexById[event.id] = result.count
-            result.append(event)
-        }
-    }
-    if zip(result, result.dropFirst()).contains(where: { withinSessionEventOrder($1, $0) }) {
-        result.sort(by: withinSessionEventOrder)
-    }
-    if result.count > limit { result.removeFirst(result.count - limit) }
+    upsertMonitorEvents(changes, into: &result, limit: limit)
     return result
+}
+
+/// In-place form of the upsert above; returns whether the bucket changed, so
+/// callers never have to diff the whole bucket (or state) afterwards. The
+/// bucket must already be in `withinSessionEventOrder` (every producer keeps
+/// it so); only the neighbours of what changed are checked.
+@discardableResult
+func upsertMonitorEvents(_ changes: [MonitorEvent], into bucket: inout [MonitorEvent], limit: Int) -> Bool {
+    guard !changes.isEmpty else { return false }
+    var changed = false
+    var touched: [Int] = []
+    touched.reserveCapacity(changes.count)
+    // A frame names a few events, almost always the newest: a backwards scan
+    // finds them without hashing every id of the bucket. Large batches (a
+    // page, a merge) index the bucket once instead.
+    var indexById: [String: Int]?
+    if changes.count > 16 {
+        var index: [String: Int] = [:]
+        index.reserveCapacity(bucket.count + changes.count)
+        for (offset, event) in bucket.enumerated() { index[event.id] = offset }
+        indexById = index
+    }
+    for event in changes {
+        let existing = indexById.map { $0[event.id] } ?? bucket.lastIndex { $0.id == event.id }
+        if let existing {
+            guard bucket[existing] != event else { continue }
+            bucket[existing] = event
+            touched.append(existing)
+        } else {
+            indexById?[event.id] = bucket.count
+            touched.append(bucket.count)
+            bucket.append(event)
+        }
+        changed = true
+    }
+    guard changed else { return false }
+    let outOfOrder = touched.contains { index in
+        (index > 0 && withinSessionEventOrder(bucket[index], bucket[index - 1]))
+            || (index + 1 < bucket.count && withinSessionEventOrder(bucket[index + 1], bucket[index]))
+    }
+    if outOfOrder { bucket.sort(by: withinSessionEventOrder) }
+    if bucket.count > limit { bucket.removeFirst(bucket.count - limit) }
+    return true
 }
 
 /// A warning when the running Gateway daemon serves from a different runtime
@@ -2189,7 +2288,24 @@ enum MonitorSelection {
         var sessionsById: [String: GatewaySession] = [:]
         for session in historySessions { sessionsById[session.sessionId] = session }
         for session in liveSessions { sessionsById[session.sessionId] = session }
-        let available = FrontdoorSession.make(sessions: sessionsById.values.filter { !$0.isInternalReview })
+        return reconcile(
+            selectedFrontdoorId: selectedFrontdoorId,
+            selectedEventId: selectedEventId,
+            frontdoors: FrontdoorSession.make(sessions: sessionsById.values.filter { !$0.isInternalReview }),
+            liveEvents: liveEvents,
+            historyEvents: historyEvents
+        )
+    }
+
+    /// The same, against Frontdoors the caller already built (the app keeps
+    /// them cached per log revision).
+    static func reconcile(
+        selectedFrontdoorId: String?,
+        selectedEventId: String?,
+        frontdoors available: [FrontdoorSession],
+        liveEvents: [String: [MonitorEvent]],
+        historyEvents: [String: [MonitorEvent]]
+    ) -> Result {
         let frontdoorId: String?
         if let selectedFrontdoorId, available.contains(where: { $0.id == selectedFrontdoorId }) {
             frontdoorId = selectedFrontdoorId
@@ -2197,15 +2313,27 @@ enum MonitorSelection {
             frontdoorId = available.first(where: \.isActive)?.id ?? available.first?.id
         }
 
-        var eventsById: [String: MonitorEvent] = [:]
-        for events in historyEvents.values {
-            for event in events { eventsById[event.id] = event }
+        let eventId = selectedEventId.flatMap { id in
+            contains(id, in: historyEvents) || contains(id, in: liveEvents) ? id : nil
         }
-        for events in liveEvents.values {
-            for event in events { eventsById[event.id] = event }
-        }
-        let eventId = selectedEventId.flatMap { eventsById[$0] == nil ? nil : $0 }
         return Result(frontdoorId: frontdoorId, eventId: eventId)
+    }
+
+    /// Event ids are `<sessionId>#<key>`, so only the bucket of that session
+    /// is searched — not an index of every retained event for one id. An id
+    /// of another shape (no bucket matches a prefix) falls back to a scan.
+    static func contains(_ eventId: String, in buckets: [String: [MonitorEvent]]) -> Bool {
+        var matchedBucket = false
+        var cursor = eventId.startIndex
+        while let hash = eventId[cursor...].firstIndex(of: "#") {
+            if let bucket = buckets[String(eventId[..<hash])] {
+                matchedBucket = true
+                if bucket.contains(where: { $0.id == eventId }) { return true }
+            }
+            cursor = eventId.index(after: hash)
+        }
+        guard !matchedBucket else { return false }
+        return buckets.values.contains { bucket in bucket.contains { $0.id == eventId } }
     }
 }
 

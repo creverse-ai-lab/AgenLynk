@@ -20,10 +20,8 @@ final class AppModel: ObservableObject {
     }
 
     @Published private(set) var startupPhase: StartupPhase = .checking
-    @Published var onboardingFrontDoor: String = "codex"
     /// Onboarding installs any subset of the built-in Frontdoors at once; at
-    /// least one must stay ticked. `onboardingFrontDoor` above is kept as the
-    /// legacy single value other code may still read.
+    /// least one must stay ticked.
     @Published var onboardingFrontdoors: Set<String> = ["codex"]
     @Published private(set) var onboardingRunning = false
     @Published private(set) var onboardingOutput: [String] = []
@@ -84,7 +82,13 @@ final class AppModel: ObservableObject {
     private var historyCursor: (updatedAt: String, sessionId: String)?
     @Published private(set) var historyLoading = false
     @Published private(set) var historyError: String?
-    @Published private(set) var browsedEvents: [String: [MonitorEvent]] = [:]
+    /// Events of the open history session plus the few opened most
+    /// recently (`browsedRecency`); older ones are dropped, not kept forever.
+    @Published private(set) var browsedEvents: [String: [MonitorEvent]] = [:] {
+        didSet { browsedRevision &+= 1 }
+    }
+    private var browsedRevision = 0
+    private var browsedRecency = RecentKeys(capacity: MonitorReducerDefaults.browsedSessionLimit)
     /// A history session opened from the sidebar; while set, the sequence
     /// shows its timeline instead of the selected Frontdoor's.
     @Published var selectedHistorySessionId: String?
@@ -92,6 +96,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var olderLoadingSessionIds: Set<String> = []
     /// Sessions whose oldest event is already loaded.
     private var olderExhaustedSessionIds: Set<String> = []
+    /// Sessions whose paged-in window is full (`pagedEventLimit`): older
+    /// events exist but are not kept in memory.
+    @Published private(set) var olderCappedSessionIds: Set<String> = []
     private static let olderPageSize = 200
     private static let historyPageSize = 50
     private var hookConsentAsked = false
@@ -186,22 +193,14 @@ final class AppModel: ObservableObject {
         gateway?.objectValue?.string("gatewayBuildId") ?? "—"
     }
 
-    /// Wall-clock time of the last message received from the Monitor stream,
-    /// regardless of kind. This is the liveness signal the menu bar shows: it
-    /// keeps ticking while agents are idle, so "no active agent" and "no data
-    /// arriving" stay distinguishable.
-    var lastStreamMessageAt: Date? { monitorStore.state.lastStreamMessageAt }
-    /// Time of the last agent event, as opposed to a state/heartbeat message.
-    var lastAgentEventAt: Date? { monitorStore.state.lastAgentEventAt }
+    /// When the Monitor stream last delivered anything (the menu bar's
+    /// liveness signal: it keeps ticking while agents are idle, so "no active
+    /// agent" and "no data arriving" stay distinguishable) and when an agent
+    /// event last changed. Deliberately NOT forwarded into this model's
+    /// `objectWillChange`: only the views printing these clocks observe it.
+    var heartbeat: MonitorHeartbeat { monitorStore.heartbeat }
 
     var streamingLive: Bool { monitorStore.state.connected && monitorStore.state.streaming }
-
-    /// Every known Frontdoor and Worker with its normalized contract state.
-    /// Uses the same `PetActivityProjection` the Pet renderer consumes, so the
-    /// menu bar and the Pet can never disagree about an agent's state.
-    var activityProjection: PetActivityProjection {
-        PetActivityProjection.make(sessions: sessions.filter { !$0.isInternalReview }, inbox: inbox)
-    }
 
     var connectionDetail: String {
         switch phase {
@@ -245,34 +244,72 @@ final class AppModel: ObservableObject {
     var gatewayConfigLockedCount: Int { gatewayConfigOptions.filter { !$0.editable }.count }
     var onboardingInstallLocationReady: Bool { BundledRuntime.installationLocationReady }
 
-    var activeSessions: [GatewaySession] { sessions.filter(\.isActive) }
+    // ── Derived session views, cached per store revision ──────────────────
+    // Several of these are read many times per render (sidebar, metric strip,
+    // menu bar, selection reconciliation, the Pet). They depend only on the
+    // monitor state, so each is built once per published state change.
+
+    private struct DerivedCache {
+        var revision = -1
+        var frontdoorSessions: [FrontdoorSession]?
+        var realtimeSessions: [GatewaySession]?
+        var realtimeInbox: [MonitorRecord]?
+        var visibleLogSessions: [GatewaySession]?
+        var logFrontdoorSessions: [FrontdoorSession]?
+        var menuBarPipeline: MenuBarPipeline?
+    }
+    private var derivedCache = DerivedCache()
+
+    private func derived<T>(_ keyPath: WritableKeyPath<DerivedCache, T?>, _ make: () -> T) -> T {
+        if derivedCache.revision != monitorStore.revision {
+            derivedCache = DerivedCache(revision: monitorStore.revision)
+        }
+        if let cached = derivedCache[keyPath: keyPath] { return cached }
+        let value = make()
+        derivedCache[keyPath: keyPath] = value
+        return value
+    }
+
     var frontdoorSessions: [FrontdoorSession] {
-        FrontdoorSession.make(sessions: sessions.filter { !$0.isInternalReview })
+        derived(\.frontdoorSessions) { FrontdoorSession.make(sessions: sessions.filter { !$0.isInternalReview }) }
     }
     var activeFrontdoors: [FrontdoorSession] { frontdoorSessions.filter(\.isActive) }
     var realtimeSessions: [GatewaySession] {
-        let liveCandidates = sessions.filter { !$0.isInternalReview }
-        let activeFrontdoorIds = Set(liveCandidates.filter(\.isActive).compactMap(\.openerInstanceId))
-        return liveCandidates
-            .filter { session in
-                session.isRealtimeVisible || (session.isFrontdoorRecord && activeFrontdoorIds.contains(session.openerInstanceId ?? ""))
-            }
-            .sorted { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
-    }
-    var realtimeInbox: [MonitorRecord] {
-        let sessionIds = Set(realtimeSessions.map(\.sessionId))
-        return inbox.filter { record in
-            guard let sessionId = record.payload.objectValue?.string("sessionId") else { return false }
-            return sessionIds.contains(sessionId)
+        derived(\.realtimeSessions) {
+            let liveCandidates = sessions.filter { !$0.isInternalReview }
+            let activeFrontdoorIds = Set(liveCandidates.filter(\.isActive).compactMap(\.openerInstanceId))
+            return liveCandidates
+                .filter { session in
+                    session.isRealtimeVisible || (session.isFrontdoorRecord && activeFrontdoorIds.contains(session.openerInstanceId ?? ""))
+                }
+                .sorted { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
         }
     }
-    /// Only real Workers: a Frontdoor record is never counted as one.
-    var realtimeWorkerCount: Int { realtimeSessions.filter { $0.role == "worker" }.count }
+    var realtimeInbox: [MonitorRecord] {
+        derived(\.realtimeInbox) {
+            let sessionIds = Set(realtimeSessions.map(\.sessionId))
+            return inbox.filter { record in
+                guard let sessionId = record.payload.objectValue?.string("sessionId") else { return false }
+                return sessionIds.contains(sessionId)
+            }
+        }
+    }
+    /// The menu bar's pipelines, rebuilt only when the monitor state changes
+    /// (a heartbeat no longer counts as one).
+    var menuBarPipeline: MenuBarPipeline {
+        derived(\.menuBarPipeline) {
+            MenuBarPipeline.make(frontdoors: frontdoorSessions, eventsBySession: eventsBySession)
+        }
+    }
     var realtimeACPCount: Int { realtimeSessions.filter { !$0.isLocalSource }.count }
     var realtimeLocalCount: Int { realtimeSessions.filter(\.isLocalSource).count }
     var pendingInbox: [MonitorRecord] { inbox.filter { $0.status == "pending" || $0.status == "interrupted" } }
-    var visibleLogSessions: [GatewaySession] { logSessions.filter { !$0.isInternalReview } }
-    var logFrontdoorSessions: [FrontdoorSession] { FrontdoorSession.make(sessions: visibleLogSessions) }
+    var visibleLogSessions: [GatewaySession] {
+        derived(\.visibleLogSessions) { logSessions.filter { !$0.isInternalReview } }
+    }
+    var logFrontdoorSessions: [FrontdoorSession] {
+        derived(\.logFrontdoorSessions) { FrontdoorSession.make(sessions: visibleLogSessions) }
+    }
     var totalEventCount: Int {
         let visibleIds = Set(visibleLogSessions.map(\.sessionId))
         return logEventsBySession.filter { visibleIds.contains($0.key) }.values.reduce(0) { $0 + $1.count }
@@ -318,6 +355,11 @@ final class AppModel: ObservableObject {
     }
 
     private var dataRevision = 0
+
+    /// Advances whenever any event a timeline can show changes (the merged
+    /// log or a browsed history session); views memoize their derived rows
+    /// against it.
+    var eventsRevision: Int { dataRevision &+ browsedRevision }
     private var allVisibleEventsCache: (key: EventCacheKey, value: [MonitorEvent])?
     private var selectedEventsCache: (key: EventCacheKey, value: [MonitorEvent])?
 
@@ -351,10 +393,6 @@ final class AppModel: ObservableObject {
             .sorted(by: crossSessionEventOrder)
         allVisibleEventsCache = (key, value)
         return value
-    }
-
-    var visibleEventsBySession: [String: [MonitorEvent]] {
-        eventsBySession.mapValues { $0.filter(eventIsVisible) }
     }
 
     var selectedEvents: [MonitorEvent] {
@@ -435,16 +473,22 @@ final class AppModel: ObservableObject {
                     endpoint: endpoint, sessionId: sessionId, before: cursor, limit: Self.olderPageSize
                 )
                 if page.events.count < Self.olderPageSize { olderExhaustedSessionIds.insert(sessionId) }
-                if let browsed = browsedEvents[sessionId] {
-                    let next = upsertMonitorEvents(page.events, into: browsed, limit: Int.max)
-                    if next != browsed {
-                        browsedEvents[sessionId] = next
+                if var browsed = browsedEvents[sessionId] {
+                    if upsertMonitorEvents(page.events, into: &browsed, limit: Int.max) {
+                        browsedEvents[sessionId] = browsed
                         arrived = true
                     }
                 } else {
                     let before = logEventsBySession[sessionId]?.count ?? 0
                     monitorStore.prependOlder(page.events, sessionId: sessionId)
-                    if (logEventsBySession[sessionId]?.count ?? 0) > before { arrived = true }
+                    if (logEventsBySession[sessionId]?.count ?? 0) > before {
+                        arrived = true
+                    } else if !page.events.isEmpty {
+                        // The paged window is full (pagedEventLimit): what
+                        // came in fell straight off again, so stop offering more.
+                        olderExhaustedSessionIds.insert(sessionId)
+                        olderCappedSessionIds.insert(sessionId)
+                    }
                 }
                 // Nothing new although the page was full: the rest is what
                 // is already loaded.
@@ -490,6 +534,9 @@ final class AppModel: ObservableObject {
             }
             // A full page of sessions already listed would page forever.
             historyHasMore = page.hasMore && !fresh.isEmpty
+            // At the in-memory cap the list stops growing: paging on would
+            // only drop the rows just fetched.
+            if capBrowsedHistory() { historyHasMore = false }
             historyError = nil
         } catch {
             historyHasMore = false
@@ -514,13 +561,52 @@ final class AppModel: ObservableObject {
         if historyCursor == nil, let last = page.sessions.last, let updatedAt = last.updatedAt {
             historyCursor = (updatedAt, last.sessionId)
         }
+        // Newest rows came in on top; the oldest fall off the bottom, and
+        // paging resumes after the last row kept.
+        if capBrowsedHistory() {
+            if let last = browsedHistory.last(where: { $0.sessionId != selectedHistorySessionId }),
+               let updatedAt = last.updatedAt {
+                historyCursor = (updatedAt, last.sessionId)
+            }
+            historyHasMore = true
+        }
+    }
+
+    /// Keeps "지난 기록" at `browsedHistoryLimit` rows, newest first, plus the
+    /// open session. Returns whether rows were dropped.
+    @discardableResult
+    private func capBrowsedHistory() -> Bool {
+        let limit = MonitorReducerDefaults.browsedHistoryLimit
+        guard browsedHistory.count > limit else { return false }
+        var kept = Array(browsedHistory.prefix(limit))
+        if let open = selectedHistorySessionId, !kept.contains(where: { $0.sessionId == open }),
+           let row = browsedHistory.first(where: { $0.sessionId == open }) {
+            kept.append(row)
+        }
+        let keptIds = Set(kept.map(\.sessionId))
+        let dropped = browsedHistory.map(\.sessionId).filter { !keptIds.contains($0) }
+        browsedHistory = kept
+        for id in dropped { forgetBrowsedEvents(id) }
+        return true
+    }
+
+    /// Drops one browsed session's events and what was remembered about
+    /// loading them.
+    private func forgetBrowsedEvents(_ sessionId: String) {
+        browsedRecency.remove(sessionId)
+        if browsedEvents[sessionId] != nil { browsedEvents[sessionId] = nil }
+        historyLoadFailedSessionIds.remove(sessionId)
+        if logEventsBySession[sessionId] == nil { olderExhaustedSessionIds.remove(sessionId) }
     }
 
     /// Opens (or closes, with nil) one browsed history session's timeline.
     func selectHistorySession(_ sessionId: String?) async {
         selectedHistorySessionId = sessionId
         selectedEventId = nil
-        guard let sessionId, browsedEvents[sessionId] == nil, let endpoint else { return }
+        guard let sessionId else { return }
+        // The open session plus the few opened last stay loaded.
+        for evicted in browsedRecency.touch(sessionId, pinned: sessionId) { forgetBrowsedEvents(evicted) }
+        guard browsedEvents[sessionId] == nil, let endpoint else { return }
         olderLoadingSessionIds.insert(sessionId)
         defer { olderLoadingSessionIds.remove(sessionId) }
         do {
@@ -604,6 +690,8 @@ final class AppModel: ObservableObject {
     private func resetHistoryBrowsing() {
         browsedHistory = []
         browsedEvents = [:]
+        browsedRecency.removeAll()
+        historyLoadFailedSessionIds = []
         historyCursor = nil
         historyHasMore = true
         historyError = nil
@@ -613,6 +701,7 @@ final class AppModel: ObservableObject {
         }
         let liveIds = Set(sessions.map(\.sessionId))
         olderExhaustedSessionIds = olderExhaustedSessionIds.filter { liveIds.contains($0) }
+        olderCappedSessionIds = olderCappedSessionIds.filter { liveIds.contains($0) }
     }
 
     func startIfNeeded() {
@@ -750,6 +839,9 @@ final class AppModel: ObservableObject {
         sidecarStreamConnected = false
         monitorStore.resetForNewSidecar()
         startTask = Task { [weak self] in
+            // The old stream must not keep retrying the endpoint that is
+            // going away, whether or not the new connection gets that far.
+            await self?.client.stop()
             await self?.connect(restartSidecar: true, generation: generation)
         }
     }
@@ -808,10 +900,14 @@ final class AppModel: ObservableObject {
             return
         }
         do {
-            hookStatus = try await client.fetchHookStatus(endpoint: endpoint)
-            hookError = nil
+            let status = try await client.fetchHookStatus(endpoint: endpoint)
+            // Polled every 15s by the settings tab: an unchanged answer must
+            // not republish (and re-render the dashboard).
+            if hookStatus != status { hookStatus = status }
+            if hookError != nil { hookError = nil }
         } catch {
-            hookError = error.localizedDescription
+            let message = error.localizedDescription
+            if hookError != message { hookError = message }
         }
     }
 
@@ -1349,6 +1445,10 @@ final class AppModel: ObservableObject {
             startReconciliation(endpoint: endpoint, generation: generation)
         } catch {
             guard connectionIsCurrent(generation) else { return }
+            // Failed before startStream: no stream may keep polling a dead
+            // endpoint behind the disconnected phase.
+            await client.stop()
+            guard connectionIsCurrent(generation) else { return }
             monitorStore.setConnection(connected: false, streaming: false)
             sidecarStreamConnected = false
             phase = .disconnected(describeConnectFailure(error))
@@ -1431,8 +1531,12 @@ final class AppModel: ObservableObject {
                 }
             }
             if let notice = effect.pausedSubscriptionNotice { recordNotice(notice) }
-            reconcileSelections()
-            syncPetSnapshot()
+            // A state frame that changed nothing (a keep-alive) has nothing
+            // to reconcile or hand to the Pet.
+            if effect.stateChanged {
+                reconcileSelections()
+                syncPetSnapshot()
+            }
         case "gateway":
             monitorStore.setGateway(message["gateway"])
             Task { await loadGatewayConfig() }
@@ -1494,6 +1598,8 @@ final class AppModel: ObservableObject {
     }
 
     private func syncPetSnapshot() {
+        // Nothing to feed: skip building the projection on every frame.
+        guard settings.petEnabled, petRunning else { return }
         petStore.sync(
             projection: PetActivityProjection.make(sessions: realtimeSessions, inbox: realtimeInbox),
             enabled: settings.petEnabled
@@ -1506,11 +1612,12 @@ final class AppModel: ObservableObject {
         // time a Frontdoor briefly left the live list, and DashboardView's
         // onChange(selectedFrontdoorId) then cleared the selected event — the
         // reported "clicking an event, it deselects on update" bug.
+        // The merged log's Frontdoors are exactly live + history minus
+        // internal reviews, already built (and cached) for the sidebar.
         let next = MonitorSelection.reconcile(
             selectedFrontdoorId: selectedFrontdoorId,
             selectedEventId: selectedEventId,
-            liveSessions: sessions,
-            historySessions: historySessions,
+            frontdoors: logFrontdoorSessions,
             liveEvents: eventsBySession,
             historyEvents: historyEventsBySession
         )

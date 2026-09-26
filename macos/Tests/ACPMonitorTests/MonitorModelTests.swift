@@ -39,10 +39,6 @@ enum MonitorModelChecks {
         try frontdoorSessionsAggregateWorkersAndExcludeLegacyRecords()
         try frontdoorNamePrefersFolderThenSaneTitle()
         try localFrontdoorIsNotDuplicatedAsAWorker()
-        try graphProjectionGroupsFrontdoorsAndAssignsWorkerLanes()
-        try graphProjectionBuildsPromptReturnTurnsAndUsesCanvasHeight()
-        try graphProjectionFollowsOnlyTheCurrentLiveTurn()
-        try graphProjectionBoundsLargeLiveHistories()
         try canonicalEventsDecodeTitleBodyStatusAndStableIds()
         try monitoringHookStatusDecodesLastReceivedAndStateText()
         try historyEndpointsDecode()
@@ -50,6 +46,10 @@ enum MonitorModelChecks {
         try permissionOutcomesAndKoreanLabelsRead()
         try sessionCapabilitiesDistinguishBlindFromIdle()
         try eventsFrameUpsertReplacesInsertsAndOrders()
+        try eventEqualityIgnoresRawPayloadAndUpsertReportsChange()
+        try recentKeysKeepTheOpenOneAndTheNewestFew()
+        try selectionFindsAnEventInItsOwnSessionBucket()
+        try trailingItemMatchesFullGrouping()
         try sessionUsageDecodesOnlyKnownNumbers()
         try restartBlockersMatchTheSharedGatewayContract()
         try runtimeInspectionSurfacesAPinnedRollback()
@@ -870,18 +870,6 @@ enum MonitorModelChecks {
         try check(petRoot?.session == "main-local", "Pet root should use the raw Frontdoor identity")
         try check(petRoot?.engine == "gpt-local", "Pet root should preserve the local model")
         try check(!pet.sessions.contains(where: { $0.role == "worker" && $0.session == root.sessionId }), "local root must not be emitted as a worker")
-
-        let projection = GraphProjection.make(sessions: [root, gatewayWorker], eventsBySession: [:])
-        try check(projection.groups.count == 1, "Branch should keep one Frontdoor trunk")
-        try check(projection.workerLaneCount == 1, "Branch worker count must exclude the local root lane")
-
-        // The menu-bar popover stacks these lanes vertically instead of laying
-        // them out along X, so it needs the trunk order made explicit.
-        let stacked = projection.lanesOrderedByTrunk
-        try check(stacked.count == projection.lanes.count, "stacked lane order must keep every lane exactly once")
-        try check(Set(stacked.map(\.id)).count == stacked.count, "stacked lane order must not duplicate a lane")
-        try check(stacked.first?.session.isFrontdoorRecord == true, "each group's Frontdoor root must lead its workers")
-        try check(stacked.last?.session.sessionId == gatewayWorker.sessionId, "workers must follow their Frontdoor root")
     }
 
     /// G6: 인증 실패, 미설치, API 비호환, 업데이트 필요, restart blocked가
@@ -1545,123 +1533,6 @@ enum MonitorModelChecks {
         return event
     }
 
-    private static func graphProjectionGroupsFrontdoorsAndAssignsWorkerLanes() throws {
-        let sessionValue = JSONValue.object([
-            "sessionId": .string("s1"), "provider": .string("codex"), "status": .string("running"),
-            "cwd": .string("/tmp/project"), "opener": .string("grok"), "createdAt": .string("2026-08-07T00:00:00.000Z"),
-            "turnId": .string("t1")
-        ])
-        guard let session = GatewaySession(sessionValue) else {
-            throw CheckError.failed("fixture creation failed")
-        }
-        let event = try canonicalEvent("s1", 1, "turn_start", ts: "2026-08-07T00:05:00.000Z", turnId: "t1")
-        let projection = GraphProjection.make(sessions: [session], eventsBySession: ["s1": [event]])
-        try check(projection.groups.count == 1, "frontdoor grouping failed")
-        try check(projection.groups.first?.opener == "grok", "frontdoor opener failed")
-        try check(projection.lanes.first?.turns.count == 1, "turn projection failed")
-        try check((projection.lanes.first?.laneX ?? 0) > (projection.groups.first?.trunkX ?? 0), "lane placement failed")
-    }
-
-    private static func graphProjectionBuildsPromptReturnTurnsAndUsesCanvasHeight() throws {
-        // Two sessions running concurrently: each contributes its own live turn,
-        // which is how more than one node ever reaches the canvas at once.
-        func running(_ id: String, turnId: String) -> JSONValue {
-            .object([
-                "sessionId": .string(id), "provider": .string("codex"), "status": .string("running"),
-                "cwd": .string("/tmp/project"), "opener": .string("codex"),
-                "openerInstanceId": .string("main-1"), "turnId": .string(turnId)
-            ])
-        }
-        guard let first = GatewaySession(running("s1", turnId: "t1")),
-              let second = GatewaySession(running("s2", turnId: "t2")) else {
-            throw CheckError.failed("turn fixture creation failed")
-        }
-        // A tool call is ONE event whose status finished; messages arrive whole.
-        let firstEvents = try [
-            canonicalEvent("s1", 1, "turn_start", ts: "2026-08-07T00:09:00.000Z", turnId: "t1", title: "first prompt", body: "first prompt"),
-            canonicalEvent("s1", 2, "agent_message", ts: "2026-08-07T00:09:01.000Z", turnId: "t1", body: "progress"),
-            canonicalEvent("s1", 3, "tool_call", ts: "2026-08-07T00:09:02.000Z", turnId: "t1", title: "Read: a", status: "completed"),
-            canonicalEvent("s1", 4, "agent_message", ts: "2026-08-07T00:09:03.000Z", turnId: "t1", body: "final answer")
-        ]
-        let secondEvents = try [
-            canonicalEvent("s2", 1, "turn_start", ts: "2026-08-07T00:09:30.000Z", turnId: "t2", body: "second prompt"),
-            canonicalEvent("s2", 2, "agent_message", ts: "2026-08-07T00:09:31.000Z", turnId: "t2", body: "second return")
-        ]
-        let projection = GraphProjection.make(
-            sessions: [first, second],
-            eventsBySession: ["s1": firstEvents, "s2": secondEvents]
-        )
-        let turns = projection.lanes.flatMap(\.turns)
-        try check(turns.count == 2, "each live session should collapse into one human-readable turn")
-        try check(turns[0].prompt == "first prompt", "prompt should come from turn_start")
-        try check(turns[0].response == "final answer", "return should keep the final segment after a tool boundary")
-        try check(turns[0].events.count == 4, "a turn should retain every event for node detail inspection")
-        try check(turns[0].progress == 0.1 && turns[1].progress == 0.9, "short live bursts should use the canvas height")
-    }
-
-    private static func graphProjectionFollowsOnlyTheCurrentLiveTurn() throws {
-        let sessionValue = JSONValue.object([
-            "sessionId": .string("s1"), "provider": .string("codex"), "status": .string("running"),
-            "cwd": .string("/tmp/project"), "opener": .string("codex"),
-            "openerInstanceId": .string("main-1"), "turnId": .string("current")
-        ])
-        guard let session = GatewaySession(sessionValue) else {
-            throw CheckError.failed("live turn fixture creation failed")
-        }
-        let events = try [
-            canonicalEvent("s1", 1, "turn_start", ts: "2026-08-07T00:00:00.000Z", turnId: "previous", body: "old prompt"),
-            canonicalEvent("s1", 2, "turn_end", ts: "2026-08-07T00:01:00.000Z", turnId: "previous", status: "completed"),
-            canonicalEvent("s1", 3, "turn_start", ts: "2026-08-07T00:02:00.000Z", turnId: "current", body: "long running prompt"),
-            canonicalEvent("s1", 4, "turn_start", ts: "2026-08-07T00:59:00.000Z", turnId: "recent-history", body: "must stay out of Live"),
-            canonicalEvent("s1", 5, "turn_end", ts: "2026-08-07T00:59:01.000Z", turnId: "recent-history", status: "completed")
-        ]
-
-        let projection = GraphProjection.make(sessions: [session], eventsBySession: ["s1": events])
-        let turns = projection.lanes.first?.turns ?? []
-        try check(turns.count == 1, "live branch should contain only the current turn")
-        try check(turns.first?.turnId == "current", "live branch should follow the Gateway session turn id")
-        try check(turns.first?.prompt == "long running prompt", "a long-running current turn must ignore the history window")
-    }
-
-    private static func graphProjectionBoundsLargeLiveHistories() throws {
-        let sessionValue = JSONValue.object([
-            "sessionId": .string("large"), "provider": .string("codex"), "status": .string("running"),
-            "cwd": .string("/tmp/project"), "opener": .string("codex"),
-            "openerInstanceId": .string("main-large"), "turnId": .string("active")
-        ])
-        guard let session = GatewaySession(sessionValue) else {
-            throw CheckError.failed("large graph fixture creation failed")
-        }
-        var values: [MonitorEvent] = []
-        for index in 0..<180 {
-            for (offset, kind) in ["turn_start", "turn_end"].enumerated() {
-                values.append(try canonicalEvent(
-                    "large", index * 2 + offset + 1, kind, ts: "2026-08-07T00:09:00.000Z",
-                    turnId: "done-\(index)", body: "done"
-                ))
-            }
-        }
-        values.append(try canonicalEvent(
-            "large", 1_000, "turn_start", ts: "2026-08-07T00:09:30.000Z",
-            turnId: "active", body: String(repeating: "p", count: 6_000)
-        ))
-        for index in 0..<300 {
-            values.append(try canonicalEvent(
-                "large", 1_001 + index, index.isMultiple(of: 2) ? "agent_message" : "agent_thought",
-                ts: "2026-08-07T00:09:31.000Z", turnId: "active", body: String(repeating: "r", count: 100)
-            ))
-        }
-
-        let projection = GraphProjection.make(sessions: [session], eventsBySession: ["large": values])
-        try check(projection.turnCount <= 120, "live projection should cap the rendered turn count")
-        guard let active = projection.lanes.first?.turns.first(where: { $0.turnId == "active" }) else {
-            throw CheckError.failed("large active turn should stay pinned")
-        }
-        try check(active.events.count <= 160, "a live turn should cap retained detail events")
-        try check(active.prompt.count <= 4_001, "a live prompt should be bounded")
-        try check(active.response.count <= 12_001, "a live response should be bounded")
-    }
-
     /// v2 events are display-ready: title/body come straight from the wire,
     /// the id is the stable `<sessionId>#<key>`, and an event that names
     /// neither id nor key is rejected rather than given a random identity.
@@ -1702,6 +1573,72 @@ enum MonitorModelChecks {
 
     /// The v2 `events` frame rule: same id replaces in place, a new id is
     /// inserted, and the bucket stays ordered by ts then sequence.
+    /// `==` compares identity and display fields, never the raw payload; the
+    /// in-place upsert reports whether anything visible changed.
+    private static func eventEqualityIgnoresRawPayloadAndUpsertReportsChange() throws {
+        let base: [String: JSONValue] = [
+            "id": .string("s1#tool:1"), "key": .string("tool:1"), "sessionId": .string("s1"),
+            "sequence": .number(1), "kind": .string("tool_call"), "ts": .string("2026-08-07T00:00:00.000Z"),
+            "title": .string("Bash: ls"), "status": .string("running"), "sources": .array([.string("hook")])
+        ]
+        var noisy = base
+        noisy["rawProviderBlob"] = .string(String(repeating: "x", count: 10_000))
+        guard let plain = MonitorEvent(.object(base)), let withBlob = MonitorEvent(.object(noisy)) else {
+            throw CheckError.failed("equality fixtures did not decode")
+        }
+        try check(plain == withBlob, "events differing only in raw payload compare equal")
+        var finished = base
+        finished["status"] = .string("completed")
+        guard let done = MonitorEvent(.object(finished)) else { throw CheckError.failed("fixture did not decode") }
+        try check(plain != done, "a status change is a change")
+
+        var bucket = [plain]
+        try check(!upsertMonitorEvents([withBlob], into: &bucket, limit: 10), "a payload-only change reports nothing")
+        try check(upsertMonitorEvents([done], into: &bucket, limit: 10), "a visible change is reported")
+        try check(bucket.count == 1 && bucket[0].status == "completed", "the event is replaced in place")
+        try check(!upsertMonitorEvents([], into: &bucket, limit: 10), "an empty frame reports nothing")
+    }
+
+    private static func recentKeysKeepTheOpenOneAndTheNewestFew() throws {
+        var recent = RecentKeys(capacity: 2)
+        try check(recent.touch("a", pinned: "a").isEmpty, "the first key stays")
+        try check(recent.touch("b", pinned: "b").isEmpty && recent.touch("c", pinned: "c").isEmpty, "capacity besides the pinned key")
+        try check(recent.touch("d", pinned: "d") == ["a"], "the least recently used key drops first")
+        try check(recent.touch("b", pinned: "b").isEmpty && recent.keys == ["c", "d", "b"], "touching moves a key to newest")
+        try check(recent.touch("e", pinned: "c") == ["d"], "the pinned (open) key never drops, however old")
+        try check(recent.keys == ["c", "b", "e"], "the open key plus the newest others remain")
+        recent.remove("b")
+        try check(recent.keys == ["c", "e"], "remove forgets a key")
+    }
+
+    private static func selectionFindsAnEventInItsOwnSessionBucket() throws {
+        let inHashSession = try canonicalEvent("s#1", 1, "agent_message")
+        let other = try canonicalEvent("s2", 1, "agent_message")
+        let buckets = ["s#1": [inHashSession], "s2": [other]]
+        try check(MonitorSelection.contains(inHashSession.id, in: buckets), "a session id containing # still resolves")
+        try check(MonitorSelection.contains(other.id, in: buckets), "an event is found in its session's bucket")
+        try check(!MonitorSelection.contains("s2#missing", in: buckets), "a missing event is not found")
+        try check(!MonitorSelection.contains("unknown#x", in: buckets), "an unknown session's event is not found")
+    }
+
+    private static func trailingItemMatchesFullGrouping() throws {
+        let ts = "2026-08-07T00:00:00.000Z"
+        let events = [
+            try canonicalEvent("s", 1, "user_message", ts: ts, turnId: "t"),
+            try canonicalEvent("s", 2, "tool_call", ts: ts, turnId: "t"),
+            try canonicalEvent("s", 3, "tool_call", ts: ts, turnId: "t"),
+            try canonicalEvent("s", 4, "tool_call", ts: ts, turnId: "u"),
+            try canonicalEvent("s", 5, "tool_call", ts: ts, turnId: "u")
+        ]
+        for count in 0...events.count {
+            let prefix = Array(events.prefix(count))
+            try check(EventTimeline.lastItem(prefix) == EventTimeline.group(prefix).last,
+                      "the trailing scan must equal the full grouping's last item (\(count) events)")
+        }
+        let noTurn = [try canonicalEvent("s", 1, "tool_call"), try canonicalEvent("s", 2, "tool_call")]
+        try check(EventTimeline.lastItem(noTurn) == EventTimeline.group(noTurn).last, "calls without a turn do not join")
+    }
+
     private static func eventsFrameUpsertReplacesInsertsAndOrders() throws {
         let start = try canonicalEvent("s1", 1, "turn_start", ts: "2026-08-07T00:00:00.000Z", key: "turn:t1")
         let running = try canonicalEvent("s1", 2, "tool_call", ts: "2026-08-07T00:00:02.000Z", key: "tool:c1",

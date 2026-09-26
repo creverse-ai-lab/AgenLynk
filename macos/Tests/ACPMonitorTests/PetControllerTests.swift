@@ -12,6 +12,8 @@ enum PetControllerChecks {
         try rejectsAnEmptyRendererPath()
         try contractFilesAreOwnerOnlyAndSequenceLocked()
         try rendererEnvironmentCarriesContractFilesButNoSecrets()
+        try scheduledUpdatesLandInOrderOffTheMainActor()
+        try oversizedLogIsRotatedToOneBackup()
         print("Swift Pet controller checks passed")
     }
 
@@ -143,6 +145,45 @@ enum PetControllerChecks {
         }
         guard terminated else {
             throw PetControllerCheckError.failed("stop() must terminate the renderer child (pid \(pid))")
+        }
+    }
+
+    @MainActor
+    private static func scheduledUpdatesLandInOrderOffTheMainActor() throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let controller = PetController(stateDirectory: workspace.appendingPathComponent("state", isDirectory: true))
+        try controller.update(sampleProjection())
+        let first = try decodeSequences(controller)
+        for _ in 0..<5 { controller.scheduleUpdate(sampleProjection()) { _ in } }
+        controller.waitForPendingWrites()
+        let last = try decodeSequences(controller)
+        guard last.state == last.actions, last.state == first.state + 5 else {
+            throw PetControllerCheckError.failed("scheduled writes must land in order with matching sequences")
+        }
+        try controller.update(sampleProjection())
+        guard try decodeSequences(controller).state == last.state + 1 else {
+            throw PetControllerCheckError.failed("a synchronous update must follow the scheduled ones")
+        }
+    }
+
+    @MainActor
+    private static func oversizedLogIsRotatedToOneBackup() throws {
+        let workspace = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let log = workspace.appendingPathComponent("pet.log")
+        let backup = workspace.appendingPathComponent("pet.log.1")
+        try Data("old backup".utf8).write(to: backup)
+        try Data(count: 16).write(to: log)
+        PetController.rotateLogIfNeeded(log)
+        guard FileManager.default.fileExists(atPath: log.path) else {
+            throw PetControllerCheckError.failed("a small log must stay in place")
+        }
+        try Data(count: PetController.logRotationBytes + 1).write(to: log)
+        PetController.rotateLogIfNeeded(log)
+        let backupSize = (try FileManager.default.attributesOfItem(atPath: backup.path)[.size] as? NSNumber)?.intValue
+        guard !FileManager.default.fileExists(atPath: log.path), backupSize == PetController.logRotationBytes + 1 else {
+            throw PetControllerCheckError.failed("an oversized log must become the single .1 backup")
         }
     }
 

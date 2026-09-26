@@ -5,11 +5,9 @@ struct AgentCatalogView: View {
     @State private var searchText = ""
 
     private struct FrontdoorAgent { let id: String; let label: String }
-    private static let frontdoorAgents = [
-        FrontdoorAgent(id: "codex", label: "Codex"),
-        FrontdoorAgent(id: "claude", label: "Claude Code"),
-        FrontdoorAgent(id: "grok", label: "Grok")
-    ]
+    private static let frontdoorAgents = AppModel.frontdoorInstallOrder.map {
+        FrontdoorAgent(id: $0, label: cliProductName($0))
+    }
 
     private var filteredAgents: [ACPAgentCatalogItem] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()

@@ -18,12 +18,9 @@ struct MenuBarStatusView: View {
     private let contentPadding: Double = 14
 
     var body: some View {
-        // Derived when the model changes, not on every clock tick: the
-        // one-second TimelineView below only redraws elapsed times.
-        let pipeline = MenuBarPipeline.make(
-            frontdoors: model.frontdoorSessions,
-            eventsBySession: model.eventsBySession
-        )
+        // Cached by the model per monitor-state revision; the one-second
+        // TimelineView below only redraws elapsed times.
+        let pipeline = model.menuBarPipeline
         TimelineView(.periodic(from: .now, by: 1)) { context in
             VStack(alignment: .leading, spacing: 10) {
                 header(now: context.date)
@@ -49,10 +46,7 @@ struct MenuBarStatusView: View {
             ACPLogoMark().frame(width: 20, height: 20)
             Circle().fill(connectionColor).frame(width: 8, height: 8)
             Text(connectionText).font(.callout.weight(.medium)).lineLimit(1)
-            Text(streamText(now: now))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(streamColor(now: now))
-                .lineLimit(1)
+            StreamFreshnessText(heartbeat: model.heartbeat, streamingLive: model.streamingLive, now: now)
             Spacer()
             Button {
                 showConnection.toggle()
@@ -176,8 +170,7 @@ struct MenuBarStatusView: View {
     private func connectionDetail(now: Date) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             detailLine("이벤트 스트림", model.streamingLive ? "수신 중" : "연결 안 됨")
-            detailLine("마지막 갱신", model.lastStreamMessageAt.map { relativeTimeText(from: $0, to: now) } ?? "수신 없음")
-            detailLine("마지막 에이전트 이벤트", model.lastAgentEventAt.map { relativeTimeText(from: $0, to: now) } ?? "이번 실행에서 없음")
+            HeartbeatDetailLines(heartbeat: model.heartbeat, now: now)
             detailLine("미응답 요청", "\(model.pendingInbox.count)개")
             if let notice = model.lastNotice {
                 Text(notice)
@@ -191,12 +184,7 @@ struct MenuBarStatusView: View {
     }
 
     private func detailLine(_ title: String, _ value: String) -> some View {
-        HStack {
-            Text(title).foregroundStyle(.tertiary)
-            Spacer()
-            Text(value).foregroundStyle(.secondary).monospacedDigit()
-        }
-        .font(.caption2)
+        MenuBarDetailLine(title: title, value: value)
     }
 
     private var actions: some View {
@@ -228,18 +216,6 @@ struct MenuBarStatusView: View {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func streamText(now: Date) -> String {
-        guard model.streamingLive else { return "· 스트림 미연결" }
-        guard let last = model.lastStreamMessageAt else { return "· 수신 대기" }
-        return "· \(relativeTimeText(from: last, to: now)) 갱신"
-    }
-
-    private func streamColor(now: Date) -> Color {
-        guard model.streamingLive else { return .red }
-        guard let last = model.lastStreamMessageAt else { return .orange }
-        return now.timeIntervalSince(last) > 90 ? .orange : .secondary
-    }
-
     private var connectionColor: Color {
         if case .connected = model.phase { return .green }
         if case .degraded = model.phase { return .orange }
@@ -255,6 +231,57 @@ struct MenuBarStatusView: View {
         case let .degraded(message): message
         case let .disconnected(message): message
         }
+    }
+}
+
+private struct MenuBarDetailLine: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        HStack {
+            Text(title).foregroundStyle(.tertiary)
+            Spacer()
+            Text(value).foregroundStyle(.secondary).monospacedDigit()
+        }
+        .font(.caption2)
+    }
+}
+
+/// "· 3초 전 갱신": the only header text that reads the stream heartbeat,
+/// so it alone observes it — a clock-only frame re-renders nothing else.
+private struct StreamFreshnessText: View {
+    @ObservedObject var heartbeat: MonitorHeartbeat
+    let streamingLive: Bool
+    let now: Date
+
+    var body: some View {
+        Text(text)
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(color)
+            .lineLimit(1)
+    }
+
+    private var text: String {
+        guard streamingLive else { return "· 스트림 미연결" }
+        guard let last = heartbeat.lastStreamMessageAt else { return "· 수신 대기" }
+        return "· \(relativeTimeText(from: last, to: now)) 갱신"
+    }
+
+    private var color: Color {
+        guard streamingLive else { return .red }
+        guard let last = heartbeat.lastStreamMessageAt else { return .orange }
+        return now.timeIntervalSince(last) > 90 ? .orange : .secondary
+    }
+}
+
+private struct HeartbeatDetailLines: View {
+    @ObservedObject var heartbeat: MonitorHeartbeat
+    let now: Date
+
+    var body: some View {
+        MenuBarDetailLine(title: "마지막 갱신", value: heartbeat.lastStreamMessageAt.map { relativeTimeText(from: $0, to: now) } ?? "수신 없음")
+        MenuBarDetailLine(title: "마지막 에이전트 이벤트", value: heartbeat.lastAgentEventAt.map { relativeTimeText(from: $0, to: now) } ?? "이번 실행에서 없음")
     }
 }
 

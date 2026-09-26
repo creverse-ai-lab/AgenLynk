@@ -6,13 +6,18 @@
 // shrinks or is atomically replaced with same-sized content.
 
 import { open, stat } from "node:fs/promises";
-import { readRecord } from "./jsonl.js";
+import { epochMs } from "../normalize/model.js";
+import { readRecord, recordSize, slimRecord } from "./jsonl.js";
 
 const DEFAULT_ADOPTION_TAIL_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_RECORDS = 4_000;
 const DEFAULT_WINDOW_MS = 65 * 60 * 1000;
+// Retained window size (UTF-16 units of the kept records), whatever the
+// record count: records are slimmed, but a window of 4,000 near-limit
+// records would still be large.
+export const DEFAULT_MAX_WINDOW_CHARS = 32 * 1024 * 1024;
 // One poll never reads more than this; a burst past it is finished next poll.
-const MAX_READ_BYTES = 16 * 1024 * 1024;
+export const MAX_READ_BYTES = 16 * 1024 * 1024;
 
 export class RecordTail {
   /**
@@ -23,6 +28,7 @@ export class RecordTail {
    *   timeOf?: (record: object) => number|null,
    *   maxRecords?: number,
    *   windowMs?: number,
+   *   maxChars?: number,
    *   adoptionTailBytes?: number
    * }} options
    */
@@ -33,10 +39,14 @@ export class RecordTail {
     this.timeOf = options.timeOf ?? defaultTimeOf;
     this.maxRecords = options.maxRecords ?? DEFAULT_MAX_RECORDS;
     this.windowMs = options.windowMs ?? DEFAULT_WINDOW_MS;
+    this.maxChars = options.maxChars ?? DEFAULT_MAX_WINDOW_CHARS;
     this.adoptionTailBytes = options.adoptionTailBytes ?? DEFAULT_ADOPTION_TAIL_BYTES;
     this.offset = 0;
     this.lastMtimeMs = 0;
     this.records = [];
+    // Retained size per record (parallel to `records`) and their sum.
+    this.sizes = [];
+    this.chars = 0;
     // True when the first read skipped the head of the file: cumulative facts
     // (Claude token totals) then cover only what was read.
     this.adoptedFromTail = false;
@@ -57,6 +67,8 @@ export class RecordTail {
       || (metadata.size === this.offset && this.offset > 0 && metadata.mtimeMs !== this.lastMtimeMs)) {
       this.offset = 0;
       this.records = [];
+      this.sizes = [];
+      this.chars = 0;
       this.adoptedFromTail = false;
     }
     if (metadata.size === this.offset) return this.#prune(nowMs);
@@ -93,7 +105,11 @@ export class RecordTail {
       if (!record || typeof record !== "object") continue;
       this.onRecord?.(record);
       if (!this.keep(record)) continue;
-      this.records.push(record);
+      const kept = slimRecord(record);
+      const size = recordSize(line, record, kept);
+      this.records.push(kept);
+      this.sizes.push(size);
+      this.chars += size;
       changed = true;
     }
     // A single line longer than one read would otherwise pin the cursor
@@ -114,17 +130,22 @@ export class RecordTail {
       drop += 1;
     }
     if (this.records.length - drop > this.maxRecords) drop = this.records.length - this.maxRecords;
-    if (drop > 0) this.records.splice(0, drop);
+    let chars = this.chars;
+    for (let index = 0; index < drop; index += 1) chars -= this.sizes[index];
+    // The newest record always stays, however large.
+    while (chars > this.maxChars && drop < this.records.length - 1) {
+      chars -= this.sizes[drop];
+      drop += 1;
+    }
+    if (drop > 0) {
+      this.records.splice(0, drop);
+      this.sizes.splice(0, drop);
+      this.chars = chars;
+    }
     return drop > 0;
   }
 }
 
 function defaultTimeOf(record) {
-  const raw = record?.timestamp;
-  if (typeof raw === "string") {
-    const parsed = Date.parse(raw);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  if (typeof raw === "number" && Number.isFinite(raw)) return raw < 1e11 ? raw * 1_000 : raw;
-  return null;
+  return epochMs(record?.timestamp);
 }

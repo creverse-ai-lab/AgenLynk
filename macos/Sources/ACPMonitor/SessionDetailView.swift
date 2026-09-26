@@ -14,6 +14,7 @@ struct SessionDetailView: View {
     @State private var settled = false
     @State private var olderRequestInFlight = false
     @State private var lastAutoScroll = Date.distantPast
+    @State private var rowsCache = TimelineRowsCache()
     private static let bottomId = "detail-bottom"
 
     var body: some View {
@@ -178,8 +179,21 @@ struct SessionDetailView: View {
         return model.browsedEvents[id] ?? model.logEventsBySession[id] ?? []
     }
     private var selectedEvent: MonitorEvent? { events.first { $0.id == selectedEventId } }
+    /// Grouped once per change of the events or the expanded set, not on
+    /// every read (the list, its empty check and paging all ask for it).
     private var rows: [TimelineRow] {
-        EventTimeline.rows(EventTimeline.group(events), expanded: expandedGroups)
+        let events = events
+        return rowsCache.rows(
+            for: TimelineRowsCache.Key(
+                revision: model.eventsRevision,
+                sessionId: sessionId,
+                count: events.count,
+                firstId: events.first?.id,
+                lastId: events.last?.id,
+                expanded: expandedGroups
+            ),
+            events: events
+        )
     }
 
     /// Selecting a tool group's row expands (or collapses) it and shows its
@@ -197,9 +211,11 @@ struct SessionDetailView: View {
                 } else {
                     expandedGroups.insert(value)
                 }
-                if case let .tools(group)? = EventTimeline.group(events).first(where: { $0.id == value }) {
-                    selectedEventId = group.representative.id
-                }
+                let group = rows.lazy.compactMap { row -> ToolCallGroup? in
+                    if case let .group(group, _) = row.content, group.id == value { return group }
+                    return nil
+                }.first
+                if let group { selectedEventId = group.representative.id }
             }
         )
     }
@@ -305,6 +321,8 @@ struct SessionDetailView: View {
 struct EventBodyView: View {
     let event: MonitorEvent
     @State private var fullText: FullEventText?
+    @State private var rawExpanded = false
+    @State private var rawCache = RawPayloadCache()
     /// Narrow inspector columns cut long bodies; a full-width pane scrolls
     /// instead and passes nil.
     var characterLimit: Int?
@@ -336,8 +354,10 @@ struct EventBodyView: View {
                 }
             }
             if event.title != nil || event.body != nil {
-                DisclosureGroup("원본 JSON") {
-                    rawPayload.padding(.top, 4)
+                // Pretty-printed (sorted keys) only while open: the selected
+                // event re-renders on every stream frame.
+                DisclosureGroup("원본 JSON", isExpanded: $rawExpanded) {
+                    if rawExpanded { rawPayload.padding(.top, 4) }
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -361,7 +381,7 @@ struct EventBodyView: View {
     }
 
     private var rawPayload: some View {
-        codeBlock(event.payload.prettyPrinted, label: "JSON")
+        codeBlock(rawCache.text(for: event), label: "JSON")
     }
 
     /// Prose: wraps to the available width, so it compresses with the column.
@@ -410,6 +430,55 @@ struct EventBodyView: View {
                 .font(.caption2)
             }
         }
+    }
+}
+
+/// The selected event's pretty-printed payload, kept per event id (and the
+/// fields an update changes) so an unchanged event is not re-serialized.
+final class RawPayloadCache {
+    private struct Key: Equatable {
+        let id: String
+        let status: String?
+        let endedAt: String?
+        let title: String?
+        let bodyCount: Int?
+        let sequence: Int?
+    }
+
+    private var key: Key?
+    private var cached = ""
+
+    func text(for event: MonitorEvent) -> String {
+        let key = Key(id: event.id, status: event.status, endedAt: event.endedAt, title: event.title,
+                      bodyCount: event.body?.utf8.count, sequence: event.sequence)
+        if self.key == key { return cached }
+        cached = event.payload.prettyPrinted
+        self.key = key
+        return cached
+    }
+}
+
+/// The last grouped rows of one timeline, reused while nothing they are
+/// built from changed. A reference type held in `@State`, so filling it
+/// during `body` publishes nothing.
+final class TimelineRowsCache {
+    struct Key: Equatable {
+        let revision: Int
+        let sessionId: String?
+        let count: Int
+        let firstId: String?
+        let lastId: String?
+        let expanded: Set<String>
+    }
+
+    private var key: Key?
+    private var cached: [TimelineRow] = []
+
+    func rows(for key: Key, events: [MonitorEvent]) -> [TimelineRow] {
+        if self.key == key { return cached }
+        cached = EventTimeline.rows(EventTimeline.group(events), expanded: key.expanded)
+        self.key = key
+        return cached
     }
 }
 
@@ -573,14 +642,6 @@ struct TurnForecastView: View {
         guard let progress = forecast.progressText else { return base }
         return "\(base) · \(progress)"
     }
-}
-
-/// "3분째", "1시간 5분째" for a running turn.
-func elapsedText(from start: Date, to now: Date) -> String {
-    let minutes = max(0, Int(now.timeIntervalSince(start) / 60))
-    if minutes < 1 { return "방금 시작" }
-    if minutes < 60 { return "\(minutes)분째" }
-    return "\(minutes / 60)시간 \(minutes % 60)분째"
 }
 
 private struct SessionConfigRow: View {

@@ -8,7 +8,7 @@ import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { RecordTail } from "../local-agents/tail.js";
 import { normalizeGrokUpdates, grokUsage } from "./acp.js";
-import { ClaudeUsageAccumulator, normalizeClaudeRecords } from "./claude.js";
+import { ClaudeUsageAccumulator, inScope as claudeInScope, normalizeClaudeRecords } from "./claude.js";
 import { normalizeCodexRecords } from "./codex.js";
 import { overlayUsage } from "./model.js";
 
@@ -17,10 +17,6 @@ import { overlayUsage } from "./model.js";
 const ENTRY_TTL_MS = 10 * 60 * 1000;
 
 const CLAUDE_KEPT_TYPES = new Set(["user", "assistant", "system", "ai-title"]);
-
-function claudeInScope(record, agentId) {
-  return agentId ? record?.agentId === agentId : record?.isSidechain !== true;
-}
 
 function keepGrokRecord(record) {
   const update = record?.params?.update;
@@ -47,12 +43,18 @@ async function readJsonIfChanged(path, previous) {
 
 export class LocalTimeline {
   /**
-   * @param {{ codexRecords?: (rawSessionId: string) => object[] }} options
+   * @param {{ codexRecords?: (rawSessionId: string) => object[], windowMs?: number, maxRecords?: number }} options
    * Codex windows come from the scanner's own tail (codex.js keeps them), so
-   * the rollout is read once for both state and timeline.
+   * the rollout is read once for both state and timeline. `windowMs` and
+   * `maxRecords` bound the Claude and Grok windows the same way (the
+   * localTranscriptWindowMs / localTranscriptRecordLimit settings).
    */
-  constructor({ codexRecords = () => [] } = {}) {
+  constructor({ codexRecords = () => [], windowMs = undefined, maxRecords = undefined } = {}) {
     this.codexRecords = codexRecords;
+    this.tailOptions = {
+      ...(windowMs != null ? { windowMs } : {}),
+      ...(maxRecords != null ? { maxRecords } : {})
+    };
     this.entries = new Map();
   }
 
@@ -97,6 +99,7 @@ export class LocalTimeline {
         agentId,
         usage,
         tail: new RecordTail(raw.transcript, {
+          ...this.tailOptions,
           keep: (record) => CLAUDE_KEPT_TYPES.has(record?.type),
           onRecord: (record) => {
             if (claudeInScope(record, agentId)) usage.add(record);
@@ -110,7 +113,7 @@ export class LocalTimeline {
         directory: raw.transcript,
         usageFile: null,
         signalsFile: null,
-        tail: new RecordTail(join(raw.transcript, "updates.jsonl"), { keep: keepGrokRecord })
+        tail: new RecordTail(join(raw.transcript, "updates.jsonl"), { ...this.tailOptions, keep: keepGrokRecord })
       };
     }
     if (entry) this.entries.set(key, { ...entry, result: null, lastSeen: 0 });

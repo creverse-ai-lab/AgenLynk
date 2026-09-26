@@ -11,12 +11,11 @@
 // use separate short-lived control connections.
 
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, rm } from "node:fs/promises";
-import { readFileSync, rmSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
-import { spawn } from "node:child_process";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GatewayRpcClient } from "../gateway/client.js";
 import {
@@ -39,10 +38,15 @@ import {
 import { installOfficialAgent, officialAgentCatalog, setOfficialAgentEnabled } from "../app/agent-catalog.js";
 import { MONITOR_API_VERSION, MONITOR_SCHEMA_VERSION, MonitorState, queuedSingleFlight } from "../projection/monitor-state.js";
 import { SIDECAR_BUILD_ID, SIDECAR_VERSION } from "../version.js";
-import { mergeMonitorSessions, projectLocalSnapshot } from "../local-monitor.js";
+import { LocalEventDelivery, mergeMonitorSessions, projectLocalSnapshot } from "../local-monitor.js";
 import { LocalAgentScanner } from "../local-agents/index.js";
 import { LocalTimeline } from "../normalize/local-timeline.js";
-import { SqliteMonitorStore, defaultMonitorDatabasePath } from "../store/sqlite-store.js";
+import {
+  SqliteMonitorStore,
+  databaseFileBytes,
+  defaultMonitorDatabasePath,
+  removeDatabaseFiles
+} from "../store/sqlite-store.js";
 import { HookSessions } from "../hooks/registry.js";
 import { defaultWorkerLedgerPath, readWorkerLedger, workerLedgerWriter } from "../store/worker-ledger.js";
 import { defaultHookEndpointPath, newHookToken, removeHookEndpoint, writeHookEndpoint } from "../hooks/endpoint.js";
@@ -148,7 +152,12 @@ async function main() {
   // One retention rule for every provider, whether hooks are on or not.
   hookSessions = new HookSessions({ staleAfterMs: monitorSettings.localSessionRetentionMs });
   localTimeline = localScanner
-    ? new LocalTimeline({ codexRecords: (sessionId) => localScanner.conversationRecords(sessionId) })
+    ? new LocalTimeline({
+      codexRecords: (sessionId) => localScanner.conversationRecords(sessionId),
+      // Claude and Grok windows follow the same user setting as Codex's.
+      windowMs: monitorSettings.localTranscriptWindowMs,
+      maxRecords: monitorSettings.localTranscriptRecordLimit
+    })
     : null;
   // A pre-config-API daemon reports most active values through setup, but not
   // every newly introduced setting. Defaults/environment represent what that
@@ -181,7 +190,7 @@ async function main() {
   // leave a monitor.db from before, which the app offers to delete.
   const diskHistoryWithoutStore = () => {
     const path = defaultMonitorDatabasePath();
-    const file = diskHistoryFileBytes(path);
+    const file = databaseFileBytes(path);
     return {
       available: false,
       retentionDays: historyRetentionMs / 86_400_000,
@@ -203,7 +212,9 @@ async function main() {
   state.restoreHistory();
   persistence?.prune();
   const historyPrune = setInterval(() => {
-    persistence?.prune({ keep: new Set(state.sessions.keys()) });
+    // Sessions still in memory are kept too: Gateway events can be persisted
+    // before the session list names them.
+    persistence?.prune({ keep: new Set([...state.sessions.keys(), ...state.store.sessionIds()]) });
   }, HISTORY_PRUNE_INTERVAL_MS);
   historyPrune.unref();
 
@@ -376,12 +387,15 @@ async function main() {
   // cursors/caches, so two overlapping passes corrupt offsets (both advance the
   // same cursor) and duplicate cached transcript records. Overlapping callers
   // share the in-flight pass; a queued re-run follows for the latecomer.
+  const localDelivery = new LocalEventDelivery();
   const applySessionSources = queuedSingleFlight(async () => {
     const beforeRevision = state.revision;
     const local = await readLocalProjection();
     const merged = mergeMonitorSessions(state.gatewaySourceSessions, local.sessions, state.workerTopology, state.formerWorkerIds);
     const acceptedLocalIds = new Set(merged.filter((session) => session.source === "local").map((session) => session.sessionId));
-    const events = Object.fromEntries(Object.entries(local.events).filter(([sessionId]) => acceptedLocalIds.has(sessionId)));
+    // Only timelines that changed since they were last handed over: an idle
+    // session's window is otherwise re-merged event by event every second.
+    const events = localDelivery.select(local.events, local.changedSessionIds, acceptedLocalIds);
     const removedSessionIds = state.setSessions(merged);
     // Only the events that changed travel with the state frame; the app
     // upserts them by id (an event outside a transcript window is kept).
@@ -428,7 +442,15 @@ async function main() {
     }
   }
 
+  // Gap markers can arrive in bursts; the owner coalesces them into one
+  // running and at most one queued reconciliation, and a failure keeps a
+  // single retry timer, not one per marker.
+  let reconcileRetry = null;
   async function reconcileSubscription() {
+    if (reconcileRetry) {
+      clearTimeout(reconcileRetry);
+      reconcileRetry = null;
+    }
     try {
       await owner.reconcile();
       const snapshot = state.snapshot();
@@ -450,8 +472,13 @@ async function main() {
         error: error?.message ?? String(error),
         health: "degraded"
       });
-      const retry = setTimeout(() => { void reconcileSubscription(); }, 500);
-      retry.unref?.();
+      if (!reconcileRetry) {
+        reconcileRetry = setTimeout(() => {
+          reconcileRetry = null;
+          void reconcileSubscription();
+        }, 500);
+        reconcileRetry.unref?.();
+      }
     }
   }
 
@@ -568,6 +595,9 @@ async function main() {
     response.writeHead(204).end();
     const recorded = hookSessions.record(provider, payload);
     if (!recorded) return;
+    // A Gateway worker's own CLI runs the same hooks; its timeline is the
+    // Gateway's, and these events would sit in a bucket nothing ever lists.
+    if (state.formerWorkerIds.has(recorded.localSessionId)) return;
     const changed = state.setExternalEvents({ [recorded.sessionId]: recorded.events });
     for (const [sessionId, events] of Object.entries(changed)) queueEvents(sessionId, events);
     nudgeLocalRefresh();
@@ -615,7 +645,7 @@ async function main() {
         "cache-control": "no-store",
         etag: tag
       });
-      response.end(JSON.stringify(state.snapshot(now)));
+      response.end(state.snapshotJson(now));
       return;
     }
     if (url.pathname === "/api/stream") {
@@ -907,15 +937,20 @@ async function main() {
 
 async function readLocalProjection() {
   const sessions = hookSessions.merge(await collectLocalSessions());
-  if (!sessions.length) return { sessions: [], events: {} };
+  if (!sessions.length) return { sessions: [], events: {}, changedSessionIds: new Set() };
   try {
     // One pipeline for every provider: the scanner found the sessions and
     // their transcripts, the timeline tails and normalizes them.
-    const { results } = localTimeline ? await localTimeline.update(sessions) : { results: new Map() };
-    return projectLocalSnapshot({ sessions }, results);
+    const { results, changed } = localTimeline
+      ? await localTimeline.update(sessions)
+      : { results: new Map(), changed: new Set() };
+    return {
+      ...projectLocalSnapshot({ sessions }, results),
+      changedSessionIds: new Set([...changed].map((key) => `local:${key}`))
+    };
   } catch (error) {
     console.error(`Local session projection ignored: ${error.message}`);
-    return { sessions: [], events: {} };
+    return { sessions: [], events: {}, changedSessionIds: new Set() };
   }
 }
 
@@ -1092,25 +1127,9 @@ function activeGatewaySettings(gateway, fallback = {}) {
   return Object.fromEntries(Object.entries(values).filter(([, value]) => value != null));
 }
 
-const DISK_HISTORY_SUFFIXES = ["", "-wal", "-shm"];
-
-/** Size of a monitor.db this process does not have open (disk history off). */
-function diskHistoryFileBytes(path = defaultMonitorDatabasePath()) {
-  let bytes = 0;
-  let exists = false;
-  for (const suffix of DISK_HISTORY_SUFFIXES) {
-    try {
-      bytes += statSync(`${path}${suffix}`).size;
-      exists = true;
-    } catch {
-      // Not present.
-    }
-  }
-  return { exists, bytes };
-}
-
+/** Deletes a monitor.db this process does not have open (disk history off). */
 function removeDiskHistoryFiles(path = defaultMonitorDatabasePath()) {
-  for (const suffix of DISK_HISTORY_SUFFIXES) rmSync(`${path}${suffix}`, { force: true });
+  removeDatabaseFiles(path);
   return 0;
 }
 

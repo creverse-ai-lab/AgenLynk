@@ -186,3 +186,19 @@ test("a read-only Codex Gateway session carries the partial-policy warning", () 
   assert.deepEqual(claude.alerts, []);
   assert.deepEqual(open.alerts, [], "auto_approve claims no restriction to weaken");
 });
+
+test("only changed or newly accepted local timelines are handed to the store", async () => {
+  const { LocalEventDelivery } = await import("../src/local-monitor.js");
+  const delivery = new LocalEventDelivery();
+  const events = { "local:codex:a": [{ key: "1" }], "local:codex:b": [{ key: "2" }], "local:codex:w": [{ key: "3" }] };
+  const accepted = new Set(["local:codex:a", "local:codex:b"]);
+  assert.deepEqual(Object.keys(delivery.select(events, new Set(), accepted)), ["local:codex:a", "local:codex:b"], "first sight delivers every accepted window");
+  assert.deepEqual(delivery.select(events, new Set(), accepted), {}, "an unchanged tick delivers nothing");
+  assert.deepEqual(Object.keys(delivery.select(events, new Set(["local:codex:b"]), accepted)), ["local:codex:b"]);
+  // A session accepted later (it stopped being a Gateway worker) is delivered once.
+  accepted.add("local:codex:w");
+  assert.deepEqual(Object.keys(delivery.select(events, new Set(), accepted)), ["local:codex:w"]);
+  // One that left and came back is delivered again.
+  delivery.select({ "local:codex:a": events["local:codex:a"] }, new Set(), accepted);
+  assert.deepEqual(Object.keys(delivery.select(events, new Set(), accepted)), ["local:codex:b", "local:codex:w"]);
+});

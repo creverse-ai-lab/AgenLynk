@@ -13,7 +13,6 @@ struct MonitoringSettingsView: View {
     /// The CLI whose hook the user switched off, awaiting confirmation.
     @State private var pendingHookRemoval: String?
 
-    private static let labels = ["claude": "Claude Code", "codex": "Codex", "grok": "Grok"]
     private static let pollInterval: UInt64 = 15_000_000_000
     private static let retentionIds = ["localSessionRetentionMs", "monitorHistoryRetentionMs"]
 
@@ -90,7 +89,7 @@ struct MonitoringSettingsView: View {
             MonitoringConsentSheet()
         }
         .alert(
-            "\(pendingHookRemoval.map { Self.labels[$0] ?? $0 } ?? "") hook을 제거할까요?",
+            "\(pendingHookRemoval.map(cliProductName) ?? "") hook을 제거할까요?",
             isPresented: Binding(get: { pendingHookRemoval != nil }, set: { if !$0 { pendingHookRemoval = nil } }),
             presenting: pendingHookRemoval
         ) { provider in
@@ -187,7 +186,7 @@ struct MonitoringSettingsView: View {
 
     @ViewBuilder
     private func row(_ target: MonitoringHookTarget, status: MonitoringHookStatus, now: Date) -> some View {
-        let label = Self.labels[target.provider] ?? target.provider
+        let label = cliProductName(target.provider)
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 // A partial registration shows as mixed: one source on, one

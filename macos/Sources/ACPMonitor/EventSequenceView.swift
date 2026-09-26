@@ -25,10 +25,17 @@ struct EventSequenceView: View {
     /// Some session in view may have events older than the loaded ones.
     var canLoadOlder = false
     var loadingOlder = false
+    /// Older events exist but the in-memory window is full.
+    var olderCapped = false
     /// Pages in older events; returns whether any arrived.
     var loadOlder: (() async -> Bool)?
     var emptyState = SequenceEmptyState()
+    /// The model's `eventsRevision`: with the events' count and ends it keys
+    /// the derived rows/lanes, so a body pass that changed none of them (a
+    /// selection, a follow toggle) reuses them.
+    var eventsRevision = 0
     @State private var expandedGroups: Set<String> = []
+    @State private var derivedCache = SequenceDerivedCache()
     // Keyboard selection: up/down step through the rows and select each
     // row's event (a tool group's representative call), so the inspector
     // follows; left/right scroll the lanes. Focus the diagram (click it)
@@ -61,44 +68,19 @@ struct EventSequenceView: View {
     }
 
     @ViewBuilder private var timeline: some View {
-        // Derived once per body pass. Events arrive whole (one message per
-        // stream, one node per tool call); runs of tool calls in one turn
-        // collapse into one representative row.
-        let rows = EventTimeline.rows(EventTimeline.group(events), expanded: expandedGroups)
-        let marks = sessionEventMarks()
-        // One continuous timeline: every loaded row is in the same scroll, so
-        // the lanes come from the loaded events themselves — a lane appears
-        // for exactly the sessions that have a row somewhere in this scroll
-        // (plus their parents), never for an unrelated older session.
-        let lanes = makeSequenceLanes(sessions: sessions, events: events)
-        let laneIndex = lanes.enumerated().reduce(into: [String: Int]()) { result, item in
-            result[item.element.session.sessionId] = item.offset
-        }
-        let edges = lanes.compactMap { lane -> SequenceCallEdge? in
-            guard let parentId = lane.parentSessionId,
-                  let parentIndex = laneIndex[parentId],
-                  let childIndex = laneIndex[lane.session.sessionId] else { return nil }
-            let turnEndId = marks.lastTurnEndId[lane.session.sessionId]
-            return SequenceCallEdge(
-                parentIndex: parentIndex,
-                childIndex: childIndex,
-                child: lane.session,
-                childDepth: lane.depth,
-                eventId: marks.firstEventId[lane.session.sessionId],
-                returnEventId: turnEndId,
-                returned: hasReturned(lane.session, turnEndEventId: turnEndId)
-            )
-        }
-        // The whole point of a sequence diagram: a call/응답 arrow is drawn on
-        // the row of the event that triggered it — a call on the child's first
-        // event, a 응답 on its turn_end — so the line sits at the moment it
-        // happened on the shared time axis. A collapsed tool group carries the
-        // arrows of the calls it stands for.
-        let callAnchors = Dictionary(edges.compactMap { edge in edge.eventId.map { ($0, edge) } },
-                                     uniquingKeysWith: { first, _ in first })
-        let responseAnchors = Dictionary(edges.compactMap { edge in
-            edge.returned ? edge.returnEventId.map { ($0, edge) } : nil
-        }, uniquingKeysWith: { first, _ in first })
+        let derived = derivedCache.value(for: SequenceDerivedKey(
+            revision: eventsRevision,
+            count: events.count,
+            firstId: events.first?.id,
+            lastId: events.last?.id,
+            expanded: expandedGroups,
+            sessions: sessions
+        )) { derive() }
+        let rows = derived.rows
+        let lanes = derived.lanes
+        let laneIndex = derived.laneIndex
+        let callAnchors = derived.callAnchors
+        let responseAnchors = derived.responseAnchors
         let width = max(timeWidth + Double(max(lanes.count, 1)) * laneWidth, 620)
 
         ScrollViewReader { proxy in
@@ -324,6 +306,8 @@ struct EventSequenceView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+            } else if olderCapped {
+                Text("이전 이벤트는 세션당 5,000개까지 보관합니다").font(.caption2).foregroundStyle(.tertiary)
             } else if !rows.isEmpty {
                 Text("처음 이벤트").font(.caption2).foregroundStyle(.tertiary)
             }
@@ -547,6 +531,51 @@ struct EventSequenceView: View {
         return session.stopReason?.isEmpty == false
     }
 
+    /// Everything the timeline derives from its events, sessions and expanded
+    /// groups. Events arrive whole (one message per stream, one node per tool
+    /// call); runs of tool calls in one turn collapse into one representative row.
+    private func derive() -> SequenceDerived {
+        let rows = EventTimeline.rows(EventTimeline.group(events), expanded: expandedGroups)
+        let marks = sessionEventMarks()
+        // One continuous timeline: every loaded row is in the same scroll, so
+        // the lanes come from the loaded events themselves — a lane appears
+        // for exactly the sessions that have a row somewhere in this scroll
+        // (plus their parents), never for an unrelated older session.
+        let lanes = makeSequenceLanes(sessions: sessions, events: events)
+        let laneIndex = lanes.enumerated().reduce(into: [String: Int]()) { result, item in
+            result[item.element.session.sessionId] = item.offset
+        }
+        let edges = lanes.compactMap { lane -> SequenceCallEdge? in
+            guard let parentId = lane.parentSessionId,
+                  let parentIndex = laneIndex[parentId],
+                  let childIndex = laneIndex[lane.session.sessionId] else { return nil }
+            let turnEndId = marks.lastTurnEndId[lane.session.sessionId]
+            return SequenceCallEdge(
+                parentIndex: parentIndex,
+                childIndex: childIndex,
+                child: lane.session,
+                childDepth: lane.depth,
+                eventId: marks.firstEventId[lane.session.sessionId],
+                returnEventId: turnEndId,
+                returned: hasReturned(lane.session, turnEndEventId: turnEndId)
+            )
+        }
+        // The whole point of a sequence diagram: a call/응답 arrow is drawn on
+        // the row of the event that triggered it — a call on the child's first
+        // event, a 응답 on its turn_end — so the line sits at the moment it
+        // happened on the shared time axis. A collapsed tool group carries the
+        // arrows of the calls it stands for.
+        let callAnchors = Dictionary(edges.compactMap { edge in edge.eventId.map { ($0, edge) } },
+                                     uniquingKeysWith: { first, _ in first })
+        let responseAnchors = Dictionary(edges.compactMap { edge in
+            edge.returned ? edge.returnEventId.map { ($0, edge) } : nil
+        }, uniquingKeysWith: { first, _ in first })
+        return SequenceDerived(
+            rows: rows, lanes: lanes, laneIndex: laneIndex,
+            callAnchors: callAnchors, responseAnchors: responseAnchors
+        )
+    }
+
     /// Earliest event id and newest `turn_end` id per session, in one grouping
     /// pass instead of a filter+sort of every event per edge.
     private func sessionEventMarks() -> SequenceEventMarks {
@@ -554,13 +583,13 @@ struct EventSequenceView: View {
         var latestTurnEnd: [String: MonitorEvent] = [:]
         for event in events {
             if let current = earliest[event.sessionId] {
-                if sequenceEventSort(event, current) { earliest[event.sessionId] = event }
+                if withinSessionEventOrder(event, current) { earliest[event.sessionId] = event }
             } else {
                 earliest[event.sessionId] = event
             }
             guard event.kind == "turn_end" else { continue }
             if let current = latestTurnEnd[event.sessionId] {
-                if sequenceEventSort(current, event) { latestTurnEnd[event.sessionId] = event }
+                if withinSessionEventOrder(current, event) { latestTurnEnd[event.sessionId] = event }
             } else {
                 latestTurnEnd[event.sessionId] = event
             }
@@ -599,6 +628,38 @@ private struct SequenceEventMarks {
     let lastTurnEndId: [String: String]
 }
 
+private struct SequenceDerivedKey: Equatable {
+    let revision: Int
+    let count: Int
+    let firstId: String?
+    let lastId: String?
+    let expanded: Set<String>
+    let sessions: [GatewaySession]
+}
+
+private struct SequenceDerived {
+    let rows: [TimelineRow]
+    let lanes: [SequenceLane]
+    let laneIndex: [String: Int]
+    let callAnchors: [String: SequenceCallEdge]
+    let responseAnchors: [String: SequenceCallEdge]
+}
+
+/// Holds the last derivation across body passes. A reference type in
+/// `@State`, so filling it during `body` publishes nothing.
+private final class SequenceDerivedCache {
+    private var key: SequenceDerivedKey?
+    private var cached: SequenceDerived?
+
+    func value(for key: SequenceDerivedKey, make: () -> SequenceDerived) -> SequenceDerived {
+        if let cached, self.key == key { return cached }
+        let value = make()
+        self.key = key
+        cached = value
+        return value
+    }
+}
+
 /// Two-stroke arrowhead landing on `point`; `pointingRight` follows the travel
 /// direction so call and return heads mirror each other.
 private func arrowHead(at point: CGPoint, pointingRight: Bool) -> Path {
@@ -609,13 +670,6 @@ private func arrowHead(at point: CGPoint, pointingRight: Bool) -> Path {
     arrow.move(to: point)
     arrow.addLine(to: CGPoint(x: point.x - 7 * direction, y: point.y + 4))
     return arrow
-}
-
-private struct SequenceDiagramNode: Identifiable {
-    let laneIndex: Int
-    let event: MonitorEvent
-
-    var id: String { event.id }
 }
 
 private struct SequenceLaneHeader: View {
@@ -758,63 +812,11 @@ private struct SequenceToolGroupNode: View {
     }
 }
 
+/// Lanes for the sessions that have an event in view, plus their parents,
+/// in `SessionTree` order — the same tree the menu bar pipeline draws.
 private func makeSequenceLanes(sessions: [GatewaySession], events: [MonitorEvent]) -> [SequenceLane] {
-    let byId = sessions.reduce(into: [String: GatewaySession]()) { result, session in
-        result[session.sessionId] = session
+    let members = SessionTree.withAncestors(of: Set(events.map(\.sessionId)), in: sessions)
+    return SessionTree.order(members).map {
+        SequenceLane(session: $0.session, parentSessionId: $0.parentSessionId, depth: $0.depth)
     }
-    let rootsByOpener = sessions.filter(\.isFrontdoorRecord).reduce(into: [String: GatewaySession]()) { result, session in
-        guard let opener = session.openerInstanceId else { return }
-        result[opener] = session
-    }
-
-    func parentId(for session: GatewaySession) -> String? {
-        if let explicit = session.parentSessionId, byId[explicit] != nil { return explicit }
-        guard !session.isFrontdoorRecord,
-              let opener = session.openerInstanceId,
-              let root = rootsByOpener[opener],
-              root.sessionId != session.sessionId else { return nil }
-        return root.sessionId
-    }
-
-    var included = Set(events.map(\.sessionId))
-    var pending = Array(included)
-    while let id = pending.popLast(), let session = byId[id], let parent = parentId(for: session) {
-        if included.insert(parent).inserted { pending.append(parent) }
-    }
-
-    let members = included.compactMap { byId[$0] }
-    let memberIds = Set(members.map(\.sessionId))
-    var children: [String: [GatewaySession]] = [:]
-    var roots: [GatewaySession] = []
-    for session in members {
-        if let parent = parentId(for: session), memberIds.contains(parent) {
-            children[parent, default: []].append(session)
-        } else {
-            roots.append(session)
-        }
-    }
-
-    let sessionOrder: (GatewaySession, GatewaySession) -> Bool = {
-        ($0.createdAt ?? "") < ($1.createdAt ?? "")
-    }
-    var lanes: [SequenceLane] = []
-    var visited = Set<String>()
-    func append(_ session: GatewaySession, depth: Int, parent: String?) {
-        guard visited.insert(session.sessionId).inserted else { return }
-        lanes.append(SequenceLane(session: session, parentSessionId: parent, depth: depth))
-        for child in (children[session.sessionId] ?? []).sorted(by: sessionOrder) {
-            append(child, depth: depth + 1, parent: session.sessionId)
-        }
-    }
-    for root in roots.sorted(by: sessionOrder) { append(root, depth: 0, parent: nil) }
-    for session in members.sorted(by: sessionOrder) where !visited.contains(session.sessionId) {
-        append(session, depth: 0, parent: nil)
-    }
-    return lanes
-}
-
-// Delegates to the canonical within-session ordering in Models.swift; the
-// call sites here compare events of one session at a time.
-private func sequenceEventSort(_ left: MonitorEvent, _ right: MonitorEvent) -> Bool {
-    withinSessionEventOrder(left, right)
 }

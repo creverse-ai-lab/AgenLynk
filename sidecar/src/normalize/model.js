@@ -81,13 +81,19 @@ export function preview(value, limit = TITLE_LIMIT) {
  * milliseconds, or epoch seconds. Returns null when nothing usable is given.
  */
 export function isoTime(value) {
+  const ms = epochMs(value);
+  return ms == null ? null : new Date(ms).toISOString();
+}
+
+/** Epoch milliseconds from the same inputs as isoTime, or null. */
+export function epochMs(value) {
   if (typeof value === "string") {
     const parsed = Date.parse(value);
-    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+    return Number.isFinite(parsed) ? parsed : null;
   }
   if (typeof value === "number" && Number.isFinite(value) && value > 0) {
     // Anything below 10^11 cannot be milliseconds after 1973.
-    return new Date(value < 1e11 ? value * 1_000 : value).toISOString();
+    return value < 1e11 ? value * 1_000 : value;
   }
   return null;
 }

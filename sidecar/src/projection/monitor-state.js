@@ -13,12 +13,17 @@ export const MONITOR_SCHEMA_VERSION = 2;
 export const MONITOR_API_VERSION = "2.0";
 const MAX_PENDING_SSE_FRAMES = 512;
 const MAX_PENDING_SSE_BYTES = 4 * 1024 * 1024;
-// Remembered Gateway event identities per session, for replay dedupe.
-const MAX_GATEWAY_IDENTITIES = 20_000;
+// Remembered Gateway event identities per session, for replay dedupe only
+// (a replay starts at the session's cursor, so recent identities suffice).
+const MAX_GATEWAY_IDENTITIES = 4_000;
+// Newest events per session a snapshot (and a reconcile frame) carries; older
+// ones are paged from /api/sessions/:id/events.
+const DEFAULT_SNAPSHOT_EVENT_LIMIT = 200;
 
 export class MonitorState {
   constructor({
     maxEventsPerSession = 2000,
+    snapshotEventLimit = DEFAULT_SNAPSHOT_EVENT_LIMIT,
     historyRetentionMs = 65 * 60 * 1000,
     sseBackpressureTimeoutMs = 10_000,
     persistence = null,
@@ -26,6 +31,8 @@ export class MonitorState {
     onWorkerRemembered = null
   } = {}) {
     this.maxEventsPerSession = maxEventsPerSession;
+    this.snapshotEventLimit = Math.min(snapshotEventLimit, maxEventsPerSession);
+    this.snapshotCache = null;
     this.historyRetentionMs = historyRetentionMs;
     this.persistence = persistence;
     this.store = new EventStore({ maxEventsPerSession, persistence });
@@ -175,6 +182,11 @@ export class MonitorState {
       this.historySessions.set(sessionId, archived);
       this.historyExpiresAt.set(sessionId, Date.now() + this.historyRetentionMs);
       this.persistence?.writeSession(archived);
+    } else if (!this.historySessions.has(sessionId)) {
+      // Never listed (events that beat the session list, then its close):
+      // no history row would ever expire these, so they go now. Whatever was
+      // persisted stays on disk.
+      this.#forgetEvents(sessionId);
     }
     this.sessions.delete(sessionId);
     this.sessionSignatures.delete(sessionId);
@@ -238,6 +250,8 @@ export class MonitorState {
     }
     if (replay) this.diagnostics.replayedEvents += 1;
     if (changed.length) this.revision += 1;
+    // A closed status can move without a revision bump.
+    else if (event.type === "session_closed") this.snapshotCache = null;
     return changed;
   }
 
@@ -324,10 +338,27 @@ export class MonitorState {
     return this.store.list(sessionId, options);
   }
 
+  /**
+   * The snapshot serialized, cached per revision: the app polls it and every
+   * reconnect fetches it, and nothing in it changes without a revision bump.
+   */
+  snapshotJson(now = Date.now()) {
+    this.pruneHistory(now);
+    // Diagnostics counters may move without a revision bump; they are tiny.
+    const key = `${this.revision}:${JSON.stringify(this.diagnostics)}`;
+    if (this.snapshotCache?.key !== key) {
+      this.snapshotCache = { key, json: JSON.stringify(this.snapshot(now)) };
+    }
+    return this.snapshotCache.json;
+  }
+
   snapshot(now = Date.now()) {
     this.pruneHistory(now);
+    // Only each session's newest events: the full memory window per session
+    // made every poll megabytes. Older ones page from the events endpoint.
+    const limit = this.snapshotEventLimit;
     const eventsOf = (ids) => Object.fromEntries(ids
-      .map((sessionId) => [sessionId, this.store.list(sessionId)])
+      .map((sessionId) => [sessionId, this.store.list(sessionId, { limit })])
       .filter(([, events]) => events.length));
     return {
       schemaVersion: MONITOR_SCHEMA_VERSION,
@@ -347,6 +378,9 @@ export class MonitorState {
       historySessions: [...this.historySessions.values()],
       historyEvents: eventsOf([...this.historySessions.keys()]),
       eventLimit: this.maxEventsPerSession,
+      // Additive: how many newest events per session `events` and
+      // `historyEvents` carry at most.
+      snapshotEventLimit: limit,
       tasks: this.tasks,
       inbox: this.inbox
     };
@@ -372,13 +406,17 @@ export class MonitorState {
     return restored;
   }
 
+  #forgetEvents(sessionId) {
+    this.store.evict(sessionId);
+    this.gatewaySeen.delete(sessionId);
+    this.gatewayCursors.delete(sessionId);
+  }
+
   /** Forgets every history session (the user cleared the history). */
   clearHistory() {
     for (const sessionId of this.historySessions.keys()) {
       if (this.sessions.has(sessionId)) continue;
-      this.store.evict(sessionId);
-      this.gatewaySeen.delete(sessionId);
-      this.gatewayCursors.delete(sessionId);
+      this.#forgetEvents(sessionId);
     }
     this.historySessions.clear();
     this.historyExpiresAt.clear();
@@ -393,12 +431,22 @@ export class MonitorState {
       this.historyExpiresAt.delete(sessionId);
       // Memory only: the persisted history keeps the session for its own,
       // longer retention.
-      if (!this.sessions.has(sessionId)) {
-        this.store.evict(sessionId);
-        this.gatewaySeen.delete(sessionId);
-        this.gatewayCursors.delete(sessionId);
-      }
+      if (!this.sessions.has(sessionId)) this.#forgetEvents(sessionId);
       pruned = true;
+    }
+    // Orphans: events for a session that is neither live nor history (Gateway
+    // events that beat a session list which never named them). They get the
+    // same clock as history, counted from their last event.
+    for (const sessionId of this.store.sessionIds()) {
+      if (this.sessions.has(sessionId) || this.historySessions.has(sessionId)) continue;
+      if ((this.store.idleMs(sessionId, now) ?? 0) <= this.historyRetentionMs) continue;
+      this.#forgetEvents(sessionId);
+      pruned = true;
+    }
+    for (const sessionId of new Set([...this.gatewaySeen.keys(), ...this.gatewayCursors.keys()])) {
+      if (this.sessions.has(sessionId) || this.historySessions.has(sessionId) || this.store.sessions.has(sessionId)) continue;
+      this.gatewaySeen.delete(sessionId);
+      this.gatewayCursors.delete(sessionId);
     }
     if (pruned) this.revision += 1;
     return pruned;

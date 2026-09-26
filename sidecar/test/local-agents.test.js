@@ -886,3 +886,65 @@ test("finished and silent Claude sessions stay listed as idle for the retention 
       "past the retention window they leave the live list");
   });
 });
+
+test("grok parent links are rescanned only when the session's logs change", async () => {
+  await withTempDirectory(async (root) => {
+    const grokRoot = join(root, "grok-sessions");
+    const sessionDirectory = join(grokRoot, "%2Fwork", "grok-session");
+    await mkdir(sessionDirectory, { recursive: true });
+    const linkRecord = (worker) => JSON.stringify({
+      update: {
+        rawOutput: {
+          tool_name: "agent_acp_session_open",
+          server_name: "agent-acp",
+          output: { OkayOutput: JSON.stringify({ ok: true, acpSessionId: worker, provider: "claude" }) }
+        }
+      }
+    });
+    const updates = join(sessionDirectory, "updates.jsonl");
+    await writeFile(updates, `${linkRecord("worker-1")}\n`);
+    const states = { g: { provider: "grok", session: "grok-cli-10", state: "running", link_session: "grok-session" } };
+    const cache = new Map();
+    const parents = new Map();
+    assert.equal(await recordGrokAcpLinks(states, parents, 100, grokRoot, cache), true);
+    assert.deepEqual(cache.get("grok-session").links, [["claude", "worker-1"]]);
+
+    // Unchanged logs: the cached links are reused as they are.
+    const cachedLinks = cache.get("grok-session").links;
+    parents.clear();
+    assert.equal(await recordGrokAcpLinks(states, parents, 101, grokRoot, cache), true, "cached links still apply");
+    assert.equal(cache.get("grok-session").links, cachedLinks);
+
+    // A grown log is read again.
+    await writeFile(updates, `${linkRecord("worker-1")}\n${linkRecord("worker-2")}\n`);
+    await utimes(updates, new Date(), new Date(Date.now() + 5_000));
+    await recordGrokAcpLinks(states, parents, 102, grokRoot, cache);
+    assert.equal(externalParent(parents, "claude", "worker-2"), "grok-session");
+
+    // A session that left the scan leaves the cache.
+    await recordGrokAcpLinks({}, parents, 103, grokRoot, cache);
+    assert.equal(cache.size, 0);
+  });
+});
+
+test("codex window records are slimmed and bookkeeping payloads trimmed", async () => {
+  await withTempDirectory(async (root) => {
+    const path = join(root, "rollout-2026-08-07T00-00-00-11111111-2222-3333-4444-555555555555.jsonl");
+    const now = Date.parse("2026-08-07T00:01:00.000Z") / 1000;
+    const huge = "x".repeat(200_000);
+    await writeFile(path, [
+      { timestamp: "2026-08-07T00:00:00.000Z", type: "session_meta", payload: { id: "s", cwd: "/work", base_instructions: { text: huge } } },
+      { timestamp: "2026-08-07T00:00:01.000Z", type: "response_item", payload: { type: "function_call_output", call_id: "c1", output: huge } },
+      { timestamp: "2026-08-07T00:00:02.000Z", type: "response_item", payload: { type: "function_call", call_id: "c2", name: "shell", arguments: JSON.stringify({ cmd: ["cat"], stdin: huge }) } }
+    ].map((record) => JSON.stringify(record)).join("\n") + "\n");
+    const cursors = new Map();
+    await discover({ root, explicitPaths: [path], cursors, retired: new Map(), staleAfter: 3600, now });
+    await poll({ cursors, states: {}, parents: new Map(), now });
+    const [cursor] = cursors.values();
+    const [meta, output, call] = cursor.conversation;
+    assert.deepEqual(meta.payload, { id: "s", cwd: "/work" });
+    assert.ok(output.payload.output.length <= 16_000, "a tool output is cut to the record limit");
+    assert.equal(JSON.parse(call.payload.arguments).cmd[0], "cat", "JSON arguments still parse after slimming");
+    assert.ok(cursor.conversationChars < 50_000);
+  });
+});

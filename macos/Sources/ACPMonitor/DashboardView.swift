@@ -446,8 +446,10 @@ struct DashboardView: View {
                 followLatestEvent: $settings.followLatestEvent,
                 canLoadOlder: model.mayHaveOlderEvents(in: sessionIds),
                 loadingOlder: !model.olderLoadingSessionIds.isDisjoint(with: sessionIds),
+                olderCapped: !model.olderCappedSessionIds.isDisjoint(with: sessionIds),
                 loadOlder: { await model.loadOlderEvents(sessionIds: sessionIds) },
-                emptyState: sequenceEmptyState
+                emptyState: sequenceEmptyState,
+                eventsRevision: model.eventsRevision
             )
             // A new scope is a new timeline: fresh scroll position (newest at
             // the bottom) and no groups left expanded from the previous one.
@@ -491,7 +493,9 @@ struct DashboardView: View {
         let events = model.browsedEvents[session.sessionId]
             ?? model.logEventsBySession[session.sessionId]
             ?? []
-        let latest = events.max(by: withinSessionEventOrder)
+        // Buckets are kept in within-session order, so the newest event is
+        // the last one, and only the trailing run of tool calls is scanned.
+        let latest = events.last
         let toolRun = EventTimeline.trailingToolGroup(events)
         let detail: String? = {
             guard let latest else { return session.title }

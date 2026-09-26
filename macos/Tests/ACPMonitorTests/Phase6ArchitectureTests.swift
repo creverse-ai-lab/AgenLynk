@@ -37,6 +37,9 @@ enum Phase6ArchitectureChecks {
         try reducerCapsOrdersAndDeduplicatesArchivedHistoryEvents()
         try reducerPrependsOlderEventsBeyondTheStreamCap()
         try reducerDropsHistoryButKeepsLiveOnHistoryCleared()
+        try reducerCapsPagedEventsAndPrunesUnknownSessions()
+        try reducerReportsNoChangeForARepeatedStateFrame()
+        try reducerMergesTruncatedSnapshotsWithoutShrinking()
         print("Swift Phase 6 architecture checks passed")
     }
 
@@ -255,6 +258,72 @@ enum Phase6ArchitectureChecks {
                   "the stream cap trims live events only, never the paged-in ones")
         let foreign = [try event("x", 1)]
         try check(!MonitorReducer.prependOlder(foreign, sessionId: "s", to: &state), "another session's events are ignored")
+    }
+
+    private static func reducerCapsPagedEventsAndPrunesUnknownSessions() throws {
+        var state = MonitorReducerState()
+        let limit = MonitorReducerDefaults.pagedEventLimit
+        state.sessions = [try session("s")]
+        MonitorReducer.applyEventsMessage(frame([try event("s", limit + 100)]), to: &state)
+        var older: [MonitorEvent] = []
+        for sequence in 1...(limit + 50) { older.append(try event("s", sequence)) }
+        try check(MonitorReducer.prependOlder(older, sessionId: "s", to: &state), "older events must be accepted")
+        let paged = state.pagedEventsBySession["s"] ?? []
+        try check(paged.count == limit, "paged events cap at \(limit), got \(paged.count)")
+        try check(paged.first?.sequence == 51, "the oldest paged events fall off first")
+        let log = state.logEventsBySession["s"] ?? []
+        try check(log.count == limit + 1 && log.last?.sequence == limit + 100, "the log joins paged and live at the boundary")
+        try check(zip(log, log.dropFirst()).allSatisfy { withinSessionEventOrder($0, $1) }, "the joined log stays ordered")
+
+        state.pagedEventsBySession["gone"] = [try event("gone", 1)]
+        let snapshot = MonitorSnapshot(
+            schemaVersion: MonitorCompatibility.supportedSchemaVersion, monitorApiVersion: "2.0", revision: 7,
+            connected: true, streaming: true, error: nil, gateway: nil,
+            sessions: state.sessions, eventsBySession: state.eventsBySession,
+            historySessions: [], historyEventsBySession: [:], eventLimit: state.eventLimit, tasks: [], inbox: []
+        )
+        let effect = MonitorReducer.apply(snapshot: snapshot, to: &state)
+        try check(state.pagedEventsBySession["gone"] == nil, "a snapshot drops paged events of a session it no longer has")
+        try check(state.pagedEventsBySession["s"]?.count == limit, "a known session keeps its paged events")
+        try check(effect.logChanged && effect.stateChanged && state.logEventsBySession["gone"] == nil,
+                  "pruning rebuilds the log")
+    }
+
+    /// The sidecar's snapshot holds only each session's newest events; a poll
+    /// must not shrink a bucket the stream grew, and a dropped session goes.
+    private static func reducerMergesTruncatedSnapshotsWithoutShrinking() throws {
+        var state = MonitorReducerState()
+        state.sessions = [try session("s")]
+        state.eventsBySession["s"] = try (1...300).map { try event("s", $0) }
+        state.eventsBySession["gone"] = [try event("gone", 1)]
+        let head = Array(state.eventsBySession["s"]!.suffix(199)) + [try event("s", 301)]
+        let snapshot = MonitorSnapshot(
+            schemaVersion: MonitorCompatibility.supportedSchemaVersion, monitorApiVersion: "2.0", revision: 9,
+            connected: true, streaming: true, error: nil, gateway: nil,
+            sessions: state.sessions, eventsBySession: ["s": head],
+            historySessions: [], historyEventsBySession: [:], eventLimit: state.eventLimit, tasks: [], inbox: []
+        )
+        let effect = MonitorReducer.apply(snapshot: snapshot, to: &state)
+        let bucket = state.eventsBySession["s"] ?? []
+        try check(bucket.count == 301 && bucket.first?.sequence == 1 && bucket.last?.sequence == 301,
+                  "a newest-N snapshot merges into the bucket, got \(bucket.count)")
+        try check(state.eventsBySession["gone"] == nil, "a session the snapshot does not list is dropped")
+        try check(effect.logChanged, "the new event rebuilds the log")
+        let again = MonitorReducer.apply(snapshot: snapshot, to: &state)
+        try check(!again.logChanged && state.eventsBySession["s"]?.count == 301, "the same revision changes nothing")
+    }
+
+    private static func reducerReportsNoChangeForARepeatedStateFrame() throws {
+        var state = MonitorReducerState()
+        let message: [String: JSONValue] = [
+            "kind": .string("state"), "connected": .bool(true), "streaming": .bool(true),
+            "sessions": .array([.object(["sessionId": .string("s"), "provider": .string("codex"), "status": .string("running")])]),
+            "tasks": .array([]), "inbox": .array([])
+        ]
+        let first = MonitorReducer.applyStateMessage(message, to: &state)
+        try check(first.stateChanged && first.logChanged, "the first frame changes the state")
+        let second = MonitorReducer.applyStateMessage(message, to: &state)
+        try check(!second.stateChanged && !second.logChanged, "an identical frame must not republish the state")
     }
 
     private static func reducerDropsHistoryButKeepsLiveOnHistoryCleared() throws {

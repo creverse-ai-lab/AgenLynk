@@ -104,9 +104,7 @@ struct OnboardingView: View {
     }
 
     private struct FrontdoorChoice { let id: String; let label: String }
-    private static let frontdoorChoices = [
-        FrontdoorChoice(id: "codex", label: "Codex"),
-        FrontdoorChoice(id: "claude", label: "Claude Code"),
-        FrontdoorChoice(id: "grok", label: "Grok")
-    ]
+    private static let frontdoorChoices = AppModel.frontdoorInstallOrder.map {
+        FrontdoorChoice(id: $0, label: cliProductName($0))
+    }
 }

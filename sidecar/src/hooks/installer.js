@@ -131,13 +131,33 @@ function writeJsonAtomic(path, value, previousMode) {
   renameSync(temporary, path);
 }
 
+// Backups hold copies of the user's agent configs (which can carry tokens),
+// so only the newest few per file are kept.
+const BACKUPS_PER_FILE = 5;
+
 function backup(path, backups, now) {
   if (!existsSync(path)) return null;
   mkdirSync(backups, { recursive: true, mode: 0o700 });
   const stamp = new Date(now).toISOString().replace(/[:.]/g, "-");
-  const target = join(backups, `${basename(dirname(path))}-${basename(path)}.${stamp}.bak`);
+  const prefix = `${basename(dirname(path))}-${basename(path)}.`;
+  const target = join(backups, `${prefix}${stamp}.bak`);
   copyFileSync(path, target);
+  pruneBackups(backups, prefix);
   return target;
+}
+
+function pruneBackups(backups, prefix) {
+  let names;
+  try {
+    names = readdirSync(backups);
+  } catch {
+    return;
+  }
+  // ISO stamps sort chronologically as text.
+  const ours = names.filter((name) => name.startsWith(prefix) && name.endsWith(".bak")).sort();
+  for (const name of ours.slice(0, Math.max(0, ours.length - BACKUPS_PER_FILE))) {
+    rmSync(join(backups, name), { force: true });
+  }
 }
 
 /**
