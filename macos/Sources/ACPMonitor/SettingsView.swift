@@ -31,6 +31,9 @@ struct SettingsView: View {
             AgentCatalogView()
                 .tabItem { Label("ACP 연결", systemImage: "cable.connector") }
 
+            MonitoringSettingsView()
+                .tabItem { Label("모니터링", systemImage: "bolt.horizontal.circle") }
+
             petConfiguration
                 .tabItem { Label("Pet", systemImage: "pawprint") }
 

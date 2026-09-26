@@ -1090,6 +1090,55 @@ struct ACPAgentCatalogSnapshot: Sendable {
     }
 }
 
+/// One CLI's monitoring-hook registration, as GET /api/hooks reports it.
+struct MonitoringHookTarget: Identifiable, Equatable, Sendable {
+    let provider: String
+    let agentPresent: Bool
+    let disabled: Bool
+    let installed: Bool
+    let partial: Bool
+    let needsTrust: Bool
+    let error: String?
+    let file: String
+
+    var id: String { provider }
+
+    init?(provider: String, _ value: JSONValue) {
+        guard let object = value.objectValue else { return nil }
+        self.provider = provider
+        agentPresent = object.bool("agentPresent") ?? false
+        disabled = object.bool("disabled") ?? false
+        installed = object.bool("installed") ?? false
+        partial = object.bool("partial") ?? false
+        needsTrust = object.bool("needsTrust") ?? false
+        error = object.string("error")
+        file = object.string("file") ?? ""
+    }
+}
+
+/// The monitoring hooks AgenLynk registers in Claude Code, Codex and Grok.
+struct MonitoringHookStatus: Equatable, Sendable {
+    /// The running sidecar accepts hook events (only the app's own does).
+    let receiving: Bool
+    let enabled: Bool
+    let targets: [MonitoringHookTarget]
+    let errors: [String]
+
+    static let providerOrder = ["claude", "codex", "grok"]
+
+    static func decode(_ data: Data) throws -> MonitoringHookStatus {
+        let raw = try JSONSerialization.jsonObject(with: data)
+        guard let root = JSONValue(any: raw).objectValue else { throw MonitorDecodeError.invalidMessage }
+        let targets = root.object("targets") ?? [:]
+        return MonitoringHookStatus(
+            receiving: root.bool("receiving") ?? false,
+            enabled: root.bool("enabled") ?? true,
+            targets: providerOrder.compactMap { provider in targets[provider].flatMap { MonitoringHookTarget(provider: provider, $0) } },
+            errors: (root.object("errors") ?? [:]).values.compactMap(\.stringValue)
+        )
+    }
+}
+
 /// One installed Gateway runtime, as `runtime-updater.js` reports it.
 struct RuntimeVersionSummary: Identifiable, Equatable, Sendable {
     let versionId: String

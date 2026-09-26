@@ -61,6 +61,22 @@ actor MonitorClient {
         return try ACPAgentCatalogSnapshot.decode(data)
     }
 
+    func fetchHookStatus(endpoint: MonitorEndpoint) async throws -> MonitoringHookStatus {
+        let (data, response) = try await URLSession.shared.data(for: endpoint.request(path: "api/hooks"))
+        try validate(response: response, data: data)
+        return try MonitoringHookStatus.decode(data)
+    }
+
+    /// `action` is "install" or "uninstall"; `providers` limits it to some CLIs.
+    func mutateHooks(endpoint: MonitorEndpoint, action: String, providers: [String]) async throws -> MonitoringHookStatus {
+        var request = endpoint.request(path: "api/hooks", method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["action": action, "providers": providers])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response: response, data: data)
+        return try MonitoringHookStatus.decode(data)
+    }
+
     func fetchGatewayConfig(endpoint: MonitorEndpoint) async throws -> GatewayConfigSnapshot {
         let (data, response) = try await URLSession.shared.data(for: endpoint.request(path: "api/gateway-config"))
         try validate(response: response, data: data)

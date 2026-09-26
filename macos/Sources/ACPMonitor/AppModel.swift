@@ -60,6 +60,9 @@ final class AppModel: ObservableObject {
     var agentCatalogSource: String { agentCatalogStore.source }
     var agentCatalogStale: Bool { agentCatalogStore.stale }
     var agentCatalogError: String? { agentCatalogStore.error }
+    @Published private(set) var hookStatus: MonitoringHookStatus?
+    @Published private(set) var hookMutatingProvider: String?
+    @Published private(set) var hookError: String?
     @Published private(set) var gatewayConfigOptions: [GatewayConfigOption] = []
     @Published private(set) var gatewayConfigLoading = false
     @Published private(set) var gatewayConfigSaving = false
@@ -516,6 +519,39 @@ final class AppModel: ObservableObject {
             return
         }
         await agentCatalogStore.load(client: client, endpoint: endpoint, refresh: refresh)
+    }
+
+    func loadHookStatus() async {
+        if endpoint == nil { await ensureStarted() }
+        guard let endpoint else {
+            hookError = "Gateway monitor가 아직 연결되지 않았습니다."
+            return
+        }
+        do {
+            hookStatus = try await client.fetchHookStatus(endpoint: endpoint)
+            hookError = nil
+        } catch {
+            hookError = error.localizedDescription
+        }
+    }
+
+    /// Turns one CLI's monitoring hook on or off. Off is remembered, so an app
+    /// update does not put it back.
+    func setHook(_ provider: String, enabled: Bool) async {
+        guard hookMutatingProvider == nil, let endpoint else { return }
+        hookMutatingProvider = provider
+        defer { hookMutatingProvider = nil }
+        do {
+            let status = try await client.mutateHooks(
+                endpoint: endpoint,
+                action: enabled ? "install" : "uninstall",
+                providers: [provider]
+            )
+            hookStatus = status
+            hookError = status.errors.first
+        } catch {
+            hookError = error.localizedDescription
+        }
     }
 
     func installAgent(_ agent: ACPAgentCatalogItem) async {
