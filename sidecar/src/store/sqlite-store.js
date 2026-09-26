@@ -6,7 +6,7 @@
 // Any database failure disables persistence and the monitor keeps working
 // from memory — history is a convenience, never a reason to go down.
 
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -35,15 +35,16 @@ export class SqliteMonitorStore {
       } catch {
         // Best effort: an existing file keeps its mode.
       }
-      return new SqliteMonitorStore(database, options);
+      return new SqliteMonitorStore(database, { ...options, path });
     } catch (error) {
       console.error(`Monitor history disabled: ${error.message}`);
       return null;
     }
   }
 
-  constructor(database, { flushMs = DEFAULT_FLUSH_MS, retentionDays = DEFAULT_RETENTION_DAYS, now = () => Date.now() } = {}) {
+  constructor(database, { flushMs = DEFAULT_FLUSH_MS, retentionDays = DEFAULT_RETENTION_DAYS, now = () => Date.now(), path = null } = {}) {
     this.database = database;
+    this.path = path;
     this.flushMs = flushMs;
     this.retentionDays = retentionDays;
     this.now = now;
@@ -136,14 +137,74 @@ export class SqliteMonitorStore {
     }
   }
 
-  /** Session records updated since `since` (ms), newest first. */
-  readSessions({ since = 0, limit = 500 } = {}) {
+  /**
+   * Session records updated in [since, before) (ms), newest first. Paging a
+   * history list passes the oldest `updatedAt` it has as the next `before`.
+   */
+  readSessions({ since = 0, before = Number.MAX_SAFE_INTEGER, limit = 500 } = {}) {
     if (this.failed) return [];
+    this.flush();
     return this.database
-      .prepare("SELECT record FROM sessions WHERE updated_at >= ? ORDER BY updated_at DESC LIMIT ?")
-      .all(since, limit)
+      .prepare("SELECT record FROM sessions WHERE updated_at >= ? AND updated_at < ? ORDER BY updated_at DESC LIMIT ?")
+      .all(since, Number.isFinite(before) ? before : Number.MAX_SAFE_INTEGER, limit)
       .map((row) => parse(row.record))
       .filter(Boolean);
+  }
+
+  /** Size and counts for the settings screen. */
+  stats() {
+    if (this.failed) return { available: false };
+    this.flush();
+    const count = (sql) => Number(this.database.prepare(sql).get()?.n ?? 0);
+    let bytes = 0;
+    for (const suffix of ["", "-wal", "-shm"]) {
+      try {
+        bytes += statSync(`${this.path}${suffix}`).size;
+      } catch {
+        // Not present.
+      }
+    }
+    return {
+      available: true,
+      path: this.path,
+      bytes,
+      sessions: count("SELECT count(*) AS n FROM sessions"),
+      events: count("SELECT count(*) AS n FROM events"),
+      retentionDays: this.retentionDays
+    };
+  }
+
+  /** Deletes all history except the sessions in `keep` (live ones). */
+  clear({ keep = new Set() } = {}) {
+    if (this.failed) return 0;
+    this.flush();
+    const ids = this.database.prepare("SELECT session_id FROM sessions").all()
+      .map((row) => row.session_id)
+      .filter((sessionId) => !keep.has(sessionId));
+    const orphanEvents = this.database.prepare("SELECT DISTINCT session_id FROM events").all()
+      .map((row) => row.session_id)
+      .filter((sessionId) => !keep.has(sessionId));
+    const all = [...new Set([...ids, ...orphanEvents])];
+    try {
+      this.database.exec("BEGIN");
+      const deleteEvents = this.database.prepare("DELETE FROM events WHERE session_id = ?");
+      const deleteSession = this.database.prepare("DELETE FROM sessions WHERE session_id = ?");
+      for (const sessionId of all) {
+        deleteEvents.run(sessionId);
+        deleteSession.run(sessionId);
+      }
+      this.database.exec("COMMIT");
+      this.database.exec("VACUUM");
+    } catch (error) {
+      try {
+        this.database.exec("ROLLBACK");
+      } catch {
+        // No open transaction.
+      }
+      console.error(`Monitor history clear failed: ${error.message}`);
+      return 0;
+    }
+    return all.length;
   }
 
   /** The newest `limit` events with sequence < `before`, oldest first. */

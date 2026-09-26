@@ -168,3 +168,25 @@ test("persisted history survives a monitor restart and old sessions are pruned",
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("persisted history pages newest first, reports its size, and clears on request", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "agenlynk-history-"));
+  try {
+    const store = await SqliteMonitorStore.open(join(directory, "monitor.db"), { flushMs: 1 });
+    for (let index = 0; index < 5; index += 1) {
+      store.writeSession({ sessionId: `s${index}`, provider: "codex", updatedAt: new Date(Date.UTC(2026, 8, 26, 0, index)).toISOString() });
+    }
+    const first = store.readSessions({ limit: 2 });
+    assert.deepEqual(first.map((session) => session.sessionId), ["s4", "s3"]);
+    const next = store.readSessions({ before: Date.parse(first.at(-1).updatedAt), limit: 2 });
+    assert.deepEqual(next.map((session) => session.sessionId), ["s2", "s1"], "paging continues where the last page ended");
+    const stats = store.stats();
+    assert.equal(stats.sessions, 5);
+    assert.ok(stats.bytes > 0);
+    assert.equal(store.clear({ keep: new Set(["s4"]) }), 4, "live sessions survive a clear");
+    assert.deepEqual(store.readSessions().map((session) => session.sessionId), ["s4"]);
+    store.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

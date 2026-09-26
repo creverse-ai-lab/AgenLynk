@@ -108,6 +108,18 @@ export const GATEWAY_SETTING_DEFINITIONS = Object.freeze([
     descriptionKo: "타임라인에 유지할 최근 로컬 대화 기록의 시간 범위입니다. 값이 작을수록 메모리를 적게 사용합니다.",
     displayUnit: "minutes" // default 65 min
   }),
+  // Same window as the Gateway's idle provider unload: a session that went
+  // quiet is still worth showing (and reusing) until it would cold-start.
+  numberSetting("localSessionRetentionMs", "monitor", "Idle local session retention", "How long a local session that finished its turn stays listed as idle before it is moved to history.", "ACP_MONITOR_LOCAL_SESSION_RETENTION_MS", 30 * 60_000, 60_000, "ms", {
+    labelKo: "대기 세션 유지 시간",
+    descriptionKo: "턴을 마친 로컬 세션을 대기(idle) 상태로 목록에 남겨 두는 시간입니다. 지나면 기록으로 옮겨집니다. 종료가 확인된 세션(SessionEnd, 프로세스 종료)은 바로 옮겨집니다.",
+    displayUnit: "minutes" // default 30 min
+  }),
+  numberSetting("monitorHistoryRetentionMs", "monitor", "Monitor history retention", "How long AgenLynk keeps session timelines (prompts, tool input and output) in ~/.acp-gateway/agenlynk/monitor.db. 0 keeps no history on disk.", "ACP_MONITOR_HISTORY_RETENTION_MS", 14 * 24 * 60 * 60_000, 0, "ms", {
+    labelKo: "모니터 기록 보관 기간",
+    descriptionKo: "세션 타임라인(프롬프트, 도구 입력·출력 포함)을 ~/.acp-gateway/agenlynk/monitor.db에 보관하는 기간입니다. 0이면 디스크에 기록을 남기지 않습니다.",
+    displayUnit: "days" // default 14 days
+  }),
   numberSetting("localTranscriptRecordLimit", "monitor", "Local transcript records", "Maximum retained local transcript records per session. Lower values reduce memory use.", "ACP_MONITOR_LOCAL_TRANSCRIPT_RECORD_LIMIT", 4_000, 100, "count", {
     labelKo: "로컬 대화 기록 수",
     descriptionKo: "세션당 유지할 로컬 대화 기록의 최대 개수입니다. 값이 작을수록 메모리를 적게 사용합니다."

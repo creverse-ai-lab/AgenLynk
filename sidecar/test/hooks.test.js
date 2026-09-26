@@ -85,7 +85,7 @@ test("Codex hooks report pending trust until Codex records it", async () => {
     installHooks({ env, only: ["codex"], consent: true });
     const pending = hookStatus({ env, only: ["codex"] }).targets.codex;
     assert.equal(pending.needsTrust, true);
-    assert.ok(pending.untrustedEvents.includes("PreToolUse"));
+    assert.ok(pending.untrustedEvents.includes("PermissionRequest"));
 
     // What Codex writes after /hooks approval: position-keyed trust entries.
     const hooksFile = join(env.CODEX_HOME, "hooks.json");
@@ -97,9 +97,9 @@ test("Codex hooks report pending trust until Codex records it", async () => {
     });
     await writeFile(join(env.CODEX_HOME, "config.toml"), lines.join("\n"));
     assert.equal(hookStatus({ env, only: ["codex"] }).targets.codex.needsTrust, false);
-    // Our PreToolUse group went after the existing one, so its trust key is :1:0
-    // and the other tool's :0:0 is untouched.
-    assert.equal(hooks.PreToolUse.length, 2);
+    // Codex prints every hook run, so AgenLynk stays off PreToolUse there; the
+    // other tool's group at :0:0 is untouched.
+    assert.deepEqual(hooks.PreToolUse, [foreignGroup]);
 
     // A changed command (a new script version) invalidates that approval:
     // the trusted_hash Codex recorded belongs to the old definition.
@@ -355,3 +355,16 @@ function runHookScript(script, provider, env, payload) {
     child.stdin.end(JSON.stringify(payload));
   });
 }
+
+test("a hook event this version no longer registers is removed on update", async () => {
+  await withTempDirectory(async (root) => {
+    const { env } = await fakeHomes(root);
+    const old = { hooks: [{ type: "command", command: "/bin/sh '/x/hooks/agenlynk-hook.sh' codex", timeout: 5 }] };
+    await writeFile(join(env.CODEX_HOME, "hooks.json"), pretty({ hooks: { PreToolUse: [foreignGroup, old], SubagentStart: [old] } }));
+    installHooks({ env, only: ["codex"], consent: true });
+    const hooks = JSON.parse(await readFile(join(env.CODEX_HOME, "hooks.json"), "utf8")).hooks;
+    assert.deepEqual(hooks.PreToolUse, [foreignGroup], "ours goes, the other tool's stays");
+    assert.equal(hooks.SubagentStart, undefined);
+    assert.ok(hooks.Stop.some((group) => group.hooks[0].command.includes("agenlynk-hook.sh")));
+  });
+});

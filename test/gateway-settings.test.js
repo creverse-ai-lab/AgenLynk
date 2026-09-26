@@ -22,7 +22,9 @@ test("Gateway settings expose every safe runtime option without secrets", async 
       agentUpdates: { autoUpdate: true, notifications: true }
     }));
     const snapshot = gatewaySettingsSnapshot({ statePath, env: {} });
-    assert.equal(snapshot.options.length, 25);
+    assert.equal(snapshot.options.length, 27);
+    assert.equal(snapshot.options.find((item) => item.id === "localSessionRetentionMs").currentValue, 30 * 60_000,
+      "idle local sessions stay listed for the Gateway's idle-unload window by default");
     assert.equal(snapshot.options.length, GATEWAY_SETTING_DEFINITIONS.length);
     assert.equal(snapshot.options.find((item) => item.id === "maxInlineResultBytes").currentValue, 65_536);
     // Workers stay thought-visible unless an operator turns it off: the adapter

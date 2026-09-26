@@ -45,7 +45,11 @@ const TARGETS = {
   codex: {
     home: (env) => env.CODEX_HOME || join(homedir(), ".codex"),
     file: (home) => join(home, "hooks.json"),
-    events: ["SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "SubagentStart", "SubagentStop", "Stop"],
+    // Codex prints a line for every hook run in its own output, so only the
+    // events that carry information are registered: PreToolUse and subagent
+    // events would only repeat "running". PostToolUse stays because it is
+    // what tells an approved permission prompt from an abandoned one.
+    events: ["SessionStart", "UserPromptSubmit", "PermissionRequest", "PostToolUse", "Stop"],
     matcherEvents: new Set(),
     trust: true
   },
@@ -136,9 +140,21 @@ function backup(path, backups, now) {
   return target;
 }
 
-/** Hooks object with ours set for every event (updated in place, else appended). */
+/**
+ * Hooks object with ours set for every event (updated in place, else
+ * appended) and removed from events this version no longer registers.
+ */
 function withOurHooks(hooks, target, script, provider) {
-  const next = { ...(hooks && typeof hooks === "object" && !Array.isArray(hooks) ? hooks : {}) };
+  const wanted = new Set(target.events);
+  const next = {};
+  for (const [event, groups] of Object.entries(hooks && typeof hooks === "object" && !Array.isArray(hooks) ? hooks : {})) {
+    if (wanted.has(event) || !Array.isArray(groups)) {
+      next[event] = groups;
+      continue;
+    }
+    const kept = groups.filter((group) => !isOurs(group));
+    if (kept.length) next[event] = kept;
+  }
   for (const event of target.events) {
     const groups = Array.isArray(next[event]) ? [...next[event]] : [];
     const index = groups.findIndex(isOurs);

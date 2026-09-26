@@ -31,6 +31,13 @@ export class HookSessions {
     this.grokRoot = grokRoot;
     this.claudeRoot = claudeRoot;
     this.sessions = new Map();
+    // provider -> ms of the last hook received, so settings can tell
+    // "registered" from "actually arriving".
+    this.lastReceived = new Map();
+  }
+
+  lastReceivedAt() {
+    return Object.fromEntries([...this.lastReceived].map(([provider, at]) => [provider, new Date(at).toISOString()]));
   }
 
   /**
@@ -45,6 +52,7 @@ export class HookSessions {
       && payload.session_id == null && (payload.sessionId != null || payload.hookEventName != null)) {
       return null;
     }
+    this.lastReceived.set(provider, receivedAt);
     const sessionId = readHookPayload(provider, payload).sessionId;
     if (typeof sessionId !== "string" || !sessionId) return null;
     const key = `${provider}:${sessionId}`;

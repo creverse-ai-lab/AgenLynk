@@ -43,6 +43,29 @@ function parseInput(value) {
   }
 }
 
+// Codex's code-mode `exec` tool takes a JavaScript snippet that calls
+// tools.exec_command({cmd: ...}) and friends. The snippet is noise in a
+// timeline; the commands it runs are what a person wants to read.
+const CODE_MODE_CALL = /tools\.([A-Za-z_]+)\(\s*(\{[\s\S]*?\})\s*\)/g;
+
+function codeModeSummary(code) {
+  if (typeof code !== "string" || !code.includes("tools.")) return null;
+  const calls = [];
+  for (const match of code.matchAll(CODE_MODE_CALL)) {
+    let args = null;
+    try {
+      args = JSON.parse(match[2]);
+    } catch {
+      // Not literal JSON (built at runtime): name the tool alone.
+    }
+    calls.push({ name: match[1], args });
+  }
+  if (!calls.length) return null;
+  const [first] = calls;
+  const extra = calls.length > 1 ? ` (+${calls.length - 1})` : "";
+  return { name: first.name, input: first.args, extra };
+}
+
 function outputText(payload) {
   const output = payload?.output;
   if (typeof output === "string") {
@@ -168,11 +191,12 @@ export function normalizeCodexRecords(records) {
       if (TOOL_CALL_TYPES.has(payload.type)) {
         const name = payload.name ?? payload.type;
         const input = parseInput(payload.input ?? payload.arguments ?? payload.action);
+        const code = codeModeSummary(input);
         toolNames.set(callId, name);
         openTools.add(callId);
         events.add(monitorEvent({
           key: `tool:${callId}`, kind: "tool_call", ts, source: SOURCE, turnId: recordTurn ?? turnId, toolCallId: callId,
-          title: toolTitle(name, input), status: "running",
+          title: code ? `${toolTitle(code.name, code.input)}${code.extra}` : toolTitle(name, input), status: "running",
           detail: { name, input: typeof input === "string" ? input : JSON.stringify(input) }
         }));
         if (turnId) setStatus("running", ts);

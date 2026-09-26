@@ -20,8 +20,10 @@ const DISCOVERY_INTERVAL_SECONDS = 2;
 // session appearing a few seconds late is fine, so the process scan runs on
 // its own slower cadence than file-based discovery.
 const PROCESS_SCAN_INTERVAL_SECONDS = 5;
-const DEFAULT_READY_AFTER = 3;
-const DEFAULT_STALE_AFTER = 600;
+// A session that finished its turn stays listed as idle this long (the app
+// setting localSessionRetentionMs); files older than it are not considered.
+const DEFAULT_READY_AFTER = 30 * 60;
+const DEFAULT_STALE_AFTER = 30 * 60;
 
 function defaultPaths() {
   const home = homedir();
@@ -45,7 +47,8 @@ export class LocalAgentScanner {
     this.orcaAccounts = paths.orcaAccounts;
     this.orcaStatus = paths.orcaStatus;
     this.readyAfter = paths.readyAfter ?? DEFAULT_READY_AFTER;
-    this.staleAfter = paths.staleAfter ?? DEFAULT_STALE_AFTER;
+    // Discovery must look back at least as far as idle sessions are kept.
+    this.staleAfter = Math.max(paths.staleAfter ?? DEFAULT_STALE_AFTER, this.readyAfter);
     this.discoveryIntervalSeconds = paths.discoveryIntervalSeconds ?? DISCOVERY_INTERVAL_SECONDS;
     this.conversationWindowMs = paths.conversationWindowMs;
     this.maxConversationRecords = paths.maxConversationRecords;

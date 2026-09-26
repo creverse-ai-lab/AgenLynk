@@ -351,6 +351,19 @@ export class MonitorState {
     return restored;
   }
 
+  /** Forgets every history session (the user cleared the history). */
+  clearHistory() {
+    for (const sessionId of this.historySessions.keys()) {
+      if (this.sessions.has(sessionId)) continue;
+      this.store.evict(sessionId);
+      this.gatewaySeen.delete(sessionId);
+      this.gatewayCursors.delete(sessionId);
+    }
+    this.historySessions.clear();
+    this.historyExpiresAt.clear();
+    this.revision += 1;
+  }
+
   pruneHistory(now = Date.now()) {
     let pruned = false;
     for (const [sessionId, expiresAt] of this.historyExpiresAt) {

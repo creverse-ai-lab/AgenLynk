@@ -71,8 +71,9 @@ const EXPECTED_GATEWAY_BUILD_ID = expectedGatewayBuildId(GATEWAY_RUNTIME_ROOT);
 // guarded startup path instead of throwing while this module is imported.
 let localScanner = null;
 let localTimeline = null;
-// Live facts from agent hooks, overlaid on every local scan.
-const hookSessions = new HookSessions();
+// Live facts from agent hooks, overlaid on every local scan. Replaced in
+// main() once the retention setting is known.
+let hookSessions = new HookSessions();
 
 // Token accounting is not timeline content, and a session accumulates one of
 // these per turn. Gateway 1.3.2+ already drops them at ingestion, but a
@@ -139,8 +140,11 @@ async function main() {
   localScanner = monitorSettings.localScannerEnabled ? new LocalAgentScanner({
     discoveryIntervalSeconds: monitorSettings.localDiscoveryIntervalMs / 1_000,
     conversationWindowMs: monitorSettings.localTranscriptWindowMs,
-    maxConversationRecords: monitorSettings.localTranscriptRecordLimit
+    maxConversationRecords: monitorSettings.localTranscriptRecordLimit,
+    readyAfter: monitorSettings.localSessionRetentionMs / 1_000
   }) : null;
+  // One retention rule for every provider, whether hooks are on or not.
+  hookSessions = new HookSessions({ staleAfterMs: monitorSettings.localSessionRetentionMs });
   localTimeline = localScanner
     ? new LocalTimeline({ codexRecords: (sessionId) => localScanner.conversationRecords(sessionId) })
     : null;
@@ -154,7 +158,10 @@ async function main() {
     access: "observer",
     autoStart: AUTO_START_GATEWAY
   });
-  const persistence = HISTORY_ENABLED ? await SqliteMonitorStore.open(defaultMonitorDatabasePath()) : null;
+  const historyRetentionMs = monitorSettings.monitorHistoryRetentionMs;
+  const persistence = HISTORY_ENABLED && historyRetentionMs > 0
+    ? await SqliteMonitorStore.open(defaultMonitorDatabasePath(), { retentionDays: historyRetentionMs / 86_400_000 })
+    : null;
   const state = new MonitorState({ maxEventsPerSession: MAX_EVENTS_PER_SESSION, persistence });
   state.restoreHistory();
   persistence?.prune();
@@ -599,7 +606,7 @@ async function main() {
       return;
     }
     if (url.pathname === "/api/hooks" && request.method === "GET") {
-      sendJson(response, { receiving: HOOKS_ENABLED, ...hookStatus() });
+      sendJson(response, { receiving: HOOKS_ENABLED, lastReceivedAt: hookSessions.lastReceivedAt(), ...hookStatus() });
       return;
     }
     if (url.pathname === "/api/hooks" && request.method === "POST") {
@@ -616,13 +623,34 @@ async function main() {
       const result = body.action === "install"
         ? installHooks({ only, consent: body.consent === true })
         : uninstallHooks({ only, decline: body.decline === true });
-      sendJson(response, { receiving: HOOKS_ENABLED, ...result });
+      sendJson(response, { receiving: HOOKS_ENABLED, lastReceivedAt: hookSessions.lastReceivedAt(), ...result });
       return;
     }
     if (url.pathname === "/api/history" && request.method === "GET") {
+      // Newest first; pass the oldest updatedAt received as `before` to page.
       const since = Number(url.searchParams.get("since")) || 0;
-      const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 200, 1), 1_000);
-      sendJson(response, { sessions: persistence ? persistence.readSessions({ since, limit }) : [] });
+      const before = Date.parse(url.searchParams.get("before") ?? "") || Number(url.searchParams.get("before")) || Number.MAX_SAFE_INTEGER;
+      const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 50, 1), 500);
+      const sessions = persistence ? persistence.readSessions({ since, before, limit }) : [];
+      sendJson(response, { sessions, hasMore: sessions.length === limit });
+      return;
+    }
+    if (url.pathname === "/api/history/stats" && request.method === "GET") {
+      sendJson(response, persistence ? persistence.stats() : { available: false, retentionDays: historyRetentionMs / 86_400_000 });
+      return;
+    }
+    if (url.pathname === "/api/history" && request.method === "POST") {
+      const body = await readJsonBody(request);
+      if (body.action !== "clear") {
+        response.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+        response.end('{"error":"action must be clear","code":"monitor_bad_request"}');
+        return;
+      }
+      const live = new Set(state.sessions.keys());
+      const deleted = persistence ? persistence.clear({ keep: live }) : 0;
+      state.clearHistory();
+      state.broadcast({ kind: "state", connected: state.connected, streaming: state.streaming, historyCleared: true });
+      sendJson(response, { deleted, ...(persistence ? persistence.stats() : { available: false }) });
       return;
     }
     if (url.pathname === "/api/agents" && request.method === "GET") {

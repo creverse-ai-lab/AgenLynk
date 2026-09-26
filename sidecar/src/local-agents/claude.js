@@ -223,15 +223,21 @@ export async function detectClaudeSessions(root, now, readyAfter, staleAfter, pa
     }
     // A tool still running (a build, a test run, a pending permission prompt)
     // writes nothing until it returns; that silence is not the session ending.
-    const lifetime = signal.state === "ready"
-      ? readyAfter
-      : signal.event === "tool_use" ? staleAfter : Math.min(staleAfter, RUNNING_LIFETIME_SECONDS);
+    // A turn that went silent without an end marker (a crash, a closed
+    // terminal) is not still running; it is kept as idle like a finished one.
+    let state = signal.state;
+    let event = signal.event;
+    if (state === "running" && event !== "tool_use" && now - signal.time > RUNNING_LIFETIME_SECONDS) {
+      state = "ready";
+      event = "silent";
+    }
+    const lifetime = state === "ready" ? readyAfter : staleAfter;
     if (now - signal.time <= lifetime) {
       states[signal.session] = {
         provider: "claude",
         session: signal.session,
-        state: signal.state,
-        event: signal.event,
+        state,
+        event,
         time: signal.time,
         pid: null,
         parent: signal.parent ?? externalParent(parents ?? new Map(), "claude", signal.session),

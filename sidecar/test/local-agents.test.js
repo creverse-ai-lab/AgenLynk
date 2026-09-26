@@ -866,3 +866,23 @@ test("watcher-fed claude scanning reuses unchanged transcripts without touching 
     assert.deepEqual(Object.keys(fourth), ["session-b-updated"]);
   });
 });
+
+test("finished and silent Claude sessions stay listed as idle for the retention window", async () => {
+  await withTempDirectory(async (root) => {
+    const project = join(root, "project");
+    await mkdir(project, { recursive: true });
+    const now = Date.now() / 1000;
+    const at = (seconds) => new Date((now - seconds) * 1000).toISOString();
+    const done = join(project, "done.jsonl");
+    await writeFile(done, `${JSON.stringify({ type: "assistant", sessionId: "done", timestamp: at(300), message: { stop_reason: "end_turn", content: [{ type: "text", text: "ok" }] } })}\n`);
+    const silent = join(project, "silent.jsonl");
+    await writeFile(silent, `${JSON.stringify({ type: "assistant", sessionId: "silent", timestamp: at(120), message: { content: [{ type: "text", text: "working" }] } })}\n`);
+    for (const path of [done, silent]) await utimes(path, now - 100, now - 100);
+
+    const states = await detectClaudeSessions(project, now, 1800, 1800);
+    assert.equal(states.done?.state, "ready", "a finished session is kept for reuse, not dropped after seconds");
+    assert.equal(states.silent?.state, "ready", "a turn that went silent without an end marker is idle, not running");
+    assert.equal(Object.keys(await detectClaudeSessions(project, now + 2000, 1800, 1800)).length, 0,
+      "past the retention window they leave the live list");
+  });
+});
