@@ -48,6 +48,11 @@ enum JSONValue: Equatable, Sendable {
         return Int(value)
     }
 
+    var doubleValue: Double? {
+        guard case let .number(value) = self, value.isFinite else { return nil }
+        return value
+    }
+
     var boolValue: Bool? {
         guard case let .bool(value) = self else { return nil }
         return value
@@ -90,6 +95,7 @@ enum JSONValue: Equatable, Sendable {
 extension Dictionary where Key == String, Value == JSONValue {
     func string(_ key: String) -> String? { self[key]?.stringValue }
     func int(_ key: String) -> Int? { self[key]?.intValue }
+    func double(_ key: String) -> Double? { self[key]?.doubleValue }
     func bool(_ key: String) -> Bool? { self[key]?.boolValue }
     func object(_ key: String) -> [String: JSONValue]? { self[key]?.objectValue }
     func array(_ key: String) -> [JSONValue]? { self[key]?.arrayValue }
@@ -99,7 +105,7 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
     let sessionId: String
     let provider: String
     let model: String?
-    let status: String
+    private(set) var status: String
     let title: String?
     let opener: String?
     let openerInstanceId: String?
@@ -112,6 +118,15 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
     let source: String
     let role: String
     let parentSessionId: String?
+    /// Token usage as the sidecar normalizes it for every provider; nil when
+    /// the source reports none.
+    let usage: SessionUsage?
+    /// The totals cover only the part of a long transcript that was read.
+    let usagePartial: Bool
+    /// What the monitor can actually observe for this session (`status`,
+    /// `timeline`, `tools`, `thinking`, `usage`, `permission`, `live`), so an
+    /// empty timeline can be told apart from a source that cannot see one.
+    let capabilities: Set<String>
 
     var id: String { sessionId }
     var displayName: String { title?.isEmpty == false ? title! : sessionId }
@@ -148,7 +163,84 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
         source = object.string("source") ?? "gateway"
         role = object.string("role") ?? "worker"
         parentSessionId = object.string("parentSessionId")
+        usage = SessionUsage(object["usage"])
+        usagePartial = object.bool("usagePartial") ?? false
+        capabilities = Set((object.array("capabilities") ?? []).compactMap { item -> String? in
+            guard case let .string(name) = item else { return nil }
+            return name
+        })
     }
+
+    /// `base` followed by the model id when the session reports one. v2 sends
+    /// a real model id or nil — never a placeholder — so nil shows nothing
+    /// rather than a made-up "default".
+    func withModel(_ base: String, separator: String = " · ") -> String {
+        guard let model, !model.isEmpty else { return base }
+        return base + separator + model
+    }
+
+    /// The same record with another status — used when a stream frame says a
+    /// session closed before the next snapshot restates it.
+    func with(status: String) -> GatewaySession {
+        var copy = self
+        copy.status = status
+        return copy
+    }
+}
+
+/// Session token usage (contracts/monitor/v2 `usage`). Same meaning for every
+/// provider: input includes cached input, total = input + output, reasoning
+/// is part of output, and `contextUsed` is the prompt size of the latest model
+/// call. A nil field means the provider did not say — never zero.
+struct SessionUsage: Hashable, Sendable {
+    let inputTokens: Double?
+    let outputTokens: Double?
+    let cacheReadTokens: Double?
+    let cacheWriteTokens: Double?
+    let reasoningTokens: Double?
+    let totalTokens: Double?
+    let contextUsed: Double?
+    let contextWindow: Double?
+    let costUsd: Double?
+
+    /// nil unless the value is an object carrying at least one known number.
+    init?(_ value: JSONValue?) {
+        guard let object = value?.objectValue else { return nil }
+        inputTokens = object.double("inputTokens")
+        outputTokens = object.double("outputTokens")
+        cacheReadTokens = object.double("cacheReadTokens")
+        cacheWriteTokens = object.double("cacheWriteTokens")
+        reasoningTokens = object.double("reasoningTokens")
+        totalTokens = object.double("totalTokens")
+        contextUsed = object.double("contextUsed")
+        contextWindow = object.double("contextWindow")
+        costUsd = object.double("costUsd")
+        let known: [Double?] = [
+            inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, reasoningTokens,
+            totalTokens, contextUsed, contextWindow, costUsd
+        ]
+        if known.allSatisfy({ $0 == nil }) { return nil }
+    }
+
+    /// Input + output when the provider left the total out.
+    var total: Double? {
+        totalTokens ?? inputTokens.flatMap { input in outputTokens.map { input + $0 } }
+    }
+
+    /// Share of the context window in use, 0...1, only when both are known.
+    var contextFraction: Double? {
+        guard let contextUsed, let contextWindow, contextWindow > 0 else { return nil }
+        return min(max(contextUsed / contextWindow, 0), 1)
+    }
+}
+
+/// Compact token count for small labels: 950, 12.3K, 1.2M.
+func formatTokenCount(_ value: Double) -> String {
+    let magnitude = abs(value)
+    if magnitude >= 1_000_000 { return String(format: "%.1fM", value / 1_000_000) }
+    if magnitude >= 10_000 { return String(format: "%.0fK", value / 1_000) }
+    if magnitude >= 1_000 { return String(format: "%.1fK", value / 1_000) }
+    return String(Int(value.rounded()))
 }
 
 struct FrontdoorSession: Identifiable, Hashable, Sendable {
@@ -379,6 +471,7 @@ private func petContractState(for status: String, hasPendingInbox: Bool) -> PetA
     case "restoring": return .starting
     case "waiting_permission", "waiting_input": return .waiting
     case "idle": return .idle
+    // Pre-v2 local sessions said "ready"; v2 sends the Gateway's "idle".
     case "ready": return .completed
     case "disconnected", "closed": return .offline
     case "cancelled", "error", "unavailable": return .failed
@@ -628,178 +721,81 @@ enum PetChildEnvironment {
     }
 }
 
+/// One canonical timeline event (contracts/monitor/v2 `event`). The sidecar
+/// gives every source — Gateway, Claude/Codex/Grok transcripts, agent hooks —
+/// this one shape, and has already done the work the app used to guess at:
+/// streamed chunks arrive merged into one `agent_message`/`agent_thought`, a
+/// tool call and its updates are one `tool_call` whose `status` moves from
+/// pending/running to completed/failed, and `title`/`body` are the display
+/// text. Nothing here inspects a provider's raw payload.
 struct MonitorEvent: Identifiable, Equatable, Sendable {
+    /// `<sessionId>#<key>`: stable across re-reads and sidecar restarts, so an
+    /// SSE `events` frame replaces the event it names instead of adding one.
     let id: String
+    let key: String
     let sessionId: String
+    /// Monitor-assigned, monotonic per session in first-seen order.
     let sequence: Int?
-    let type: String
+    let kind: String
     let timestamp: String?
+    let endedAt: String?
     let turnId: String?
-    let text: String?
+    let toolCallId: String?
+    /// One-line summary (a tool's "Bash: ls -la", a prompt's first line).
+    let title: String?
+    /// Display text: the message, the thought, a tool's output.
+    let body: String?
+    /// pending, running, completed, failed, cancelled, or nil.
+    let status: String?
+    let sources: [String]
+    /// Kind-specific extras (tool name/input, durationMs, requestId, …).
+    let detail: [String: JSONValue]
     let payload: JSONValue
 
     init?(_ value: JSONValue) {
         guard let object = value.objectValue,
               let sessionId = object.string("sessionId"),
-              let type = object.string("type") else { return nil }
+              let kind = object.string("kind") else { return nil }
+        let key = object.string("key")
+        guard let id = object.string("id") ?? key.map({ "\(sessionId)#\($0)" }) else { return nil }
+        self.id = id
+        self.key = key ?? id
         self.sessionId = sessionId
+        self.kind = kind
         sequence = object.int("sequence")
-        self.type = type
         timestamp = object.string("ts")
+        endedAt = object.string("endedAt")
         turnId = object.string("turnId")
-        text = object.string("text")
+        toolCallId = object.string("toolCallId")
+        title = nonEmptyText(object.string("title"))
+        body = nonEmptyText(object.string("body"))
+        status = object.string("status")
+        sources = (object.array("sources") ?? []).compactMap(\.stringValue)
+        detail = object.object("detail") ?? [:]
         payload = value
-        id = sequence.map { "\(sessionId):\($0)" }
-            ?? "\(sessionId):\(timestamp ?? ""):\(type):\(UUID().uuidString)"
     }
 
+    /// Short label for the kind, as rows and nodes print it.
+    var kindLabel: String {
+        kind == "agent_message" ? "agent response" : kind.replacingOccurrences(of: "_", with: " ")
+    }
+
+    /// One line for a list row or tooltip: the sidecar's title, else the head
+    /// of the body, else the kind.
     var summary: String {
-        if let text, !text.isEmpty {
-            return String(text.replacingOccurrences(of: "\n", with: " ").prefix(140))
-        }
-        guard let object = payload.objectValue else { return type }
-        if let data = object.object("data"), let title = data.string("title") { return title }
-        if let toolCall = object.object("toolCall"), let title = toolCall.string("title") { return title }
-        if let message = object.string("message") { return String(message.prefix(140)) }
-        if let reason = object.string("stopReason") { return reason }
-        return type.replacingOccurrences(of: "_", with: " ")
+        if let title { return title }
+        if let body { return String(body.replacingOccurrences(of: "\n", with: " ").prefix(140)) }
+        return kindLabel
     }
 
-    /// What the event actually *said*, with the JSON envelope stripped — the
-    /// detail panes lead with this and keep the raw payload as a fallback.
-    ///
-    /// The payload's *shape* decides where that text lives, not its type.
-    /// `src/gateway-service.js` flattens only chunk/prompt events into a
-    /// top-level `text` (`capTextEvent`); every other update goes through the
-    /// generic tail that serializes the whole update into `text` and keeps the
-    /// real object in `data` — so on those, `text` is JSON and must not be
-    /// shown as a body. `sidecar/src/local-transcript.js` emits no `data` at all and
-    /// writes a human summary into `text`. Hence: `data` wins whenever it
-    /// exists, `text` is only trusted without it.
-    ///
-    /// nil means the payload carries nothing more readable than its own JSON.
-    var bodyText: String? {
-        let object = payload.objectValue ?? [:]
-        if type == "permission_request" {
-            // The tool call is capped separately (`capStructuredField`), so
-            // only its identity is guaranteed to survive here.
-            let title = object.object("toolCall")?.string("title")
-            return [title, "권한 요청"].compactMap(nonEmptyBody).joined(separator: " · ")
-        }
-        if let data = object.object("data") {
-            return structuredBodyText(data) ?? nonEmptyBody(data.string("message"))
-        }
-        // An update too large to deliver leaves only a truncated JSON head in
-        // `text`; the raw view renders that better than a half-parsed body.
-        if object.bool("dataTruncated") == true { return nil }
-        return nonEmptyBody(text) ?? nonEmptyBody(object.string("message"))
-    }
+    /// Still in flight: a tool call or request that has not finished.
+    var isInFlight: Bool { status == "pending" || status == "running" }
+    var isFailed: Bool { status == "failed" }
 }
 
-/// The readable part of a gateway event's raw ACP update (`data`).
-private func structuredBodyText(_ data: [String: JSONValue]) -> String? {
-    let title = nonEmptyBody(data.string("title") ?? data.string("name"))
-    // A finished call is interesting for what it returned, a starting one for
-    // what it was asked to do — the same rule covers `tool_call` and
-    // `tool_call_update` without branching on a type the payload may not state.
-    let detail = toolResultText(data) ?? toolInputText(data)
-    let parts = [title, detail].compactMap { $0 }
-    if !parts.isEmpty { return parts.joined(separator: "\n\n") }
-    guard let status = nonEmptyBody(data.string("status")) else { return nil }
-    return "상태: \(status)"
-}
-
-/// Whatever the tool reported back. Field names come from the agent, not the
-/// Gateway — the Gateway forwards its update verbatim — so every shape ACP
-/// agents are seen to use is accepted rather than one canonical key.
-private func toolResultText(_ data: [String: JSONValue]) -> String? {
-    for key in ["content", "output", "result", "rawOutput"] {
-        if let text = nonEmptyBody(acpContentText(data[key])) { return text }
-    }
-    // A structured `rawOutput` has no text leaf to lift, but it is still the
-    // result and far shorter than the whole envelope.
-    if let raw = data["rawOutput"], raw.objectValue != nil || raw.arrayValue != nil {
-        return nonEmptyBody(raw.compactPrinted)
-    }
-    return nil
-}
-
-/// A tool call's arguments, summarized: the reader only needs to recognize
-/// *which* call this was, so a long argument blob is cut here instead of
-/// filling the pane.
-private func toolInputText(_ data: [String: JSONValue]) -> String? {
-    guard let raw = data["rawInput"] ?? data["input"] ?? data["arguments"] else { return nil }
-    let text = nonEmptyBody(acpContentText(raw)) ?? nonEmptyBody(raw.compactPrinted)
-    guard let text else { return nil }
-    return text.count > 400 ? String(text.prefix(400)) + "…" : text
-}
-
-/// Text leaves of an ACP content value: a bare string, an array of blocks, a
-/// plain `{type:"text", text}` block, or the tool-call wrapper that nests the
-/// real block under `content`.
-private func acpContentText(_ value: JSONValue?) -> String? {
-    switch value {
-    case let .string(text):
-        return text
-    case let .array(items):
-        let parts = items.compactMap { acpContentText($0) }.filter { !$0.isEmpty }
-        return parts.isEmpty ? nil : parts.joined(separator: "\n")
-    case let .object(object):
-        if let text = object.string("text") { return text }
-        return acpContentText(object["content"])
-    default:
-        return nil
-    }
-}
-
-private func nonEmptyBody(_ text: String?) -> String? {
-    guard let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
-    return trimmed
-}
-
-/// The full text a streamed chunk belongs to, rebuilt from its whole turn.
-///
-/// A response arrives as many `agent_message_chunk` fragments, and every
-/// surface that picks one event — the sequence diagram's collapsed ×N node,
-/// follow-latest selection, a list row — lands on a single fragment, so the
-/// pane showed the tail of the answer ("녕") instead of the answer ("안녕").
-///
-/// Joining depends on who produced the chunks: the Gateway streams token
-/// deltas, concatenated verbatim within a run and split into paragraphs at the
-/// same boundaries its own result logic uses (tool/permission/elicitation —
-/// see SEGMENT_BOUNDARY_TYPES in src/gateway-service.js); the local transcript
-/// projector emits one chunk per complete assistant message, so each is its
-/// own paragraph. Returns nil for a lone fragment — `bodyText` already shows
-/// it — and for non-chunk events.
-func mergedChunkBody(for event: MonitorEvent, in siblings: [MonitorEvent]) -> (text: String, fragments: Int)? {
-    guard event.type == "agent_message_chunk" || event.type == "agent_thought_chunk" else { return nil }
-    let boundaries: Set<String> = ["tool_call", "permission_request", "elicitation_request"]
-    let isLocal = event.payload.objectValue?.string("source") == "local-transcript"
-    let turnEvents = siblings
-        .filter { $0.sessionId == event.sessionId && $0.turnId == event.turnId }
-        .sorted(by: withinSessionEventOrder)
-
-    var segments: [String] = []
-    var run = ""
-    var fragments = 0
-    for item in turnEvents {
-        if item.type == event.type {
-            guard let text = item.text, !text.isEmpty else { continue }
-            fragments += 1
-            if isLocal {
-                segments.append(text)
-            } else {
-                run += text
-            }
-        } else if boundaries.contains(item.type), !run.isEmpty {
-            segments.append(run)
-            run = ""
-        }
-    }
-    if !run.isEmpty { segments.append(run) }
-    guard fragments > 1 else { return nil }
-    let text = segments.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
-    return text.isEmpty ? nil : (text, fragments)
+private func nonEmptyText(_ text: String?) -> String? {
+    guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+    return text
 }
 
 /// One entry of the app's notice/error log: repeated identical errors fold
@@ -850,7 +846,7 @@ struct MonitorRecord: Identifiable, Equatable, Sendable {
     }
 }
 
-/// A parsed `monitorApiVersion` string such as `"1.0"`. Minor is additive
+/// A parsed `monitorApiVersion` string such as `"2.0"`. Minor is additive
 /// (new optional capabilities); only a major mismatch is incompatible.
 struct MonitorApiVersion: Equatable, Sendable {
     let major: Int
@@ -872,8 +868,8 @@ struct MonitorApiVersion: Equatable, Sendable {
 /// must reject up front rather than let callers partially decode a message
 /// they don't understand.
 enum MonitorCompatibility {
-    static let supportedSchemaVersion = 1
-    static let supportedApiMajor = 1
+    static let supportedSchemaVersion = 2
+    static let supportedApiMajor = 2
 
     /// A missing/malformed version field means the message isn't even a
     /// message this build understands the shape of (`monitor_api_incompatible`);
@@ -963,6 +959,11 @@ struct InstalledFrontdoors: Equatable, Sendable {
     }
 }
 
+enum MonitorReducerDefaults {
+    /// Matches the sidecar's default `maxEventsPerSession`.
+    static let eventLimit = 2_000
+}
+
 struct MonitorSnapshot: Sendable {
     let schemaVersion: Int
     let monitorApiVersion: String
@@ -978,6 +979,8 @@ struct MonitorSnapshot: Sendable {
     let eventsBySession: [String: [MonitorEvent]]
     let historySessions: [GatewaySession]
     let historyEventsBySession: [String: [MonitorEvent]]
+    /// The sidecar's per-session event cap; upserts trim to the same bound.
+    let eventLimit: Int
     let tasks: [MonitorRecord]
     let inbox: [MonitorRecord]
 
@@ -988,12 +991,12 @@ struct MonitorSnapshot: Sendable {
         let sessions = (root.array("sessions") ?? []).compactMap(GatewaySession.init)
         var eventsBySession: [String: [MonitorEvent]] = [:]
         for (sessionId, value) in root.object("events") ?? [:] {
-            eventsBySession[sessionId] = (value.arrayValue ?? []).compactMap(MonitorEvent.init)
+            eventsBySession[sessionId] = (value.arrayValue ?? []).compactMap(MonitorEvent.init).sorted(by: withinSessionEventOrder)
         }
         let historySessions = (root.array("historySessions") ?? []).compactMap(GatewaySession.init)
         var historyEventsBySession: [String: [MonitorEvent]] = [:]
         for (sessionId, value) in root.object("historyEvents") ?? [:] {
-            historyEventsBySession[sessionId] = (value.arrayValue ?? []).compactMap(MonitorEvent.init)
+            historyEventsBySession[sessionId] = (value.arrayValue ?? []).compactMap(MonitorEvent.init).sorted(by: withinSessionEventOrder)
         }
         let tasks = (root.array("tasks") ?? []).enumerated().map { MonitorRecord($0.element, fallbackKind: "task", index: $0.offset) }
         let inbox = (root.array("inbox") ?? []).enumerated().map { MonitorRecord($0.element, fallbackKind: "inbox", index: $0.offset) }
@@ -1009,6 +1012,7 @@ struct MonitorSnapshot: Sendable {
             eventsBySession: eventsBySession,
             historySessions: historySessions,
             historyEventsBySession: historyEventsBySession,
+            eventLimit: max(root.int("eventLimit") ?? MonitorReducerDefaults.eventLimit, 1),
             tasks: tasks,
             inbox: inbox
         )
@@ -1494,26 +1498,52 @@ enum MonitorClientError: LocalizedError, Equatable, Sendable {
 }
 
 // ── Canonical MonitorEvent orderings ─────────────────────────────────────
-// Exactly two, because there are exactly two valid scopes. Four ad-hoc
-// comparators with two different rules had grown across the views; which one
-// you need depends only on scope, so the scope is in the name.
+// Both follow the contract's "ts, then sequence" order. `ts` is when the fact
+// was first observed, and a later observation of the same event (a tool call
+// finishing) keeps it, so an upserted event never jumps position. `sequence`
+// is the monitor's first-seen counter and only breaks timestamp ties.
 
-/// Order WITHIN one session: the gateway assigns `sequence` monotonically per
-/// session, so it is authoritative there — several events can share one
-/// millisecond timestamp. Sequence-less events sort last.
+/// Order WITHIN one session. The sidecar writes every `ts` in the same
+/// fixed-width ISO8601 form, so string order is time order.
 func withinSessionEventOrder(_ lhs: MonitorEvent, _ rhs: MonitorEvent) -> Bool {
-    if (lhs.sequence ?? Int.max) != (rhs.sequence ?? Int.max) {
-        return (lhs.sequence ?? Int.max) < (rhs.sequence ?? Int.max)
-    }
-    return (lhs.timestamp ?? "") < (rhs.timestamp ?? "")
+    if lhs.timestamp != rhs.timestamp { return (lhs.timestamp ?? "") < (rhs.timestamp ?? "") }
+    if lhs.sequence != rhs.sequence { return (lhs.sequence ?? Int.max) < (rhs.sequence ?? Int.max) }
+    return lhs.id < rhs.id
 }
 
-/// Order ACROSS sessions: sequences are per-session counters and comparing
-/// them between sessions is meaningless, so wall-clock order decides and
-/// sequence only breaks same-session timestamp ties.
+/// Order ACROSS sessions: sequences are per-session counters, so wall-clock
+/// order decides and the session id keeps equal timestamps deterministic.
 func crossSessionEventOrder(_ lhs: MonitorEvent, _ rhs: MonitorEvent) -> Bool {
     if lhs.timestamp != rhs.timestamp { return (lhs.timestamp ?? "") < (rhs.timestamp ?? "") }
-    return (lhs.sequence ?? 0) < (rhs.sequence ?? 0)
+    if lhs.sessionId != rhs.sessionId { return lhs.sessionId < rhs.sessionId }
+    return withinSessionEventOrder(lhs, rhs)
+}
+
+/// Upserts changed events into one session's bucket, the v2 rule for both SSE
+/// `events` frames and a `state` frame's `events`: an event whose `id` is
+/// already present replaces it in place, a new `id` is inserted, the bucket
+/// stays in `withinSessionEventOrder`, and only the oldest events fall off
+/// past `limit` (the sidecar's `eventLimit`). A later duplicate of one id in
+/// the same batch wins.
+func upsertMonitorEvents(_ changes: [MonitorEvent], into bucket: [MonitorEvent], limit: Int) -> [MonitorEvent] {
+    guard !changes.isEmpty else { return bucket }
+    var result = bucket
+    var indexById: [String: Int] = [:]
+    indexById.reserveCapacity(result.count + changes.count)
+    for (index, event) in result.enumerated() { indexById[event.id] = index }
+    for event in changes {
+        if let index = indexById[event.id] {
+            result[index] = event
+        } else {
+            indexById[event.id] = result.count
+            result.append(event)
+        }
+    }
+    if zip(result, result.dropFirst()).contains(where: { withinSessionEventOrder($1, $0) }) {
+        result.sort(by: withinSessionEventOrder)
+    }
+    if result.count > limit { result.removeFirst(result.count - limit) }
+    return result
 }
 
 /// A warning when the running Gateway daemon serves from a different runtime

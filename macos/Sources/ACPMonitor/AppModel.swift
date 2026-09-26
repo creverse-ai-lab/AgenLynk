@@ -1013,10 +1013,9 @@ final class AppModel: ObservableObject {
         guard let message = value.objectValue, let kind = message.string("kind") else { return }
         monitorStore.markStreamMessage()
         switch kind {
-        case "event":
-            if let eventValue = message["event"], let event = MonitorEvent(eventValue) {
-                monitorStore.enqueue(event)
-            }
+        case "events":
+            // Changed canonical events, upserted by id (Monitor API v2).
+            monitorStore.applyEventsMessage(message)
         case "state":
             let effect = monitorStore.applyStateMessage(message)
             if monitorStore.state.connected { updateConnectionPhase() }
@@ -1120,8 +1119,8 @@ final class AppModel: ObservableObject {
     }
 
     private func eventIsVisible(_ event: MonitorEvent) -> Bool {
-        if !settings.showThoughts, event.type == "agent_thought_chunk" { return false }
-        if !settings.showToolEvents, event.type.hasPrefix("tool_call") { return false }
+        if !settings.showThoughts, event.kind == "agent_thought" { return false }
+        if !settings.showToolEvents, event.kind == "tool_call" { return false }
         return true
     }
 

@@ -143,13 +143,13 @@ struct GraphProjection: Sendable {
 
     private static func currentTurnEvents(_ events: [MonitorEvent], activeTurnId: String?) -> [MonitorEvent] {
         guard let activeTurnId else { return [] }
-        // Live may receive thousands of token chunks. Walk backwards and retain only
-        // the detail budget instead of filtering/copying the entire session on every chunk.
+        // A long turn can hold thousands of events. Walk backwards and retain only
+        // the detail budget instead of filtering/copying the entire session on every frame.
         var recent: [MonitorEvent] = []
         recent.reserveCapacity(maxEventsPerTurn)
         var startEvent: MonitorEvent?
         for event in events.reversed() where event.turnId == activeTurnId {
-            if event.type == "turn_start" {
+            if event.kind == "turn_start" {
                 startEvent = event
                 break
             }
@@ -173,12 +173,12 @@ struct GraphProjection: Sendable {
         }
 
         for event in sorted {
-            if event.type == "turn_start" {
+            if event.kind == "turn_start" {
                 finishCurrent()
                 current = TurnAccumulator(
                     id: event.id,
                     turnId: event.turnId,
-                    prompt: boundedPrefix(event.text ?? "(prompt 내용 없음)", limit: maxPromptCharacters),
+                    prompt: boundedPrefix(event.body ?? event.title ?? "(prompt 내용 없음)", limit: maxPromptCharacters),
                     startedAt: event.timestamp,
                     events: [event]
                 )
@@ -186,18 +186,21 @@ struct GraphProjection: Sendable {
             }
             guard let turn = current else { continue }
             turn.append(event, limit: maxEventsPerTurn)
-            switch event.type {
-            case "agent_message_chunk":
-                turn.appendResponse(event.text ?? "", limit: maxResponseCharacters)
-            case "tool_call", "permission_request", "elicitation_request":
+            switch event.kind {
+            case "agent_message":
+                // Each message arrives whole (the sidecar merges its chunks);
+                // messages with no boundary between them read as paragraphs.
+                turn.appendMessage(event.body ?? "", limit: maxResponseCharacters)
+            case "tool_call", "permission_request", "input_request":
                 // Gateway의 최종 result와 동일하게 마지막 경계 이후의 메시지만 남긴다.
                 turn.clearResponse()
             case "turn_end":
                 turn.completed = true
+                turn.failed = event.isFailed
                 finishCurrent()
                 continue
             case "error":
-                if let text = event.text { turn.replaceResponse(text, limit: maxResponseCharacters) }
+                if let text = event.body ?? event.title { turn.replaceResponse(text, limit: maxResponseCharacters) }
                 turn.completed = true
                 turn.failed = true
                 finishCurrent()
@@ -255,8 +258,12 @@ struct GraphProjection: Sendable {
             events.append(event)
         }
 
-        func appendResponse(_ text: String, limit: Int) {
+        func appendMessage(_ text: String, limit: Int) {
             guard !text.isEmpty else { return }
+            if !response.isEmpty {
+                response += "\n\n"
+                responseCharacters += 2
+            }
             response += text
             responseCharacters += text.count
             if responseCharacters > limit {

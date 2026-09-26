@@ -23,18 +23,17 @@ struct EventSequenceView: View {
     private let relationNodeSpacing = 8.0
 
     var body: some View {
-        // Derived once per body pass. The computed-property forms re-ran
-        // collapseSequenceEvents up to four times (totalPages, pageEvents,
-        // pageRangeLabel, onChange) and firstEventId filtered+sorted the full
-        // event array once per edge — measurable milliseconds at 10 passes/s
-        // during a busy turn.
-        let diagram = collapseSequenceEvents(events)
+        // Derived once per body pass: firstEventId used to filter+sort the
+        // full event array once per edge — measurable milliseconds at 10
+        // passes/s during a busy turn. Events arrive whole (one message per
+        // stream, one node per tool call), so each event is one diagram row.
+        let diagram = events
         // A page is a self-contained slice of the sequence. Deriving headers
         // from the full history left unrelated lanes (for example an older
         // Grok worker) pinned ahead of the Frontdoor even when that provider
         // had no event on the page currently being viewed.
         let pageEntries = SequencePageLayout.entries(in: diagram, page: page, pageSize: pageSize)
-        let pageEventValues = pageEntries.map(\.event)
+        let pageEventValues = Array(pageEntries)
         let marks = sessionEventMarks()
         let lanes = makeSequenceLanes(sessions: sessions, events: pageEventValues)
         let laneIndex = lanes.enumerated().reduce(into: [String: Int]()) { result, item in
@@ -56,8 +55,8 @@ struct EventSequenceView: View {
             )
         }
         let nodes = pageEntries.compactMap { entry -> SequenceDiagramNode? in
-            guard let index = laneIndex[entry.event.sessionId] else { return nil }
-            return SequenceDiagramNode(laneIndex: index, event: entry.event, collapsedCount: entry.count)
+            guard let index = laneIndex[entry.sessionId] else { return nil }
+            return SequenceDiagramNode(laneIndex: index, event: entry)
         }
         // The whole point of a sequence diagram: a call/응답 arrow is drawn on
         // the row of the event that triggered it — a call on the child's first
@@ -157,7 +156,7 @@ struct EventSequenceView: View {
                                 .buttonStyle(.plain)
                                 .frame(width: laneWidth - 24, height: 64)
                                 .position(x: laneX(index), y: 35)
-                                .help("\(lane.session.provider) \(lane.session.model ?? "default") 세션 상세")
+                                .help("\(lane.session.withModel(lane.session.provider, separator: " ")) 세션 상세")
                         }
                     }
                     .frame(width: width, height: headerHeight)
@@ -245,7 +244,6 @@ struct EventSequenceView: View {
                                 } label: {
                                     SequenceEventNode(
                                         event: node.event,
-                                        collapsedCount: node.collapsedCount,
                                         selected: selectedEventId == node.event.id
                                     )
                                 }
@@ -352,8 +350,8 @@ struct EventSequenceView: View {
         .position(x: capsuleX, y: y)
         .help(
             response
-                ? "\(edge.child.provider) \(edge.child.model ?? "default") 응답 반환"
-                : "\(edge.child.provider) \(edge.child.model ?? "default") 호출"
+                ? "\(edge.child.withModel(edge.child.provider, separator: " ")) 응답 반환"
+                : "\(edge.child.withModel(edge.child.provider, separator: " ")) 호출"
         )
     }
 
@@ -382,7 +380,7 @@ struct EventSequenceView: View {
             } else {
                 earliest[event.sessionId] = event
             }
-            guard event.type == "turn_end" else { continue }
+            guard event.kind == "turn_end" else { continue }
             if let current = latestTurnEnd[event.sessionId] {
                 if sequenceEventSort(current, event) { latestTurnEnd[event.sessionId] = event }
             } else {
@@ -395,7 +393,7 @@ struct EventSequenceView: View {
         )
     }
 
-    private func pageRangeLabel(for values: [SequenceEventEntry]) -> String {
+    private func pageRangeLabel(for values: [MonitorEvent]) -> String {
         guard !values.isEmpty else { return "0 / 0" }
         let range = SequencePageLayout.range(totalCount: values.count, page: page, pageSize: pageSize)
         return "\(range.lowerBound + 1)–\(range.upperBound) / \(values.count)"
@@ -443,7 +441,6 @@ private func arrowHead(at point: CGPoint, pointingRight: Bool) -> Path {
 private struct SequenceDiagramNode: Identifiable {
     let laneIndex: Int
     let event: MonitorEvent
-    let collapsedCount: Int
 
     var id: String { event.id }
 }
@@ -464,10 +461,12 @@ private struct SequenceLaneHeader: View {
             }
             Text(lane.session.provider.capitalized)
                 .font(.caption2.weight(.medium))
-            Text(lane.session.model ?? "default")
-                .font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            if let model = lane.session.model {
+                Text(model)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
         }
         .padding(7)
         .background(selected ? Color.accentColor.opacity(0.14) : Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 9))
@@ -504,21 +503,19 @@ private struct SequenceLaneHeader: View {
 
 private struct SequenceEventNode: View {
     let event: MonitorEvent
-    let collapsedCount: Int
     let selected: Bool
 
     var body: some View {
         HStack(spacing: 7) {
-            Image(systemName: eventSymbol(event.type))
-                .foregroundStyle(eventColor(event.type))
+            Image(systemName: eventSymbol(event))
+                .foregroundStyle(eventColor(event))
                 .frame(width: 15)
-            Text(event.type == "agent_message_chunk" ? "agent response" : event.type.replacingOccurrences(of: "_", with: " "))
+            Text(event.kindLabel)
                 .font(.caption.weight(.semibold))
                 .lineLimit(1)
-            if collapsedCount > 1 {
-                Text("×\(collapsedCount)")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
+            if event.isInFlight {
+                // A tool call or request still waiting on its result.
+                ProgressView().controlSize(.mini)
             }
             Spacer(minLength: 0)
         }
@@ -528,30 +525,6 @@ private struct SequenceEventNode: View {
         .overlay(Capsule().stroke(selected ? Color.accentColor : Color.secondary.opacity(0.2)))
         .help(event.summary)
     }
-}
-
-private struct SequenceEventEntry {
-    var event: MonitorEvent
-    var count: Int
-}
-
-private func collapseSequenceEvents(_ events: [MonitorEvent]) -> [SequenceEventEntry] {
-    var result: [SequenceEventEntry] = []
-    result.reserveCapacity(events.count)
-    for event in events {
-        // Thought chunks stream in runs exactly like message chunks now that
-        // delegated workers request thinking output.
-        if event.type == "agent_message_chunk" || event.type == "agent_thought_chunk",
-           let last = result.last,
-           last.event.type == event.type,
-           last.event.sessionId == event.sessionId,
-           last.event.turnId == event.turnId {
-            result[result.count - 1] = SequenceEventEntry(event: event, count: last.count + 1)
-        } else {
-            result.append(SequenceEventEntry(event: event, count: 1))
-        }
-    }
-    return result
 }
 
 private func makeSequenceLanes(sessions: [GatewaySession], events: [MonitorEvent]) -> [SequenceLane] {

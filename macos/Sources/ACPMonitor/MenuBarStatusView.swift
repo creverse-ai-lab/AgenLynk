@@ -151,9 +151,10 @@ struct MenuBarStatusView: View {
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 6)
                 } else {
+                    let context = contextFractions()
                     ForEach(sortedAgents, id: \.id) { agent in
                         Button { open(agent) } label: {
-                            MenuBarActivityRow(agent: agent, now: now)
+                            MenuBarActivityRow(agent: agent, now: now, contextFraction: context[agent.id])
                         }
                         .buttonStyle(.plain)
                     }
@@ -189,6 +190,20 @@ struct MenuBarStatusView: View {
     }
 
     private var sortedAgents: [PetAgentActivity] { model.activityProjection.orderedByProgress }
+
+    /// Context-window use per activity row id: a Worker row is its session, a
+    /// Frontdoor row is its root session. Only sessions whose source reports
+    /// a context window appear.
+    private func contextFractions() -> [String: Double] {
+        var result: [String: Double] = [:]
+        for session in model.sessions {
+            if let fraction = session.usage?.contextFraction { result[session.sessionId] = fraction }
+        }
+        for frontdoor in model.frontdoorSessions {
+            if let fraction = frontdoor.root?.usage?.contextFraction { result[frontdoor.id] = fraction }
+        }
+        return result
+    }
 
     private func progressSummary(_ agents: [PetAgentActivity]) -> String {
         let running = agents.filter { $0.state == .running || $0.state == .starting }.count
@@ -239,6 +254,8 @@ struct MenuBarStatusView: View {
 private struct MenuBarActivityRow: View {
     let agent: PetAgentActivity
     let now: Date
+    /// Share of the session's context window in use, when known.
+    var contextFraction: Double?
 
     var body: some View {
         HStack(alignment: .top, spacing: 7) {
@@ -263,6 +280,12 @@ private struct MenuBarActivityRow: View {
                             .foregroundStyle(.orange)
                     }
                     Spacer(minLength: 4)
+                    if let contextFraction {
+                        Text("ctx \(contextPercentText(contextFraction))")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(contextColor(contextFraction))
+                            .help("컨텍스트 창 사용률")
+                    }
                     Text(relative(from: agent.updatedAt, to: now))
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.tertiary)

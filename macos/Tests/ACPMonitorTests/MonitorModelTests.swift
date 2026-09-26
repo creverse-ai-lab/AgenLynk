@@ -39,10 +39,11 @@ enum MonitorModelChecks {
         try graphProjectionBuildsPromptReturnTurnsAndUsesCanvasHeight()
         try graphProjectionFollowsOnlyTheCurrentLiveTurn()
         try graphProjectionBoundsLargeLiveHistories()
-        try eventBodyTextSurfacesReadableTextInsteadOfTheJSONEnvelope()
+        try canonicalEventsDecodeTitleBodyStatusAndStableIds()
+        try eventsFrameUpsertReplacesInsertsAndOrders()
+        try sessionUsageDecodesOnlyKnownNumbers()
         try restartBlockersMatchTheSharedGatewayContract()
         try runtimeInspectionSurfacesAPinnedRollback()
-        try mergedChunkBodyRebuildsTheWholeStreamedMessage()
         print("Swift model checks passed")
     }
 
@@ -266,34 +267,66 @@ enum MonitorModelChecks {
     }
 
     private static func snapshotDecodesSessionsEventsTasksAndInbox() throws {
-        let repoRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent()
-        let fixtureURL = repoRoot.appendingPathComponent("sidecar/test/fixtures/monitor-snapshot-v1.json")
-        let data = try Data(contentsOf: fixtureURL)
-        let snapshot = try MonitorSnapshot.decode(data)
-        try check(snapshot.schemaVersion == 1, "snapshot should decode the schema version")
-        try check(snapshot.monitorApiVersion == "1.0", "snapshot should decode the monitor API version")
-        try check(snapshot.revision == 7, "snapshot should decode the shared state revision")
+        let fixtureURL = repositoryRoot().appendingPathComponent("sidecar/test/fixtures/monitor-snapshot-v2.json")
+        // `_input` is the Node test's construction input; the rest is the wire
+        // payload. Unknown top-level keys must not disturb decoding.
+        let snapshot = try MonitorSnapshot.decode(try Data(contentsOf: fixtureURL))
+        try check(snapshot.schemaVersion == 2, "snapshot should decode the schema version")
+        try check(snapshot.monitorApiVersion == "2.0", "snapshot should decode the monitor API version")
+        try check(snapshot.revision == 13, "snapshot should decode the shared state revision")
         try check(snapshot.connected, "snapshot should be connected")
         try check(snapshot.streaming, "snapshot should decode the streaming state")
-        try check(snapshot.sessions.first?.sessionId == "s1", "session decode failed")
-        try check(snapshot.eventsBySession["s1"]?.first?.type == "turn_start", "event decode failed")
-        try check(snapshot.historySessions.first?.sessionId == "old", "history session decode failed")
-        try check(snapshot.historyEventsBySession["old"]?.first?.type == "turn_end", "history event decode failed")
+        try check(snapshot.eventLimit == 2_000, "snapshot should decode the per-session event limit")
         try check(snapshot.tasks.first?.id == "t1", "task decode failed")
         try check(snapshot.inbox.first?.id == "i1", "inbox decode failed")
+
+        guard let session = snapshot.sessions.first, session.sessionId == "s1" else {
+            throw CheckError.failed("session decode failed")
+        }
+        try check(session.model == "gpt-5.6", "a real model id should decode")
+        try check(session.capabilities == ["status", "timeline", "tools", "thinking", "permission", "usage"],
+                  "capabilities should decode")
+        try check(!session.usagePartial, "a missing usagePartial means complete totals")
+        guard let usage = session.usage else { throw CheckError.failed("session usage should decode") }
+        try check(usage.inputTokens == 1_200 && usage.outputTokens == 80 && usage.totalTokens == 1_280,
+                  "usage token counts should decode")
+        try check(usage.cacheReadTokens == 1_000 && usage.reasoningTokens == 20, "cache/reasoning tokens should decode")
+        try check(usage.cacheWriteTokens == nil && usage.costUsd == nil, "a null usage field must stay nil, never zero")
+        try check(usage.contextWindow == 258_400, "context window should decode")
+        try check(abs((usage.contextFraction ?? 0) - 1_200.0 / 258_400.0) < 0.000_001, "context fraction should be used/window")
+
+        let events = snapshot.eventsBySession["s1"] ?? []
+        try check(events.map(\.kind) == ["turn_start", "agent_message", "tool_call", "permission_request"],
+                  "events should decode as canonical kinds in ts/sequence order: \(events.map(\.kind))")
+        try check(events.map(\.sequence) == [1, 2, 3, 4], "monitor sequences should decode")
+        try check(events.first?.id == "s1#turn:turn-1" && events.first?.key == "turn:turn-1", "stable ids should decode")
+        try check(events.first?.body == "work", "turn_start body is the prompt")
+        try check(events[1].body == "checking now", "the sidecar's merged message body is read verbatim")
+        let tool = events[2]
+        try check(tool.title == "Read: README.md" && tool.body == "# Project", "a tool call's title/body come from the sidecar")
+        try check(tool.status == "completed" && !tool.isInFlight, "a finished tool call carries its terminal status")
+        try check(tool.toolCallId == "call-1" && tool.endedAt == "2026-08-07T00:00:03.000Z", "tool call identity/end should decode")
+        try check(tool.detail["input"]?.stringValue == #"{"path":"README.md"}"#, "tool detail should decode")
+        try check(tool.sources == ["gateway"], "sources should decode")
+        try check(events[3].status == "pending" && events[3].isInFlight, "an unanswered permission request is pending")
+        try check(events[3].title == "Write README.md", "a permission request is titled by its tool")
+
+        try check(snapshot.historySessions.first?.sessionId == "old", "history session decode failed")
+        try check(snapshot.historySessions.first?.model == nil, "a session without a model decodes nil")
+        try check(snapshot.historySessions.first?.usage == nil, "a session without usage decodes nil")
+        let history = snapshot.historyEventsBySession["old"]?.first
+        try check(history?.kind == "turn_end" && history?.status == "completed", "history event decode failed")
+        try check(history?.detail["stopReason"]?.stringValue == "end_turn", "turn_end detail should keep the stop reason")
     }
 
     /// Reads the same ordered NDJSON characterization fixtures the Node
-    /// replay harness executes. Swift consumes the shared *input* lines through
-    /// production decoders, then runs the same `MonitorSelection` /
-    /// `MonitorStreamNotice` helpers `AppModel` calls.
+    /// replay harness executes. Since v2 the app never sees the raw Gateway
+    /// events those traces feed Node (the sidecar normalizes them), so Swift
+    /// decodes each trace's expected — and any checkpoint — snapshot with the
+    /// production decoder and runs the same `MonitorSelection` /
+    /// `MonitorStreamNotice` helpers `AppModel` calls on the result.
     private static func characterizationTracesDecodeExpectedSnapshots() throws {
-        let repoRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent()
-        let traceRoot = repoRoot.appendingPathComponent("sidecar/test/fixtures/monitor-traces")
+        let traceRoot = repositoryRoot().appendingPathComponent("sidecar/test/fixtures/monitor-traces")
         let traceFiles = [
             "cold-start-gateway-meta-delay.ndjson",
             "frontdoor-disappears.ndjson",
@@ -320,43 +353,33 @@ enum MonitorModelChecks {
         }
         guard let meta = records.first?.objectValue,
               meta.string("kind") == "meta",
-              meta.int("traceVersion") == 1,
+              meta.int("traceVersion") == 2,
               let expected = records.last?.objectValue,
               expected.string("kind") == "expected",
               let snapshotValue = expected["snapshot"] else {
             throw CheckError.failed("malformed characterization trace: \(name)")
         }
 
-        var replay = TraceReplay(maxEventsPerSession: meta.int("maxEventsPerSession") ?? 2_000)
         var delayedMeta: MonitorMeta?
         var selectedFrontdoorId: String?
+        var cursorTruncated = false
 
         for stepValue in records.dropFirst().dropLast() {
             guard let step = stepValue.objectValue, let kind = step.string("kind") else {
                 throw CheckError.failed("malformed step in \(name)")
             }
             switch kind {
-            case "state":
-                if let values = step.array("sessions") {
-                    replay.setSessions(try decodeTraceSessions(values, name: name))
+            case "set_sessions", "state":
+                // Session records are the same shape on both sides of the
+                // sidecar, so these inputs still go through the decoder.
+                let sessions = try decodeTraceSessions(step.array("sessions") ?? [], name: name)
+                if kind == "set_sessions", selectedFrontdoorId == nil {
+                    selectedFrontdoorId = sessions.compactMap(\.openerInstanceId).first
                 }
-            case "set_sessions":
-                replay.setSessions(try decodeTraceSessions(step.array("sessions") ?? [], name: name))
-                if selectedFrontdoorId == nil {
-                    selectedFrontdoorId = replay.sessions.compactMap(\.openerInstanceId).first
-                }
-            case "push_event":
-                guard let eventValue = step["event"], let event = MonitorEvent(eventValue) else {
-                    throw CheckError.failed("push_event did not decode in \(name)")
-                }
-                if event.type != "usage_update"
-                    && event.type != "subscription_gap"
-                    && event.type != "subscription_replay_truncated" {
-                    replay.push(event)
-                }
-            case "set_gateway":
-                replay.gateway = step["gateway"]
             case "checkpoint":
+                if let checkpoint = step["snapshot"] {
+                    _ = try decodeTraceSnapshot(checkpoint, name: name)
+                }
                 if let metaValue = step["meta"] {
                     delayedMeta = try decodeTraceMeta(metaValue, name: name)
                     try check(delayedMeta?.gatewayIdentity.gatewayVersion == nil,
@@ -364,60 +387,25 @@ enum MonitorModelChecks {
                     try check(delayedMeta?.gatewayIdentity.gatewayBuildId == nil,
                               "cold-start meta must tolerate null setup values in \(name)")
                 }
-                if let sse = step.object("sse") {
-                    try check(sse.string("kind") == "state", "disappearance SSE must be kind=state in \(name)")
-                    try check((sse.array("sessions") ?? []).isEmpty, "disappearance SSE sessions must be empty in \(name)")
-                    let removed = Set((sse.array("removedSessionIds") ?? []).compactMap { $0.stringValue })
-                    try check(removed == Set(replay.lastRemovedSessionIds),
-                              "removedSessionIds diverged in \(name): \(removed) != \(replay.lastRemovedSessionIds)")
-                }
-            case "socket_flow":
-                guard let eventValue = step["event"], MonitorEvent(eventValue) != nil else {
-                    throw CheckError.failed("socket_flow event did not decode in \(name)")
-                }
             case "initial_subscription", "restored_subscription":
-                if let eventValue = step["event"] {
-                    try check(MonitorEvent(eventValue) != nil, "\(kind) event did not decode in \(name)")
-                }
-                for value in step.array("replay") ?? [] {
-                    try check(MonitorEvent(value) != nil, "replay event did not decode in \(name)")
-                }
                 if let args = step.object("args") {
                     try check(args.bool("includeThoughts") == true && args.bool("includeToolEvents") == true,
                               "subscribe args must match production observer in \(name)")
                 }
                 if let truncated = step.object("cursorTruncated") {
-                    replay.cursorTruncated = truncated.values.contains { $0.boolValue == true }
+                    cursorTruncated = truncated.values.contains { $0.boolValue == true }
                 }
-            case "set_tasks", "set_inbox":
-                break
-            case "subscription_gap":
-                guard let marker = step.object("event") else {
-                    throw CheckError.failed("subscription_gap marker is missing in \(name)")
-                }
-                try check(marker.string("type") == "subscription_gap",
-                          "subscription_gap must stay transport control state in \(name)")
-            case "replay_event":
-                guard let eventValue = step["event"], let event = MonitorEvent(eventValue) else {
-                    throw CheckError.failed("replay_event did not decode in \(name)")
-                }
-                replay.push(event)
-            case "reconciled":
+            case "push_event", "replay_event", "socket_flow", "subscription_gap",
+                 "set_gateway", "set_tasks", "set_inbox", "reconciled":
+                // Raw Gateway input for the Node runner; the app only ever
+                // receives the canonical result in the expected snapshot.
                 break
             default:
                 throw CheckError.failed("unknown step \(kind) in \(name)")
             }
         }
 
-        guard var snapshotObject = snapshotValue.objectValue else {
-            throw CheckError.failed("expected snapshot is not an object in \(name)")
-        }
-        // Characterization traces may assert a focused partial snapshot. Add
-        // only the required wire envelope before exercising production decode.
-        snapshotObject["schemaVersion"] = snapshotObject["schemaVersion"] ?? .number(1)
-        snapshotObject["monitorApiVersion"] = snapshotObject["monitorApiVersion"] ?? .string("1.0")
-        let snapshotData = try JSONSerialization.data(withJSONObject: JSONValue.object(snapshotObject).foundationValue)
-        let snapshot = try MonitorSnapshot.decode(snapshotData)
+        let snapshot = try decodeTraceSnapshot(snapshotValue, name: name)
         let snapshotFrontdoors = Set(FrontdoorSession.make(
             sessions: snapshot.historySessions + snapshot.sessions
         ).map(\.id))
@@ -432,24 +420,25 @@ enum MonitorModelChecks {
                   "Frontdoor projection diverged for \(name): \(snapshotFrontdoors) != \(expectedFrontdoors)")
         try check(snapshotEvents == expectedEvents,
                   "event projection diverged for \(name): \(snapshotEvents) != \(expectedEvents)")
-
-        if replay.touchedState {
-            let replayedFrontdoors = Set(FrontdoorSession.make(sessions: replay.mergedSessions).map(\.id))
-            try check(replayedFrontdoors == snapshotFrontdoors,
-                      "Swift step replay diverged from Node snapshot frontdoors for \(name): \(replayedFrontdoors) != \(snapshotFrontdoors)")
-            try check(replay.mergedEventRefs == snapshotEvents,
-                      "Swift step replay diverged from Node snapshot events for \(name): \(replay.mergedEventRefs) != \(snapshotEvents)")
-            if replay.sessions.isEmpty && !replay.historySessions.isEmpty {
-                let historyFrontdoors = FrontdoorSession.make(sessions: replay.historySessions)
-                try check(!historyFrontdoors.isEmpty || expectedFrontdoors.isEmpty,
-                          "history-only Frontdoor must stay visible in \(name)")
-                try check(!replay.historyEventsBySession.values.joined().isEmpty || expectedEvents.isEmpty,
-                          "history-only log events must stay visible in \(name)")
-            }
+        for bucket in Array(snapshot.eventsBySession.values) + Array(snapshot.historyEventsBySession.values) {
+            try check(Set(bucket.map(\.id)).count == bucket.count, "event ids must be unique per session in \(name)")
+            try check(zip(bucket, bucket.dropFirst()).allSatisfy { !withinSessionEventOrder($1, $0) },
+                      "decoded buckets must be in ts/sequence order in \(name)")
+        }
+        if snapshot.sessions.isEmpty && !snapshot.historySessions.isEmpty {
+            try check(!FrontdoorSession.make(sessions: snapshot.historySessions).isEmpty || expectedFrontdoors.isEmpty,
+                      "history-only Frontdoor must stay visible in \(name)")
+            try check(!snapshot.historyEventsBySession.values.joined().isEmpty || expectedEvents.isEmpty,
+                      "history-only log events must stay visible in \(name)")
         }
 
         if let declaredFrontdoor = projection.string("selectedFrontdoorId"),
-           let declaredEvent = projection.string("selectedEventRef") {
+           let declaredRef = projection.string("selectedEventRef") {
+            // eventRefs are `sessionId:sequence`; selection works on stable ids.
+            let allEvents = Array(snapshot.eventsBySession.values.joined()) + Array(snapshot.historyEventsBySession.values.joined())
+            guard let declaredEvent = allEvents.first(where: { "\($0.sessionId):\($0.sequence ?? -1)" == declaredRef })?.id else {
+                throw CheckError.failed("selectedEventRef \(declaredRef) is not in the snapshot for \(name)")
+            }
             let kept = MonitorSelection.reconcile(
                 selectedFrontdoorId: declaredFrontdoor,
                 selectedEventId: declaredEvent,
@@ -463,10 +452,7 @@ enum MonitorModelChecks {
             try check(kept.eventId == declaredEvent,
                       "MonitorSelection must keep a history-only event after live sessions disappear in \(name)")
         } else if let declared = projection.string("selectedFrontdoorId") ?? selectedFrontdoorId {
-            let visible = replay.touchedState
-                ? Set(FrontdoorSession.make(sessions: replay.mergedSessions).map(\.id))
-                : snapshotFrontdoors
-            try check(visible.contains(declared),
+            try check(snapshotFrontdoors.contains(declared),
                       "selected history-only Frontdoor is not selectable after live sessions disappear in \(name)")
         }
 
@@ -537,14 +523,8 @@ enum MonitorModelChecks {
                     "a streaming pause without an error must not record an overflow notice in \(name)"
                 )
             }
-            if let sse = transport.array("sse")?.first?.objectValue {
-                try check(sse.string("kind") == "state" && (sse.array("sessions") ?? []).isEmpty,
-                          "disappearance transport SSE must be sessions=[] in \(name)")
-                try check(!(sse.array("removedSessionIds") ?? []).isEmpty,
-                          "disappearance transport SSE must include removedSessionIds in \(name)")
-            }
             if transport.object("cursorTruncated") != nil {
-                try check(replay.cursorTruncated, "reconnect fixture must include cursorTruncated=true in \(name)")
+                try check(cursorTruncated, "reconnect fixture must include cursorTruncated=true in \(name)")
                 try check((transport.array("receivedTypes") ?? []).contains { value in
                     value.stringValue == "subscription_replay_truncated"
                 },
@@ -555,6 +535,32 @@ enum MonitorModelChecks {
                           "restored subscribe args must match production observer in \(name)")
             }
         }
+    }
+
+    /// Characterization traces may assert a focused partial snapshot. Adds
+    /// only the required wire envelope, then decodes with production code and
+    /// checks no event was silently dropped by the decoder.
+    private static func decodeTraceSnapshot(_ value: JSONValue, name: String) throws -> MonitorSnapshot {
+        guard var object = value.objectValue else {
+            throw CheckError.failed("trace snapshot is not an object in \(name)")
+        }
+        object["schemaVersion"] = object["schemaVersion"] ?? .number(2)
+        object["monitorApiVersion"] = object["monitorApiVersion"] ?? .string("2.0")
+        let data = try JSONSerialization.data(withJSONObject: JSONValue.object(object).foundationValue)
+        let snapshot = try MonitorSnapshot.decode(data)
+        for field in ["events", "historyEvents"] {
+            let raw = (object.object(field) ?? [:]).values.reduce(0) { $0 + ($1.arrayValue?.count ?? 0) }
+            let decoded = (field == "events" ? snapshot.eventsBySession : snapshot.historyEventsBySession)
+                .values.reduce(0) { $0 + $1.count }
+            try check(raw == decoded, "every canonical \(field) entry must decode in \(name): \(decoded)/\(raw)")
+        }
+        return snapshot
+    }
+
+    private static func repositoryRoot() -> URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
     }
 
     private static func decodeTraceSessions(_ values: [JSONValue], name: String) throws -> [GatewaySession] {
@@ -574,8 +580,8 @@ enum MonitorModelChecks {
     private static func snapshotRejectsUnsupportedSchemaMajorWithoutPartialDecode() throws {
         let data = Data(#"""
         {
-          "schemaVersion":2,
-          "monitorApiVersion":"1.0",
+          "schemaVersion":3,
+          "monitorApiVersion":"2.0",
           "connected":true,
           "sessions":[{"sessionId":"s1","provider":"codex","status":"running","cwd":"/tmp/project"}]
         }
@@ -593,7 +599,7 @@ enum MonitorModelChecks {
         // A missing monitorApiVersion is a malformed/missing contract, not a
         // recognizable-but-outdated one: it must reject as incompatible, not
         // update-required.
-        let missingApiVersion = Data(#"{"schemaVersion":1,"connected":true,"sessions":[]}"#.utf8)
+        let missingApiVersion = Data(#"{"schemaVersion":2,"connected":true,"sessions":[]}"#.utf8)
         do {
             _ = try MonitorSnapshot.decode(missingApiVersion)
             throw CheckError.failed("a missing monitorApiVersion must be rejected, not defaulted")
@@ -611,11 +617,11 @@ enum MonitorModelChecks {
     /// exactly what it's looking at, and knows it's too old for it).
     private static func compatibilityDistinguishesIncompatibleFromUpdateRequired() throws {
         let malformedCases = [
-            #"{"monitorApiVersion":"1.0"}"#, // missing schemaVersion entirely
-            #"{"schemaVersion":"1","monitorApiVersion":"1.0"}"#, // schemaVersion is not a number
-            #"{"schemaVersion":1}"#, // missing monitorApiVersion entirely
-            #"{"schemaVersion":1,"monitorApiVersion":"bad"}"#, // unparseable version string
-            #"{"schemaVersion":1,"monitorApiVersion":"1"}"# // missing minor component
+            #"{"monitorApiVersion":"2.0"}"#, // missing schemaVersion entirely
+            #"{"schemaVersion":"2","monitorApiVersion":"2.0"}"#, // schemaVersion is not a number
+            #"{"schemaVersion":2}"#, // missing monitorApiVersion entirely
+            #"{"schemaVersion":2,"monitorApiVersion":"bad"}"#, // unparseable version string
+            #"{"schemaVersion":2,"monitorApiVersion":"2"}"# // missing minor component
         ]
         for json in malformedCases {
             do {
@@ -630,8 +636,10 @@ enum MonitorModelChecks {
         }
 
         let updateRequiredCases = [
-            #"{"schemaVersion":2,"monitorApiVersion":"1.0"}"#, // well-formed but unsupported schema major
-            #"{"schemaVersion":1,"monitorApiVersion":"2.0"}"# // well-formed but unsupported API major
+            #"{"schemaVersion":1,"monitorApiVersion":"2.0"}"#, // a v1 monitor: canonical events are v2-only
+            #"{"schemaVersion":3,"monitorApiVersion":"2.0"}"#, // well-formed but unsupported schema major
+            #"{"schemaVersion":2,"monitorApiVersion":"1.0"}"#, // a v1 API behind a v2 schema
+            #"{"schemaVersion":2,"monitorApiVersion":"3.0"}"# // well-formed but unsupported API major
         ]
         for json in updateRequiredCases {
             do {
@@ -660,8 +668,8 @@ enum MonitorModelChecks {
     private static func monitorMetaDecodesGatewayIdentityAndToleratesNullSetupValues() throws {
         let data = Data(#"""
         {
-          "schemaVersion":1,
-          "monitorApiVersion":"1.0",
+          "schemaVersion":2,
+          "monitorApiVersion":"2.1",
           "sidecarVersion":"0.4.0",
           "sidecarBuildId":"sidecar-build",
           "gatewayIdentity":{"rootId":"root-1","gatewayApiVersion":1,"gatewayVersion":null,"gatewayBuildId":null},
@@ -669,8 +677,8 @@ enum MonitorModelChecks {
         }
         """#.utf8)
         let meta = try MonitorMeta.decode(data)
-        try check(meta.schemaVersion == 1, "meta should decode the schema version")
-        try check(meta.monitorApiVersion == "1.0", "meta should decode the monitor API version")
+        try check(meta.schemaVersion == 2, "meta should decode the schema version")
+        try check(meta.monitorApiVersion == "2.1", "an additive minor version must stay compatible")
         try check(meta.sidecarVersion == "0.4.0", "meta should decode the sidecar version")
         try check(meta.sidecarBuildId == "sidecar-build", "meta should decode the sidecar build id")
         try check(meta.gatewayIdentity.rootId == "root-1", "meta should decode the gateway identity root id")
@@ -681,7 +689,7 @@ enum MonitorModelChecks {
     }
 
     private static func monitorMetaRejectsMissingMonitorApiVersion() throws {
-        let data = Data(#"{"schemaVersion":1,"gatewayIdentity":{},"capabilities":{}}"#.utf8)
+        let data = Data(#"{"schemaVersion":2,"gatewayIdentity":{},"capabilities":{}}"#.utf8)
         do {
             _ = try MonitorMeta.decode(data)
             throw CheckError.failed("a missing monitorApiVersion must be rejected, not defaulted")
@@ -1183,19 +1191,45 @@ enum MonitorModelChecks {
         try check(snapshot.unavailableReason != nil, "a disconnected session should surface an unavailable reason")
     }
 
+    /// A canonical v2 event as the sidecar sends it. `key` defaults to one
+    /// derived from kind+sequence so fixtures only state what a check reads.
+    private static func canonicalEvent(
+        _ sessionId: String,
+        _ sequence: Int,
+        _ kind: String,
+        ts: String = "2026-08-07T00:00:00.000Z",
+        key: String? = nil,
+        turnId: String? = nil,
+        title: String? = nil,
+        body: String? = nil,
+        status: String? = nil
+    ) throws -> MonitorEvent {
+        let key = key ?? "\(kind):\(sequence)"
+        var value: [String: JSONValue] = [
+            "id": .string("\(sessionId)#\(key)"), "key": .string(key),
+            "sessionId": .string(sessionId), "sequence": .number(Double(sequence)),
+            "kind": .string(kind), "ts": .string(ts), "sources": .array([.string("gateway")])
+        ]
+        if let turnId { value["turnId"] = .string(turnId) }
+        if let title { value["title"] = .string(title) }
+        if let body { value["body"] = .string(body) }
+        if let status { value["status"] = .string(status) }
+        guard let event = MonitorEvent(.object(value)) else {
+            throw CheckError.failed("canonical event fixture did not decode")
+        }
+        return event
+    }
+
     private static func graphProjectionGroupsFrontdoorsAndAssignsWorkerLanes() throws {
         let sessionValue = JSONValue.object([
             "sessionId": .string("s1"), "provider": .string("codex"), "status": .string("running"),
             "cwd": .string("/tmp/project"), "opener": .string("grok"), "createdAt": .string("2026-08-07T00:00:00.000Z"),
             "turnId": .string("t1")
         ])
-        let eventValue = JSONValue.object([
-            "sessionId": .string("s1"), "sequence": .number(0), "type": .string("turn_start"),
-            "ts": .string("2026-08-07T00:05:00.000Z"), "turnId": .string("t1")
-        ])
-        guard let session = GatewaySession(sessionValue), let event = MonitorEvent(eventValue) else {
+        guard let session = GatewaySession(sessionValue) else {
             throw CheckError.failed("fixture creation failed")
         }
+        let event = try canonicalEvent("s1", 1, "turn_start", ts: "2026-08-07T00:05:00.000Z", turnId: "t1")
         let projection = GraphProjection.make(sessions: [session], eventsBySession: ["s1": [event]])
         try check(projection.groups.count == 1, "frontdoor grouping failed")
         try check(projection.groups.first?.opener == "grok", "frontdoor opener failed")
@@ -1213,37 +1247,30 @@ enum MonitorModelChecks {
                 "openerInstanceId": .string("main-1"), "turnId": .string(turnId)
             ])
         }
-        let firstFixtures: [[String: JSONValue]] = [
-            ["sequence": .number(0), "type": .string("turn_start"), "ts": .string("2026-08-07T00:09:00.000Z"), "turnId": .string("t1"), "text": .string("first prompt")],
-            ["sequence": .number(1), "type": .string("agent_message_chunk"), "ts": .string("2026-08-07T00:09:01.000Z"), "turnId": .string("t1"), "text": .string("progress")],
-            ["sequence": .number(2), "type": .string("tool_call"), "ts": .string("2026-08-07T00:09:02.000Z"), "turnId": .string("t1")],
-            ["sequence": .number(3), "type": .string("agent_message_chunk"), "ts": .string("2026-08-07T00:09:03.000Z"), "turnId": .string("t1"), "text": .string("final answer")],
-            ["sequence": .number(4), "type": .string("tool_call_update"), "ts": .string("2026-08-07T00:09:04.000Z"), "turnId": .string("t1")]
-        ]
-        let secondFixtures: [[String: JSONValue]] = [
-            ["sequence": .number(5), "type": .string("turn_start"), "ts": .string("2026-08-07T00:09:30.000Z"), "turnId": .string("t2"), "text": .string("second prompt")],
-            ["sequence": .number(6), "type": .string("agent_message_chunk"), "ts": .string("2026-08-07T00:09:31.000Z"), "turnId": .string("t2"), "text": .string("second return")]
-        ]
         guard let first = GatewaySession(running("s1", turnId: "t1")),
               let second = GatewaySession(running("s2", turnId: "t2")) else {
             throw CheckError.failed("turn fixture creation failed")
         }
-        func events(_ fixtures: [[String: JSONValue]], sessionId: String) -> [MonitorEvent] {
-            fixtures.compactMap { fixture in
-                var value = fixture
-                value["sessionId"] = .string(sessionId)
-                return MonitorEvent(.object(value))
-            }
-        }
+        // A tool call is ONE event whose status finished; messages arrive whole.
+        let firstEvents = try [
+            canonicalEvent("s1", 1, "turn_start", ts: "2026-08-07T00:09:00.000Z", turnId: "t1", title: "first prompt", body: "first prompt"),
+            canonicalEvent("s1", 2, "agent_message", ts: "2026-08-07T00:09:01.000Z", turnId: "t1", body: "progress"),
+            canonicalEvent("s1", 3, "tool_call", ts: "2026-08-07T00:09:02.000Z", turnId: "t1", title: "Read: a", status: "completed"),
+            canonicalEvent("s1", 4, "agent_message", ts: "2026-08-07T00:09:03.000Z", turnId: "t1", body: "final answer")
+        ]
+        let secondEvents = try [
+            canonicalEvent("s2", 1, "turn_start", ts: "2026-08-07T00:09:30.000Z", turnId: "t2", body: "second prompt"),
+            canonicalEvent("s2", 2, "agent_message", ts: "2026-08-07T00:09:31.000Z", turnId: "t2", body: "second return")
+        ]
         let projection = GraphProjection.make(
             sessions: [first, second],
-            eventsBySession: ["s1": events(firstFixtures, sessionId: "s1"), "s2": events(secondFixtures, sessionId: "s2")]
+            eventsBySession: ["s1": firstEvents, "s2": secondEvents]
         )
         let turns = projection.lanes.flatMap(\.turns)
         try check(turns.count == 2, "each live session should collapse into one human-readable turn")
         try check(turns[0].prompt == "first prompt", "prompt should come from turn_start")
         try check(turns[0].response == "final answer", "return should keep the final segment after a tool boundary")
-        try check(turns[0].events.count == 5, "a turn should retain every event for node detail inspection")
+        try check(turns[0].events.count == 4, "a turn should retain every event for node detail inspection")
         try check(turns[0].progress == 0.1 && turns[1].progress == 0.9, "short live bursts should use the canvas height")
     }
 
@@ -1253,21 +1280,16 @@ enum MonitorModelChecks {
             "cwd": .string("/tmp/project"), "opener": .string("codex"),
             "openerInstanceId": .string("main-1"), "turnId": .string("current")
         ])
-        let fixtures: [[String: JSONValue]] = [
-            ["sequence": .number(0), "type": .string("turn_start"), "ts": .string("2026-08-07T00:00:00.000Z"), "turnId": .string("previous"), "text": .string("old prompt")],
-            ["sequence": .number(1), "type": .string("turn_end"), "ts": .string("2026-08-07T00:01:00.000Z"), "turnId": .string("previous")],
-            ["sequence": .number(2), "type": .string("turn_start"), "ts": .string("2026-08-07T00:02:00.000Z"), "turnId": .string("current"), "text": .string("long running prompt")],
-            ["sequence": .number(3), "type": .string("turn_start"), "ts": .string("2026-08-07T00:59:00.000Z"), "turnId": .string("recent-history"), "text": .string("must stay out of Live")],
-            ["sequence": .number(4), "type": .string("turn_end"), "ts": .string("2026-08-07T00:59:01.000Z"), "turnId": .string("recent-history")]
-        ]
         guard let session = GatewaySession(sessionValue) else {
             throw CheckError.failed("live turn fixture creation failed")
         }
-        let events = fixtures.compactMap { fixture -> MonitorEvent? in
-            var value = fixture
-            value["sessionId"] = .string("s1")
-            return MonitorEvent(.object(value))
-        }
+        let events = try [
+            canonicalEvent("s1", 1, "turn_start", ts: "2026-08-07T00:00:00.000Z", turnId: "previous", body: "old prompt"),
+            canonicalEvent("s1", 2, "turn_end", ts: "2026-08-07T00:01:00.000Z", turnId: "previous", status: "completed"),
+            canonicalEvent("s1", 3, "turn_start", ts: "2026-08-07T00:02:00.000Z", turnId: "current", body: "long running prompt"),
+            canonicalEvent("s1", 4, "turn_start", ts: "2026-08-07T00:59:00.000Z", turnId: "recent-history", body: "must stay out of Live"),
+            canonicalEvent("s1", 5, "turn_end", ts: "2026-08-07T00:59:01.000Z", turnId: "recent-history", status: "completed")
+        ]
 
         let projection = GraphProjection.make(sessions: [session], eventsBySession: ["s1": events])
         let turns = projection.lanes.first?.turns ?? []
@@ -1287,27 +1309,22 @@ enum MonitorModelChecks {
         }
         var values: [MonitorEvent] = []
         for index in 0..<180 {
-            for (offset, type) in ["turn_start", "turn_end"].enumerated() {
-                let value = JSONValue.object([
-                    "sessionId": .string("large"), "sequence": .number(Double(index * 2 + offset)),
-                    "type": .string(type), "ts": .string("2026-08-07T00:09:00.000Z"),
-                    "turnId": .string("done-\(index)"), "text": .string("done")
-                ])
-                if let event = MonitorEvent(value) { values.append(event) }
+            for (offset, kind) in ["turn_start", "turn_end"].enumerated() {
+                values.append(try canonicalEvent(
+                    "large", index * 2 + offset + 1, kind, ts: "2026-08-07T00:09:00.000Z",
+                    turnId: "done-\(index)", body: "done"
+                ))
             }
         }
-        if let start = MonitorEvent(.object([
-            "sessionId": .string("large"), "sequence": .number(1_000), "type": .string("turn_start"),
-            "ts": .string("2026-08-07T00:09:30.000Z"), "turnId": .string("active"),
-            "text": .string(String(repeating: "p", count: 6_000))
-        ])) { values.append(start) }
+        values.append(try canonicalEvent(
+            "large", 1_000, "turn_start", ts: "2026-08-07T00:09:30.000Z",
+            turnId: "active", body: String(repeating: "p", count: 6_000)
+        ))
         for index in 0..<300 {
-            let value = JSONValue.object([
-                "sessionId": .string("large"), "sequence": .number(Double(1_001 + index)),
-                "type": .string("agent_message_chunk"), "ts": .string("2026-08-07T00:09:31.000Z"),
-                "turnId": .string("active"), "text": .string(String(repeating: "r", count: 100))
-            ])
-            if let event = MonitorEvent(value) { values.append(event) }
+            values.append(try canonicalEvent(
+                "large", 1_001 + index, index.isMultiple(of: 2) ? "agent_message" : "agent_thought",
+                ts: "2026-08-07T00:09:31.000Z", turnId: "active", body: String(repeating: "r", count: 100)
+            ))
         }
 
         let projection = GraphProjection.make(sessions: [session], eventsBySession: ["large": values])
@@ -1320,89 +1337,92 @@ enum MonitorModelChecks {
         try check(active.response.count <= 12_001, "a live response should be bounded")
     }
 
-    /// The detail panes lead with `bodyText`, so it must follow the producers'
-    /// real shapes: `src/gateway-service.js` flattens chunks into `text` but
-    /// serializes tool updates into `text` while keeping the real object in
-    /// `data` — reading `text` there would print JSON, which is exactly what
-    /// the body is supposed to replace.
-    private static func eventBodyTextSurfacesReadableTextInsteadOfTheJSONEnvelope() throws {
-        func event(_ fields: [String: JSONValue]) throws -> MonitorEvent {
-            var value = fields
-            value["sessionId"] = .string("s1")
-            value["ts"] = .string("2026-08-07T00:00:00.000Z")
-            guard let event = MonitorEvent(.object(value)) else {
-                throw CheckError.failed("body text fixture creation failed")
-            }
-            return event
-        }
+    /// v2 events are display-ready: title/body come straight from the wire,
+    /// the id is the stable `<sessionId>#<key>`, and an event that names
+    /// neither id nor key is rejected rather than given a random identity.
+    private static func canonicalEventsDecodeTitleBodyStatusAndStableIds() throws {
+        let tool = try canonicalEvent("s1", 3, "tool_call", key: "tool:call-1", title: "Bash: ls", body: "a\nb", status: "running")
+        try check(tool.id == "s1#tool:call-1" && tool.key == "tool:call-1", "the wire id is kept")
+        try check(tool.summary == "Bash: ls", "the summary is the sidecar's title")
+        try check(tool.isInFlight && !tool.isFailed, "running is in flight")
+        try check(tool.kindLabel == "tool call", "kind labels read as words")
 
-        let chunk = try event([
-            "sequence": .number(0), "type": .string("agent_message_chunk"),
-            "text": .string("리팩터링을 마쳤습니다.")
-        ])
-        try check(chunk.bodyText == "리팩터링을 마쳤습니다.", "a chunk's top-level text is the body verbatim")
+        let message = try canonicalEvent("s1", 4, "agent_message", body: "첫 줄\n둘째 줄")
+        try check(message.summary == "첫 줄 둘째 줄", "without a title the summary is the body's head on one line")
+        try check(message.kindLabel == "agent response", "agent messages read as a response")
 
-        // The gateway's generic tail: `text` is the serialized update, `data`
-        // the real one, and the result sits in a nested ACP content wrapper.
-        let update = try event([
-            "sequence": .number(1), "type": .string("tool_call_update"),
-            "text": .string(#"{"sessionUpdate":"tool_call_update","toolCallId":"tool-1"}"#),
-            "data": .object([
-                "sessionUpdate": .string("tool_call_update"),
-                "toolCallId": .string("tool-1"),
-                "status": .string("completed"),
-                "title": .string("Read file"),
-                "content": .array([
-                    .object(["type": .string("content"), "content": .object(["type": .string("text"), "text": .string("line one")])]),
-                    .object(["type": .string("content"), "content": .object(["type": .string("text"), "text": .string("line two")])])
-                ])
-            ])
-        ])
-        guard let updateBody = update.bodyText else {
-            throw CheckError.failed("a completed tool call must surface what it returned")
-        }
-        try check(updateBody.contains("line one") && updateBody.contains("line two"), "every text part of the result must be joined into the body")
-        try check(updateBody.contains("Read file"), "the tool's title should introduce its result")
-        try check(!updateBody.contains("toolCallId"), "the serialized envelope must never leak into the body")
+        let bare = try canonicalEvent("s1", 5, "turn_end", status: "failed")
+        try check(bare.title == nil && bare.body == nil, "missing title/body stay nil")
+        try check(bare.summary == "turn end" && bare.isFailed, "a bare event falls back to its kind")
 
-        // Nothing readable: the raw JSON view stays the only sensible display.
-        let ended = try event(["sequence": .number(2), "type": .string("turn_end"), "stopReason": .string("end_turn")])
-        try check(ended.bodyText == nil, "an event with no text must report no body rather than a fabricated one")
+        let keyOnly = MonitorEvent(.object([
+            "sessionId": .string("s1"), "key": .string("turn:t1"), "kind": .string("turn_start"),
+            "title": .string("   ")
+        ]))
+        try check(keyOnly?.id == "s1#turn:t1", "a missing id is derived from the key, the contract's own rule")
+        try check(keyOnly?.title == nil, "a blank title is no title")
+        try check(keyOnly?.sequence == nil && keyOnly?.status == nil && keyOnly?.detail.isEmpty == true,
+                  "missing optional fields decode as nil/empty")
 
-        let started = try event([
-            "sequence": .number(3), "type": .string("tool_call"),
-            "text": .string(#"{"sessionUpdate":"tool_call"}"#),
-            "data": .object([
-                "toolCallId": .string("tool-2"), "title": .string("Edit file"),
-                "rawInput": .object(["path": .string("/tmp/a.txt")])
-            ])
-        ])
-        try check(started.bodyText?.contains("Edit file") == true, "a starting tool call is identified by its title")
-        try check(started.bodyText?.contains("/tmp/a.txt") == true, "a starting tool call should summarize its input")
+        let anonymous = MonitorEvent(.object([
+            "sessionId": .string("s1"), "sequence": .number(1), "kind": .string("turn_start")
+        ]))
+        try check(anonymous == nil, "an event without id or key has no stable identity and must be rejected")
+        let legacy = MonitorEvent(.object([
+            "sessionId": .string("s1"), "sequence": .number(1), "type": .string("agent_message_chunk"), "text": .string("x")
+        ]))
+        try check(legacy == nil, "a v1 raw event (type/text) is not a canonical event")
+    }
 
-        // local-transcript.js writes a human summary into `text` and emits no
-        // `data`, so the same tool types must stay readable from that producer.
-        let local = try event([
-            "sequence": .number(4), "type": .string("tool_call"),
-            "source": .string("local-transcript"), "toolCallId": .string("call-1"),
-            "text": .string("exec: sqlite3 state.db")
-        ])
-        try check(local.bodyText == "exec: sqlite3 state.db", "a local transcript summary is already the body")
+    /// The v2 `events` frame rule: same id replaces in place, a new id is
+    /// inserted, and the bucket stays ordered by ts then sequence.
+    private static func eventsFrameUpsertReplacesInsertsAndOrders() throws {
+        let start = try canonicalEvent("s1", 1, "turn_start", ts: "2026-08-07T00:00:00.000Z", key: "turn:t1")
+        let running = try canonicalEvent("s1", 2, "tool_call", ts: "2026-08-07T00:00:02.000Z", key: "tool:c1",
+                                         title: "Bash: make", status: "running")
+        let bucket = upsertMonitorEvents([running, start], into: [], limit: 10)
+        try check(bucket.map(\.id) == ["s1#turn:t1", "s1#tool:c1"], "inserted events must sort by ts")
 
-        let permission = try event([
-            "sequence": .number(5), "type": .string("permission_request"),
-            "requestId": .string("req-1"),
-            "toolCall": .object(["toolCallId": .string("tool-3"), "title": .string("Edit file")])
-        ])
-        try check(permission.bodyText == "Edit file · 권한 요청", "a permission request should name the tool it is asking about")
+        // The call finishes: same id, same first-seen ts, new status/body.
+        let finished = try canonicalEvent("s1", 2, "tool_call", ts: "2026-08-07T00:00:02.000Z", key: "tool:c1",
+                                          title: "Bash: make", body: "ok", status: "completed")
+        // A message first seen earlier than the call but delivered later, and
+        // a same-ms event whose lower sequence must lead.
+        let earlier = try canonicalEvent("s1", 3, "agent_message", ts: "2026-08-07T00:00:01.000Z", key: "msg:t1:1", body: "hi")
+        let tieLate = try canonicalEvent("s1", 5, "agent_thought", ts: "2026-08-07T00:00:03.000Z", key: "thought:t1:2")
+        let tieEarly = try canonicalEvent("s1", 4, "agent_message", ts: "2026-08-07T00:00:03.000Z", key: "msg:t1:2")
+        let next = upsertMonitorEvents([finished, tieLate, earlier, tieEarly], into: bucket, limit: 10)
+        try check(next.map(\.key) == ["turn:t1", "msg:t1:1", "tool:c1", "msg:t1:2", "thought:t1:2"],
+                  "upsert must order by ts then sequence: \(next.map(\.key))")
+        try check(next.filter { $0.key == "tool:c1" }.count == 1, "the same id must replace, never duplicate")
+        try check(next.first { $0.key == "tool:c1" }?.status == "completed", "the replacement carries the new status")
+        try check(next.first { $0.key == "tool:c1" }?.body == "ok", "the replacement carries the new body")
 
-        // Oversized updates keep only a truncated JSON head in `text`.
-        let truncated = try event([
-            "sequence": .number(6), "type": .string("tool_call_update"),
-            "text": .string(#"{"sessionUpdate":"tool_call_update","rawOutput":"가가가"#),
-            "dataTruncated": .bool(true)
-        ])
-        try check(truncated.bodyText == nil, "a truncated JSON head must not be presented as readable text")
+        let capped = upsertMonitorEvents([try canonicalEvent("s1", 6, "turn_end", ts: "2026-08-07T00:00:04.000Z")],
+                                         into: next, limit: 3)
+        try check(capped.map(\.sequence) == [4, 5, 6], "past the limit only the oldest events fall off")
+        try check(upsertMonitorEvents([], into: next, limit: 10) == next, "an empty frame changes nothing")
+    }
+
+    private static func sessionUsageDecodesOnlyKnownNumbers() throws {
+        try check(SessionUsage(nil) == nil && SessionUsage(.null) == nil, "no usage object means no usage")
+        try check(SessionUsage(.object(["inputTokens": .null, "outputTokens": .null])) == nil,
+                  "an all-null usage object means the provider said nothing")
+        let partial = SessionUsage(.object(["inputTokens": .number(10), "outputTokens": .number(5)]))
+        try check(partial?.total == 15, "total falls back to input + output")
+        try check(partial?.contextFraction == nil, "no context gauge without a window")
+        let full = SessionUsage(.object(["contextUsed": .number(300_000), "contextWindow": .number(200_000)]))
+        try check(full?.contextFraction == 1, "the context fraction is clamped to 1")
+        try check(formatTokenCount(950) == "950" && formatTokenCount(1_280) == "1.3K"
+                  && formatTokenCount(258_400) == "258K" && formatTokenCount(1_260_000) == "1.3M",
+                  "token counts abbreviate for small labels")
+        guard let session = GatewaySession(.object([
+            "sessionId": .string("s"), "usage": .object(["totalTokens": .number(7)]),
+            "usagePartial": .bool(true), "capabilities": .array([.string("status"), .number(1)])
+        ])) else { throw CheckError.failed("usage session fixture did not decode") }
+        try check(session.usage?.total == 7 && session.usagePartial, "session usage fields decode")
+        try check(session.capabilities == ["status"], "non-string capabilities are ignored")
+        try check(session.model == nil && session.withModel("codex") == "codex", "a nil model adds no tag")
     }
 
     /// Replays sidecar/test/fixtures/restart-blockers.json — the same file
@@ -1470,141 +1490,8 @@ enum MonitorModelChecks {
         try check(unpinned.pinnedNotice == nil, "an unpinned runtime must show no pin notice")
     }
 
-    /// A streamed answer is many chunk events; selecting any single one (the
-    /// sequence diagram's ×N node keeps the *last* fragment) must still show
-    /// the whole message, not its tail.
-    private static func mergedChunkBodyRebuildsTheWholeStreamedMessage() throws {
-        func event(_ fields: [String: JSONValue]) throws -> MonitorEvent {
-            var value = fields
-            value["sessionId"] = .string("s1")
-            value["turnId"] = value["turnId"] ?? .string("t1")
-            value["ts"] = .string("2026-08-07T00:00:00.000Z")
-            guard let event = MonitorEvent(.object(value)) else {
-                throw CheckError.failed("merged chunk fixture creation failed")
-            }
-            return event
-        }
-
-        // Gateway token deltas: joined verbatim, paragraph break at the same
-        // boundaries the gateway's own result logic uses.
-        let bucket = try [
-            event(["sequence": .number(0), "type": .string("turn_start"), "text": .string("인사해")]),
-            event(["sequence": .number(1), "type": .string("agent_message_chunk"), "text": .string("안")]),
-            event(["sequence": .number(2), "type": .string("agent_message_chunk"), "text": .string("녕")]),
-            event(["sequence": .number(3), "type": .string("tool_call"), "text": .string("{}")]),
-            event(["sequence": .number(4), "type": .string("agent_message_chunk"), "text": .string("하세요")])
-        ]
-        guard let merged = mergedChunkBody(for: bucket[2], in: bucket) else {
-            throw CheckError.failed("a multi-fragment stream must merge")
-        }
-        try check(merged.text == "안녕\n\n하세요", "token deltas join verbatim and break at tool boundaries")
-        try check(merged.fragments == 3, "every fragment of the turn counts")
-
-        // Fragments from another turn must not bleed in.
-        let otherTurn = try event(["sequence": .number(9), "type": .string("agent_message_chunk"), "text": .string("다른 턴"), "turnId": .string("t2")])
-        guard let scoped = mergedChunkBody(for: bucket[1], in: bucket + [otherTurn]) else {
-            throw CheckError.failed("turn-scoped merge failed")
-        }
-        try check(!scoped.text.contains("다른 턴"), "merging is scoped to the selected fragment's turn")
-
-        // Local transcript chunks are complete messages: one paragraph each.
-        let localBucket = try [
-            event(["sequence": .number(0), "type": .string("agent_message_chunk"), "source": .string("local-transcript"), "text": .string("첫 메시지")]),
-            event(["sequence": .number(1), "type": .string("agent_message_chunk"), "source": .string("local-transcript"), "text": .string("둘째 메시지")])
-        ]
-        guard let local = mergedChunkBody(for: localBucket[1], in: localBucket) else {
-            throw CheckError.failed("local chunks must merge")
-        }
-        try check(local.text == "첫 메시지\n\n둘째 메시지", "complete local messages must not be smashed together")
-
-        // A lone fragment and a non-chunk event both defer to bodyText.
-        let single = try event(["sequence": .number(0), "type": .string("agent_message_chunk"), "text": .string("혼자")])
-        try check(mergedChunkBody(for: single, in: [single]) == nil, "a lone fragment needs no merging")
-        try check(mergedChunkBody(for: bucket[3], in: bucket) == nil, "non-chunk events never merge")
-    }
-
     private static func check(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         if !condition() { throw CheckError.failed(message) }
-    }
-}
-
-/// Local replay of monitor-state mutations using public production types.
-/// Mirrors current `MonitorState` archive/cap/dedup so Swift can consume the
-/// shared trace inputs instead of only decoding the final expected snapshot.
-private struct TraceReplay {
-    var sessions: [GatewaySession] = []
-    var eventsBySession: [String: [MonitorEvent]] = [:]
-    var historySessions: [GatewaySession] = []
-    var historyEventsBySession: [String: [MonitorEvent]] = [:]
-    var gateway: JSONValue?
-    var lastRemovedSessionIds: [String] = []
-    var cursorTruncated = false
-    var touchedState = false
-    let maxEventsPerSession: Int
-
-    var mergedSessions: [GatewaySession] {
-        var byId: [String: GatewaySession] = [:]
-        for session in historySessions { byId[session.sessionId] = session }
-        for session in sessions { byId[session.sessionId] = session }
-        return Array(byId.values)
-    }
-
-    var mergedEventRefs: Set<String> {
-        Set(
-            eventsBySession.values.joined().map { "\($0.sessionId):\($0.sequence ?? -1)" }
-            + historyEventsBySession.values.joined().map { "\($0.sessionId):\($0.sequence ?? -1)" }
-        )
-    }
-
-    mutating func setSessions(_ next: [GatewaySession]) {
-        touchedState = true
-        let nextIds = Set(next.map(\.sessionId))
-        let liveIds = Set(sessions.map(\.sessionId)).union(eventsBySession.keys)
-        lastRemovedSessionIds = liveIds.filter { !nextIds.contains($0) }
-        var sessionById: [String: GatewaySession] = [:]
-        for session in historySessions { sessionById[session.sessionId] = session }
-        for session in sessions { sessionById[session.sessionId] = session }
-        for sessionId in lastRemovedSessionIds {
-            archive(sessionId: sessionId, session: sessionById[sessionId])
-        }
-        sessions = next
-        for sessionId in lastRemovedSessionIds {
-            eventsBySession.removeValue(forKey: sessionId)
-        }
-    }
-
-    mutating func push(_ event: MonitorEvent) {
-        touchedState = true
-        var events = eventsBySession[event.sessionId] ?? []
-        if let sequence = event.sequence, events.contains(where: { $0.sequence == sequence }) { return }
-        events.append(event)
-        events.sort { left, right in
-            if (left.sequence ?? Int.max) != (right.sequence ?? Int.max) {
-                return (left.sequence ?? Int.max) < (right.sequence ?? Int.max)
-            }
-            return (left.timestamp ?? "") < (right.timestamp ?? "")
-        }
-        if events.count > maxEventsPerSession {
-            events.removeFirst(events.count - maxEventsPerSession)
-        }
-        eventsBySession[event.sessionId] = events
-    }
-
-    private mutating func archive(sessionId: String, session: GatewaySession?) {
-        let current = eventsBySession[sessionId] ?? []
-        guard let session, !current.isEmpty else { return }
-        historySessions.removeAll { $0.sessionId == sessionId }
-        historySessions.append(session)
-        var unique: [String: MonitorEvent] = [:]
-        for event in (historyEventsBySession[sessionId] ?? []) + current {
-            unique[event.sequence.map { "sequence:\($0)" } ?? event.id] = event
-        }
-        historyEventsBySession[sessionId] = unique.values.sorted { left, right in
-            if (left.sequence ?? Int.max) != (right.sequence ?? Int.max) {
-                return (left.sequence ?? Int.max) < (right.sequence ?? Int.max)
-            }
-            return (left.timestamp ?? "") < (right.timestamp ?? "")
-        }.suffix(maxEventsPerSession).map { $0 }
     }
 }
 

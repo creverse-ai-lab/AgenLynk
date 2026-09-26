@@ -13,25 +13,17 @@ struct SessionDetailView: View {
                 sessionConfigPanel(session)
                 Divider()
                 HSplitView {
-                    // A streamed response is dozens of chunk events; one row
-                    // per fragment reads as noise ("안", "녕", …). Runs collapse
-                    // into one row that previews the merged message — the same
-                    // collapsing the dashboard's sequence diagram applies.
-                    List(collapsedEvents, id: \.event.id, selection: $selectedEventId) { entry in
-                        EventRow(
-                            event: entry.event,
-                            session: session,
-                            collapsedCount: entry.count,
-                            summaryOverride: entry.count > 1
-                                ? mergedChunkBody(for: entry.event, in: events)?.text
-                                : nil
-                        )
-                        .tag(entry.event.id)
+                    // One row per canonical event: the sidecar already merged
+                    // a streamed response into one message and a tool call's
+                    // updates into the call itself.
+                    List(events, selection: $selectedEventId) { event in
+                        EventRow(event: event, session: session)
+                            .tag(event.id)
                     }
                     .frame(minWidth: 430)
                     ScrollView {
                         if let selectedEvent {
-                            EventBodyView(event: selectedEvent, siblings: events).padding(14)
+                            EventBodyView(event: selectedEvent).padding(14)
                         } else {
                             ContentUnavailableView("이벤트를 선택하세요", systemImage: "doc.text.magnifyingglass")
                         }
@@ -53,34 +45,20 @@ struct SessionDetailView: View {
     private var events: [MonitorEvent] { model.eventsBySession[sessionId ?? ""] ?? [] }
     private var selectedEvent: MonitorEvent? { events.first { $0.id == selectedEventId } }
 
-    /// Consecutive same-turn chunk runs fold into one row, represented by the
-    /// newest fragment (mirrors collapseSequenceEvents in EventSequenceView).
-    private var collapsedEvents: [(event: MonitorEvent, count: Int)] {
-        var result: [(event: MonitorEvent, count: Int)] = []
-        result.reserveCapacity(events.count)
-        for event in events {
-            if event.type == "agent_message_chunk" || event.type == "agent_thought_chunk",
-               let last = result.last,
-               last.event.type == event.type,
-               last.event.turnId == event.turnId {
-                result[result.count - 1] = (event, last.count + 1)
-            } else {
-                result.append((event, 1))
-            }
-        }
-        return result
-    }
-
     private func sessionHeader(_ session: GatewaySession) -> some View {
         HStack(spacing: 14) {
             Circle().fill(statusColor(session.status)).frame(width: 11, height: 11)
             VStack(alignment: .leading, spacing: 3) {
                 Text(session.displayName).font(.title3.weight(.semibold))
-                Text("\(session.provider) · \(session.model ?? "default") · \(session.status)")
+                Text("\(session.withModel(session.provider)) · \(session.status)")
                     .foregroundStyle(.secondary)
                 Text(session.cwd).font(.caption).foregroundStyle(.tertiary).textSelection(.enabled)
             }
             Spacer()
+            if let usage = session.usage {
+                SessionUsageView(usage: usage, partial: session.usagePartial)
+                    .frame(maxWidth: 220)
+            }
             VStack(alignment: .trailing) {
                 Text("Frontdoor").font(.caption).foregroundStyle(.secondary)
                 Text(session.opener ?? "unknown").font(.callout.weight(.medium))
@@ -149,32 +127,40 @@ struct SessionDetailView: View {
 
 /// One event rendered the way a reader asks about it: what it said first, the
 /// raw payload one disclosure away. Shared by the session detail pane and the
-/// dashboard inspector so both explain an event identically.
+/// dashboard inspector so both explain an event identically. `title` and
+/// `body` are the sidecar's display text, so nothing is dug out of the JSON.
 struct EventBodyView: View {
     let event: MonitorEvent
-    /// The event's whole session bucket. A streamed response is many chunk
-    /// events, and whichever single one got selected is just a fragment — with
-    /// the bucket in hand the pane can show the message they add up to.
-    var siblings: [MonitorEvent] = []
     /// Narrow inspector columns cut long bodies; a full-width pane scrolls
     /// instead and passes nil.
     var characterLimit: Int?
     var bodyFont: Font = .body
 
     var body: some View {
-        let merged = mergedChunkBody(for: event, in: siblings)
         VStack(alignment: .leading, spacing: 10) {
-            if let body = merged?.text ?? event.bodyText {
+            if let title = event.title, title != event.body {
+                Text(title)
+                    .font(bodyFont.weight(.semibold))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if let status = eventStatusLabel(event.status) {
+                Label(statusLine(status), systemImage: eventSymbol(event))
+                    .font(.caption)
+                    .foregroundStyle(eventColor(event))
+            }
+            if let input = event.detail["input"]?.stringValue, event.kind == "tool_call" {
+                codeBlock(input, label: "입력")
+            }
+            if let body = event.body {
                 if looksLikeCode(body) {
-                    codeBlock(body, label: "본문")
+                    codeBlock(body, label: event.kind == "tool_call" ? "출력" : "본문")
                 } else {
                     textBlock(body, font: bodyFont, label: "본문")
                 }
-                if let merged {
-                    Text("스트림 조각 \(merged.fragments)개를 합쳐 표시 · 원본 JSON은 선택한 조각의 것")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
+            }
+            if event.title != nil || event.body != nil {
                 DisclosureGroup("원본 JSON") {
                     rawPayload.padding(.top, 4)
                 }
@@ -188,6 +174,12 @@ struct EventBodyView: View {
         // shrink to it, and a vertical ScrollView keeps its bar at the trailing
         // edge only when its content actually fits that width.
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// "완료 · 1.2초" when the event says how long it took.
+    private func statusLine(_ status: String) -> String {
+        guard let milliseconds = event.detail["durationMs"]?.doubleValue else { return status }
+        return "\(status) · \(String(format: "%.1f", milliseconds / 1_000))초"
     }
 
     private var rawPayload: some View {
@@ -245,6 +237,45 @@ private func looksLikeCode(_ text: String) -> Bool {
     guard lines.count > 1 else { return false }
     let structured = lines.filter { $0.hasPrefix("  ") || $0.hasPrefix("\t") || $0.hasPrefix("+") || $0.hasPrefix("-") }
     return structured.count * 2 >= lines.count
+}
+
+/// A session's token totals and context gauge, shown only for what the source
+/// actually reports (every usage field is optional). Shared by the session
+/// header and the dashboard inspector.
+struct SessionUsageView: View {
+    let usage: SessionUsage
+    /// The totals cover only the part of a long transcript that was read.
+    var partial = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if let total = usage.total {
+                HStack(spacing: 6) {
+                    Text("토큰 \(formatTokenCount(total))\(partial ? "+" : "")")
+                        .font(.caption.weight(.medium).monospacedDigit())
+                    if let input = usage.inputTokens, let output = usage.outputTokens {
+                        Text("입력 \(formatTokenCount(input)) · 출력 \(formatTokenCount(output))")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .lineLimit(1)
+            }
+            if let fraction = usage.contextFraction,
+               let used = usage.contextUsed,
+               let window = usage.contextWindow {
+                ProgressView(value: fraction)
+                    .progressViewStyle(.linear)
+                    .controlSize(.small)
+                    .tint(contextColor(fraction))
+                Text("컨텍스트 \(contextPercentText(fraction)) · \(formatTokenCount(used)) / \(formatTokenCount(window))")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .help(partial ? "긴 transcript에서 읽은 부분만 합산한 값입니다." : "")
+    }
 }
 
 private struct SessionConfigRow: View {

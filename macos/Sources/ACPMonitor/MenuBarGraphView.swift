@@ -69,6 +69,12 @@ struct MenuBarLiveGraph: View {
                             .truncationMode(.head)
                     }
                     Spacer(minLength: 0)
+                    if let fraction = lane.session.usage?.contextFraction {
+                        Text(contextPercentText(fraction))
+                            .font(.system(size: 9).monospacedDigit())
+                            .foregroundStyle(contextColor(fraction))
+                            .help("컨텍스트 창 사용률")
+                    }
                 }
                 .padding(.horizontal, 6)
                 .frame(height: laneHeight)
@@ -157,16 +163,19 @@ struct MenuBarLiveGraph: View {
                 }
 
                 // The model runs at the newest end of the lane, so it is
-                // labelled there rather than in the project column.
-                let tagX = (points.last?.x ?? leadInset) + 12
-                let inFlight = points.last.map { !$0.turn.completed } ?? false
-                context.draw(
-                    Text(modelLabel(lane))
-                        .font(.system(size: 9, weight: inFlight ? .semibold : .regular))
-                        .foregroundColor(inFlight ? .green : .secondary),
-                    at: CGPoint(x: tagX, y: y),
-                    anchor: .leading
-                )
+                // labelled there rather than in the project column. No tag
+                // when the source does not report a model.
+                if let label = modelLabel(lane) {
+                    let tagX = (points.last?.x ?? leadInset) + 12
+                    let inFlight = points.last.map { !$0.turn.completed } ?? false
+                    context.draw(
+                        Text(label)
+                            .font(.system(size: 9, weight: inFlight ? .semibold : .regular))
+                            .foregroundColor(inFlight ? .green : .secondary),
+                        at: CGPoint(x: tagX, y: y),
+                        anchor: .leading
+                    )
+                }
             }
         }
         .overlay(alignment: .topLeading) { tooltipTargets(lanes) }
@@ -198,17 +207,18 @@ struct MenuBarLiveGraph: View {
     }
 
     /// Abbreviated so a long model id cannot push the tag past its reserved
-    /// width. The full value stays in the lane tooltip.
-    private func modelLabel(_ lane: GraphLane) -> String {
+    /// width. The full value stays in the lane tooltip. nil when the session
+    /// reports no model: v2 sends a real id or nothing.
+    private func modelLabel(_ lane: GraphLane) -> String? {
         let model = (lane.session.model ?? "").trimmingCharacters(in: .whitespaces)
-        let value = model.isEmpty ? lane.session.provider : model
-        return value.count > 18 ? String(value.prefix(17)) + "…" : value
+        guard !model.isEmpty else { return nil }
+        return model.count > 18 ? String(model.prefix(17)) + "…" : model
     }
 
     private func laneTooltip(_ lane: GraphLane) -> String {
         let role = lane.session.isFrontdoorRecord ? "Frontdoor" : "Worker"
         let cwd = lane.session.cwd.isEmpty ? lane.session.sessionId : lane.session.cwd
-        return "\(role) · \(lane.session.provider) · \(lane.session.model ?? "default")\n\(cwd)"
+        return "\(role) · \(lane.session.withModel(lane.session.provider))\n\(cwd)"
     }
 
     private func turnTooltip(lane: GraphLane, turn: GraphTurnPoint) -> String {

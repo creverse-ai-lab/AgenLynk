@@ -210,12 +210,12 @@ struct DashboardView: View {
         let latest = events.max(by: withinSessionEventOrder)
         let detail: String? = {
             guard let latest else { return session.title }
-            if let merged = mergedChunkBody(for: latest, in: events) { return merged.text }
-            if let body = latest.bodyText { return body }
-            let summary = latest.summary
-            return summary.isEmpty ? session.title : summary
+            // A tool call is named by its title ("Bash: ls"); its body is
+            // the output, which is not what "doing now" means.
+            if latest.kind == "tool_call" { return latest.title ?? latest.body ?? session.title }
+            return latest.body ?? latest.title ?? session.title
         }()
-        let type = latest?.type ?? ""
+        let kind = latest?.kind ?? ""
 
         switch session.status {
         case "waiting_permission":
@@ -226,19 +226,23 @@ struct DashboardView: View {
             break
         }
         if session.isActive {
-            if type.hasPrefix("tool_call") {
-                return SessionActivity(symbol: "wrench.and.screwdriver.fill", color: .cyan, headline: "도구 실행 중", detail: detail)
+            if kind == "tool_call" {
+                let running = latest?.isInFlight ?? false
+                return SessionActivity(
+                    symbol: "wrench.and.screwdriver.fill", color: .cyan,
+                    headline: running ? "도구 실행 중" : "도구 실행 완료", detail: detail
+                )
             }
-            if type == "agent_thought_chunk" {
+            if kind == "agent_thought" {
                 return SessionActivity(symbol: "brain.head.profile", color: .purple, headline: "사고 중", detail: detail)
             }
-            if type == "agent_message_chunk" {
+            if kind == "agent_message" {
                 return SessionActivity(symbol: "text.bubble.fill", color: .blue, headline: "답변 생성 중", detail: detail)
             }
             return SessionActivity(symbol: "bolt.fill", color: .green, headline: "작업 진행 중", detail: detail)
         }
         switch session.status {
-        case "ready", "idle", "end_turn", "completed", "closed":
+        case "idle", "ready", "end_turn", "completed", "closed":
             return SessionActivity(symbol: "checkmark.circle.fill", color: .green, headline: "최근 작업 완료", detail: detail)
         case "error":
             return SessionActivity(symbol: "exclamationmark.triangle.fill", color: .red, headline: "오류로 중단됨", detail: detail)
@@ -254,22 +258,26 @@ struct DashboardView: View {
                     if let event = model.selectedEvent {
                         if let session = model.visibleLogSessions.first(where: { $0.sessionId == event.sessionId }) {
                             LabeledContent("세션", value: session.provider.capitalized)
-                            LabeledContent("모델", value: session.model ?? "default")
+                            if let model = session.model {
+                                LabeledContent("모델", value: model)
+                            }
                             LabeledContent("역할", value: session.isFrontdoorRecord ? "Frontdoor" : "Worker")
+                            if let usage = session.usage {
+                                SessionUsageView(usage: usage, partial: session.usagePartial)
+                            }
                         }
-                        LabeledContent("이벤트", value: event.type.replacingOccurrences(of: "_", with: " "))
+                        LabeledContent("이벤트", value: event.kindLabel)
+                        if let status = eventStatusLabel(event.status) {
+                            LabeledContent("상태", value: status)
+                        }
                         LabeledContent("시간", value: shortTime(event.timestamp))
                             .lineLimit(1)
                         Divider()
                         // Same body-first treatment as the session detail pane;
                         // this column is an inspector, not an export, so the
-                        // JSON only has to stay reachable, not lead. Siblings
-                        // let a selected stream fragment show its whole message
-                        // — the sequence diagram collapses a chunk run into one
-                        // ×N node whose representative is the *last* fragment.
+                        // JSON only has to stay reachable, not lead.
                         EventBodyView(
                             event: event,
-                            siblings: model.eventsBySession[event.sessionId] ?? [],
                             characterLimit: 4_000,
                             bodyFont: .caption
                         )
@@ -414,7 +422,7 @@ private struct SequenceSelectionContext: View {
                         // The LOCAL/ACP source is not something a reader acts
                         // on; role and model are.
                         ContextPill(text: session.isFrontdoorRecord ? "Frontdoor" : "Worker", color: .secondary)
-                        Text("\(session.provider.capitalized) · \(session.model ?? "default")")
+                        Text(session.withModel(session.provider.capitalized))
                             .font(.caption2.weight(.medium))
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
@@ -524,26 +532,21 @@ struct FrontdoorRow: View {
 struct EventRow: View {
     let event: MonitorEvent
     let session: GatewaySession?
-    /// >1 when this row stands for a whole run of streamed chunks.
-    var collapsedCount: Int = 1
-    /// The run's merged text — the representative event is only its newest
-    /// fragment, so its own summary would show the tail of the message.
-    var summaryOverride: String?
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: eventSymbol(event.type))
-                .foregroundStyle(eventColor(event.type)).frame(width: 18)
+            Image(systemName: eventSymbol(event))
+                .foregroundStyle(eventColor(event)).frame(width: 18)
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
-                    Text(event.type.replacingOccurrences(of: "_", with: " ")).font(.callout.weight(.medium))
-                    if collapsedCount > 1 {
-                        Text("×\(collapsedCount)").font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                    Text(event.kindLabel).font(.callout.weight(.medium))
+                    if let status = eventStatusLabel(event.status) {
+                        Text(status).font(.caption2).foregroundStyle(statusColor(event.status ?? ""))
                     }
                     Spacer()
                     Text(shortTime(event.timestamp)).font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
                 }
-                Text(summaryOverride.map { String($0.replacingOccurrences(of: "\n", with: " ").prefix(140)) } ?? event.summary)
+                Text(event.summary)
                     .font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 if let session { Text(session.displayName).font(.caption2).foregroundStyle(.tertiary) }
             }
