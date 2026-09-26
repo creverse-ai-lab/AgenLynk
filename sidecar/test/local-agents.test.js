@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { detectClaudeSessions } from "../src/local-agents/claude.js";
 import { discover, poll, prune } from "../src/local-agents/codex.js";
@@ -214,7 +214,7 @@ test("a grok CLI session adopts the gateway workers its own log proves it opened
   });
 });
 
-test("a grok process is only reported while its transcript shows an open turn", async () => {
+test("an interactive grok is running during a turn and ready between turns", async () => {
   await withTempDirectory(async (root) => {
     const active = join(root, "%2Fwork", "grok-session", "events.jsonl");
     await mkdir(join(root, "%2Fwork", "grok-session"), { recursive: true });
@@ -233,7 +233,11 @@ test("a grok process is only reported while its transcript shows an open turn", 
     const parents = new Map([[linkKey("grok", "grok-session"), ["one", 100]]]);
 
     const states = await cliProcessStates(processes, eventPaths, 100, {}, parents);
-    assert.deepEqual(Object.keys(states), ["grok:grok-session"]);
+    const endedKey = `grok:${basename(dirname(ended))}`;
+    assert.deepEqual(Object.keys(states).sort(), ["grok:grok-session", endedKey].sort());
+    assert.equal(states["grok:grok-session"].state, "running");
+    assert.equal(states[endedKey].state, "ready", "a live interactive grok between turns waits for its user");
+    assert.equal(states["grok:grok-session"].transcript, dirname(active));
     assert.equal(states["grok:grok-session"].session, "grok-session");
     assert.equal(states["grok:grok-session"].parent, "one");
     assert.equal(states["grok:grok-session"].cwd, "/work", "the session directory encodes the cwd");

@@ -1,21 +1,34 @@
+import { GatewayEventNormalizer } from "../normalize/acp.js";
+import { EventStore } from "../store/event-store.js";
+
 // Wire contract for the native Monitor app's HTTP/SSE API, independent of
 // GATEWAY_API_VERSION (the Gateway daemon's own setup/subscribe handshake).
 // Bump MONITOR_SCHEMA_VERSION only when a field is removed, renamed, or
 // changes meaning; additive fields do not require a bump.
-export const MONITOR_SCHEMA_VERSION = 1;
-export const MONITOR_API_VERSION = "1.0";
+//
+// v2: events are canonical (contracts/monitor/v2): `kind` instead of the
+// source's `type`, a store-assigned `sequence`, a stable `id`, and the same
+// shape whether the Gateway, a transcript, or a hook produced them.
+export const MONITOR_SCHEMA_VERSION = 2;
+export const MONITOR_API_VERSION = "2.0";
 const MAX_PENDING_SSE_FRAMES = 512;
 const MAX_PENDING_SSE_BYTES = 4 * 1024 * 1024;
+// Remembered Gateway event identities per session, for replay dedupe.
+const MAX_GATEWAY_IDENTITIES = 20_000;
 
 export class MonitorState {
   constructor({
     maxEventsPerSession = 2000,
     historyRetentionMs = 65 * 60 * 1000,
-    sseBackpressureTimeoutMs = 10_000
+    sseBackpressureTimeoutMs = 10_000,
+    persistence = null
   } = {}) {
     this.maxEventsPerSession = maxEventsPerSession;
     this.historyRetentionMs = historyRetentionMs;
+    this.persistence = persistence;
+    this.store = new EventStore({ maxEventsPerSession, persistence });
     this.sessions = new Map();
+    this.sessionSignatures = new Map();
     // Raw Gateway session source retained inside the canonical state owner so
     // transport callbacks do not maintain a competing module-level copy.
     this.gatewaySourceSessions = [];
@@ -24,13 +37,16 @@ export class MonitorState {
     // the merge keeps the last proven attribution here for the session's
     // lifetime (see mergeMonitorSessions).
     this.workerTopology = new Map();
-    this.eventsBySession = new Map();
-    this.eventSequencesBySession = new Map();
+    // Gateway subscription bookkeeping: one stateful normalizer per session
+    // (chunks stream one at a time), the highest daemon sequence seen (the
+    // resubscribe cursor), and the identities already applied. The identity
+    // includes ts, so a restarted daemon that renumbers from 0 is not
+    // mistaken for a replay of what the monitor already holds.
+    this.gatewayNormalizers = new Map();
+    this.gatewayCursors = new Map();
+    this.gatewaySeen = new Map();
     this.historySessions = new Map();
-    this.historyEventsBySession = new Map();
     this.historyExpiresAt = new Map();
-    this.externalEventSessionIds = new Set();
-    this.externalEventSignatures = new Map();
     this.closedSessionIds = new Set();
     this.closedSessionOrder = [];
     this.tasks = [];
@@ -103,11 +119,22 @@ export class MonitorState {
         && typeof session.sessionId === "string" && session.sessionId
         && !this.closedSessionIds.has(session.sessionId))
       .map((session) => [session.sessionId, session]));
-    const removedSessionIds = [...new Set([...this.sessions.keys(), ...this.eventsBySession.keys()])]
-      .filter((sessionId) => !nextSessions.has(sessionId));
+    const removedSessionIds = [...this.sessions.keys()].filter((sessionId) => !nextSessions.has(sessionId));
     for (const sessionId of removedSessionIds) this.removeSession(sessionId);
-    const changed = sessionMapSignature(this.sessions) !== sessionMapSignature(nextSessions);
+    let changed = removedSessionIds.length > 0;
+    const nextSignatures = new Map();
+    for (const [sessionId, session] of nextSessions) {
+      const signature = JSON.stringify(session);
+      nextSignatures.set(sessionId, signature);
+      if (this.sessionSignatures.get(sessionId) === signature) continue;
+      changed = true;
+      this.persistence?.writeSession(session);
+      // A session that came back is live again, not history.
+      this.historySessions.delete(sessionId);
+      this.historyExpiresAt.delete(sessionId);
+    }
     this.sessions = nextSessions;
+    this.sessionSignatures = nextSignatures;
     if (changed) this.revision += 1;
     return removedSessionIds;
   }
@@ -116,14 +143,23 @@ export class MonitorState {
     this.gatewaySourceSessions = Array.isArray(list) ? list : [];
   }
 
+  /**
+   * Moves a live session to history. Its events stay in the store (and in the
+   * persisted history), so nothing has to be copied.
+   */
   removeSession(sessionId, { closed = false } = {}) {
-    const existed = this.sessions.has(sessionId) || this.eventsBySession.has(sessionId);
-    this.archiveSession(sessionId);
+    const session = this.sessions.get(sessionId);
+    const existed = Boolean(session) || this.store.has(sessionId);
+    if (session) {
+      const archived = closed ? { ...session, status: "closed" } : session;
+      this.historySessions.set(sessionId, archived);
+      this.historyExpiresAt.set(sessionId, Date.now() + this.historyRetentionMs);
+      this.persistence?.writeSession(archived);
+    }
     this.sessions.delete(sessionId);
-    this.eventsBySession.delete(sessionId);
-    this.eventSequencesBySession.delete(sessionId);
-    this.externalEventSignatures.delete(sessionId);
+    this.sessionSignatures.delete(sessionId);
     this.workerTopology.delete(sessionId);
+    this.gatewayNormalizers.delete(sessionId);
     if (closed && !this.closedSessionIds.has(sessionId)) {
       this.closedSessionIds.add(sessionId);
       this.closedSessionOrder.push(sessionId);
@@ -141,37 +177,48 @@ export class MonitorState {
     return changed;
   }
 
+  /**
+   * One Gateway subscription event. Returns the canonical events it changed
+   * (empty when it was a duplicate or carried nothing to show).
+   */
   pushEvent(event, { replay = false } = {}) {
     // Gap/truncation markers are subscription control records, never timeline content.
     if (!event?.sessionId || event.type === "subscription_gap" || event.type === "subscription_replay_truncated") {
-      return false;
+      return [];
     }
-    const events = this.eventsBySession.get(event.sessionId) ?? [];
-    const sequences = this.eventSequencesBySession.get(event.sessionId) ?? new Set();
-    if (Number.isFinite(event.sequence) && sequences.has(event.sequence)) return false;
-
-    events.push(event);
-    if (Number.isFinite(event.sequence)) sequences.add(event.sequence);
-    if (events.length > 1 && eventOrder(events.at(-1), events.at(-2)) < 0) events.sort(eventOrder);
-    if (events.length > this.maxEventsPerSession) {
-      const removed = events.splice(0, events.length - this.maxEventsPerSession);
-      for (const item of removed) {
-        if (Number.isFinite(item.sequence)) sequences.delete(item.sequence);
-      }
-      this.diagnostics.overflowDroppedEvents += removed.length;
+    const sessionId = event.sessionId;
+    // The daemon stamps every event; sequence + ts tells a replay (same pair)
+    // from a restarted daemon's renumbered event (same sequence, later ts).
+    const identity = `${event.sequence ?? ""}:${event.ts ?? ""}`;
+    let seen = this.gatewaySeen.get(sessionId);
+    if (!seen) {
+      seen = new Set();
+      this.gatewaySeen.set(sessionId, seen);
     }
-    this.eventsBySession.set(event.sessionId, events);
-    this.eventSequencesBySession.set(event.sessionId, sequences);
-    if (event.type === "session_closed" && this.sessions.has(event.sessionId)) {
-      this.sessions.set(event.sessionId, {
-        ...this.sessions.get(event.sessionId),
+    if (Number.isFinite(event.sequence) && seen.has(identity)) return [];
+    if (Number.isFinite(event.sequence)) {
+      seen.add(identity);
+      if (seen.size > MAX_GATEWAY_IDENTITIES) seen.delete(seen.values().next().value);
+      this.gatewayCursors.set(sessionId, Math.max(this.gatewayCursors.get(sessionId) ?? -1, event.sequence));
+    }
+    let normalizer = this.gatewayNormalizers.get(sessionId);
+    if (!normalizer) {
+      normalizer = new GatewayEventNormalizer();
+      this.gatewayNormalizers.set(sessionId, normalizer);
+    }
+    const before = this.store.overflowDropped;
+    const changed = this.store.upsert(sessionId, normalizer.ingest(event));
+    this.diagnostics.overflowDroppedEvents += this.store.overflowDropped - before;
+    if (event.type === "session_closed" && this.sessions.has(sessionId)) {
+      this.sessions.set(sessionId, {
+        ...this.sessions.get(sessionId),
         status: "closed",
-        updatedAt: event.ts ?? this.sessions.get(event.sessionId).updatedAt
+        updatedAt: event.ts ?? this.sessions.get(sessionId).updatedAt
       });
     }
     if (replay) this.diagnostics.replayedEvents += 1;
-    this.revision += 1;
-    return true;
+    if (changed.length) this.revision += 1;
+    return changed;
   }
 
   beginSubscriptionGap(event) {
@@ -221,11 +268,10 @@ export class MonitorState {
   }
 
   subscriptionCursors(floors = {}) {
-    const sessionIds = new Set([...this.eventsBySession.keys(), ...Object.keys(floors)]);
+    const sessionIds = new Set([...this.gatewayCursors.keys(), ...Object.keys(floors)]);
     return Object.fromEntries([...sessionIds].map((sessionId) => {
-      const sequences = (this.eventsBySession.get(sessionId) ?? [])
-        .map((event) => event.sequence).filter(Number.isFinite);
-      const next = sequences.length ? Math.max(...sequences) + 1 : 0;
+      const highest = this.gatewayCursors.get(sessionId);
+      const next = Number.isFinite(highest) ? highest + 1 : 0;
       const floor = Number.isFinite(floors[sessionId]) ? floors[sessionId] : next;
       return [sessionId, Math.min(next, floor)];
     }));
@@ -236,46 +282,33 @@ export class MonitorState {
     return `\"monitor-${this.revision}\"`;
   }
 
-  // Returns the sessionIds whose bucket actually changed (an emptied/dropped
-  // bucket included), so a caller can stream just those buckets instead of
-  // re-sending every local transcript on each scan.
+  /**
+   * Canonical events from local timelines, grouped by session. Upserted, never
+   * replaced: an event that slides out of a transcript window stays. Returns
+   * only what changed, grouped the same way, for the SSE `events` frame.
+   */
   setExternalEvents(groups = {}) {
-    const nextIds = new Set(Object.keys(groups));
-    const changedSessionIds = [];
-    for (const sessionId of this.externalEventSessionIds) {
-      if (nextIds.has(sessionId)) continue;
-      this.eventsBySession.delete(sessionId);
-      this.eventSequencesBySession.delete(sessionId);
-      this.externalEventSignatures.delete(sessionId);
-      changedSessionIds.push(sessionId);
-    }
+    const changed = {};
     for (const [sessionId, values] of Object.entries(groups)) {
-      const events = (Array.isArray(values) ? values : []).slice(-this.maxEventsPerSession);
-      const signature = externalEventsSignature(events);
-      if (this.externalEventSignatures.get(sessionId) === signature) continue;
-      // Keep only what the new bucket drops (a transcript window sliding past
-      // old records). Archiving the whole live bucket on every change copied,
-      // merged and sorted up to maxEventsPerSession events per scan tick.
-      const previous = this.eventsBySession.get(sessionId);
-      if (previous?.length) {
-        const kept = new Set(events.map(eventIdentity));
-        const dropped = previous.filter((event) => !kept.has(eventIdentity(event)));
-        if (dropped.length) this.archiveSession(sessionId, dropped);
-      }
-      this.eventsBySession.set(sessionId, events);
-      this.eventSequencesBySession.set(sessionId, new Set(
-        events.map((event) => event.sequence).filter(Number.isFinite)
-      ));
-      this.externalEventSignatures.set(sessionId, signature);
-      changedSessionIds.push(sessionId);
+      const before = this.store.overflowDropped;
+      const updated = this.store.upsert(sessionId, Array.isArray(values) ? values : []);
+      this.diagnostics.overflowDroppedEvents += this.store.overflowDropped - before;
+      if (updated.length) changed[sessionId] = updated;
     }
-    this.externalEventSessionIds = nextIds;
-    if (changedSessionIds.length) this.revision += 1;
-    return changedSessionIds;
+    if (Object.keys(changed).length) this.revision += 1;
+    return changed;
+  }
+
+  /** Events for one session, oldest first. */
+  eventsFor(sessionId, options) {
+    return this.store.list(sessionId, options);
   }
 
   snapshot(now = Date.now()) {
     this.pruneHistory(now);
+    const eventsOf = (ids) => Object.fromEntries(ids
+      .map((sessionId) => [sessionId, this.store.list(sessionId)])
+      .filter(([, events]) => events.length));
     return {
       schemaVersion: MONITOR_SCHEMA_VERSION,
       monitorApiVersion: MONITOR_API_VERSION,
@@ -289,25 +322,33 @@ export class MonitorState {
       error: this.lastError,
       gateway: this.gateway,
       sessions: [...this.sessions.values()],
-      events: Object.fromEntries(this.eventsBySession),
+      // Gateway events can land before the session list that names them.
+      events: eventsOf(this.store.sessionIds().filter((sessionId) => !this.historySessions.has(sessionId))),
       historySessions: [...this.historySessions.values()],
-      historyEvents: Object.fromEntries(this.historyEventsBySession),
+      historyEvents: eventsOf([...this.historySessions.keys()]),
       eventLimit: this.maxEventsPerSession,
       tasks: this.tasks,
       inbox: this.inbox
     };
   }
 
-  archiveSession(sessionId, currentEvents = this.eventsBySession.get(sessionId) ?? []) {
-    const session = this.sessions.get(sessionId) ?? this.historySessions.get(sessionId);
-    if (!session || !currentEvents.length) return;
-    this.historySessions.set(sessionId, session);
-    const merged = [...(this.historyEventsBySession.get(sessionId) ?? []), ...currentEvents];
-    const unique = new Map(merged.map((event) => [eventIdentity(event), event]));
-    this.historyEventsBySession.set(sessionId, [...unique.values()]
-      .sort(eventOrder)
-      .slice(-this.maxEventsPerSession));
-    this.historyExpiresAt.set(sessionId, Date.now() + this.historyRetentionMs);
+  /**
+   * Loads recently active sessions from persisted history, so a sidecar
+   * restart does not blank the log. Restored sessions are history until a
+   * source reports them live again.
+   */
+  restoreHistory(now = Date.now()) {
+    if (!this.persistence) return 0;
+    let restored = 0;
+    for (const session of this.persistence.readSessions({ since: now - this.historyRetentionMs })) {
+      if (!session?.sessionId || this.sessions.has(session.sessionId)) continue;
+      this.historySessions.set(session.sessionId, session);
+      this.historyExpiresAt.set(session.sessionId, now + this.historyRetentionMs);
+      this.store.load(session.sessionId, this.persistence.readEvents(session.sessionId, { limit: this.maxEventsPerSession }));
+      restored += 1;
+    }
+    if (restored) this.revision += 1;
+    return restored;
   }
 
   pruneHistory(now = Date.now()) {
@@ -315,8 +356,14 @@ export class MonitorState {
     for (const [sessionId, expiresAt] of this.historyExpiresAt) {
       if (expiresAt > now) continue;
       this.historySessions.delete(sessionId);
-      this.historyEventsBySession.delete(sessionId);
       this.historyExpiresAt.delete(sessionId);
+      // Memory only: the persisted history keeps the session for its own,
+      // longer retention.
+      if (!this.sessions.has(sessionId)) {
+        this.store.evict(sessionId);
+        this.gatewaySeen.delete(sessionId);
+        this.gatewayCursors.delete(sessionId);
+      }
       pruned = true;
     }
     if (pruned) this.revision += 1;
@@ -415,32 +462,6 @@ export class MonitorState {
       return;
     }
   }
-}
-
-function eventIdentity(event) {
-  if (Number.isFinite(event?.sequence)) return `sequence:${event.sequence}`;
-  return `${event?.ts ?? ""}:${event?.type ?? ""}:${event?.turnId ?? ""}:${event?.text ?? ""}`;
-}
-
-function sessionMapSignature(map) {
-  return JSON.stringify([...map.entries()]);
-}
-
-function externalEventsSignature(events) {
-  const first = events[0];
-  const last = events.at(-1);
-  return JSON.stringify([
-    events.length,
-    first?.sequence, first?.type, first?.turnId, first?.text,
-    last?.sequence, last?.type, last?.turnId, last?.text, last?.stopReason
-  ]);
-}
-
-function eventOrder(left, right) {
-  const leftSequence = Number.isFinite(left?.sequence) ? left.sequence : Infinity;
-  const rightSequence = Number.isFinite(right?.sequence) ? right.sequence : Infinity;
-  if (leftSequence !== rightSequence) return leftSequence - rightSequence;
-  return String(left?.ts ?? "").localeCompare(String(right?.ts ?? ""));
 }
 
 export function queuedSingleFlight(operation) {

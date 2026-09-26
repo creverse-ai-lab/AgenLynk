@@ -8,7 +8,7 @@
 
 import { open, readdir, stat } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { isConversationRecord } from "../local-transcript.js";
+import { isCodexTimelineRecord } from "../normalize/codex.js";
 import { readRecord } from "./jsonl.js";
 import { recordExternalParent } from "./parent-links.js";
 import { signalWithApprovals } from "./signals.js";
@@ -242,9 +242,9 @@ export async function poll({ cursors, states, parents, now }) {
           cursor.identified = true;
         }
         if (recordExternalParent(record, cursor.session, parents, now)) changed = true;
-        // Second consumer of the same read: conversation-shaped records feed
-        // the event projection so nothing re-reads this file for events.
-        if (isConversationRecord(record)) cursor.conversation.push(record);
+        // Second consumer of the same read: timeline records feed the Codex
+        // normalizer so nothing re-reads this file for events.
+        if (isCodexTimelineRecord(record)) cursor.conversation.push(record);
         const signal = signalWithApprovals(record, cursor.pendingApprovals);
         if (signal) {
           latest = stateRecord(cursor.session, signal[0], signal[1], modified, cursor.database);

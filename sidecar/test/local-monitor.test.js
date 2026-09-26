@@ -1,62 +1,47 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mergeMonitorSessions, projectLocalSnapshot } from "../src/local-monitor.js";
-import { currentProjectedTurnId, projectCodexTranscript } from "../src/local-transcript.js";
-
-test("Codex transcript projection preserves prompt, assistant messages, tools, and completion", () => {
-  const records = [
-    { timestamp: "2026-08-07T00:00:00.000Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "inspect sessions" }] } },
-    { timestamp: "2026-08-07T00:00:01.000Z", type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "checking now" }] } },
-    { timestamp: "2026-08-07T00:00:02.000Z", type: "response_item", payload: { type: "custom_tool_call", name: "exec", call_id: "call-1", input: "sqlite3 state.db" } },
-    { timestamp: "2026-08-07T00:00:03.000Z", type: "response_item", payload: { type: "custom_tool_call_output", call_id: "call-1", output: "ignored large output" } },
-    { timestamp: "2026-08-07T00:00:04.000Z", type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "mapping is correct" }] } },
-    { timestamp: "2026-08-07T00:00:05.000Z", type: "event_msg", payload: { type: "task_complete" } }
-  ];
-  const events = projectCodexTranscript(records, {
-    sessionId: "local:codex:main",
-    rawSessionId: "main",
-    now: Date.parse("2026-08-07T00:01:00.000Z")
-  });
-
-  assert.deepEqual(events.map((event) => event.type), [
-    "turn_start", "agent_message_chunk", "tool_call", "tool_call_update", "agent_message_chunk", "turn_end"
-  ]);
-  assert.equal(events[0].text, "inspect sessions");
-  assert.equal(events[1].text, "checking now");
-  assert.match(events[2].text, /exec: sqlite3 state\.db/);
-  assert.equal(events[4].text, "mapping is correct");
-  assert.ok(events.every((event) => event.turnId === events[0].turnId));
-});
+import { normalizeCodexRecords } from "../src/normalize/codex.js";
 
 // Regression: the state scan invents `local-turn:<session>` for a running
-// session because it cannot see turn boundaries, while the transcript
-// projection numbers each turn `local-turn:<session>:<startedAt>`. When the
-// projection supplies a session's events, the session record has to adopt
-// their turn id — the menu-bar live graph scopes events to the session's
-// current turn, so a record pointing at a turn none of its events belongs to
-// draws a running session with nothing in it.
-test("a running local session adopts the turn id its projected events carry", () => {
+// session because it cannot see turn boundaries. The timeline can; the
+// session record has to carry the turn its own events belong to, because the
+// menu-bar live graph scopes events to the session's current turn.
+test("a running local session carries the turn id and facts of its timeline", () => {
   const records = [
-    { timestamp: "2026-08-07T00:00:00.000Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "first" }] } },
-    { timestamp: "2026-08-07T00:00:01.000Z", type: "event_msg", payload: { type: "task_complete" } },
-    { timestamp: "2026-08-07T00:00:02.000Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "second" }] } },
-    { timestamp: "2026-08-07T00:00:03.000Z", type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "working" }] } }
+    { timestamp: "2026-08-07T00:00:00.000Z", type: "turn_context", payload: { turn_id: "t1", model: "gpt-5.6", cwd: "/work" } },
+    { timestamp: "2026-08-07T00:00:00.000Z", type: "event_msg", payload: { type: "task_started", turn_id: "t1" } },
+    { timestamp: "2026-08-07T00:00:01.000Z", type: "event_msg", payload: { type: "task_complete", turn_id: "t1" } },
+    { timestamp: "2026-08-07T00:00:02.000Z", type: "event_msg", payload: { type: "task_started", turn_id: "t2" } },
+    {
+      timestamp: "2026-08-07T00:00:03.000Z", type: "event_msg",
+      payload: { type: "token_count", info: { total_token_usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 }, model_context_window: 1000 } }
+    }
   ];
-  const [session] = projectLocalSnapshot({ sessions: [
-    { provider: "codex", session: "main", state: "running", time: 100, cwd: "/work" }
-  ] }).sessions;
-  const events = projectCodexTranscript(records, {
-    sessionId: session.sessionId,
-    rawSessionId: session.localSessionId,
-    now: Date.parse("2026-08-07T00:01:00.000Z")
-  });
+  const timeline = normalizeCodexRecords(records);
+  const projected = projectLocalSnapshot({ sessions: [
+    { provider: "codex", session: "main", state: "running", time: Date.parse("2026-08-07T00:00:02.500Z") / 1000, cwd: "/work" }
+  ] }, new Map([["codex:main", timeline]]));
+  const [session] = projected.sessions;
 
-  const adopted = currentProjectedTurnId(events);
-  assert.notEqual(adopted, session.turnId, "the scan's synthetic id is not a real turn id");
-  assert.equal(adopted, events.at(-1).turnId);
-  assert.ok(events.some((event) => event.turnId === adopted && event.type === "turn_start"),
-    "the adopted turn must be one the events actually opened");
-  assert.equal(currentProjectedTurnId([]), null);
+  assert.equal(session.turnId, "t2", "the session adopts the timeline's open turn, not a synthetic id");
+  assert.equal(session.model, "gpt-5.6");
+  assert.equal(session.usage.totalTokens, 12);
+  assert.equal(session.usage.contextWindow, 1000);
+  assert.equal(session.createdAt, "2026-08-07T00:00:00.000Z", "a session starts at its first event");
+  assert.deepEqual(projected.events[session.sessionId].map((event) => event.kind), ["turn_start", "turn_end", "turn_start"]);
+});
+
+test("a local session without a timeline gets no invented events and no placeholder model", () => {
+  const projected = projectLocalSnapshot({ sessions: [
+    { provider: "claude", session: "quiet", state: "ready", time: 100, engine: "claude-cli", event: "end_turn" }
+  ] });
+  const [session] = projected.sessions;
+  assert.equal(session.status, "idle", "the scanner's ready maps onto the canonical idle");
+  assert.equal(session.model, null, "claude-cli is a placeholder, not a model");
+  assert.equal(session.title, null, "a scanner event name is not a title");
+  assert.deepEqual(projected.events, {});
+  assert.deepEqual(session.capabilities, ["status"]);
 });
 
 test("local snapshot projects a real frontdoor and nested local workers", () => {
@@ -76,7 +61,6 @@ test("local snapshot projects a real frontdoor and nested local workers", () => 
   assert.equal(grandchild.role, "worker");
   assert.equal(grandchild.openerInstanceId, "main", "an intermediate parent must not create a false Frontdoor");
   assert.equal(grandchild.status, "waiting_input");
-  assert.equal(projected.events[root.sessionId][0].type, "turn_start");
 });
 
 test("a local parent id uses the parent's provider and is never minted for an unseen parent", () => {

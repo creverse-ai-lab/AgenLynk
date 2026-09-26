@@ -49,8 +49,9 @@ test("live sidecar make-before-break rewind keeps old events and promotes one su
 
     await waitFor(async () => {
       const snapshot = await fetchJson(`${ready.url}/api/snapshot`, { headers });
-      const sequences = snapshot.events?.["s-live"]?.map((event) => event.sequence) ?? [];
-      return snapshot.streaming && sequences[0] === 0 && sequences.includes(3) ? snapshot : false;
+      const events = snapshot.events?.["s-live"] ?? [];
+      const message = events.find((event) => event.kind === "agent_message");
+      return snapshot.streaming && events[0]?.kind === "turn_start" && message?.body === "after" ? snapshot : false;
     }, "initial rewind snapshot did not land");
 
     await waitFor(async () => {
@@ -97,12 +98,14 @@ test("live sidecar make-before-break rewind keeps old events and promotes one su
 
     const snapshot = await waitFor(async () => {
       const value = await fetchJson(`${ready.url}/api/snapshot`, { headers });
-      const sequences = value.events?.["s-live"]?.map((event) => event.sequence) ?? [];
-      return sequences.join(",") === "0,1,2,3,4" && value.streamHealth === "healthy" ? value : false;
-    }, "promoted snapshot did not reach canonical sequences");
+      const message = value.events?.["s-live"]?.find((event) => event.kind === "agent_message");
+      // Replayed chunks 1-2 arrive after 3-4 but read in daemon order.
+      return message?.body === "onetwoafterold-live" && value.streamHealth === "healthy" ? value : false;
+    }, "promoted snapshot did not reach the canonical message");
     const status = await fetchJson(`${control.url}/status`);
 
-    assert.equal(snapshot.events["s-live"].some((event) => event.type === "subscription_gap"), false);
+    assert.deepEqual(snapshot.events["s-live"].map((event) => event.kind), ["turn_start", "agent_message"],
+      "the gap marker never enters the timeline");
     assert.deepEqual(status.subscribeCalls.map((item) => item.subscriptionId), ["sub-1", "sub-2"]);
     assert.deepEqual(status.subscribeCalls[1].cursors, { "s-live": 1 });
     assert.equal(status.subscribeCalls[1].includeThoughts, true);

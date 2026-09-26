@@ -39,8 +39,9 @@ import { installOfficialAgent, officialAgentCatalog, setOfficialAgentEnabled } f
 import { MONITOR_API_VERSION, MONITOR_SCHEMA_VERSION, MonitorState, queuedSingleFlight } from "../projection/monitor-state.js";
 import { SIDECAR_BUILD_ID, SIDECAR_VERSION } from "../version.js";
 import { mergeMonitorSessions, projectLocalSnapshot } from "../local-monitor.js";
-import { currentProjectedTurnId, projectCodexTranscript } from "../local-transcript.js";
 import { LocalAgentScanner } from "../local-agents/index.js";
+import { LocalTimeline } from "../normalize/local-timeline.js";
+import { SqliteMonitorStore, defaultMonitorDatabasePath } from "../store/sqlite-store.js";
 /*
  * Gateway code above comes only from the release artifact's public client.
  */
@@ -51,11 +52,17 @@ const MAX_EVENTS_PER_SESSION = numberEnv("ACP_GATEWAY_MONITOR_MAX_EVENTS", 2000,
 const AUTO_START_GATEWAY = booleanEnv("ACP_GATEWAY_MONITOR_AUTOSTART", true);
 const EXPECTED_PARENT_PID = optionalPositiveIntegerEnv("ACP_GATEWAY_MONITOR_PARENT_PID");
 const REFRESH_INTERVAL_MS = 3_000;
+// Streamed Gateway chunks are coalesced into one SSE frame per window so a
+// growing message is re-sent at most this often, not once per token.
+const EVENT_BROADCAST_MS = 100;
+const HISTORY_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+const HISTORY_ENABLED = booleanEnv("ACP_GATEWAY_MONITOR_HISTORY", true);
 const GATEWAY_RUNTIME_ROOT = process.env.ACP_GATEWAY_ACTIVE_ROOT ?? null;
 const EXPECTED_GATEWAY_BUILD_ID = expectedGatewayBuildId(GATEWAY_RUNTIME_ROOT);
 // Initialized inside main() so corrupt settings are reported through its
 // guarded startup path instead of throwing while this module is imported.
 let localScanner = null;
+let localTimeline = null;
 
 // Token accounting is not timeline content, and a session accumulates one of
 // these per turn. Gateway 1.3.2+ already drops them at ingestion, but a
@@ -124,6 +131,9 @@ async function main() {
     conversationWindowMs: monitorSettings.localTranscriptWindowMs,
     maxConversationRecords: monitorSettings.localTranscriptRecordLimit
   }) : null;
+  localTimeline = localScanner
+    ? new LocalTimeline({ codexRecords: (sessionId) => localScanner.conversationRecords(sessionId) })
+    : null;
   // A pre-config-API daemon reports most active values through setup, but not
   // every newly introduced setting. Defaults/environment represent what that
   // old process actually booted with; persisted values may only be staged.
@@ -134,7 +144,37 @@ async function main() {
     access: "observer",
     autoStart: AUTO_START_GATEWAY
   });
-  const state = new MonitorState({ maxEventsPerSession: MAX_EVENTS_PER_SESSION });
+  const persistence = HISTORY_ENABLED ? await SqliteMonitorStore.open(defaultMonitorDatabasePath()) : null;
+  const state = new MonitorState({ maxEventsPerSession: MAX_EVENTS_PER_SESSION, persistence });
+  state.restoreHistory();
+  persistence?.prune();
+  const historyPrune = setInterval(() => {
+    persistence?.prune({ keep: new Set(state.sessions.keys()) });
+  }, HISTORY_PRUNE_INTERVAL_MS);
+  historyPrune.unref();
+
+  // Changed canonical events waiting for the next coalesced `events` frame.
+  let pendingEvents = new Map();
+  let eventFlushTimer = null;
+  const queueEvents = (sessionId, events) => {
+    if (!events.length) return;
+    let bucket = pendingEvents.get(sessionId);
+    if (!bucket) {
+      bucket = new Map();
+      pendingEvents.set(sessionId, bucket);
+    }
+    for (const event of events) bucket.set(event.id, event);
+    if (eventFlushTimer) return;
+    eventFlushTimer = setTimeout(flushEvents, EVENT_BROADCAST_MS);
+    eventFlushTimer.unref?.();
+  };
+  const flushEvents = () => {
+    eventFlushTimer = null;
+    if (!pendingEvents.size) return;
+    const events = Object.fromEntries([...pendingEvents].map(([sessionId, bucket]) => [sessionId, [...bucket.values()]]));
+    pendingEvents = new Map();
+    state.broadcast({ kind: "events", events });
+  };
   const apiToken = randomBytes(32).toString("base64url");
   let agentMutationActive = false;
   const owner = new GatewaySubscriptionOwner({
@@ -191,9 +231,11 @@ async function main() {
       return;
     }
     if (isIgnoredMonitorEvent(event)) return;
-    if (!state.pushEvent(event)) return;
-    state.broadcast({ kind: "event", event });
+    const changed = state.pushEvent(event);
+    if (!changed.length && event.type !== "session_closed") return;
+    queueEvents(event.sessionId, changed);
     if (event.type === "session_closed") {
+      flushEvents();
       state.setGatewaySourceSessions(
         state.gatewaySourceSessions.filter((session) => session.sessionId !== event.sessionId)
       );
@@ -283,16 +325,10 @@ async function main() {
     const acceptedLocalIds = new Set(merged.filter((session) => session.source === "local").map((session) => session.sessionId));
     const events = Object.fromEntries(Object.entries(local.events).filter(([sessionId]) => acceptedLocalIds.has(sessionId)));
     const removedSessionIds = state.setSessions(merged);
-    const changedEventSessionIds = state.setExternalEvents(events);
-    // Local transcripts have no per-event push channel: the scanner only
-    // rewrites whole buckets here, so a state broadcast has to carry them or
-    // the app keeps whatever /api/snapshot returned when its stream connected.
-    // Captured inside the single-flight pass so the payload is the bucket that
-    // the change detection above actually saw.
-    const localEvents = changedEventSessionIds.length
-      ? Object.fromEntries(changedEventSessionIds
-        .map((sessionId) => [sessionId, state.eventsBySession.get(sessionId) ?? []]))
-      : null;
+    // Only the events that changed travel with the state frame; the app
+    // upserts them by id (an event outside a transcript window is kept).
+    const changedEvents = state.setExternalEvents(events);
+    const localEvents = Object.keys(changedEvents).length ? changedEvents : null;
     return { removedSessionIds, changed: state.revision !== beforeRevision, localEvents };
   });
 
@@ -475,6 +511,25 @@ async function main() {
       response.write("retry: 2000\n\n");
       state.addSseClient(response);
       request.on("close", () => state.removeSseClient(response));
+      return;
+    }
+    const eventsRoute = url.pathname.match(/^\/api\/sessions\/([^/]+)\/events$/);
+    if (eventsRoute && request.method === "GET") {
+      // Older events than the snapshot carries, newest page first; served
+      // from memory and then from persisted history.
+      const sessionId = decodeURIComponent(eventsRoute[1]);
+      const before = Number(url.searchParams.get("before"));
+      const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 200, 1), 1_000);
+      sendJson(response, {
+        sessionId,
+        events: state.store.page(sessionId, { before: Number.isFinite(before) && before > 0 ? before : Infinity, limit })
+      });
+      return;
+    }
+    if (url.pathname === "/api/history" && request.method === "GET") {
+      const since = Number(url.searchParams.get("since")) || 0;
+      const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 200, 1), 1_000);
+      sendJson(response, { sessions: persistence ? persistence.readSessions({ since, limit }) : [] });
       return;
     }
     if (url.pathname === "/api/agents" && request.method === "GET") {
@@ -666,6 +721,9 @@ async function main() {
     shuttingDown = true;
     clearInterval(interval);
     clearInterval(localInterval);
+    clearInterval(historyPrune);
+    flushEvents();
+    persistence?.close();
     if (parentWatch) clearInterval(parentWatch);
     state.closeSseClients();
     rpc.close();
@@ -686,26 +744,10 @@ async function readLocalProjection() {
   const sessions = await collectLocalSessions();
   if (!sessions.length) return { sessions: [], events: {} };
   try {
-    const projection = projectLocalSnapshot({ sessions });
-    // Events come from the conversation window the codex tailer already
-    // retained during its state pass — the same single read serves both
-    // consumers, instead of a second reader re-tailing the same files.
-    for (const session of projection.sessions) {
-      if (session.provider !== "codex" || !session.localSessionId) continue;
-      const records = localScanner.conversationRecords(session.localSessionId);
-      if (!records.length) continue;
-      const events = projectCodexTranscript(records, {
-        sessionId: session.sessionId,
-        rawSessionId: session.localSessionId,
-        now: Date.now()
-      });
-      if (!events.length) continue;
-      projection.events[session.sessionId] = events;
-      // Only while the session is actually mid-turn: a record with turnId
-      // null is not running, and must not be given one.
-      if (session.turnId) session.turnId = currentProjectedTurnId(events) ?? session.turnId;
-    }
-    return projection;
+    // One pipeline for every provider: the scanner found the sessions and
+    // their transcripts, the timeline tails and normalizes them.
+    const { results } = localTimeline ? await localTimeline.update(sessions) : { results: new Map() };
+    return projectLocalSnapshot({ sessions }, results);
   } catch (error) {
     console.error(`Local session projection ignored: ${error.message}`);
     return { sessions: [], events: {} };

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
+import { monitorEvent } from "../src/normalize/model.js";
 import {
   MONITOR_API_VERSION,
   MONITOR_SCHEMA_VERSION,
@@ -38,17 +39,19 @@ test("queuedSingleFlight serializes overlapping refreshes and coalesces the queu
 test("MonitorState deduplicates, bounds events, and immediately removes missing sessions", () => {
   const state = new MonitorState({ maxEventsPerSession: 2 });
   state.setSessions([{ sessionId: "session-a" }]);
-  assert.equal(state.pushEvent({ sessionId: "session-a", sequence: 0, type: "first" }), true);
-  assert.equal(state.pushEvent({ sessionId: "session-a", sequence: 0, type: "duplicate" }), false);
-  state.pushEvent({ sessionId: "session-a", sequence: 1, type: "second" });
-  state.pushEvent({ sessionId: "session-a", sequence: 2, type: "third" });
-  assert.deepEqual(state.snapshot().events["session-a"].map((event) => event.sequence), [1, 2]);
+  const turn = (sequence, turnId, ts) => ({ sessionId: "session-a", sequence, type: "turn_start", turnId, ts });
+  assert.equal(state.pushEvent(turn(0, "t0", "2026-08-07T00:00:00Z")).length, 1);
+  assert.deepEqual(state.pushEvent(turn(0, "t0", "2026-08-07T00:00:00Z")), [], "a replayed event is a duplicate");
+  state.pushEvent(turn(1, "t1", "2026-08-07T00:00:01Z"));
+  state.pushEvent(turn(2, "t2", "2026-08-07T00:00:02Z"));
+  assert.deepEqual(state.snapshot().events["session-a"].map((event) => event.turnId), ["t1", "t2"]);
   assert.equal(state.snapshot().eventLimit, 2);
+  assert.equal(state.snapshot().diagnostics.overflowDroppedEvents, 1);
   assert.equal(state.snapshot().streaming, false);
 
   state.setSessions([]);
   assert.deepEqual(state.snapshot().events, {});
-  assert.deepEqual(state.snapshot().historyEvents["session-a"].map((event) => event.sequence), [1, 2]);
+  assert.deepEqual(state.snapshot().historyEvents["session-a"].map((event) => event.turnId), ["t1", "t2"]);
 });
 
 test("MonitorState marks a close event and removes its Live data on removal", () => {
@@ -143,23 +146,20 @@ test("MonitorState ignores malformed session entries instead of crashing refresh
   assert.deepEqual(state.snapshot().sessions.map((session) => session.sessionId), ["valid"]);
 });
 
-test("MonitorState replaces local events and ignores local work as a Gateway restart blocker", () => {
+test("MonitorState upserts local events and ignores local work as a Gateway restart blocker", () => {
   const state = new MonitorState();
-  state.setSessions([{ sessionId: "local:codex:main", source: "local", status: "running" }]);
-  state.setExternalEvents({
-    "local:codex:main": [{ sessionId: "local:codex:main", sequence: 10, type: "turn_start" }]
-  });
-  assert.equal(state.snapshot().events["local:codex:main"].length, 1);
+  const id = "local:codex:main";
+  const start = (title) => monitorEvent({ key: "turn:t1", kind: "turn_start", ts: "2026-08-07T00:00:00Z", source: "transcript", turnId: "t1", title });
+  state.setSessions([{ sessionId: id, source: "local", status: "running" }]);
+  state.setExternalEvents({ [id]: [start("first")] });
+  assert.equal(state.snapshot().events[id].length, 1);
   assert.deepEqual(state.restartBlockers(), []);
   const unchangedRevision = state.revision;
-  state.setExternalEvents({
-    "local:codex:main": [{ sessionId: "local:codex:main", sequence: 10, type: "turn_start" }]
-  });
+  state.setExternalEvents({ [id]: [start("first")] });
   assert.equal(state.revision, unchangedRevision, "an unchanged local transcript must not churn monitor state");
-  state.setExternalEvents({
-    "local:codex:main": [{ sessionId: "local:codex:main", sequence: 12, type: "turn_start" }]
-  });
-  assert.deepEqual(state.snapshot().events["local:codex:main"].map((event) => event.sequence), [12]);
+  state.setExternalEvents({ [id]: [start("rewritten")] });
+  assert.deepEqual(state.snapshot().events[id].map((event) => event.title), ["rewritten"],
+    "the same key is refined in place, not appended");
 });
 
 test("MonitorState stamps snapshot and SSE envelopes with schema/API version", () => {

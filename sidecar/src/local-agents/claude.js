@@ -26,6 +26,8 @@ export function claudeSignal(record) {
   if (kind === "system" && record?.subtype === "turn_duration") return ["ready", "turn_duration"];
   if (kind === "assistant") {
     if (message?.stop_reason === "end_turn") return ["ready", "end_turn"];
+    // Distinguished so the scanner can keep a long-running tool call alive.
+    if (contentTypes.has("tool_use")) return ["running", "tool_use"];
     if (contentTypes.has("thinking") || contentTypes.has("text") || contentTypes.has("tool_use")) {
       return ["running", "assistant"];
     }
@@ -208,7 +210,7 @@ export async function detectClaudeSessions(root, now, readyAfter, staleAfter, pa
     }
   }
 
-  for (const [, entry] of scanned) {
+  for (const [path, entry] of scanned) {
     const signal = entry.signal;
     if (!signal) continue;
     if (parents) {
@@ -219,7 +221,11 @@ export async function detectClaudeSessions(root, now, readyAfter, staleAfter, pa
         if (parents.get(key)?.[0] !== signal.session) parents.set(key, [signal.session, signal.time]);
       }
     }
-    const lifetime = signal.state === "ready" ? readyAfter : Math.min(staleAfter, RUNNING_LIFETIME_SECONDS);
+    // A tool still running (a build, a test run, a pending permission prompt)
+    // writes nothing until it returns; that silence is not the session ending.
+    const lifetime = signal.state === "ready"
+      ? readyAfter
+      : signal.event === "tool_use" ? staleAfter : Math.min(staleAfter, RUNNING_LIFETIME_SECONDS);
     if (now - signal.time <= lifetime) {
       states[signal.session] = {
         provider: "claude",
@@ -231,7 +237,9 @@ export async function detectClaudeSessions(root, now, readyAfter, staleAfter, pa
         parent: signal.parent ?? externalParent(parents ?? new Map(), "claude", signal.session),
         engine: "claude-cli",
         cwd: signal.cwd,
-        link_session: signal.session
+        link_session: signal.session,
+        transcript: path,
+        agent_id: signal.parent ? signal.session : null
       };
     }
   }

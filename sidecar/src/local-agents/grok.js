@@ -245,7 +245,14 @@ export async function cliProcessStates(processes, eventPaths, now, previous = {}
     const candidates = Array.isArray(values) ? values : values ? [values] : [];
     if (!isGrokProcess(command, args) || isProxiedGrokProcess(processes, pid) || !candidates.length) continue;
     for (const eventPath of candidates) {
-      if (await lastGrokTurn(eventPath) !== "turn_started") continue;
+      const lastTurn = await lastGrokTurn(eventPath);
+      // An interactive grok between turns is a session waiting for its user,
+      // not a vanished one: it stays listed as ready until the process exits.
+      // A multiplexed `grok agent stdio` keeps every session it ever opened
+      // held, so only its open turns mean anything.
+      const interactive = !isMultiplexedGrokProcess(command, args);
+      if (lastTurn !== "turn_started" && !(interactive && lastTurn === "turn_ended")) continue;
+      const state = lastTurn === "turn_started" ? "running" : "ready";
       const sessionDirectory = dirname(eventPath);
       // The provider-side id is stable across pid reuse and matches the
       // Gateway's acpSessionId, allowing mergeMonitorSessions to dedupe a
@@ -255,14 +262,15 @@ export async function cliProcessStates(processes, eventPaths, now, previous = {}
       states[stateKey] = {
         provider: "grok",
         session,
-        state: "running",
-        event: "process/running",
-        time: previous[stateKey]?.time ?? now,
+        state,
+        event: `process/${state}`,
+        time: previous[stateKey]?.state === state ? previous[stateKey].time : now,
         pid,
         parent: externalParent(parents ?? new Map(), "grok", session),
         engine: "grok-cli",
         cwd: decodeURIComponent(basename(dirname(sessionDirectory))),
-        link_session: session
+        link_session: session,
+        transcript: sessionDirectory
       };
     }
   }

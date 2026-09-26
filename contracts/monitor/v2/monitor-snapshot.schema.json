@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp-gateway.dev/contracts/monitor/v2/monitor-snapshot.schema.json",
+  "title": "Monitor snapshot v2",
+  "description": "GET /api/snapshot from the AgenLynk sidecar. Every event has the same canonical shape whether the Gateway, a Claude/Codex/Grok transcript, or an agent hook produced it (sidecar/src/normalize/model.js is the implementation). SSE frames carry the same session and event shapes: `state` (sessions, removedSessionIds, and changed events to upsert by id) and `events` (changed events to upsert by id).",
+  "type": "object",
+  "required": [
+    "schemaVersion", "monitorApiVersion", "revision", "connected", "streaming", "streamHealth",
+    "diagnostics", "error", "gateway", "sessions", "events", "historySessions", "historyEvents",
+    "eventLimit", "tasks", "inbox"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "monitorApiVersion": { "const": "2.0" },
+    "revision": { "type": "integer", "minimum": 0 },
+    "connected": { "type": "boolean" },
+    "streaming": { "type": "boolean" },
+    "streamHealth": { "enum": ["healthy", "degraded", "reconciling", "disconnected"] },
+    "diagnostics": { "type": "object" },
+    "error": { "type": ["string", "null"] },
+    "gateway": { "type": ["object", "null"] },
+    "sessions": { "type": "array", "items": { "$ref": "#/$defs/session" } },
+    "events": { "$ref": "#/$defs/eventsBySession" },
+    "historySessions": { "type": "array", "items": { "$ref": "#/$defs/session" } },
+    "historyEvents": { "$ref": "#/$defs/eventsBySession" },
+    "eventLimit": { "type": "integer", "minimum": 1 },
+    "tasks": { "type": "array" },
+    "inbox": { "type": "array" }
+  },
+  "$defs": {
+    "eventsBySession": {
+      "type": "object",
+      "description": "Session id -> events, oldest first (by ts, then sequence).",
+      "additionalProperties": { "type": "array", "items": { "$ref": "#/$defs/event" } }
+    },
+    "session": {
+      "type": "object",
+      "description": "Gateway sessions carry additional Gateway fields; these are the ones every source provides or leaves null.",
+      "required": ["sessionId"],
+      "properties": {
+        "sessionId": { "type": "string", "minLength": 1 },
+        "provider": { "type": ["string", "null"] },
+        "status": {
+          "enum": ["running", "waiting_permission", "waiting_input", "idle", "cancelling", "restoring", "closed", "unavailable", "error", "disconnected"]
+        },
+        "model": { "type": ["string", "null"], "description": "The real model id, or null. Never a placeholder such as \"claude-cli\"." },
+        "title": { "type": ["string", "null"] },
+        "cwd": { "type": ["string", "null"] },
+        "role": { "enum": ["frontdoor", "worker"] },
+        "source": { "type": ["string", "null"] },
+        "turnId": { "type": ["string", "null"] },
+        "parentSessionId": { "type": ["string", "null"] },
+        "createdAt": { "type": ["string", "null"], "format": "date-time" },
+        "updatedAt": { "type": ["string", "null"], "format": "date-time" },
+        "usage": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/usage" }] },
+        "usagePartial": { "type": "boolean", "description": "Totals cover only the part of a long transcript that was read." },
+        "capabilities": {
+          "type": "array",
+          "description": "What this monitor can actually observe for the session, so the app can tell \"nothing happened\" from \"this source cannot see it\".",
+          "items": { "enum": ["status", "timeline", "tools", "thinking", "usage", "permission", "live"] }
+        }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "description": "Same meaning for every provider: inputTokens include cached input, totalTokens = inputTokens + outputTokens, reasoningTokens are part of outputTokens, contextUsed is the prompt size of the latest model call. null = the provider did not say.",
+      "additionalProperties": false,
+      "required": [
+        "inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "reasoningTokens",
+        "totalTokens", "contextUsed", "contextWindow", "costUsd"
+      ],
+      "properties": {
+        "inputTokens": { "type": ["number", "null"] },
+        "outputTokens": { "type": ["number", "null"] },
+        "cacheReadTokens": { "type": ["number", "null"] },
+        "cacheWriteTokens": { "type": ["number", "null"] },
+        "reasoningTokens": { "type": ["number", "null"] },
+        "totalTokens": { "type": ["number", "null"] },
+        "contextUsed": { "type": ["number", "null"] },
+        "contextWindow": { "type": ["number", "null"] },
+        "costUsd": { "type": ["number", "null"] }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "key", "sequence", "sessionId", "kind", "ts", "turnId", "toolCallId", "title", "body", "status", "endedAt", "sources"],
+      "properties": {
+        "id": { "type": "string", "description": "<sessionId>#<key>; stable across re-reads and sidecar restarts." },
+        "key": { "type": "string", "description": "The normalizer's merge key, e.g. tool:<toolCallId>, turn:<turnId>:end." },
+        "sequence": { "type": "integer", "minimum": 1, "description": "Assigned by the monitor store in first-seen order; never a daemon counter." },
+        "sessionId": { "type": "string" },
+        "kind": {
+          "enum": [
+            "session_start", "session_end", "turn_start", "turn_end", "user_message", "agent_message", "agent_thought",
+            "tool_call", "permission_request", "input_request", "subagent", "plan", "compaction", "error"
+          ]
+        },
+        "ts": { "type": "string", "format": "date-time", "description": "When the fact was first observed." },
+        "endedAt": { "type": ["string", "null"], "format": "date-time" },
+        "turnId": { "type": ["string", "null"] },
+        "toolCallId": { "type": ["string", "null"] },
+        "title": { "type": ["string", "null"], "maxLength": 240, "description": "One-line summary." },
+        "body": { "type": ["string", "null"], "description": "Display text: a message, a thought, a tool's output." },
+        "status": { "enum": ["pending", "running", "completed", "failed", "cancelled", null] },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "enum": ["transcript", "hook", "gateway", "process"] }
+        },
+        "detail": {
+          "type": "object",
+          "description": "Kind-specific extras, e.g. tool name/input/locations, durationMs, requestId, childSessionId."
+        }
+      }
+    }
+  }
+}

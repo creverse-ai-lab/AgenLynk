@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { monitorEvent } from "../src/normalize/model.js";
 import { MonitorState } from "../src/projection/monitor-state.js";
 import { isIgnoredMonitorEvent } from "../src/server/monitor.js";
+import { SqliteMonitorStore } from "../src/store/sqlite-store.js";
 
-test("MonitorState produces the shared Monitor API v1 snapshot fixture", async () => {
-  const fixtureUrl = new URL("./fixtures/monitor-snapshot-v1.json", import.meta.url);
+test("MonitorState produces the shared Monitor API v2 snapshot fixture", async () => {
+  const fixtureUrl = new URL("./fixtures/monitor-snapshot-v2.json", import.meta.url);
   const fixture = JSON.parse(await readFile(fixtureUrl, "utf8"));
   const input = fixture._input;
   const state = new MonitorState();
@@ -22,50 +26,63 @@ test("MonitorState produces the shared Monitor API v1 snapshot fixture", async (
   assert.deepEqual(state.snapshot(), expected);
 });
 
-test("setExternalEvents reports only the local buckets that changed", () => {
-  const state = new MonitorState();
-  const first = [{ sessionId: "local:codex:a", sequence: 1, type: "turn_start" }];
-  const second = [{ sessionId: "local:codex:b", sequence: 1, type: "turn_start" }];
-
-  assert.deepEqual(state.setExternalEvents({ "local:codex:a": first, "local:codex:b": second }).sort(),
-    ["local:codex:a", "local:codex:b"]);
-  // The scanner re-reads the same transcript every second; an unchanged read
-  // must not put the bucket back on the wire.
-  assert.deepEqual(state.setExternalEvents({ "local:codex:a": first, "local:codex:b": second }), []);
-
-  const grown = [...first, { sessionId: "local:codex:a", sequence: 2, type: "agent_message_chunk", text: "hi" }];
-  assert.deepEqual(state.setExternalEvents({ "local:codex:a": grown, "local:codex:b": second }), ["local:codex:a"]);
-  assert.deepEqual(state.eventsBySession.get("local:codex:a").map((event) => event.sequence), [1, 2]);
-
-  // A dropped bucket is a change too: the app has to clear what it holds.
-  assert.deepEqual(state.setExternalEvents({ "local:codex:a": grown }), ["local:codex:b"]);
-  assert.equal(state.eventsBySession.has("local:codex:b"), false);
+const localEvent = (key, ts, values = {}) => monitorEvent({
+  key, kind: "agent_message", ts, source: "transcript", body: key, ...values
 });
 
-test("setExternalEvents archives only events a live bucket drops", () => {
+test("setExternalEvents upserts and reports only what changed", () => {
   const state = new MonitorState();
-  const id = "local:codex:a";
-  state.setSessions([{ sessionId: id, provider: "codex", status: "running" }]);
-  const event = (sequence) => ({ sessionId: id, sequence, type: "agent_message_chunk", text: `m${sequence}` });
+  const a = "local:codex:a";
+  const window = [localEvent("m1", "2026-08-07T00:00:00Z"), localEvent("m2", "2026-08-07T00:00:01Z")];
 
-  state.setExternalEvents({ [id]: [event(1), event(2)] });
-  state.setExternalEvents({ [id]: [event(1), event(2), event(3)] });
-  assert.equal(state.historyEventsBySession.has(id), false, "an appending live bucket is not copied into history");
-  assert.equal(state.historySessions.has(id), false);
+  assert.deepEqual(Object.keys(state.setExternalEvents({ [a]: window })), [a]);
+  // Re-normalizing the same window every scan tick must not hit the wire.
+  assert.deepEqual(state.setExternalEvents({ [a]: window }), {});
 
-  // The transcript window slides past event 1: only that event is preserved.
-  state.setExternalEvents({ [id]: [event(2), event(3), event(4)] });
-  assert.deepEqual(state.historyEventsBySession.get(id).map((item) => item.sequence), [1]);
+  const refined = [window[0], localEvent("m2", "2026-08-07T00:00:01Z", { body: "m2 finished" })];
+  const changed = state.setExternalEvents({ [a]: refined });
+  assert.deepEqual(changed[a].map((event) => event.key), ["m2"]);
+  assert.equal(state.eventsFor(a).at(-1).body, "m2 finished");
+  assert.deepEqual(state.eventsFor(a).map((event) => event.sequence), [1, 2], "a refined event keeps its sequence");
 });
 
-test("setExternalEvents replaces a rewritten turn instead of appending it", () => {
+test("events that slide out of a transcript window stay in the timeline", () => {
   const state = new MonitorState();
-  state.setExternalEvents({ "local:codex:a": [{ sessionId: "local:codex:a", sequence: 1, type: "turn_start", turnId: null }] });
-  const changed = state.setExternalEvents({
-    "local:codex:a": [{ sessionId: "local:codex:a", sequence: 1, type: "turn_start", turnId: "turn-1" }]
-  });
-  assert.deepEqual(changed, ["local:codex:a"]);
-  assert.deepEqual(state.eventsBySession.get("local:codex:a").map((event) => event.turnId), ["turn-1"]);
+  const a = "local:codex:a";
+  state.setSessions([{ sessionId: a, provider: "codex", status: "running" }]);
+  state.setExternalEvents({ [a]: [localEvent("m1", "2026-08-07T00:00:00Z"), localEvent("m2", "2026-08-07T00:00:01Z")] });
+  state.setExternalEvents({ [a]: [localEvent("m2", "2026-08-07T00:00:01Z"), localEvent("m3", "2026-08-07T00:00:02Z")] });
+  assert.deepEqual(state.eventsFor(a).map((event) => event.key), ["m1", "m2", "m3"]);
+  assert.equal(state.historySessions.has(a), false, "a live session is never copied into history");
+});
+
+test("a removed session moves to history with its events intact", () => {
+  const state = new MonitorState();
+  const a = "local:claude:a";
+  state.setSessions([{ sessionId: a, provider: "claude", status: "running" }]);
+  state.setExternalEvents({ [a]: [localEvent("m1", "2026-08-07T00:00:00Z")] });
+  state.setSessions([]);
+  const snapshot = state.snapshot();
+  assert.deepEqual(snapshot.historySessions.map((session) => session.sessionId), [a]);
+  assert.deepEqual(snapshot.historyEvents[a].map((event) => event.key), ["m1"]);
+  assert.equal(snapshot.events[a], undefined);
+});
+
+test("Gateway chunks merge into one message and replays are ignored", () => {
+  const state = new MonitorState();
+  const chunk = (sequence, text, ts) => ({ sessionId: "s1", sequence, type: "agent_message_chunk", ts, turnId: "t1", text });
+  state.pushEvent({ sessionId: "s1", sequence: 0, type: "turn_start", ts: "2026-08-07T00:00:00Z", turnId: "t1", text: "go" });
+  state.pushEvent(chunk(1, "hel", "2026-08-07T00:00:01Z"));
+  state.pushEvent(chunk(2, "lo", "2026-08-07T00:00:02Z"));
+  assert.deepEqual(state.pushEvent(chunk(2, "lo", "2026-08-07T00:00:02Z"), { replay: true }), [], "a replayed chunk is not appended twice");
+  const messages = state.eventsFor("s1").filter((event) => event.kind === "agent_message");
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].body, "hello");
+
+  // A restarted daemon renumbers from 0: same sequence, different event.
+  const restarted = state.pushEvent({ sessionId: "s1", sequence: 1, type: "turn_completed", ts: "2026-08-07T00:05:00Z", turnId: "t1" });
+  assert.equal(restarted.length, 1, "a renumbered event is not mistaken for a replay");
+  assert.deepEqual(state.subscriptionCursors(), { s1: 3 });
 });
 
 test("monitor ingestion drops usage_update from an old daemon's replay", () => {
@@ -77,35 +94,35 @@ test("monitor ingestion drops usage_update from an old daemon's replay", () => {
   // The replay path a pre-1.3.2 daemon serves on subscribe.
   const state = new MonitorState();
   const replay = [
-    { sessionId: "s1", sequence: 1, type: "turn_start" },
-    { sessionId: "s1", sequence: 2, type: "usage_update" },
-    { sessionId: "s1", sequence: 3, type: "turn_completed" }
+    { sessionId: "s1", sequence: 1, type: "turn_start", ts: "2026-08-07T00:00:00Z", turnId: "t1" },
+    { sessionId: "s1", sequence: 2, type: "usage_update", ts: "2026-08-07T00:00:01Z", turnId: "t1" },
+    { sessionId: "s1", sequence: 3, type: "turn_completed", ts: "2026-08-07T00:00:02Z", turnId: "t1" }
   ];
   for (const event of replay) {
     if (isIgnoredMonitorEvent(event)) continue;
     state.pushEvent(event);
   }
-  assert.deepEqual(state.snapshot().events.s1.map((event) => event.type), ["turn_start", "turn_completed"]);
+  assert.deepEqual(state.snapshot().events.s1.map((event) => event.kind), ["turn_start", "turn_end"]);
 });
 
 test("replay truncation degrades health, increments diagnostics, and stays out of the timeline", () => {
   const state = new MonitorState();
   state.setConnection({ connected: true, streaming: true, error: null });
-  state.pushEvent({ sessionId: "s1", sequence: 0, type: "turn_start" });
-  assert.equal(state.pushEvent({ type: "subscription_replay_truncated", sessionIds: ["s1"] }), false);
+  state.pushEvent({ sessionId: "s1", sequence: 0, type: "turn_start", ts: "2026-08-07T00:00:00Z", turnId: "t1" });
+  assert.deepEqual(state.pushEvent({ type: "subscription_replay_truncated", sessionIds: ["s1"] }), []);
   state.noteReplayTruncation({ type: "subscription_replay_truncated", sessionIds: ["s1"] });
   const snapshot = state.snapshot();
   assert.equal(snapshot.streamHealth, "degraded");
   assert.equal(snapshot.streaming, true);
   assert.match(snapshot.error ?? "", /truncated/);
   assert.equal(snapshot.diagnostics.replayTruncations, 1);
-  assert.equal(snapshot.events.s1.some((event) => event.type === "subscription_replay_truncated"), false);
+  assert.deepEqual(snapshot.events.s1.map((event) => event.kind), ["turn_start"]);
 });
 
 test("expired history changes the snapshot tag and yields a pruned body", () => {
   const state = new MonitorState({ historyRetentionMs: 1_000 });
-  state.setSessions([{ sessionId: "old", provider: "codex", status: "ready" }]);
-  state.pushEvent({ sessionId: "old", sequence: 1, type: "turn_end", ts: "2026-08-06T23:59:00.000Z" });
+  state.setSessions([{ sessionId: "old", provider: "codex", status: "idle" }]);
+  state.pushEvent({ sessionId: "old", sequence: 1, type: "turn_completed", ts: "2026-08-06T23:59:00.000Z", turnId: "t" });
   state.setSessions([]);
   const expiresAt = state.historyExpiresAt.get("old");
   const liveNow = expiresAt - 1;
@@ -118,4 +135,36 @@ test("expired history changes the snapshot tag and yields a pruned body", () => 
   assert.deepEqual(pruned.historySessions, []);
   assert.deepEqual(pruned.historyEvents, {});
   assert.ok(pruned.revision > live.revision);
+});
+
+test("persisted history survives a monitor restart and old sessions are pruned", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "agenlynk-monitor-db-"));
+  try {
+    const path = join(directory, "monitor.db");
+    const first = await SqliteMonitorStore.open(path, { flushMs: 1 });
+    assert.ok(first, "node:sqlite is available");
+    const before = new MonitorState({ persistence: first });
+    const a = "local:grok:a";
+    before.setSessions([{ sessionId: a, provider: "grok", status: "running", updatedAt: new Date().toISOString() }]);
+    before.setExternalEvents({ [a]: [localEvent("m1", "2026-08-07T00:00:00Z"), localEvent("m2", "2026-08-07T00:00:01Z")] });
+    before.setSessions([]);
+    first.close();
+
+    const second = await SqliteMonitorStore.open(path, { flushMs: 1 });
+    const after = new MonitorState({ persistence: second });
+    assert.equal(after.restoreHistory(), 1);
+    const snapshot = after.snapshot();
+    assert.deepEqual(snapshot.historySessions.map((session) => session.sessionId), [a]);
+    assert.deepEqual(snapshot.historyEvents[a].map((event) => event.key), ["m1", "m2"]);
+    // New events continue the restored sequence instead of restarting at 1.
+    after.setExternalEvents({ [a]: [localEvent("m3", "2026-08-07T00:00:02Z")] });
+    assert.equal(after.eventsFor(a).at(-1).sequence, 3);
+    assert.deepEqual(second.readEvents(a, { before: 3, limit: 1 }).map((event) => event.key), ["m2"]);
+
+    assert.equal(second.prune({ retentionDays: 0, keep: new Set() }), 1);
+    assert.deepEqual(second.readSessions(), []);
+    second.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

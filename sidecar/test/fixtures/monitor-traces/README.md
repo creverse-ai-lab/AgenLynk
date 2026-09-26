@@ -1,4 +1,4 @@
-# Monitor characterization trace v1
+# Monitor characterization trace v2
 
 각 `.ndjson` 파일은 다음 순서로 재생한다.
 
@@ -15,13 +15,15 @@ Node 재생 결과는 완전한 `MonitorState.snapshot()`이다. fixture `expect
 
 selection-reset은 live가 비어도 merged history에서 선택된 Frontdoor/event를 유지해야 한다. observer overflow는 connected + `streaming=false` + error 한 건만 notice로 남기고, 같은 문구를 연속으로 두 번 넣으면 notice log는 한 줄에 count=2로 접힌다. `kind: "notice"` 메시지는 없다.
 
-이벤트 규칙 (현재 동작):
+이벤트 규칙 (Monitor API v2):
 
-- live `pushEvent`는 sequence로 정렬한 뒤 cap한다. 같은 session의 같은 finite sequence는 중복으로 버리고 넣지 않는다.
-- session이 live에서 빠지면 이벤트가 있을 때만 history로 아카이브하고, history도 sequence 다음 `ts`로 정렬한 뒤 최근 `maxEventsPerSession`개만 남긴다.
-- live cap도 같은 한도로 가장 오래된 이벤트를 버린다.
+- 입력 줄은 sidecar가 Gateway에서 받는 원본 이벤트다. `MonitorState.pushEvent`가 이를 정규화(`sidecar/src/normalize/acp.js`)해 canonical 이벤트로 store에 upsert한다. 기대 snapshot의 이벤트는 canonical 형태(`kind`, store가 부여한 `sequence`, 안정적인 `id`)다.
+- 같은 session에서 같은 Gateway `sequence`+`ts` 쌍은 replay 중복으로 버린다. sequence가 같아도 ts가 다르면 재시작한 daemon의 새 이벤트다.
+- 같은 turn의 연속된 message/thought chunk는 이벤트 하나로 합쳐지고, 본문은 도착 순서가 아니라 Gateway sequence 순서로 만든다(gap replay가 앞 chunk를 늦게 다시 보내도 문장이 뒤섞이지 않는다).
+- tool_call과 그 tool_call_update는 `toolCallId`로 이벤트 하나가 된다.
+- session이 live에서 빠지면 session record만 history로 옮겨지고 이벤트는 store에 그대로 남는다. 세션당 `maxEventsPerSession`을 넘으면 가장 오래된(ts 기준) 이벤트를 버린다.
 - `subscription_replay_truncated`는 timeline/notice가 아니라 diagnostics + degraded health다. `subscription_error`는 SSE `kind: "state"`로만 올라가고 `kind: "notice"`는 없다.
-- `subscription_gap.ndjson`은 gap marker가 timeline에 저장되지 않고 degraded/reconciliation을 거쳐 replay 후 canonical 순서로 복구되는 계약을 고정한다.
-- `event-flood.ndjson`은 중복·역순 이벤트와 bounded overflow diagnostics를 고정한다.
+- `subscription-gap.ndjson`은 gap marker가 timeline에 저장되지 않고 degraded/reconciling 이후 healthy로 돌아오는지 확인한다.
+- `event-flood.ndjson`은 순서가 뒤섞인 네 개의 서로 다른 이벤트를 한도 3에 넣어, 가장 오래된 것이 버려지고 replay 중복이 무시되는지 확인한다.
 
-재현성을 위해 timestamp는 고정 ISO-8601 문자열만 사용한다. PID, 실제 임시 경로, 현재 시각, map iteration에 의존하는 값은 fixture에 기록하지 않는다.
+Swift는 v2부터 Gateway 원본 이벤트를 받지 않는다. Swift 쪽은 기대 snapshot을 production decoder로 읽고 selection/notice 로직만 재생한다.

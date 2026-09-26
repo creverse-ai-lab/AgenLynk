@@ -13,6 +13,14 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+// Gateway sequences the monitor has applied for a session. Event sequences
+// in v2 are the monitor store's own; the daemon's live in its dedupe ledger.
+function appliedSequences(state, sessionId) {
+  return [...(state.gatewaySeen.get(sessionId) ?? [])]
+    .map((identity) => Number(identity.split(":")[0]))
+    .sort((left, right) => left - right);
+}
+
 function seedSession(state, { sessionId = "s1", sequences = [0, 3] } = {}) {
   state.setConnection({ connected: true, streaming: true, error: null });
   state.setSessions([{ sessionId, status: "running" }]);
@@ -90,7 +98,7 @@ test("gap reconciliation keeps the old subscription live until rewind promote", 
   assert.equal(owner.activeSubscriptionId, "sub-old");
   owner.onEvent({ sessionId: "s1", sequence: 4, type: "agent_message_chunk", text: "old-live" });
   candidateOnEvent({ sessionId: "s1", sequence: 5, type: "agent_message_chunk", text: "candidate-live" });
-  assert.equal(state.eventsBySession.get("s1").some((event) => event.sequence === 5), false);
+  assert.equal(appliedSequences(state, "s1").includes(5), false);
   candidateGate.resolve();
   await reconcile;
 
@@ -99,8 +107,8 @@ test("gap reconciliation keeps the old subscription live until rewind promote", 
   assert.equal(calls[1][1], "sub-old");
   assert.equal(owner.activeSubscriptionId, "sub-new");
   assert.equal(owner.subscriptionActive, true);
-  assert.deepEqual(state.snapshot().events.s1.map((event) => event.sequence), [0, 1, 2, 3, 4, 5]);
-  assert.equal(state.snapshot().events.s1.some((event) => event.type === "subscription_gap"), false);
+  assert.deepEqual(appliedSequences(state, "s1"), [0, 1, 2, 3, 4, 5]);
+  assert.equal(state.snapshot().events.s1.some((event) => event.kind === "subscription_gap"), false);
   assert.deepEqual(state.snapshot().diagnostics, {
     subscriptionGaps: 1,
     replayedEvents: 2,
@@ -211,7 +219,7 @@ test("cursorTruncated after rewind degrades health and stays out of the timeline
   assert.match(snapshot.error ?? "", /truncated/);
   assert.equal(snapshot.streaming, true);
   assert.equal(snapshot.diagnostics.replayTruncations, 1);
-  assert.equal(snapshot.events.s1.some((event) => event.type === "subscription_replay_truncated"), false);
+  assert.equal(snapshot.events.s1.some((event) => event.kind === "subscription_replay_truncated"), false);
 });
 
 test("initial open unsubscribes a candidate if post-subscribe work fails", async () => {
