@@ -27,6 +27,7 @@ final class AppSettings: ObservableObject {
         static let petExecutablePath = "monitor.petExecutablePath"
         static let bundledPetDefaultMigration = "monitor.bundledPetDefaultV1"
         static let frontdoorNicknames = "monitor.frontdoorNicknames"
+        static let sessionNicknames = "monitor.sessionNicknames"
         static let showSessionColumn = "monitor.showSessionColumn"
         static let showInspectorColumn = "monitor.showInspectorColumn"
     }
@@ -54,6 +55,28 @@ final class AppSettings: ObservableObject {
     @Published private(set) var frontdoorNicknames: [String: String] {
         didSet {
             defaults.set(try? JSONEncoder().encode(frontdoorNicknames), forKey: Key.frontdoorNicknames)
+        }
+    }
+    /// User-chosen session names, keyed by monitor session id — a store of
+    /// their own, so no Frontdoor id can ever collide with a session id.
+    @Published private(set) var sessionNicknames: [String: String] {
+        didSet {
+            defaults.set(try? JSONEncoder().encode(sessionNicknames), forKey: Key.sessionNicknames)
+        }
+    }
+
+    func sessionNickname(id: String) -> String? {
+        let value = sessionNicknames[id]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value?.isEmpty == false ? value : nil
+    }
+
+    /// Save a session name, or clear it (back to the automatic name) when empty.
+    func setSessionNickname(_ name: String?, id: String) {
+        let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if trimmed.isEmpty {
+            sessionNicknames.removeValue(forKey: id)
+        } else {
+            sessionNicknames[id] = trimmed
         }
     }
 
@@ -108,6 +131,12 @@ final class AppSettings: ObservableObject {
             defaults.set(true, forKey: Key.followLatestEventUXMigration)
         }
         nodePath = defaults.string(forKey: Key.nodePath) ?? ""
+        if let data = defaults.data(forKey: Key.sessionNicknames),
+           let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
+            sessionNicknames = decoded
+        } else {
+            sessionNicknames = [:]
+        }
         if let data = defaults.data(forKey: Key.frontdoorNicknames),
            let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
             frontdoorNicknames = decoded

@@ -207,11 +207,14 @@ struct MenuBarStatusView: View {
 
     private func progressSummary(_ agents: [PetAgentActivity]) -> String {
         let running = agents.filter { $0.state == .running || $0.state == .starting }.count
-        let waiting = agents.filter { $0.state == .waiting }.count
-        if running == 0 && waiting == 0 { return "진행 중 없음" }
-        if waiting == 0 { return "진행 중 \(running)" }
-        if running == 0 { return "응답 대기 \(waiting)" }
-        return "진행 중 \(running) · 응답 대기 \(waiting)"
+        let permission = agents.filter { $0.state == .waiting && $0.waitingReason == "permission" }.count
+        let input = agents.filter { $0.state == .waiting && $0.waitingReason != "permission" }.count
+        let parts = [
+            running > 0 ? "진행 중 \(running)" : nil,
+            permission > 0 ? "권한 대기 \(permission)" : nil,
+            input > 0 ? "입력 대기 \(input)" : nil
+        ].compactMap { $0 }
+        return parts.isEmpty ? "진행 중 없음" : parts.joined(separator: " · ")
     }
 
     private func open(_ agent: PetAgentActivity) {
@@ -300,7 +303,7 @@ private struct MenuBarActivityRow: View {
     private var stateLabel: String {
         switch agent.state {
         case .running: "진행 중"
-        case .waiting: "응답 대기"
+        case .waiting: agent.waitingReason == "permission" ? "권한 대기" : agent.waitingReason == "input" ? "입력 대기" : "응답 대기"
         case .starting: "시작 중"
         case .completed: "완료"
         case .failed: "실패"

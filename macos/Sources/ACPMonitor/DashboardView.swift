@@ -150,19 +150,19 @@ struct DashboardView: View {
             if panelLayout.showsSessions {
                 forceSessionColumn = false
                 settings.showSessionColumn = false
-            } else if settings.showSessionColumn {
-                forceSessionColumn = true
             } else {
+                // Asking for a panel opens it now, even where the width
+                // would fold it.
                 settings.showSessionColumn = true
+                if !panelLayout.fitsSessions { forceSessionColumn = true }
             }
         } else {
             if panelLayout.showsInspector {
                 forceInspectorColumn = false
                 settings.showInspectorColumn = false
-            } else if settings.showInspectorColumn {
-                forceInspectorColumn = true
             } else {
                 settings.showInspectorColumn = true
+                if !panelLayout.fitsInspector { forceInspectorColumn = true }
             }
         }
     }
@@ -418,8 +418,10 @@ struct DashboardView: View {
             return SessionActivity(symbol: "bolt.fill", color: .green, headline: "작업 진행 중", detail: detail)
         }
         switch session.status {
-        case "idle", "ready", "end_turn", "completed", "closed":
-            return SessionActivity(symbol: "checkmark.circle.fill", color: .green, headline: "최근 작업 완료", detail: detail)
+        case "idle", "ready", "end_turn", "completed":
+            return SessionActivity(symbol: "pause.circle.fill", color: .secondary, headline: "대기 · 다음 입력을 기다림", detail: detail)
+        case "closed":
+            return SessionActivity(symbol: "checkmark.circle", color: .secondary, headline: "종료됨", detail: detail)
         case "error":
             return SessionActivity(symbol: "exclamationmark.triangle.fill", color: .red, headline: "오류로 중단됨", detail: detail)
         default:
@@ -445,7 +447,7 @@ struct DashboardView: View {
                             LabeledContent("역할", value: session.isFrontdoorRecord ? "Frontdoor" : "Worker")
                             SessionCapabilityBadges(session: session)
                             if let usage = session.usage {
-                                SessionUsageView(usage: usage, partial: session.usagePartial)
+                                SessionUsageView(usage: usage, partial: session.usagePartial, forecast: UsageForecast(session: session))
                             }
                         }
                         LabeledContent("이벤트", value: event.kindLabel)
@@ -570,6 +572,16 @@ private struct SequenceSelectionContext: View {
                         ProviderIcon(provider: frontdoor.provider, size: 16)
                         ContextPill(text: frontdoor.isActive ? "진행 중" : "대기", color: frontdoor.isActive ? .green : .secondary)
                         ContextPill(text: "Worker \(frontdoor.workers.count)", color: .secondary)
+                        // The whole work: the Frontdoor and every worker it opened.
+                        let work = WorkUsage(sessions: frontdoor.members)
+                        if let total = work.totalTokens {
+                            ContextPill(text: "작업 토큰 \(formatTokenCount(total))", color: .secondary)
+                                .help("이 Frontdoor와 Worker들의 세션 누적 토큰 합계입니다(입력은 cache 포함).")
+                            if let current = work.currentTurnTokens {
+                                ContextPill(text: "진행 중 \(formatTokenCount(current))", color: .green)
+                                    .help("지금 실행 중인 턴 \(work.runningSessions)개가 지금까지 쓴 토큰입니다.")
+                            }
+                        }
                         ContextPill(text: "작업공간 \(frontdoor.workspaceCount)", color: .secondary)
                     }
                     if let task = frontdoor.latestTask, task != frontdoor.displayName {
@@ -937,7 +949,15 @@ private struct InspectorSection<Content: View>: View {
 }
 
 private struct RecordRow: View {
+    @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var settings: AppSettings
     let record: MonitorRecord
+    /// The session a task/inbox row belongs to, by its name — the raw id stays
+    /// in the tooltip.
+    private var sessionText: String {
+        if let session = model.knownSession(record.subtitle) { return settings.sessionName(session) }
+        return record.subtitle == record.id ? "" : "세션 정보 없음"
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack {
@@ -945,7 +965,10 @@ private struct RecordRow: View {
                 Spacer()
                 if let status = record.status { Text(sessionStatusLabel(status)).foregroundStyle(statusColor(status)) }
             }
-            Text(record.subtitle).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+            if !sessionText.isEmpty {
+                Text(sessionText).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                    .help(record.subtitle)
+            }
         }
         .padding(.vertical, 3)
     }

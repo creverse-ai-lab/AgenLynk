@@ -174,12 +174,19 @@ test("Grok subagents become one subagent event that completes", () => {
 
 test("Gateway permission requests resolve in place and chunks read in daemon order", () => {
   const normalizer = new GatewayEventNormalizer();
-  const [request] = normalizer.ingest({ sessionId: "s", sequence: 1, type: "permission_request", ts: "2026-09-26T00:00:00Z", turnId: "t", requestId: "r1", toolCall: { toolCallId: "c1", title: "Write file" } });
+  const options = [{ optionId: "yes", kind: "allow_once", name: "Allow" }, { optionId: "no", kind: "reject_once", name: "Reject" }];
+  const ask = (sequence, requestId) => normalizer.ingest({ sessionId: "s", sequence, type: "permission_request", ts: "2026-09-26T00:00:00Z", turnId: "t", requestId, toolCall: { toolCallId: "c1", title: "Write file" }, options })[0];
+  const answer = (sequence, requestId, optionId) => normalizer.ingest({ sessionId: "s", sequence, type: "permission_response", ts: "2026-09-26T00:00:01Z", turnId: "t", requestId, optionId })[0];
+  const request = ask(1, 1);
   assert.equal(request.kind, "permission_request");
   assert.equal(request.status, "pending");
-  const [resolved] = normalizer.ingest({ sessionId: "s", sequence: 2, type: "permission_response", ts: "2026-09-26T00:00:01Z", turnId: "t", requestId: "r1" });
-  assert.equal(resolved.key, request.key);
-  assert.equal(mergeEvent(request, resolved).status, "completed");
+  const allowed = answer(2, 1, "yes");
+  assert.equal(allowed.key, request.key);
+  assert.deepEqual([mergeEvent(request, allowed).status, allowed.detail.outcome], ["completed", "approved"]);
+  ask(3, 2);
+  assert.deepEqual([answer(4, 2, "no").status, answer(4, 2, "no").detail.outcome], ["failed", "denied"], "a rejected option is a denial");
+  ask(5, 3);
+  assert.equal(answer(6, 3, null).detail.outcome, "cancelled", "no option chosen is a cancellation");
 
   const chunks = new GatewayEventNormalizer();
   chunks.ingest({ sessionId: "s", sequence: 5, type: "agent_message_chunk", ts: "2026-09-26T00:00:05Z", turnId: "t", text: "world" });
@@ -287,4 +294,25 @@ test("a turn that ends closes the tool calls it left open, for every source", ()
   gateway.ingest({ sessionId: "s", sequence: 1, type: "tool_call", ts: "2026-09-26T00:00:01Z", turnId: "t", data: { sessionUpdate: "tool_call", toolCallId: "c1", title: "Read" } });
   const closed = gateway.ingest({ sessionId: "s", sequence: 2, type: "turn_completed", ts: "2026-09-26T00:00:02Z", turnId: "t", stopReason: "end_turn" });
   assert.equal(closed.find((event) => event.key === "tool:c1")?.status, "completed");
+});
+
+test("every provider reports per-turn token use for the forecast", () => {
+  const claude = normalizeClaudeRecords(claudeTurn).session.turns;
+  // msg_1 (2 records, counted once: 112 in + 5 out) + msg_2 (201 in + 7 out)
+  assert.deepEqual(claude.map((turn) => [turn.running, turn.totalTokens, turn.outputTokens, turn.contextUsed]), [[false, 325, 12, 201]]);
+
+  const codex = normalizeCodexRecords(codexTurn).session.turns;
+  assert.equal(codex.length, 1);
+  assert.equal(codex[0].running, false);
+  assert.equal(codex[0].outputTokens, 12);
+
+  const grok = normalizeGrokUpdates([
+    ...grokTurn.slice(0, -1),
+    { timestamp: 1790380805, method: "_x.ai/session/update", params: { sessionId: "g1", update: { sessionUpdate: "turn_completed", prompt_id: "p1", stop_reason: "end_turn", usage: { totalTokens: 900, outputTokens: 40 } }, _meta: {} } }
+  ]).session.turns;
+  assert.deepEqual(grok.map((turn) => [turn.running, turn.totalTokens, turn.outputTokens]), [[false, 900, 40]]);
+
+  const running = normalizeGrokUpdates(grokTurn.slice(0, -1)).session.turns;
+  assert.equal(running[0].running, true);
+  assert.equal(running[0].totalTokens, null, "Grok settles a turn's tokens only when it ends");
 });

@@ -130,6 +130,8 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
     /// Warnings the app must show, e.g. `permission_policy_partial`: a
     /// read_only/ask Codex session can still edit inside its roots.
     let alerts: [SessionAlert]
+    /// Recent turns' token use, newest last (contracts/monitor/v2 turnUsage).
+    let turnUsage: [TurnUsage]
 
     var id: String { sessionId }
     /// Naming policy (docs/ux-policy.md): the sidecar's title (the CLI's own
@@ -201,6 +203,7 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
             return name
         })
         alerts = (object.array("alerts") ?? []).compactMap(SessionAlert.init)
+        turnUsage = (object.array("turnUsage") ?? []).compactMap(TurnUsage.init)
     }
 
     /// `base` followed by the model id when the session reports one. v2 sends
@@ -217,6 +220,88 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
         var copy = self
         copy.status = status
         return copy
+    }
+}
+
+struct TurnUsage: Hashable, Sendable {
+    let turnId: String
+    let startedAt: String?
+    let running: Bool
+    let totalTokens: Double?
+    let outputTokens: Double?
+    let contextUsed: Double?
+
+    init?(_ value: JSONValue) {
+        guard let object = value.objectValue, let turnId = object.string("turnId") else { return nil }
+        self.turnId = turnId
+        startedAt = object.string("startedAt")
+        running = object.bool("running") ?? false
+        totalTokens = object.double("totalTokens")
+        outputTokens = object.double("outputTokens")
+        contextUsed = object.double("contextUsed")
+    }
+}
+
+/// What a session (or a whole Frontdoor's work) has used and is likely to
+/// use. The estimate is the median of completed turns — shown only with at
+/// least two, so one odd turn does not pass for a pattern.
+struct UsageForecast: Equatable, Sendable {
+    /// The running turn's tokens so far; nil when the provider settles a turn
+    /// only at its end (Grok) or nothing is running.
+    let currentTurnTokens: Double?
+    let currentTurnRunning: Bool
+    let currentTurnStartedAt: String?
+    let typicalTurnTokens: Double?
+    let completedTurns: Int
+    /// Turns left before the context window fills at the recent growth rate.
+    let turnsUntilContextFull: Int?
+
+    init(session: GatewaySession) {
+        let turns = session.turnUsage
+        let running = turns.last(where: \.running)
+        currentTurnRunning = running != nil
+        currentTurnTokens = running?.totalTokens
+        currentTurnStartedAt = running?.startedAt
+        let completed = turns.filter { !$0.running }.compactMap(\.totalTokens)
+        completedTurns = completed.count
+        typicalTurnTokens = completed.count >= 2 ? Self.median(completed) : nil
+        let contexts = turns.compactMap(\.contextUsed)
+        let growth = zip(contexts, contexts.dropFirst()).map { $1 - $0 }.filter { $0 > 0 }
+        if let window = session.usage?.contextWindow, let used = session.usage?.contextUsed ?? contexts.last,
+           growth.count >= 2, let step = Self.median(growth), step > 0, window > used {
+            turnsUntilContextFull = Int(((window - used) / step).rounded(.down))
+        } else {
+            turnsUntilContextFull = nil
+        }
+    }
+
+    /// How far the running turn is against the typical one (may exceed 1).
+    var progress: Double? {
+        guard let current = currentTurnTokens, let typical = typicalTurnTokens, typical > 0 else { return nil }
+        return current / typical
+    }
+
+    static func median(_ values: [Double]) -> Double? {
+        guard !values.isEmpty else { return nil }
+        let sorted = values.sorted()
+        let middle = sorted.count / 2
+        return sorted.count.isMultiple(of: 2) ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle]
+    }
+}
+
+/// One Frontdoor's work: its root and workers added up.
+struct WorkUsage: Equatable, Sendable {
+    let totalTokens: Double?
+    let currentTurnTokens: Double?
+    let runningSessions: Int
+
+    init(sessions: [GatewaySession]) {
+        let totals = sessions.compactMap { $0.usage?.total }
+        totalTokens = totals.isEmpty ? nil : totals.reduce(0, +)
+        let running = sessions.compactMap { session in session.turnUsage.last(where: \.running) }
+        runningSessions = running.count
+        let current = running.compactMap(\.totalTokens)
+        currentTurnTokens = current.isEmpty ? nil : current.reduce(0, +)
     }
 }
 
@@ -305,9 +390,10 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
     /// a local CLI writes its *current tool call* into its title
     /// ("custom_tool_call/exec"), which as a name is worse than useless.
     var displayName: String {
+        if isUnattributed { return "연결 미확인 Worker" }
         if let folder = workingFolder { return folder }
         if let name = designatedName { return name }
-        return "\(provider.capitalized) Frontdoor"
+        return "이름 없는 작업"
     }
     /// The root's title, but only when it reads as a name rather than the
     /// transient event/tool text local sessions park there.
@@ -337,8 +423,21 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
             .first { !$0.isEmpty }
     }
 
+    /// Workers the Gateway reports without a known opener (an older daemon,
+    /// or a Main whose transcript this Mac cannot see). They are never promoted
+    /// to Frontdoors, but they must not vanish either: they share one group.
+    static let unattributedId = "unattributed"
+    var isUnattributed: Bool { id == Self.unattributedId }
+
     static func make(sessions: [GatewaySession]) -> [FrontdoorSession] {
         let mapped = sessions.filter(\.hasFrontdoorIdentity)
+        let orphans = sessions.filter { !$0.hasFrontdoorIdentity && !$0.isFrontdoorRecord }
+        let unattributed = orphans.isEmpty ? [] : [FrontdoorSession(
+            id: unattributedId,
+            provider: orphans.first?.provider.lowercased() ?? "agent",
+            root: nil,
+            workers: orphans.sorted { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
+        )]
         return Dictionary(grouping: mapped, by: { $0.openerInstanceId! })
             .map { instanceId, members in
                 let roots = members.filter(\.isFrontdoorRecord)
@@ -353,6 +452,7 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
                 )
             }
             .sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
+            + unattributed
     }
 }
 
@@ -394,6 +494,16 @@ struct PetAgentActivity: Equatable, Sendable {
     /// contract state, so a legacy aggregation can be re-run without
     /// re-classifying raw Gateway statuses.
     let memberStates: [PetAgentState]
+    /// Why a waiting agent waits ("permission" or "input"): the Pet contract
+    /// folds both into `waiting`, the menu bar tells them apart.
+    var waitingReason: String? = nil
+}
+
+/// "permission" / "input" for a waiting status, else nil.
+func waitingReason(for statuses: [String]) -> String? {
+    if statuses.contains("waiting_permission") { return "permission" }
+    if statuses.contains("waiting_input") { return "input" }
+    return nil
 }
 
 /// The common activity projection both `pet-state.json`/`pet-actions.json`
@@ -452,7 +562,8 @@ struct PetActivityProjection: Equatable, Sendable {
                 source: root?.source ?? (group.allSatisfy(\.isLocalSource) ? "local" : "gateway"),
                 cwd: frontdoorCwd.isEmpty ? nil : frontdoorCwd,
                 inboxPending: 0,
-                memberStates: memberStates
+                memberStates: memberStates,
+                waitingReason: waitingReason(for: group.map(\.status))
             ))
             agents.append(contentsOf: workers.map { gatewaySession in
                 let pending = pendingBySession[gatewaySession.sessionId] ?? 0
@@ -470,7 +581,8 @@ struct PetActivityProjection: Equatable, Sendable {
                     source: gatewaySession.source,
                     cwd: gatewaySession.cwd.isEmpty ? nil : gatewaySession.cwd,
                     inboxPending: pending,
-                    memberStates: []
+                    memberStates: [],
+                    waitingReason: waitingReason(for: [gatewaySession.status])
                 )
             })
         }
@@ -866,7 +978,9 @@ struct MonitorEvent: Identifiable, Equatable, Sendable {
             }
             switch status {
             case "pending", "running", nil: return "권한 요청 대기"
-            case "completed": return "승인됨"
+            // A response without a known outcome (an older source) is only
+            // known to have been answered, not allowed.
+            case "completed": return detail["outcome"] == nil ? "응답됨" : "승인됨"
             case "failed": return "거부됨"
             case "cancelled": return "취소됨"
             default: return "권한 요청"
@@ -938,8 +1052,8 @@ func sessionStatusLabel(_ status: String) -> String {
     case "restoring": "복원 중"
     case "pending": "대기 중"
     case "interrupted": "중단됨"
-    case "unknown", "": "알 수 없음"
-    default: status.replacingOccurrences(of: "_", with: " ")
+    // An unlisted status is not shown as raw text (docs/ux-policy.md §3).
+    default: "알 수 없음"
     }
 }
 

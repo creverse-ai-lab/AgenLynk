@@ -43,6 +43,7 @@ import { LocalAgentScanner } from "../local-agents/index.js";
 import { LocalTimeline } from "../normalize/local-timeline.js";
 import { SqliteMonitorStore, defaultMonitorDatabasePath } from "../store/sqlite-store.js";
 import { HookSessions } from "../hooks/registry.js";
+import { defaultWorkerLedgerPath, readWorkerLedger, workerLedgerWriter } from "../store/worker-ledger.js";
 import { defaultHookEndpointPath, newHookToken, removeHookEndpoint, writeHookEndpoint } from "../hooks/endpoint.js";
 import { HOOK_PROVIDERS as INSTALLABLE_HOOK_PROVIDERS, ensureHooks, hookStatus, installHooks, uninstallHooks } from "../hooks/installer.js";
 /*
@@ -162,7 +163,18 @@ async function main() {
   const persistence = HISTORY_ENABLED && historyRetentionMs > 0
     ? await SqliteMonitorStore.open(defaultMonitorDatabasePath(), { retentionDays: historyRetentionMs / 86_400_000 })
     : null;
-  const state = new MonitorState({ maxEventsPerSession: MAX_EVENTS_PER_SESSION, persistence });
+  // A session that leaves the live list stays in the in-memory log as long as
+  // an idle one stays live, so every provider disappears on the same clock;
+  // older history is browsed from the database.
+  const workerLedgerPath = defaultWorkerLedgerPath();
+  const saveWorkerLedger = HISTORY_ENABLED ? workerLedgerWriter(workerLedgerPath) : null;
+  const state = new MonitorState({
+    maxEventsPerSession: MAX_EVENTS_PER_SESSION,
+    persistence,
+    historyRetentionMs: monitorSettings.localSessionRetentionMs,
+    formerWorkerIds: HISTORY_ENABLED ? readWorkerLedger(workerLedgerPath) : [],
+    onWorkerRemembered: saveWorkerLedger
+  });
   state.restoreHistory();
   persistence?.prune();
   const historyPrune = setInterval(() => {
@@ -630,8 +642,11 @@ async function main() {
       // Newest first; pass the oldest updatedAt received as `before` to page.
       const since = Number(url.searchParams.get("since")) || 0;
       const before = Date.parse(url.searchParams.get("before") ?? "") || Number(url.searchParams.get("before")) || Number.MAX_SAFE_INTEGER;
+      // (updatedAt, sessionId) is the cursor, so sessions sharing a timestamp
+      // across a page boundary are not skipped.
+      const beforeId = url.searchParams.get("beforeId") ?? null;
       const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 50, 1), 500);
-      const sessions = persistence ? persistence.readSessions({ since, before, limit }) : [];
+      const sessions = persistence ? persistence.readSessions({ since, before, beforeId, limit }) : [];
       sendJson(response, { sessions, hasMore: sessions.length === limit });
       return;
     }
@@ -845,6 +860,7 @@ async function main() {
     clearInterval(historyPrune);
     flushEvents();
     persistence?.close();
+    saveWorkerLedger?.flush();
     removeHookEndpoint(hookEndpointPath, hookToken);
     if (parentWatch) clearInterval(parentWatch);
     state.closeSseClients();

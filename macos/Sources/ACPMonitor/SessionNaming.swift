@@ -1,21 +1,18 @@
 import SwiftUI
 
-// Session nicknames reuse the Frontdoor nickname store under a `session:` key,
-// so a Frontdoor and its root session never collide (docs/ux-policy.md).
+// Session names (docs/ux-policy.md §2): the user's name when set, else the
+// automatic name. Stored apart from Frontdoor names.
 extension AppSettings {
-    /// A session's name: the user's override when set, else the naming
-    /// policy's automatic name. Stored with the Frontdoor names under a
-    /// `session:` key, so a Frontdoor and its root session never collide.
     func sessionName(_ session: GatewaySession) -> String {
-        frontdoorName(id: "session:\(session.sessionId)", auto: session.displayName)
+        sessionNickname(id: session.sessionId) ?? session.displayName
     }
 
     func hasSessionNickname(_ session: GatewaySession) -> Bool {
-        hasFrontdoorNickname(id: "session:\(session.sessionId)")
+        sessionNickname(id: session.sessionId) != nil
     }
 
     func setSessionName(_ name: String?, for session: GatewaySession) {
-        setFrontdoorName(name, id: "session:\(session.sessionId)")
+        setSessionNickname(name, id: session.sessionId)
     }
 }
 

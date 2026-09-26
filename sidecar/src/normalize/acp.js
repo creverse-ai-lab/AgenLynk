@@ -13,7 +13,8 @@ import {
   isoTime,
   monitorEvent,
   sessionPatch,
-  toolTitle
+  toolTitle,
+  turnUsageList
 } from "./model.js";
 
 // Streaming messages whose chunks the Gateway normalizer keeps for ordering.
@@ -144,6 +145,21 @@ function mapUpdate(collector, update, context) {
   }
 }
 
+/**
+ * approved / denied / cancelled for a Gateway permission response, from the
+ * kind of the option chosen (ACP: allow_once/allow_always/reject_once/
+ * reject_always); no option chosen is a cancellation. null when unknowable.
+ */
+function permissionResponseOutcome(event, options) {
+  const explicit = event.outcome ?? event.data?.outcome;
+  if (["approved", "denied", "cancelled"].includes(explicit)) return explicit;
+  if (event.optionId == null) return "cancelled";
+  const kind = (options ?? []).find((option) => option?.optionId === event.optionId)?.kind ?? String(event.optionId);
+  if (/^allow/i.test(kind)) return "approved";
+  if (/^reject|^deny/i.test(kind)) return "denied";
+  return null;
+}
+
 /** Closes the tool calls a finished turn left open, with the turn's outcome. */
 function closeOpenTools(collector, context, ts, status, turnId) {
   for (const id of context.openTools ?? []) {
@@ -166,6 +182,7 @@ export function normalizeGrokUpdates(records) {
   let status = null;
   let statusAt = null;
   let turnUsage = null;
+  const turns = new Map();
 
   for (const record of Array.isArray(records) ? records : []) {
     const params = record?.params;
@@ -189,6 +206,7 @@ export function normalizeGrokUpdates(records) {
         context.segment = 0;
         context.lastKind = null;
       }
+      if (!turns.has(promptId)) turns.set(promptId, { turnId: promptId, startedAt: ts, running: true });
       collector.add(monitorEvent({
         key: `turn:${promptId}`, kind: "turn_start", ts, source: "transcript", turnId: promptId,
         title: text, body: text, bodyMode: "append"
@@ -215,12 +233,25 @@ export function normalizeGrokUpdates(records) {
       }
       closeOpenTools(collector, context, ts, stopStatus(update.stop_reason), ended);
       if (update.usage) turnUsage = update.usage;
+      if (ended) {
+        const turn = turns.get(ended) ?? { turnId: ended };
+        turns.set(ended, {
+          ...turn,
+          running: false,
+          endedAt: ts,
+          totalTokens: Number.isFinite(Number(update.usage?.totalTokens)) ? Number(update.usage.totalTokens) : null,
+          outputTokens: Number.isFinite(Number(update.usage?.outputTokens)) ? Number(update.usage.outputTokens) : null,
+          contextUsed: Number.isFinite(Number(meta.totalTokens)) ? Number(meta.totalTokens) : null
+        });
+      }
       status = "idle";
       statusAt = ts;
       context.turnId = null;
       continue;
     }
     mapUpdate(collector, update, context);
+    const running = context.turnId ? turns.get(context.turnId) : null;
+    if (running?.running && Number.isFinite(Number(meta.totalTokens))) running.contextUsed = Number(meta.totalTokens);
     if (context.turnId && ["tool_call", "tool_call_update", "agent_message_chunk", "agent_thought_chunk"].includes(type)) {
       status = "running";
       statusAt = ts;
@@ -229,7 +260,7 @@ export function normalizeGrokUpdates(records) {
 
   return {
     events: collector.list(),
-    session: sessionPatch({ model, status, statusAt, turnId: context.turnId, lastTurnUsage: turnUsage ?? null })
+    session: sessionPatch({ model, status, statusAt, turnId: context.turnId, lastTurnUsage: turnUsage ?? null, turns: turnUsageList(turns) })
   };
 }
 
@@ -271,6 +302,9 @@ export function grokUsage(usageFile, signalsFile) {
 export class GatewayEventNormalizer {
   constructor() {
     this.context = { turnId: null, segment: 0, lastKind: null, ts: null, source: "gateway", chunks: new Map(), openTools: new Set() };
+    // requestId -> offered options, so a response's optionId says whether it
+    // allowed or rejected (the response carries only the id).
+    this.permissionOptions = new Map();
   }
 
   ingest(event) {
@@ -312,6 +346,10 @@ export class GatewayEventNormalizer {
         context.chunkSequence = null;
         break;
       case "permission_request":
+        if (event.requestId != null && Array.isArray(event.options)) {
+          this.permissionOptions.set(String(event.requestId), event.options);
+          if (this.permissionOptions.size > 200) this.permissionOptions.delete(this.permissionOptions.keys().next().value);
+        }
         collector.add(monitorEvent({
           key: `perm:${event.requestId ?? ts}`, kind: "permission_request", ts, source: "gateway", turnId,
           toolCallId: event.toolCall?.toolCallId ?? null,
@@ -321,12 +359,15 @@ export class GatewayEventNormalizer {
         context.lastKind = type;
         break;
       case "permission_response":
-      case "permission_result":
+      case "permission_result": {
+        const outcome = permissionResponseOutcome(event, this.permissionOptions.get(String(event.requestId)));
         collector.add(monitorEvent({
           key: `perm:${event.requestId ?? ts}`, kind: "permission_request", ts, source: "gateway", turnId,
-          status: "completed", endedAt: ts, detail: { outcome: event.outcome ?? event.data?.outcome ?? null }
+          status: outcome === "approved" ? "completed" : outcome === "denied" ? "failed" : outcome === "cancelled" ? "cancelled" : "completed",
+          endedAt: ts, detail: { outcome }
         }));
         break;
+      }
       case "elicitation_request":
         collector.add(monitorEvent({
           key: `input:${event.requestId ?? ts}`, kind: "input_request", ts, source: "gateway", turnId,

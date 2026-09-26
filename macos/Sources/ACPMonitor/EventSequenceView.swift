@@ -251,7 +251,12 @@ struct EventSequenceView: View {
                     break
                 }
             }
-            .onChange(of: rows.last?.id) { _, _ in
+            // The newest event, not the newest row: a call joining the last tool
+            // group keeps the row id but must still be followed.
+            .onChange(of: events.last?.id) { _, _ in
+                if followLatestEvent { scrollToBottom(proxy, animated: false) }
+            }
+            .onChange(of: events.count) { _, _ in
                 if followLatestEvent { scrollToBottom(proxy, animated: false) }
             }
             .task {
@@ -308,14 +313,18 @@ struct EventSequenceView: View {
     /// so the prepended events appear above it instead of shoving the view.
     private func requestOlder(rows: [TimelineRow], proxy: ScrollViewProxy, force: Bool = false) {
         guard force || settled, canLoadOlder, !olderRequestInFlight, let loadOlder else { return }
-        let anchorId = rows.first?.id
+        // Anchor on an event, not a row: a tool group's row id changes when
+        // older calls join it, and a vanished anchor would jump the view.
+        let anchorEventId = rows.first?.coveredEventIds.last
         olderRequestInFlight = true
         Task { @MainActor in
             let arrived = await loadOlder()
             olderRequestInFlight = false
-            guard arrived, let anchorId else { return }
+            guard arrived, let anchorEventId else { return }
             await Task.yield()
-            proxy.scrollTo(anchorId, anchor: .top)
+            let refreshed = EventTimeline.rows(EventTimeline.group(events), expanded: expandedGroups)
+            guard let row = refreshed.first(where: { $0.coveredEventIds.contains(anchorEventId) }) else { return }
+            proxy.scrollTo(row.id, anchor: .top)
         }
     }
 

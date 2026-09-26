@@ -115,7 +115,9 @@ enum EventTimeline {
 
         for event in events {
             if event.kind == "tool_call" {
-                if let last = run.last, last.sessionId != event.sessionId || last.turnId != event.turnId {
+                // Calls with no known turn (a hook that arrived before the
+                // transcript) are not assumed to share one.
+                if let last = run.last, last.sessionId != event.sessionId || last.turnId != event.turnId || event.turnId == nil {
                     flush()
                 }
                 run.append(event)
@@ -174,7 +176,7 @@ struct DashboardPanelLayout: Equatable, Sendable {
 
     let fitsSessions: Bool
     let fitsInspector: Bool
-    let showsSessions: Bool
+    private(set) var showsSessions: Bool
     let showsInspector: Bool
 
     /// `force*` opens a panel the width folded away (the user asked for it).
@@ -184,6 +186,10 @@ struct DashboardPanelLayout: Equatable, Sendable {
         showsSessions = (wantsSessions && fitsSessions) || forceSessions
         // With the session list hidden the inspector only needs its own room.
         fitsInspector = showsSessions ? roomForBoth : width >= Self.centerMinimum + Self.inspectorMinimum
-        showsInspector = (wantsInspector && fitsInspector) || forceInspector
+        // A panel forced open where both do not fit takes the other's place
+        // rather than squeezing the sequence below its minimum.
+        let forcedSessionsCrowd = forceSessions && !roomForBoth
+        showsInspector = ((wantsInspector && fitsInspector) && !forcedSessionsCrowd) || forceInspector
+        if forceInspector && !roomForBoth && !forceSessions { showsSessions = false }
     }
 }

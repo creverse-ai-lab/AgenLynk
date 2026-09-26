@@ -13,7 +13,8 @@ import {
   monitorEvent,
   preview,
   sessionPatch,
-  toolTitle
+  toolTitle,
+  turnUsageList
 } from "./model.js";
 
 const SOURCE = "transcript";
@@ -62,6 +63,12 @@ export function normalizeClaudeRecords(records, { agentId = null } = {}) {
   let statusAt = null;
   let contextUsed = null;
   const openTools = new Set();
+  // turnId -> {turnId, startedAt, endedAt, running, messages: Map<id, usage>}
+  const turns = new Map();
+  const turnEntry = (id) => {
+    if (!turns.has(id)) turns.set(id, { turnId: id, running: true, messages: new Map() });
+    return turns.get(id);
+  };
 
   const setStatus = (value, at) => {
     status = value;
@@ -79,6 +86,9 @@ export function normalizeClaudeRecords(records, { agentId = null } = {}) {
     events.add(monitorEvent({
       key: `turn:${turnId}:end`, kind: "turn_end", ts, source: SOURCE, turnId, status: outcome, detail
     }));
+    const entry = turnEntry(turnId);
+    entry.running = false;
+    entry.endedAt = ts;
     setStatus("idle", ts);
     turnId = null;
     openTools.clear();
@@ -127,6 +137,7 @@ export function normalizeClaudeRecords(records, { agentId = null } = {}) {
         continue;
       }
       turnId = record.promptId ?? record.uuid ?? `turn-${ts}`;
+      turnEntry(turnId).startedAt = ts;
       events.add(monitorEvent({
         key: `turn:${turnId}`, kind: "turn_start", ts, source: SOURCE, turnId, title: text, body: text
       }));
@@ -141,6 +152,12 @@ export function normalizeClaudeRecords(records, { agentId = null } = {}) {
       if (usage && typeof usage === "object") {
         contextUsed = [usage.input_tokens, usage.cache_read_input_tokens, usage.cache_creation_input_tokens]
           .map(Number).filter(Number.isFinite).reduce((sum, value) => sum + value, 0) || contextUsed;
+        // One record per content block repeats the message's usage: keyed by
+        // message id so a turn counts each model call once.
+        if (turnId && (message.id ?? record.uuid)) {
+          const output = Number(usage.output_tokens) || 0;
+          turnEntry(turnId).messages.set(message.id ?? record.uuid, { input: contextUsed ?? 0, output });
+        }
       }
       if (record.isApiErrorMessage === true) {
         events.add(monitorEvent({
@@ -201,6 +218,15 @@ export function normalizeClaudeRecords(records, { agentId = null } = {}) {
       statusAt,
       turnId,
       openToolCount: openTools.size,
+      turns: turnUsageList(new Map([...turns].map(([id, turn]) => {
+        const calls = [...turn.messages.values()];
+        return [id, {
+          ...turn,
+          totalTokens: calls.length ? calls.reduce((sum, call) => sum + call.input + call.output, 0) : null,
+          outputTokens: calls.length ? calls.reduce((sum, call) => sum + call.output, 0) : null,
+          contextUsed: calls.at(-1)?.input ?? null
+        }];
+      }))),
       usage: contextUsed != null ? { contextUsed } : null
     })
   };

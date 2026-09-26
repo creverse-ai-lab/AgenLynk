@@ -76,6 +76,7 @@ final class AppModel: ObservableObject {
     /// /api/history, and the events of the ones the user opened.
     @Published private(set) var browsedHistory: [GatewaySession] = []
     @Published private(set) var historyHasMore = true
+    private var historyCursor: (updatedAt: String, sessionId: String)?
     @Published private(set) var historyLoading = false
     @Published private(set) var historyError: String?
     @Published private(set) var browsedEvents: [String: [MonitorEvent]] = [:]
@@ -445,6 +446,7 @@ final class AppModel: ObservableObject {
     func loadHistoryPage(reset: Bool = false) async {
         if reset {
             browsedHistory = []
+            historyCursor = nil
             historyHasMore = true
             historyError = nil
         }
@@ -454,8 +456,15 @@ final class AppModel: ObservableObject {
         historyLoading = true
         defer { historyLoading = false }
         do {
-            let before = browsedHistory.compactMap(\.updatedAt).min()
-            let page = try await client.fetchHistory(endpoint: endpoint, before: before, limit: Self.historyPageSize)
+            // The server pages newest first on (updatedAt, sessionId); the
+            // last row received is the cursor.
+            let cursor = historyCursor
+            let page = try await client.fetchHistory(
+                endpoint: endpoint, before: cursor?.updatedAt, beforeId: cursor?.sessionId, limit: Self.historyPageSize
+            )
+            if let last = page.sessions.last, let updatedAt = last.updatedAt {
+                historyCursor = (updatedAt, last.sessionId)
+            }
             var known = Set(browsedHistory.map(\.sessionId))
             let fresh = page.sessions.filter { known.insert($0.sessionId).inserted }
             browsedHistory.append(contentsOf: fresh)
@@ -732,11 +741,19 @@ final class AppModel: ObservableObject {
     /// After the sidecar connects: apply the onboarding choice, or ask an
     /// existing user once if the hooks have never been agreed to.
     private func reconcileHookConsent() async {
-        await loadHookStatus()
-        guard let status = hookStatus, status.receiving else { return }
+        // The sidecar may still be starting its hook endpoint: a failed read
+        // is retried briefly, and an onboarding choice is kept until it lands
+        // (the next connection retries it again).
+        var status: MonitoringHookStatus?
+        for attempt in 0..<5 {
+            await loadHookStatus()
+            status = hookStatus
+            if status?.receiving == true { break }
+            if attempt < 4 { try? await Task.sleep(nanoseconds: 1_500_000_000) }
+        }
+        guard let status, status.receiving else { return }
         if let chosen = pendingHookConsent {
-            pendingHookConsent = nil
-            await answerHookConsent(enabled: chosen)
+            if await answerHookConsent(enabled: chosen) { pendingHookConsent = nil }
             return
         }
         if status.consentRequired && !hookConsentAsked {
@@ -746,8 +763,9 @@ final class AppModel: ObservableObject {
     }
 
     /// The user's answer to the monitoring-hook question. An empty set is "no".
-    func answerHookConsent(enabled providers: Set<String>) async {
-        guard let endpoint else { return }
+    @discardableResult
+    func answerHookConsent(enabled providers: Set<String>) async -> Bool {
+        guard let endpoint else { return false }
         hookConsentPresented = false
         let ordered = Self.frontdoorInstallOrder.filter { providers.contains($0) }
         let declined = Self.frontdoorInstallOrder.filter { !providers.contains($0) }
@@ -763,8 +781,10 @@ final class AppModel: ObservableObject {
             }
             hookStatus = status
             hookError = status.errors.first
+            return true
         } catch {
             hookError = error.localizedDescription
+            return false
         }
     }
 

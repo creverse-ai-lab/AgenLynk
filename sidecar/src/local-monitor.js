@@ -129,6 +129,7 @@ export function projectLocalSnapshot(snapshot, timelines = new Map()) {
       updatedAt,
       eventCount: timeline?.events?.length ?? 0,
       usage: facts.usage ?? null,
+      turnUsage: facts.turns ?? [],
       ...(facts.usagePartial ? { usagePartial: true } : {}),
       capabilities: localCapabilities(provider, timeline, raw.hooked === true),
       source: "local",
@@ -215,8 +216,9 @@ export function mergeMonitorSessions(gatewaySessions, localSessions, workerTopol
       // The Gateway keeps usage off its event stream; the worker's own
       // transcript (scanned locally) is where the tokens are.
       usage: session.usage ?? localMatch?.usage ?? null,
+      turnUsage: session.turnUsage ?? localMatch?.turnUsage ?? [],
       model: session.model ?? localMatch?.model ?? null,
-      capabilities: ["status", "timeline", "tools", "thinking", "permission", ...(localMatch?.usage ? ["usage"] : [])],
+      capabilities: ["status", "timeline", "tools", "thinking", "permission", "live", ...(localMatch?.usage ? ["usage"] : [])],
       alerts: sessionAlerts(session),
       ...(topology ? {
         opener: session.opener ?? topology.opener,

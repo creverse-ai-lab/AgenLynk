@@ -1,3 +1,4 @@
+import ACPShared
 import SwiftUI
 
 struct SessionDetailView: View {
@@ -113,20 +114,24 @@ struct SessionDetailView: View {
                     ProviderIcon(provider: session.provider, size: 20)
                     SessionNameEditor(session: session)
                 }
-                Text("\(session.withModel(session.provider)) · \(sessionStatusLabel(session.status))")
+                Text([session.model, sessionStatusLabel(session.status)].compactMap { $0 }.joined(separator: " · "))
                     .foregroundStyle(.secondary)
-                    .help(session.status)
                 Text(session.cwd).font(.caption).foregroundStyle(.tertiary).textSelection(.enabled)
                 SessionCapabilityBadges(session: session)
             }
             Spacer()
             if let usage = session.usage {
-                SessionUsageView(usage: usage, partial: session.usagePartial)
+                SessionUsageView(usage: usage, partial: session.usagePartial, forecast: UsageForecast(session: session))
                     .frame(maxWidth: 220)
             }
-            VStack(alignment: .trailing) {
-                Text("Frontdoor").font(.caption).foregroundStyle(.secondary)
-                Text(session.opener ?? "unknown").font(.callout.weight(.medium))
+            VStack(alignment: .trailing, spacing: 3) {
+                Text(session.isFrontdoorRecord ? "Frontdoor" : "Worker").font(.caption).foregroundStyle(.secondary)
+                if !session.isFrontdoorRecord, let opener = session.opener {
+                    HStack(spacing: 4) {
+                        Text("요청한 곳").font(.caption2).foregroundStyle(.tertiary)
+                        ProviderIcon(provider: opener, size: 14)
+                    }
+                }
             }
         }
         .padding(16)
@@ -311,9 +316,11 @@ struct SessionUsageView: View {
     let usage: SessionUsage
     /// The totals cover only the part of a long transcript that was read.
     var partial = false
+    var forecast: UsageForecast?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
+            if let forecast { TurnForecastView(forecast: forecast) }
             if let total = usage.total {
                 Text("세션 누적 토큰 \(formatTokenCount(total))\(partial ? "+" : "")")
                     .font(.caption.weight(.medium).monospacedDigit())
@@ -348,6 +355,74 @@ struct SessionUsageView: View {
         }
         .help(partial ? "긴 transcript에서 읽은 부분만 합산한 값입니다." : "")
     }
+}
+
+/// "이번 턴 N 토큰 · 3분째" against the typical turn, and how many turns the
+/// context has left at the recent rate. Shown only for what is known.
+struct TurnForecastView: View {
+    let forecast: UsageForecast
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if forecast.currentTurnRunning {
+                HStack(spacing: 4) {
+                    Image(systemName: "bolt.fill").font(.caption2).foregroundStyle(.green)
+                    if let current = forecast.currentTurnTokens {
+                        Text("이번 턴 \(formatTokenCount(current)) 토큰")
+                    } else {
+                        Text("이번 턴 집계 중")
+                            .help("이 CLI는 턴이 끝날 때 토큰을 확정합니다.")
+                    }
+                    if let started = forecast.currentTurnStartedAt.flatMap(parseTimestamp) {
+                        TimelineView(.periodic(from: .now, by: 30)) { context in
+                            Text("· \(elapsedText(from: started, to: context.date))")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .font(.caption.weight(.medium).monospacedDigit())
+                .lineLimit(1)
+                if let typical = forecast.typicalTurnTokens {
+                    if let progress = forecast.progress {
+                        ProgressView(value: min(progress, 1))
+                            .progressViewStyle(.linear)
+                            .controlSize(.small)
+                            .tint(progress > 1 ? .orange : .accentColor)
+                    }
+                    Text(forecastLine(typical: typical))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle((forecast.progress ?? 0) > 1 ? .orange : .secondary)
+                        .lineLimit(1)
+                        .help("완료된 최근 턴들이 쓴 토큰의 중앙값입니다. 이번 작업의 크기가 비슷하다면 이만큼 쓰게 됩니다.")
+                }
+            } else if let typical = forecast.typicalTurnTokens {
+                Text("다음 턴 예상 약 \(formatTokenCount(typical)) 토큰 (지난 \(forecast.completedTurns)턴 중앙값)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            if let left = forecast.turnsUntilContextFull {
+                Text(left == 0 ? "컨텍스트가 곧 가득 찹니다" : "컨텍스트 약 \(left)턴 여유")
+                    .font(.caption2)
+                    .foregroundStyle(left <= 2 ? .orange : .secondary)
+                    .help("최근 턴마다 늘어난 컨텍스트 양으로 계산한 추정치입니다. 압축(compaction)이 일어나면 다시 늘어납니다.")
+            }
+        }
+    }
+
+    private func forecastLine(typical: Double) -> String {
+        let base = "예상 약 \(formatTokenCount(typical)) (지난 \(forecast.completedTurns)턴 중앙값)"
+        guard let progress = forecast.progress else { return base }
+        return progress > 1 ? "\(base) · 예상 초과 \(Int((progress * 100).rounded()))%" : "\(base) · \(Int((progress * 100).rounded()))%"
+    }
+}
+
+/// "3분째", "1시간 5분째" for a running turn.
+func elapsedText(from start: Date, to now: Date) -> String {
+    let minutes = max(0, Int(now.timeIntervalSince(start) / 60))
+    if minutes < 1 { return "방금 시작" }
+    if minutes < 60 { return "\(minutes)분째" }
+    return "\(minutes / 60)시간 \(minutes % 60)분째"
 }
 
 private struct SessionConfigRow: View {

@@ -79,7 +79,12 @@ export class EventStore {
   page(sessionId, { before = Infinity, limit = 200 } = {}) {
     const inMemory = this.list(sessionId).filter((event) => event.sequence < before);
     if (inMemory.length >= limit || !this.persistence) return inMemory.slice(-limit);
-    return this.persistence.readEvents(sessionId, { before, limit });
+    // Memory is newer than the last flush; the database holds what memory
+    // capped away. Both, deduplicated by key, newest `limit`.
+    this.persistence.flush?.();
+    const byKey = new Map(this.persistence.readEvents(sessionId, { before, limit }).map((event) => [event.key, event]));
+    for (const event of inMemory) byKey.set(event.key, event);
+    return [...byKey.values()].sort(eventOrder).slice(-limit);
   }
 
   /** Restores persisted events without re-persisting them. */

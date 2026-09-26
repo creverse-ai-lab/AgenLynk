@@ -115,10 +115,12 @@ actor MonitorClient {
 
     /// Persisted session records updated before `before` (an ISO timestamp),
     /// newest first.
-    func fetchHistory(endpoint: MonitorEndpoint, before: String?, limit: Int = 50) async throws -> MonitorHistoryPage {
+    /// `beforeId` breaks ties between sessions with the same `updatedAt`.
+    func fetchHistory(endpoint: MonitorEndpoint, before: String?, beforeId: String? = nil, limit: Int = 50) async throws -> MonitorHistoryPage {
         var components = URLComponents(url: endpoint.baseURL.appendingPathComponent("api/history"), resolvingAgainstBaseURL: false)!
         var items = [URLQueryItem(name: "limit", value: String(limit))]
         if let before { items.append(URLQueryItem(name: "before", value: before)) }
+        if let beforeId { items.append(URLQueryItem(name: "beforeId", value: beforeId)) }
         components.queryItems = items
         var request = endpoint.request(path: "api/history")
         request.url = components.url

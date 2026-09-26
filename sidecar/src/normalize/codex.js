@@ -14,7 +14,8 @@ import {
   isoTime,
   monitorEvent,
   sessionPatch,
-  toolTitle
+  toolTitle,
+  turnUsageList
 } from "./model.js";
 
 const SOURCE = "transcript";
@@ -64,6 +65,16 @@ function codeModeSummary(code) {
   const [first] = calls;
   const extra = calls.length > 1 ? ` (+${calls.length - 1})` : "";
   return { name: first.name, input: first.args, extra };
+}
+
+/** A tool output that reports a non-zero exit or an error, e.g. a sandbox denial. */
+function outputFailed(payload) {
+  const parsed = parseInput(payload?.output);
+  const exit = parsed?.metadata?.exit_code ?? parsed?.exit_code;
+  if (Number.isFinite(Number(exit)) && Number(exit) !== 0) return true;
+  if (payload?.success === false || parsed?.success === false) return true;
+  const text = typeof payload?.output === "string" ? payload.output : "";
+  return /^(Script failed|Error:|error:)/.test(text.trim());
 }
 
 function outputText(payload) {
@@ -118,6 +129,11 @@ export function normalizeCodexRecords(records) {
   };
   // Turns whose opening prompt already landed on turn_start.
   const promptedTurns = new Set();
+  // Codex reports cumulative totals; a turn's use is the difference between
+  // the totals at its end and at its start.
+  const turns = new Map();
+  let lastTotal = null;
+  let lastOutput = null;
 
   const setStatus = (value, at) => {
     status = value;
@@ -132,6 +148,11 @@ export function normalizeCodexRecords(records) {
 
     if (record.type === "session_meta") {
       if (typeof payload.cwd === "string") cwd = payload.cwd;
+      // The window starts at the session's beginning: nothing was used yet.
+      if (lastTotal == null) {
+        lastTotal = 0;
+        lastOutput = 0;
+      }
       continue;
     }
     if (record.type === "turn_context") {
@@ -148,6 +169,7 @@ export function normalizeCodexRecords(records) {
       if (payload.type === "task_started") {
         turnId = recordTurn ?? `turn-${ts}`;
         if (payload.model_context_window != null) contextWindow = payload.model_context_window;
+        turns.set(turnId, { turnId, startedAt: ts, running: true, baseTotal: lastTotal, baseOutput: lastOutput });
         events.add(monitorEvent({ key: `turn:${turnId}`, kind: "turn_start", ts, source: SOURCE, turnId }));
         setStatus("running", ts);
       } else if (payload.type === "task_complete") {
@@ -159,6 +181,7 @@ export function normalizeCodexRecords(records) {
           }));
         }
         closeOpenTools(ts, "completed", ended);
+        if (turns.has(ended)) Object.assign(turns.get(ended), { running: false, endedAt: ts });
         setStatus("idle", ts);
         turnId = null;
       } else if (payload.type === "turn_aborted") {
@@ -170,6 +193,7 @@ export function normalizeCodexRecords(records) {
           }));
         }
         closeOpenTools(ts, "cancelled", ended);
+        if (turns.has(ended)) Object.assign(turns.get(ended), { running: false, endedAt: ts });
         setStatus("idle", ts);
         turnId = null;
       } else if (payload.type === "stream_error" || payload.type === "error") {
@@ -179,6 +203,21 @@ export function normalizeCodexRecords(records) {
         }));
       } else if (payload.type === "token_count") {
         usage = usageFrom(payload.info) ?? usage;
+        const total = Number(payload.info?.total_token_usage?.total_tokens);
+        const output = Number(payload.info?.total_token_usage?.output_tokens);
+        const turn = turnId ? turns.get(turnId) : null;
+        if (turn && Number.isFinite(total)) {
+          // Adopted mid-turn: the first report's own call is the known floor.
+          if (turn.baseTotal == null) {
+            turn.baseTotal = total - (Number(payload.info?.last_token_usage?.total_tokens) || 0);
+            turn.baseOutput = output - (Number(payload.info?.last_token_usage?.output_tokens) || 0);
+          }
+          turn.totalTokens = total - turn.baseTotal;
+          turn.outputTokens = Number.isFinite(output) ? output - (turn.baseOutput ?? 0) : null;
+          turn.contextUsed = Number(payload.info?.last_token_usage?.input_tokens) || null;
+        }
+        if (Number.isFinite(total)) lastTotal = total;
+        if (Number.isFinite(output)) lastOutput = output;
       } else if (payload.type === "item_completed") {
         addItem(events, payload.item, ts, recordTurn ?? turnId, payload, promptedTurns);
       }
@@ -204,7 +243,7 @@ export function normalizeCodexRecords(records) {
         openTools.delete(callId);
         events.add(monitorEvent({
           key: `tool:${callId}`, kind: "tool_call", ts, source: SOURCE, turnId: recordTurn ?? turnId, toolCallId: callId,
-          body: outputText(payload), status: "completed", endedAt: ts
+          body: outputText(payload), status: outputFailed(payload) ? "failed" : "completed", endedAt: ts
         }));
       }
     }
@@ -213,7 +252,7 @@ export function normalizeCodexRecords(records) {
   if (usage && usage.contextWindow == null && contextWindow != null) usage.contextWindow = contextWindow;
   return {
     events: events.list(),
-    session: sessionPatch({ model, cwd, status, statusAt, turnId, usage })
+    session: sessionPatch({ model, cwd, status, statusAt, turnId, usage, turns: turnUsageList(turns) })
   };
 }
 

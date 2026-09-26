@@ -299,3 +299,26 @@ export class EventCollector {
       .sort((left, right) => Date.parse(left.ts) - Date.parse(right.ts));
   }
 }
+
+export const TURN_USAGE_LIMIT = 20;
+
+/**
+ * Per-turn token use, newest last, for the usage forecast. Same meaning as
+ * session usage: totalTokens = input (incl. cache) + output across the turn's
+ * model calls; contextUsed is the prompt size of the turn's last call.
+ * A running turn reports what it has used so far.
+ */
+export function turnUsageList(turns) {
+  return [...turns.values()]
+    .filter((turn) => turn.totalTokens != null || turn.running)
+    .slice(-TURN_USAGE_LIMIT)
+    .map((turn) => ({
+      turnId: turn.turnId,
+      startedAt: turn.startedAt ?? null,
+      endedAt: turn.endedAt ?? null,
+      running: turn.running === true,
+      totalTokens: turn.totalTokens ?? null,
+      outputTokens: turn.outputTokens ?? null,
+      contextUsed: turn.contextUsed ?? null
+    }));
+}

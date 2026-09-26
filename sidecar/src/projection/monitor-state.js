@@ -21,7 +21,9 @@ export class MonitorState {
     maxEventsPerSession = 2000,
     historyRetentionMs = 65 * 60 * 1000,
     sseBackpressureTimeoutMs = 10_000,
-    persistence = null
+    persistence = null,
+    formerWorkerIds = [],
+    onWorkerRemembered = null
   } = {}) {
     this.maxEventsPerSession = maxEventsPerSession;
     this.historyRetentionMs = historyRetentionMs;
@@ -41,7 +43,10 @@ export class MonitorState {
     // transcript outlives its Gateway session (idle sessions stay listed for
     // the retention window), and without this it would come back as a
     // parentless local session — a false Frontdoor.
-    this.formerWorkerIds = new Set();
+    // Kept on disk apart from history (onWorkerRemembered), so neither a
+    // restart nor a zero history retention forgets a worker.
+    this.formerWorkerIds = new Set(formerWorkerIds);
+    this.onWorkerRemembered = onWorkerRemembered;
     // Gateway subscription bookkeeping: one stateful normalizer per session
     // (chunks stream one at a time), the highest daemon sequence seen (the
     // resubscribe cursor), and the identities already applied. The identity
@@ -154,6 +159,7 @@ export class MonitorState {
       if (typeof id !== "string" || !id || this.formerWorkerIds.has(id)) continue;
       this.formerWorkerIds.add(id);
       if (this.formerWorkerIds.size > 10_000) this.formerWorkerIds.delete(this.formerWorkerIds.values().next().value);
+      this.onWorkerRemembered?.(this.formerWorkerIds);
     }
   }
 

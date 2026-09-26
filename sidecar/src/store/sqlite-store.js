@@ -141,12 +141,17 @@ export class SqliteMonitorStore {
    * Session records updated in [since, before) (ms), newest first. Paging a
    * history list passes the oldest `updatedAt` it has as the next `before`.
    */
-  readSessions({ since = 0, before = Number.MAX_SAFE_INTEGER, limit = 500 } = {}) {
+  readSessions({ since = 0, before = Number.MAX_SAFE_INTEGER, beforeId = null, limit = 500 } = {}) {
     if (this.failed) return [];
     this.flush();
+    const bound = Number.isFinite(before) ? before : Number.MAX_SAFE_INTEGER;
+    // Keyset pagination on (updated_at, session_id): a page boundary inside a
+    // run of equal timestamps continues with the next id instead of skipping.
     return this.database
-      .prepare("SELECT record FROM sessions WHERE updated_at >= ? AND updated_at < ? ORDER BY updated_at DESC LIMIT ?")
-      .all(since, Number.isFinite(before) ? before : Number.MAX_SAFE_INTEGER, limit)
+      .prepare(`SELECT record FROM sessions
+                 WHERE updated_at >= ? AND (updated_at < ? OR (updated_at = ? AND session_id < ?))
+                 ORDER BY updated_at DESC, session_id DESC LIMIT ?`)
+      .all(since, bound, bound, beforeId ?? "", limit)
       .map((row) => parse(row.record))
       .filter(Boolean);
   }
@@ -194,7 +199,6 @@ export class SqliteMonitorStore {
         deleteSession.run(sessionId);
       }
       this.database.exec("COMMIT");
-      this.database.exec("VACUUM");
     } catch (error) {
       try {
         this.database.exec("ROLLBACK");
@@ -203,6 +207,13 @@ export class SqliteMonitorStore {
       }
       console.error(`Monitor history clear failed: ${error.message}`);
       return 0;
+    }
+    // Reclaiming the space is a nicety: the deletion already committed, so a
+    // failure here must not report it as not having happened.
+    try {
+      this.database.exec("VACUUM");
+    } catch (error) {
+      console.error(`Monitor history vacuum skipped: ${error.message}`);
     }
     return all.length;
   }

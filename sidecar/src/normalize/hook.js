@@ -143,12 +143,12 @@ export class HookNormalizer {
     if (provider === "claude" && !hook.agentId && hook.toolUseId) {
       if (hook.event === "PreToolUse") {
         events.push(monitorEvent({
-          key: `tool:${hook.toolUseId}`, kind: "tool_call", ts, source: SOURCE, turnId: null,
+          key: `tool:${hook.toolUseId}`, kind: "tool_call", ts, source: SOURCE, turnId: hook.turnId,
           toolCallId: hook.toolUseId, title: toolTitle(hook.toolName, hook.toolInput), status: "running"
         }));
       } else if (hook.event === "PostToolUse" || hook.event === "PostToolUseFailure") {
         events.push(monitorEvent({
-          key: `tool:${hook.toolUseId}`, kind: "tool_call", ts, source: SOURCE, turnId: null,
+          key: `tool:${hook.toolUseId}`, kind: "tool_call", ts, source: SOURCE, turnId: hook.turnId,
           toolCallId: hook.toolUseId, status: hook.event === "PostToolUse" ? "completed" : "failed", endedAt: ts
         }));
       }

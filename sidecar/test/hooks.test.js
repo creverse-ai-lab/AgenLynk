@@ -368,3 +368,22 @@ test("a hook event this version no longer registers is removed on update", async
     assert.ok(hooks.Stop.some((group) => group.hooks[0].command.includes("agenlynk-hook.sh")));
   });
 });
+
+test("updating one CLI keeps the script version another CLI still uses", async () => {
+  await withTempDirectory(async (root) => {
+    const { env } = await fakeHomes(root);
+    installHooks({ env, consent: true });
+    const scriptsRoot = join(env.AGENLYNK_HOME, "hooks");
+    // Codex still names an older version (e.g. its update was skipped).
+    const oldDir = join(scriptsRoot, "0123456789ab");
+    await mkdir(oldDir, { recursive: true });
+    await writeFile(join(oldDir, "agenlynk-hook.sh"), "#!/bin/sh\n");
+    const hooksFile = join(env.CODEX_HOME, "hooks.json");
+    const text = (await readFile(hooksFile, "utf8")).replace(/hooks\/[0-9a-f]{12}\/agenlynk-hook\.sh/g, "hooks/0123456789ab/agenlynk-hook.sh");
+    await writeFile(hooksFile, text);
+    installHooks({ env, only: ["claude"] });
+    assert.ok(existsSync(join(oldDir, "agenlynk-hook.sh")), "a version a config still references is kept");
+    installHooks({ env, only: ["codex"] });
+    assert.equal(existsSync(oldDir), false, "once nothing references it, it goes");
+  });
+});

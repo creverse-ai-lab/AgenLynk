@@ -237,18 +237,32 @@ function installScript(scriptPath, scriptsRoot) {
     writeFileSync(temporary, source, { mode: 0o755 });
     renameSync(temporary, scriptPath);
   }
-  // Older versions are only referenced by configs this install just
-  // rewrote; a config still naming one degrades to the command's no-op guard.
-  const version = basename(dirname(scriptPath));
+  return digest(source);
+}
+
+/**
+ * Removes script versions no agent config refers to any more. Runs after the
+ * configs are written, and keeps any version a config still names (a CLI
+ * that was not updated this time, or whose config could not be parsed).
+ */
+function pruneScripts(env, scriptsRoot, current) {
+  const referenced = new Set([basename(dirname(current))]);
+  for (const target of Object.values(TARGETS)) {
+    let text = "";
+    try {
+      text = readFileSync(target.file(target.home(env)), "utf8");
+    } catch {
+      continue;
+    }
+    for (const match of text.matchAll(/hooks\/([0-9a-f]{12})\/agenlynk-hook\.sh/g)) referenced.add(match[1]);
+  }
   try {
     for (const entry of readdirSync(scriptsRoot, { withFileTypes: true })) {
-      if (entry.name === version) continue;
-      rmSync(join(scriptsRoot, entry.name), { recursive: true, force: true });
+      if (!referenced.has(entry.name)) rmSync(join(scriptsRoot, entry.name), { recursive: true, force: true });
     }
   } catch {
     // Nothing to prune.
   }
-  return digest(source);
 }
 
 export function readHookState(env = process.env) {
@@ -352,6 +366,7 @@ export function installHooks({ env = process.env, only = null, now = Date.now(),
       }
     }
   }
+  pruneScripts(env, locations.scriptsRoot, locations.script);
   const previous = previousState;
   const installed = new Set(selectedProviders(only));
   writeHookState(env, {

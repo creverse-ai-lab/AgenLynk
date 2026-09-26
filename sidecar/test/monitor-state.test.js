@@ -210,3 +210,35 @@ test("the monitor remembers every worker the Gateway reported, across a restart"
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("history paging does not skip sessions that share a timestamp across pages", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "agenlynk-history-ties-"));
+  try {
+    const store = await SqliteMonitorStore.open(join(directory, "monitor.db"), { flushMs: 1 });
+    const at = new Date(Date.UTC(2026, 8, 26)).toISOString();
+    for (const id of ["a", "b", "c", "d"]) store.writeSession({ sessionId: id, provider: "codex", updatedAt: at });
+    const first = store.readSessions({ limit: 2 });
+    const last = first.at(-1);
+    const second = store.readSessions({ before: Date.parse(last.updatedAt), beforeId: last.sessionId, limit: 2 });
+    assert.deepEqual([...first, ...second].map((session) => session.sessionId), ["d", "c", "b", "a"]);
+    store.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the worker ledger outlives the monitor and a zero history retention", async () => {
+  const { readWorkerLedger, workerLedgerWriter } = await import("../src/store/worker-ledger.js");
+  const directory = await mkdtemp(join(tmpdir(), "agenlynk-ledger-"));
+  try {
+    const path = join(directory, "workers.json");
+    const save = workerLedgerWriter(path, 1);
+    const first = new MonitorState({ onWorkerRemembered: save });
+    first.setGatewaySourceSessions([{ sessionId: "acp-9", acpSessionId: "worker-9" }]);
+    save.flush();
+    const second = new MonitorState({ formerWorkerIds: readWorkerLedger(path) });
+    assert.ok(second.formerWorkerIds.has("worker-9"), "a restarted monitor still knows the worker");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

@@ -5,6 +5,7 @@ enum MonitorModelChecks {
     static func main() throws {
         try snapshotDecodesSessionsEventsTasksAndInbox()
         try dashboardPanelsFoldByWidthAndOpenOnDemand()
+        try usageForecastUsesCompletedTurnsAndContextGrowth()
         try sessionNamesFollowTheNamingPolicy()
         try characterizationTracesDecodeExpectedSnapshots()
         try snapshotRejectsUnsupportedSchemaMajorWithoutPartialDecode()
@@ -414,9 +415,14 @@ enum MonitorModelChecks {
         }
 
         let snapshot = try decodeTraceSnapshot(snapshotValue, name: name)
-        let snapshotFrontdoors = Set(FrontdoorSession.make(
-            sessions: snapshot.historySessions + snapshot.sessions
-        ).map(\.id))
+        // The unattributed-worker group holds sessions with no Frontdoor; it
+        // is shown, but it is not a Frontdoor the projection names.
+        let grouped = FrontdoorSession.make(sessions: snapshot.historySessions + snapshot.sessions)
+        let snapshotFrontdoors = Set(grouped.filter { !$0.isUnattributed }.map(\.id))
+        if name == "legacy-1.3.2-daemon.ndjson" {
+            try check(grouped.contains { $0.isUnattributed && !$0.workers.isEmpty },
+                      "a worker without an opener is listed under 연결 미확인 Worker, not dropped")
+        }
         let snapshotEvents = Set(
             snapshot.eventsBySession.values.joined().map { "\($0.sessionId):\($0.sequence ?? -1)" }
             + snapshot.historyEventsBySession.values.joined().map { "\($0.sessionId):\($0.sequence ?? -1)" }
@@ -778,11 +784,16 @@ enum MonitorModelChecks {
             try session(id: "worker-3", status: "idle", instanceId: "main-2", opener: "grok"),
             try session(id: "legacy", status: "running", instanceId: nil)
         ])
-        try check(frontdoors.count == 2, "Dashboard should list Frontdoors, not mapped Worker sessions")
+        let real = frontdoors.filter { !$0.isUnattributed }
+        try check(real.count == 2, "Dashboard should list Frontdoors, not mapped Worker sessions")
         let codex = frontdoors.first { $0.id == "main-1" }
         try check(codex?.workers.count == 2, "workers with the same Frontdoor id should aggregate")
         try check(codex?.activeWorkerCount == 1, "Frontdoor activity should come from its current workers")
-        try check(!frontdoors.contains(where: { $0.id == "legacy" }), "legacy sessions without a Frontdoor id must stay out of the UI")
+        try check(!frontdoors.contains(where: { $0.id == "legacy" }), "a session without a Frontdoor id is never promoted to one")
+        // Policy (docs/ux-policy.md §1): never a Frontdoor, but never hidden.
+        let orphans = frontdoors.first(where: \.isUnattributed)
+        try check(orphans?.workers.map(\.sessionId) == ["legacy"] && orphans?.displayName == "연결 미확인 Worker",
+                  "a worker without an opener is listed under 연결 미확인 Worker")
     }
 
     /// The Frontdoor name is its working folder first; a title is only used
@@ -812,9 +823,9 @@ enum MonitorModelChecks {
         let bare = try frontdoor(title: nil, cwd: "/")
         try check(folderWithTitle.displayName == "proj", "the working folder names the Frontdoor even when a title exists")
         try check(titleNoFolder.displayName == "리팩터링 작업", "without a folder a sane title names the Frontdoor")
-        try check(junkTitle.displayName == "Codex Frontdoor", "a tool-call title is rejected as a name")
+        try check(junkTitle.displayName == "이름 없는 작업", "a tool-call title is rejected as a name; the provider is the icon")
         try check(folderOnly.displayName == "proj", "the working folder names the Frontdoor")
-        try check(bare.displayName == "Codex Frontdoor", "with neither, the provider label remains")
+        try check(bare.displayName == "이름 없는 작업", "with neither, a neutral name; the provider is the icon")
     }
 
     private static func localFrontdoorIsNotDuplicatedAsAWorker() throws {
@@ -919,6 +930,42 @@ enum MonitorModelChecks {
         try check(runtimeSplitWarning(gateway: buildSplit)?.contains("old") == true, "a build-id split must surface as a warning")
         try check(runtimeSplitWarning(gateway: .object(["gatewayVersion": .string("1.3.1")])) == nil, "no annotation, no warning")
         try check(runtimeSplitWarning(gateway: nil) == nil, "no gateway info, no warning")
+    }
+
+    private static func usageForecastUsesCompletedTurnsAndContextGrowth() throws {
+        func turn(_ id: String, running: Bool = false, total: Double?, context: Double?) -> JSONValue {
+            var object: [String: JSONValue] = ["turnId": .string(id), "running": .bool(running)]
+            if let total { object["totalTokens"] = .number(total) }
+            if let context { object["contextUsed"] = .number(context) }
+            return .object(object)
+        }
+        let value: JSONValue = .object([
+            "sessionId": .string("s"), "provider": .string("codex"),
+            "usage": .object(["totalTokens": .number(10_000), "contextUsed": .number(60_000), "contextWindow": .number(100_000)]),
+            "turnUsage": .array([
+                turn("t1", total: 1_000, context: 20_000),
+                turn("t2", total: 3_000, context: 30_000),
+                turn("t3", total: 2_000, context: 40_000),
+                turn("t4", running: true, total: 3_000, context: 50_000)
+            ])
+        ])
+        guard let session = GatewaySession(value) else { throw CheckError.failed("session did not decode") }
+        let forecast = UsageForecast(session: session)
+        try check(forecast.currentTurnRunning && forecast.currentTurnTokens == 3_000, "the running turn reports its use so far")
+        try check(forecast.typicalTurnTokens == 2_000, "the estimate is the median of completed turns")
+        try check(forecast.progress == 1.5, "progress compares the running turn to the typical one")
+        try check(forecast.turnsUntilContextFull == 4, "context left / median growth per turn")
+
+        let fresh: JSONValue = .object(["sessionId": .string("n"), "provider": .string("grok"),
+                                        "turnUsage": .array([turn("only", total: 500, context: nil), turn("now", running: true, total: nil, context: nil)])])
+        guard let newSession = GatewaySession(fresh) else { throw CheckError.failed("session did not decode") }
+        let early = UsageForecast(session: newSession)
+        try check(early.typicalTurnTokens == nil, "one turn is not a pattern")
+        try check(early.currentTurnRunning && early.currentTurnTokens == nil, "Grok's running turn is settled at its end")
+
+        let work = WorkUsage(sessions: [session, newSession])
+        try check(work.totalTokens == 10_000 && work.currentTurnTokens == 3_000 && work.runningSessions == 2,
+                  "a Frontdoor's work adds up its sessions")
     }
 
     private static func dashboardPanelsFoldByWidthAndOpenOnDemand() throws {

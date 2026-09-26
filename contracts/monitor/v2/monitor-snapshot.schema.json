@@ -54,6 +54,23 @@
         "updatedAt": { "type": ["string", "null"], "format": "date-time" },
         "usage": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/usage" }] },
         "usagePartial": { "type": "boolean", "description": "Totals cover only the part of a long transcript that was read." },
+        "turnUsage": {
+          "type": "array",
+          "description": "Recent turns (newest last) for the usage forecast. Same token meaning as usage; a running turn reports what it has used so far, or null when the provider settles it only at the end (Grok).",
+          "items": {
+            "type": "object",
+            "required": ["turnId", "running", "totalTokens", "outputTokens", "contextUsed"],
+            "properties": {
+              "turnId": { "type": "string" },
+              "startedAt": { "type": ["string", "null"] },
+              "endedAt": { "type": ["string", "null"] },
+              "running": { "type": "boolean" },
+              "totalTokens": { "type": ["number", "null"] },
+              "outputTokens": { "type": ["number", "null"] },
+              "contextUsed": { "type": ["number", "null"] }
+            }
+          }
+        },
         "alerts": {
           "type": "array",
           "description": "Warnings the app must show on the session, e.g. permission_policy_partial for a read_only/ask Codex session (it can still edit inside its roots).",
