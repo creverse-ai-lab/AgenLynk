@@ -19,7 +19,8 @@ assert.equal(packageDocument.dependencies, undefined, "root package must not car
 assert.deepEqual(Object.keys(packageDocument.bin), ["agenlynk-sidecar"]);
 assert.equal(sidecarPackage.version, SIDECAR_VERSION);
 assert.match(SIDECAR_BUILD_ID, /^[a-f0-9]{16}$/);
-assert.equal(lock.version, "1.4.0");
+assert.match(lock.version, /^\d+\.\d+\.\d+$/);
+assert.equal(lock.tag, `v${lock.version}`);
 assert.equal(lock.apiMajor, 1);
 
 const allowedRuntimeFiles = new Set([

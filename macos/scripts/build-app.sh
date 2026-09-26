@@ -29,6 +29,11 @@ mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$PET_CONTENTS/MacOS" "$PET_CON
 cp "$BIN_DIR/ACPMonitor" "$CONTENTS/MacOS/ACPMonitor"
 cp "$REPO_ROOT/macos/Resources/Info.plist" "$CONTENTS/Info.plist"
 cp "$REPO_ROOT/macos/Resources/ACPLogo.svg" "$CONTENTS/Resources/ACPLogo.svg"
+# Provider marks for the dashboard, the same images the Pet ships.
+mkdir -p "$CONTENTS/Resources/ProviderIcons"
+cp "$REPO_ROOT/macos/Sources/LynkPet/Resources/claude.jpg" "$CONTENTS/Resources/ProviderIcons/claude.jpg"
+cp "$REPO_ROOT/macos/Sources/LynkPet/Resources/chatgpt.jpg" "$CONTENTS/Resources/ProviderIcons/codex.jpg"
+cp "$REPO_ROOT/macos/Sources/LynkPet/Resources/grok.jpg" "$CONTENTS/Resources/ProviderIcons/grok.jpg"
 cp "$BIN_DIR/LynkPet" "$PET_EXECUTABLE"
 cp "$REPO_ROOT/macos/Resources/LynkPet-Info.plist" "$PET_CONTENTS/Info.plist"
 PET_RESOURCE_BUNDLE="$BIN_DIR/ACPMonitor_LynkPet.bundle"

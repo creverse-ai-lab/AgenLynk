@@ -29,6 +29,7 @@ env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 $SHARED_FLAGS \
   "$REPO_ROOT/macos/Sources/ACPMonitor/Models.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/GraphProjection.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/EventTimeline.swift" \
   "$REPO_ROOT/macos/Tests/ACPMonitorTests/MonitorModelTests.swift" \
   -o "$OUT"
 

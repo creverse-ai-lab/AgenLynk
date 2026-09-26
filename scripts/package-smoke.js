@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -27,6 +27,8 @@ const installState = join(temporary, "install.json");
 const token = "package-smoke-control-token-123456789";
 const rootId = "package-smoke-root";
 await writeFile(installState, JSON.stringify({ version: 1, identity: { token, rootId }, managedMcp: {} }));
+
+const pinnedGateway = JSON.parse(await readFile(new URL("../gateway.lock.json", import.meta.url), "utf8")).version;
 
 const common = {
   ...process.env,
@@ -68,8 +70,8 @@ try {
     const response = await fetch(`${ready.url}/api/meta`, { headers });
     const value = await response.json();
     return value.capabilities?.gatewayCompatibility?.status === "supported" ? value : false;
-  }, "sidecar did not decode the Gateway 1.4.0 setup contract");
-  assert.equal(meta.gatewayIdentity.gatewayVersion, "1.4.0");
+  }, `sidecar did not decode the Gateway ${pinnedGateway} setup contract`);
+  assert.equal(meta.gatewayIdentity.gatewayVersion, pinnedGateway);
 
   const firstSnapshot = await fetch(`${ready.url}/api/snapshot`, { headers });
   assert.equal(firstSnapshot.status, 200);
@@ -89,7 +91,7 @@ try {
   assert.equal(stream.status, 200);
   assert.match(stream.headers.get("content-type") ?? "", /^text\/event-stream/);
   streamAbort.abort();
-  process.stdout.write(`package smoke: Gateway 1.4.0 setup/snapshot/SSE and sidecar isolated roots verified (${gateway}, ${sidecar})\n`);
+  process.stdout.write(`package smoke: Gateway ${pinnedGateway} setup/snapshot/SSE and sidecar isolated roots verified (${gateway}, ${sidecar})\n`);
 } finally {
   for (const child of [monitor, daemon]) {
     if (!child || child.exitCode != null) continue;

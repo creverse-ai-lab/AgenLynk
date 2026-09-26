@@ -54,6 +54,19 @@
         "updatedAt": { "type": ["string", "null"], "format": "date-time" },
         "usage": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/usage" }] },
         "usagePartial": { "type": "boolean", "description": "Totals cover only the part of a long transcript that was read." },
+        "alerts": {
+          "type": "array",
+          "description": "Warnings the app must show on the session, e.g. permission_policy_partial for a read_only/ask Codex session (it can still edit inside its roots).",
+          "items": {
+            "type": "object",
+            "required": ["level", "code"],
+            "properties": {
+              "level": { "enum": ["info", "warning", "error"] },
+              "code": { "type": "string" },
+              "message": { "type": "string" }
+            }
+          }
+        },
         "capabilities": {
           "type": "array",
           "description": "What this monitor can actually observe for the session, so the app can tell \"nothing happened\" from \"this source cannot see it\".",

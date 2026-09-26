@@ -22,17 +22,3 @@ enum SequenceRelationLayout {
         return childX - direction * distanceFromChild
     }
 }
-
-enum SequencePageLayout {
-    static func range(totalCount: Int, page: Int, pageSize: Int) -> Range<Int> {
-        guard totalCount > 0, pageSize > 0 else { return 0..<0 }
-        let safePage = max(0, page)
-        let end = max(0, totalCount - safePage * pageSize)
-        let start = max(0, end - pageSize)
-        return start..<end
-    }
-
-    static func entries<Value>(in values: [Value], page: Int, pageSize: Int) -> ArraySlice<Value> {
-        values[range(totalCount: values.count, page: page, pageSize: pageSize)]
-    }
-}

@@ -1,9 +1,11 @@
 import SwiftUI
 
 struct SessionDetailView: View {
+    @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppModel
     let sessionId: String?
     @State private var selectedEventId: String?
+    @State private var expandedGroups: Set<String> = []
 
     var body: some View {
         if let session {
@@ -16,9 +18,36 @@ struct SessionDetailView: View {
                     // One row per canonical event: the sidecar already merged
                     // a streamed response into one message and a tool call's
                     // updates into the call itself.
-                    List(events, selection: $selectedEventId) { event in
-                        EventRow(event: event, session: session)
-                            .tag(event.id)
+                    // Runs of tool calls collapse into one row; one continuous
+                    // list that pages older events in when its top appears.
+                    List(selection: listSelection) {
+                        if model.mayHaveOlderEvents(session.sessionId) || model.olderLoadingSessionIds.contains(session.sessionId) {
+                            HStack(spacing: 6) {
+                                if model.olderLoadingSessionIds.contains(session.sessionId) {
+                                    ProgressView().controlSize(.mini)
+                                    Text("이전 이벤트 불러오는 중")
+                                } else {
+                                    Button("이전 이벤트 더 보기", systemImage: "arrow.up") {
+                                        Task { await model.loadOlderEvents(sessionIds: [session.sessionId]) }
+                                    }
+                                    .buttonStyle(.borderless)
+                                }
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                            .onAppear { Task { await model.loadOlderEvents(sessionIds: [session.sessionId]) } }
+                        }
+                        ForEach(rows) { row in
+                            switch row.content {
+                            case let .event(event):
+                                EventRow(event: event, session: session, nested: row.parentGroupId != nil)
+                                    .tag(event.id)
+                            case let .group(group, expanded):
+                                ToolGroupRow(group: group, expanded: expanded)
+                                    .tag(group.id)
+                            }
+                        }
                     }
                     .frame(minWidth: 430)
                     ScrollView {
@@ -31,7 +60,7 @@ struct SessionDetailView: View {
                     .frame(minWidth: 360)
                 }
             }
-            .navigationTitle(session.displayName)
+            .navigationTitle(settings.sessionName(session))
             .task(id: sessionId) {
                 guard let sessionId, session.role == "worker", !session.isLocalSource else { return }
                 await model.loadSessionConfig(sessionId: sessionId)
@@ -41,18 +70,54 @@ struct SessionDetailView: View {
         }
     }
 
-    private var session: GatewaySession? { model.sessions.first { $0.sessionId == sessionId } }
-    private var events: [MonitorEvent] { model.eventsBySession[sessionId ?? ""] ?? [] }
+    private var session: GatewaySession? {
+        guard let sessionId else { return nil }
+        return model.sessions.first { $0.sessionId == sessionId } ?? model.knownSession(sessionId)
+    }
+    private var events: [MonitorEvent] {
+        let id = sessionId ?? ""
+        return model.browsedEvents[id] ?? model.logEventsBySession[id] ?? []
+    }
     private var selectedEvent: MonitorEvent? { events.first { $0.id == selectedEventId } }
+    private var rows: [TimelineRow] {
+        EventTimeline.rows(EventTimeline.group(events), expanded: expandedGroups)
+    }
+
+    /// Selecting a tool group's row expands (or collapses) it and shows its
+    /// representative call; any other row selects its event.
+    private var listSelection: Binding<String?> {
+        Binding(
+            get: { selectedEventId },
+            set: { value in
+                guard let value, value.hasPrefix("tools:") else {
+                    selectedEventId = value
+                    return
+                }
+                if expandedGroups.contains(value) {
+                    expandedGroups.remove(value)
+                } else {
+                    expandedGroups.insert(value)
+                }
+                if case let .tools(group)? = EventTimeline.group(events).first(where: { $0.id == value }) {
+                    selectedEventId = group.representative.id
+                }
+            }
+        )
+    }
 
     private func sessionHeader(_ session: GatewaySession) -> some View {
         HStack(spacing: 14) {
             Circle().fill(statusColor(session.status)).frame(width: 11, height: 11)
             VStack(alignment: .leading, spacing: 3) {
-                Text(session.displayName).font(.title3.weight(.semibold))
-                Text("\(session.withModel(session.provider)) · \(session.status)")
+                HStack(spacing: 7) {
+                    ProviderIcon(provider: session.provider, size: 20)
+                    SessionNameEditor(session: session)
+                }
+                Text("\(session.withModel(session.provider)) · \(sessionStatusLabel(session.status))")
                     .foregroundStyle(.secondary)
+                    .help(session.status)
                 Text(session.cwd).font(.caption).foregroundStyle(.tertiary).textSelection(.enabled)
+                SessionCapabilityBadges(session: session)
             }
             Spacer()
             if let usage = session.usage {
@@ -250,16 +315,15 @@ struct SessionUsageView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             if let total = usage.total {
-                HStack(spacing: 6) {
-                    Text("토큰 \(formatTokenCount(total))\(partial ? "+" : "")")
-                        .font(.caption.weight(.medium).monospacedDigit())
-                    if let input = usage.inputTokens, let output = usage.outputTokens {
-                        Text("입력 \(formatTokenCount(input)) · 출력 \(formatTokenCount(output))")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
+                Text("세션 누적 토큰 \(formatTokenCount(total))\(partial ? "+" : "")")
+                    .font(.caption.weight(.medium).monospacedDigit())
+                    .lineLimit(1)
+                if let input = usage.inputTokens, let output = usage.outputTokens {
+                    Text("입력(cache 포함) \(formatTokenCount(input)) · 출력 \(formatTokenCount(output))")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
-                .lineLimit(1)
             }
             if let fraction = usage.contextFraction,
                let used = usage.contextUsed,
@@ -268,10 +332,18 @@ struct SessionUsageView: View {
                     .progressViewStyle(.linear)
                     .controlSize(.small)
                     .tint(contextColor(fraction))
-                Text("컨텍스트 \(contextPercentText(fraction)) · \(formatTokenCount(used)) / \(formatTokenCount(window))")
+                Text("최근 요청 컨텍스트 \(contextPercentText(fraction)) · \(formatTokenCount(used)) / \(formatTokenCount(window))")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .help(contextPercentHelp)
+            } else if let used = usage.contextUsed {
+                // Claude reports the prompt size but not the window.
+                Text("최근 요청 컨텍스트 \(formatTokenCount(used)) 토큰 (창 크기 미제공)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .help("최근 모델 요청에 들어간 토큰 수입니다. 이 source는 컨텍스트 창 크기를 알려 주지 않습니다.")
             }
         }
         .help(partial ? "긴 transcript에서 읽은 부분만 합산한 값입니다." : "")

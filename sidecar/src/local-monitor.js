@@ -16,6 +16,38 @@ function monitorStatus(value) {
   }
 }
 
+const TITLE_FROM_PROMPT_LIMIT = 60;
+
+/**
+ * One naming rule for every provider: the CLI's own title when it has one
+ * (Claude's ai-title), else the latest prompt, cut to a label. Never a raw id
+ * or a scanner event name — the app falls back to "<provider> · <folder>".
+ */
+function sessionTitle(facts, events, raw) {
+  if (typeof facts.title === "string" && facts.title.trim()) return facts.title.trim();
+  if (typeof raw.task === "string" && raw.task.trim()) return raw.task.trim();
+  const prompt = [...(events ?? [])].reverse().find((event) => event.kind === "turn_start" && event.title)?.title;
+  if (!prompt) return null;
+  const line = prompt.replace(/\s+/g, " ").trim();
+  return line.length > TITLE_FROM_PROMPT_LIMIT ? `${line.slice(0, TITLE_FROM_PROMPT_LIMIT - 1)}…` : line;
+}
+
+/**
+ * Warnings the app must show on a session. Codex edits inside its session
+ * roots through its own tools without asking, so a read_only/ask Gateway
+ * session is not edit-proof (Gateway 1.5.1 management contract); the same
+ * holds for 1.4.0 daemons, which do not say so themselves.
+ */
+export function sessionAlerts(session) {
+  const policy = session?.permissionPolicy;
+  if (session?.provider !== "codex" || !policy || policy === "auto_approve") return [];
+  return [{
+    level: "warning",
+    code: "permission_policy_partial",
+    message: `${policy} 정책이 부분적으로만 적용됩니다. Codex는 세션 폴더 안의 파일을 권한 요청 없이 고칠 수 있습니다.`
+  }];
+}
+
 // Placeholders the scanners use when they cannot see the real model.
 const PLACEHOLDER_MODELS = new Set(["claude-cli", "grok-cli", "codex-cli"]);
 
@@ -87,7 +119,7 @@ export function projectLocalSnapshot(snapshot, timelines = new Map()) {
       provider,
       model: realModel(facts.model) ?? realModel(raw.engine),
       status,
-      title: facts.title ?? raw.task ?? null,
+      title: sessionTitle(facts, timeline?.events, raw),
       opener: root?.provider ?? raw.provider ?? "local",
       openerInstanceId: rootId,
       cwd: raw.cwd ?? facts.cwd ?? root?.cwd ?? "",
@@ -130,7 +162,7 @@ function localCapabilities(provider, timeline, hooked) {
   return capabilities;
 }
 
-export function mergeMonitorSessions(gatewaySessions, localSessions, workerTopology = null) {
+export function mergeMonitorSessions(gatewaySessions, localSessions, workerTopology = null, formerWorkerIds = null) {
   // ownedWorkerIds is LOAD-BEARING even though the scanner no longer produces
   // Gateway sessions itself: an ACP claude worker writes a transcript under
   // ~/.claude/projects like any other claude session, so the local scanner
@@ -185,6 +217,7 @@ export function mergeMonitorSessions(gatewaySessions, localSessions, workerTopol
       usage: session.usage ?? localMatch?.usage ?? null,
       model: session.model ?? localMatch?.model ?? null,
       capabilities: ["status", "timeline", "tools", "thinking", "permission", ...(localMatch?.usage ? ["usage"] : [])],
+      alerts: sessionAlerts(session),
       ...(topology ? {
         opener: session.opener ?? topology.opener,
         openerInstanceId: session.openerInstanceId ?? topology.openerInstanceId,
@@ -196,8 +229,9 @@ export function mergeMonitorSessions(gatewaySessions, localSessions, workerTopol
     session?.sessionId,
     session?.acpSessionId
   ]).filter(Boolean));
+  // A worker the Gateway already closed is history, not a new local root.
   const local = (Array.isArray(localSessions) ? localSessions : [])
-    .filter((session) => !ownedWorkerIds.has(session.localSessionId))
+    .filter((session) => !ownedWorkerIds.has(session.localSessionId) && !formerWorkerIds?.has(session.localSessionId))
     .map((session) => ({
       ...session,
       parentSessionId: resolvedParentSessionId(session)

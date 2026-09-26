@@ -190,3 +190,23 @@ test("persisted history pages newest first, reports its size, and clears on requ
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("the monitor remembers every worker the Gateway reported, across a restart", async () => {
+  const state = new MonitorState();
+  state.setGatewaySourceSessions([{ sessionId: "acp-1", acpSessionId: "worker-uuid", provider: "claude" }]);
+  state.setGatewaySourceSessions([]);
+  assert.ok(state.formerWorkerIds.has("worker-uuid"), "a closed Gateway session is still known as a worker");
+
+  const directory = await mkdtemp(join(tmpdir(), "agenlynk-workers-"));
+  try {
+    const store = await SqliteMonitorStore.open(join(directory, "monitor.db"), { flushMs: 1 });
+    store.writeSession({ sessionId: "acp-2", acpSessionId: "worker-2", provider: "codex", updatedAt: new Date().toISOString() });
+    store.flush();
+    const restarted = new MonitorState({ persistence: store });
+    restarted.restoreHistory();
+    assert.ok(restarted.formerWorkerIds.has("worker-2"), "restored Gateway history keeps its workers known");
+    store.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

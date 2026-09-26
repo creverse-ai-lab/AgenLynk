@@ -96,7 +96,7 @@ struct MenuBarStatusView: View {
     private var metricsRow: some View {
         HStack(spacing: 12) {
             MenuBarMetric(title: "Frontdoor", value: "\(model.activeFrontdoors.count)")
-            MenuBarMetric(title: "Worker", value: "\(model.realtimeSessions.count)")
+            MenuBarMetric(title: "Worker", value: "\(model.realtimeWorkerCount)")
             MenuBarMetric(title: "대기 요청", value: "\(model.pendingInbox.count)")
             MenuBarMetric(title: "이벤트", value: model.totalEventCount.formatted())
         }
@@ -268,9 +268,7 @@ private struct MenuBarActivityRow: View {
                     Text(stateLabel)
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(stateColor)
-                    Text(agent.provider.capitalized)
-                        .font(.caption.weight(.medium))
-                        .lineLimit(1)
+                    ProviderIcon(provider: agent.provider, size: 13)
                     Text(agent.role == "worker" ? "Worker" : "Frontdoor")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
@@ -284,7 +282,7 @@ private struct MenuBarActivityRow: View {
                         Text("ctx \(contextPercentText(contextFraction))")
                             .font(.caption2.monospacedDigit())
                             .foregroundStyle(contextColor(contextFraction))
-                            .help("컨텍스트 창 사용률")
+                            .help(contextPercentHelp)
                     }
                     Text(relative(from: agent.updatedAt, to: now))
                         .font(.caption2.monospacedDigit())

@@ -1,3 +1,4 @@
+import ACPShared
 import SwiftUI
 
 struct DashboardView: View {
@@ -62,19 +63,53 @@ struct DashboardView: View {
             // side columns default to just enough width for their own rows and
             // the center takes the rest. Both keep their old max widths, so a
             // divider drag still restores the roomier layout.
-            HSplitView {
-                sessionColumn
-                    .frame(minWidth: 170, idealWidth: 190, maxWidth: 340)
-                eventColumn
-                    .frame(minWidth: 420, idealWidth: 820)
-                operationsColumn
-                    .frame(minWidth: 220, idealWidth: 240, maxWidth: 440)
+            GeometryReader { proxy in
+                let layout = DashboardPanelLayout(
+                    width: proxy.size.width,
+                    wantsSessions: settings.showSessionColumn,
+                    wantsInspector: settings.showInspectorColumn,
+                    forceSessions: forceSessionColumn,
+                    forceInspector: forceInspectorColumn
+                )
+                HSplitView {
+                    if layout.showsSessions {
+                        sessionColumn
+                            .frame(minWidth: 170, idealWidth: 190, maxWidth: 340)
+                    }
+                    eventColumn
+                        .frame(minWidth: 420, idealWidth: 820)
+                    if layout.showsInspector {
+                        operationsColumn
+                            .frame(minWidth: 220, idealWidth: 240, maxWidth: 440)
+                    }
+                }
+                .onAppear { panelLayout = layout }
+                .onChange(of: layout) { _, next in
+                    panelLayout = next
+                    // A forced panel lasts until the window has room again.
+                    if next.fitsSessions { forceSessionColumn = false }
+                    if next.fitsInspector { forceInspectorColumn = false }
+                }
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .background(ACPApplicationIconUpdater().frame(width: 0, height: 0))
         .toolbar {
+            ToolbarItemGroup(placement: .navigation) {
+                Button {
+                    togglePanel(sessions: true)
+                } label: {
+                    Label("세션 목록", systemImage: "sidebar.left")
+                }
+                .help(panelHelp(shown: panelLayout.showsSessions, folded: settings.showSessionColumn && !panelLayout.fitsSessions, name: "세션 목록"))
+            }
             ToolbarItemGroup {
+                Button {
+                    togglePanel(sessions: false)
+                } label: {
+                    Label("인스펙터", systemImage: "sidebar.right")
+                }
+                .help(panelHelp(shown: panelLayout.showsInspector, folded: settings.showInspectorColumn && !panelLayout.fitsInspector, name: "인스펙터"))
                 SettingsLink {
                     Label("설정", systemImage: "gearshape")
                 }
@@ -84,7 +119,9 @@ struct DashboardView: View {
             }
         }
         .onChange(of: model.selectedFrontdoorId) { _, _ in
-            settings.followLatestEvent = false
+            // A new scope opens at its newest event, following.
+            settings.followLatestEvent = true
+            guard model.selectedHistorySessionId == nil else { return }
             model.selectedEventId = nil
             if model.selectedSession?.openerInstanceId != model.selectedFrontdoorId {
                 model.selectedSessionId = model.selectedFrontdoor?.root?.sessionId
@@ -92,7 +129,7 @@ struct DashboardView: View {
             }
         }
         .onChange(of: model.selectedSessionId) { _, _ in
-            settings.followLatestEvent = false
+            guard model.selectedHistorySessionId == nil else { return }
             model.selectedEventId = nil
             if let openerInstanceId = model.selectedSession?.openerInstanceId,
                openerInstanceId != model.selectedFrontdoorId {
@@ -102,6 +139,38 @@ struct DashboardView: View {
     }
 
     @State private var showNoticeLog = false
+    @State private var panelLayout = DashboardPanelLayout(width: 1200, wantsSessions: true, wantsInspector: true)
+    @State private var forceSessionColumn = false
+    @State private var forceInspectorColumn = false
+
+    /// A panel folded away by a narrow window opens on demand; otherwise the
+    /// button is the user's show/hide preference, which persists.
+    private func togglePanel(sessions: Bool) {
+        if sessions {
+            if panelLayout.showsSessions {
+                forceSessionColumn = false
+                settings.showSessionColumn = false
+            } else if settings.showSessionColumn {
+                forceSessionColumn = true
+            } else {
+                settings.showSessionColumn = true
+            }
+        } else {
+            if panelLayout.showsInspector {
+                forceInspectorColumn = false
+                settings.showInspectorColumn = false
+            } else if settings.showInspectorColumn {
+                forceInspectorColumn = true
+            } else {
+                settings.showInspectorColumn = true
+            }
+        }
+    }
+
+    private func panelHelp(shown: Bool, folded: Bool, name: String) -> String {
+        if shown { return "\(name) 숨기기" }
+        return folded ? "창이 좁아 \(name)을(를) 접었습니다 · 누르면 펼치기" : "\(name) 보이기"
+    }
 
     private var connectionBar: some View {
         HStack(spacing: 9) {
@@ -170,37 +239,136 @@ struct DashboardView: View {
             }
             .padding(10)
             Divider()
-            List(model.visibleFrontdoors, selection: $model.selectedFrontdoorId) { frontdoor in
-                FrontdoorRow(frontdoor: frontdoor)
-                    .tag(frontdoor.id)
+            List(selection: sidebarSelection) {
+                ForEach(model.visibleFrontdoors) { frontdoor in
+                    FrontdoorRow(frontdoor: frontdoor)
+                        .tag(frontdoor.id)
+                }
+                historySection
             }
             .listStyle(.sidebar)
         }
     }
 
+    private static let historyTagPrefix = "history:"
+
+    /// One selection for both sidebar sections: a Frontdoor id, or a
+    /// "history:" tag for a browsed history session. Only a click goes
+    /// through here, so the reconciliation that re-picks a Frontdoor on
+    /// updates never closes an opened history session.
+    private var sidebarSelection: Binding<String?> {
+        Binding(
+            get: {
+                if let id = model.selectedHistorySessionId { return Self.historyTagPrefix + id }
+                return model.selectedFrontdoorId
+            },
+            set: { value in
+                if let value, value.hasPrefix(Self.historyTagPrefix) {
+                    let sessionId = String(value.dropFirst(Self.historyTagPrefix.count))
+                    settings.followLatestEvent = true
+                    Task { await model.selectHistorySession(sessionId) }
+                } else {
+                    if model.selectedHistorySessionId != nil {
+                        Task { await model.selectHistorySession(nil) }
+                        settings.followLatestEvent = true
+                    }
+                    model.selectedFrontdoorId = value
+                }
+            }
+        )
+    }
+
+    /// Older sessions from the on-disk history, paged in as the list's end
+    /// scrolls into view.
+    private var historySection: some View {
+        Section {
+            ForEach(model.browsableHistory) { session in
+                HistorySessionRow(session: session)
+                    .tag(Self.historyTagPrefix + session.sessionId)
+                    .onAppear {
+                        guard session.sessionId == model.browsableHistory.last?.sessionId else { return }
+                        Task { await model.loadHistoryPage() }
+                    }
+            }
+            // The end of the list: reaching it loads the next page.
+            HStack(spacing: 6) {
+                if model.historyLoading {
+                    ProgressView().controlSize(.mini)
+                    Text("불러오는 중…")
+                } else if let error = model.historyError {
+                    Label(error, systemImage: "exclamationmark.triangle").lineLimit(2)
+                } else if model.historyHasMore {
+                    Button("더 불러오기") { Task { await model.loadHistoryPage() } }
+                        .buttonStyle(.borderless)
+                } else if model.browsableHistory.isEmpty {
+                    Text("지난 기록 없음")
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .onAppear { Task { await model.loadHistoryPage() } }
+        } header: {
+            HStack(spacing: 4) {
+                Text("지난 기록")
+                Spacer(minLength: 0)
+                Button {
+                    Task { await model.loadHistoryPage(reset: true) }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help("지난 기록 새로 고침")
+            }
+        }
+    }
+
+    /// The sessions the sequence shows: the opened history session, else the
+    /// selected Frontdoor's members, else every visible session.
+    private var sequenceSessions: [GatewaySession] {
+        if let history = model.selectedHistorySession { return [history] }
+        return model.selectedFrontdoor?.members ?? model.visibleLogSessions
+    }
+
+    private var sequenceScopeKey: String {
+        if let id = model.selectedHistorySessionId { return "history:\(id)" }
+        return model.selectedFrontdoorId ?? "all"
+    }
+
     private var eventColumn: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Label(model.selectedFrontdoorId == nil ? "전체 이벤트 시퀀스" : "Frontdoor 이벤트 시퀀스", systemImage: "timeline.selection")
+                Label(
+                    model.selectedHistorySessionId != nil ? "지난 기록 이벤트 시퀀스"
+                        : model.selectedFrontdoorId == nil ? "전체 이벤트 시퀀스" : "Frontdoor 이벤트 시퀀스",
+                    systemImage: "timeline.selection"
+                )
                     .font(.headline)
                 Spacer()
                 Text("\(model.selectedEvents.count)개").foregroundStyle(.secondary).font(.caption)
             }
             .padding(12)
             Divider()
+            let contextSession = model.selectedHistorySession ?? model.selectedSession
             SequenceSelectionContext(
-                frontdoor: model.selectedFrontdoor,
-                session: model.selectedSession,
-                activity: model.selectedSession.map { sessionActivity(for: $0) }
+                frontdoor: model.selectedHistorySessionId == nil ? model.selectedFrontdoor : nil,
+                session: contextSession,
+                activity: contextSession.map { sessionActivity(for: $0) }
             )
             Divider()
+            let sessionIds = sequenceSessions.map(\.sessionId)
             EventSequenceView(
-                sessions: model.selectedFrontdoor?.members ?? model.visibleLogSessions,
+                sessions: sequenceSessions,
                 events: model.selectedEvents,
                 selectedSessionId: $model.selectedSessionId,
                 selectedEventId: $model.selectedEventId,
-                followLatestEvent: $settings.followLatestEvent
+                followLatestEvent: $settings.followLatestEvent,
+                canLoadOlder: model.mayHaveOlderEvents(in: sessionIds),
+                loadingOlder: !model.olderLoadingSessionIds.isDisjoint(with: sessionIds),
+                loadOlder: { await model.loadOlderEvents(sessionIds: sessionIds) }
             )
+            // A new scope is a new timeline: fresh scroll position (newest at
+            // the bottom) and no groups left expanded from the previous one.
+            .id(sequenceScopeKey)
         }
     }
 
@@ -209,13 +377,18 @@ struct DashboardView: View {
     /// status word, because "무엇을 하는 중인가" is the question the top strip is
     /// there to answer.
     private func sessionActivity(for session: GatewaySession) -> SessionActivity {
-        let events = model.eventsBySession[session.sessionId] ?? []
+        let events = model.browsedEvents[session.sessionId]
+            ?? model.logEventsBySession[session.sessionId]
+            ?? []
         let latest = events.max(by: withinSessionEventOrder)
+        let toolRun = EventTimeline.trailingToolGroup(events)
         let detail: String? = {
             guard let latest else { return session.title }
-            // A tool call is named by its title ("Bash: ls"); its body is
-            // the output, which is not what "doing now" means.
-            if latest.kind == "tool_call" { return latest.title ?? latest.body ?? session.title }
+            // A run of tool calls reads as the run ("도구 12개 · 실행 중: …");
+            // a single call by its compact header, never by its output.
+            if let toolRun { return toolRun.summary(titleLimit: 40) }
+            if latest.kind == "tool_call" { return latest.compactToolTitle(limit: 60) }
+            if let state = latest.requestStateLabel { return [state, latest.title].compactMap { $0 }.joined(separator: " · ") }
             return latest.body ?? latest.title ?? session.title
         }()
         let kind = latest?.kind ?? ""
@@ -250,7 +423,7 @@ struct DashboardView: View {
         case "error":
             return SessionActivity(symbol: "exclamationmark.triangle.fill", color: .red, headline: "오류로 중단됨", detail: detail)
         default:
-            return SessionActivity(symbol: "pause.circle", color: .secondary, headline: session.status, detail: detail)
+            return SessionActivity(symbol: "pause.circle", color: .secondary, headline: sessionStatusLabel(session.status), detail: detail)
         }
     }
 
@@ -259,18 +432,26 @@ struct DashboardView: View {
             VStack(alignment: .leading, spacing: 18) {
                 InspectorSection(title: "선택 이벤트", symbol: "doc.text.magnifyingglass") {
                     if let event = model.selectedEvent {
-                        if let session = model.visibleLogSessions.first(where: { $0.sessionId == event.sessionId }) {
-                            LabeledContent("세션", value: session.provider.capitalized)
+                        if let session = model.knownSession(event.sessionId) {
+                            LabeledContent("세션") {
+                                HStack(spacing: 5) {
+                                    ProviderIcon(provider: session.provider, size: 14)
+                                    Text(settings.sessionName(session)).lineLimit(1)
+                                }
+                            }
                             if let model = session.model {
                                 LabeledContent("모델", value: model)
                             }
                             LabeledContent("역할", value: session.isFrontdoorRecord ? "Frontdoor" : "Worker")
+                            SessionCapabilityBadges(session: session)
                             if let usage = session.usage {
                                 SessionUsageView(usage: usage, partial: session.usagePartial)
                             }
                         }
                         LabeledContent("이벤트", value: event.kindLabel)
-                        if let status = eventStatusLabel(event.status) {
+                        if let state = event.requestStateLabel {
+                            LabeledContent("상태", value: state)
+                        } else if let status = eventStatusLabel(event.status) {
                             LabeledContent("상태", value: status)
                         }
                         LabeledContent("시간", value: shortTime(event.timestamp))
@@ -386,7 +567,7 @@ private struct SequenceSelectionContext: View {
                     }
                     .onChange(of: frontdoor.id) { _, _ in editingName = false }
                     HStack(spacing: 6) {
-                        ContextPill(text: frontdoor.provider.capitalized, color: .blue)
+                        ProviderIcon(provider: frontdoor.provider, size: 16)
                         ContextPill(text: frontdoor.isActive ? "진행 중" : "대기", color: frontdoor.isActive ? .green : .secondary)
                         ContextPill(text: "Worker \(frontdoor.workers.count)", color: .secondary)
                         ContextPill(text: "작업공간 \(frontdoor.workspaceCount)", color: .secondary)
@@ -425,12 +606,14 @@ private struct SequenceSelectionContext: View {
                         // The LOCAL/ACP source is not something a reader acts
                         // on; role and model are.
                         ContextPill(text: session.isFrontdoorRecord ? "Frontdoor" : "Worker", color: .secondary)
-                        Text(session.withModel(session.provider.capitalized))
+                        ProviderIcon(provider: session.provider, size: 14)
+                        Text(session.model ?? "")
                             .font(.caption2.weight(.medium))
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
                             .lineLimit(1)
                     }
+                    SessionCapabilityBadges(session: session)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -512,7 +695,15 @@ struct FrontdoorRow: View {
     let frontdoor: FrontdoorSession
     var body: some View {
         HStack(alignment: .top, spacing: 9) {
-            Circle().fill(frontdoor.isActive ? .blue : .secondary).frame(width: 8, height: 8).padding(.top, 5)
+            ProviderIcon(provider: frontdoor.provider, size: 18)
+                .overlay(alignment: .bottomTrailing) {
+                    if frontdoor.isActive {
+                        Circle().fill(.green).frame(width: 7, height: 7)
+                            .overlay(Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1.5))
+                            .offset(x: 2, y: 2)
+                    }
+                }
+                .padding(.top, 1)
             VStack(alignment: .leading, spacing: 3) {
                 Text(settings.frontdoorName(id: frontdoor.id, auto: frontdoor.displayName))
                     .font(.callout.weight(.medium)).lineLimit(1)
@@ -533,28 +724,164 @@ struct FrontdoorRow: View {
 }
 
 struct EventRow: View {
+    @EnvironmentObject private var settings: AppSettings
     let event: MonitorEvent
     let session: GatewaySession?
+    /// A call listed under its expanded tool group.
+    var nested = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: eventSymbol(event))
-                .foregroundStyle(eventColor(event)).frame(width: 18)
-            VStack(alignment: .leading, spacing: 3) {
-                HStack {
-                    Text(event.kindLabel).font(.callout.weight(.medium))
-                    if let status = eventStatusLabel(event.status) {
-                        Text(status).font(.caption2).foregroundStyle(statusColor(event.status ?? ""))
-                    }
-                    Spacer()
-                    Text(shortTime(event.timestamp)).font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
+        if event.kind == "tool_call" {
+            // A tool call is a compact one-line header; the output is in the
+            // detail pane on click.
+            HStack(spacing: 8) {
+                if event.isInFlight {
+                    ProgressView().controlSize(.mini).frame(width: 18)
+                } else {
+                    Image(systemName: eventSymbol(event))
+                        .foregroundStyle(eventColor(event)).frame(width: 18)
                 }
-                Text(event.summary)
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                if let session { Text(session.displayName).font(.caption2).foregroundStyle(.tertiary) }
+                Text(event.compactToolTitle(limit: nested ? 48 : 40))
+                    .font(nested ? .caption : .callout)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if let status = eventStatusLabel(event.status), !event.isInFlight {
+                    Text(status).font(.caption2).foregroundStyle(eventColor(event))
+                }
+                Spacer()
+                Text(shortTime(event.timestamp)).font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
+            }
+            .padding(.vertical, nested ? 1 : 3)
+            .padding(.leading, nested ? 22 : 0)
+            .help(event.title ?? event.summary)
+        } else {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: eventSymbol(event))
+                    .foregroundStyle(eventColor(event)).frame(width: 18)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Text(event.kindLabel).font(.callout.weight(.medium))
+                        if let state = event.requestStateLabel {
+                            Text(state).font(.caption2.weight(.semibold)).foregroundStyle(eventColor(event))
+                        } else if let status = eventStatusLabel(event.status) {
+                            Text(status).font(.caption2).foregroundStyle(statusColor(event.status ?? ""))
+                        }
+                        Spacer()
+                        Text(shortTime(event.timestamp)).font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
+                    }
+                    Text(event.summary)
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    if let session { Text(settings.sessionName(session)).font(.caption2).foregroundStyle(.tertiary) }
+                }
+            }
+            .padding(.vertical, 4)
+        }
+    }
+}
+
+/// A run of tool calls as one list row: count, representative call,
+/// failures, and a chevron; clicking it expands the calls below.
+struct ToolGroupRow: View {
+    let group: ToolCallGroup
+    let expanded: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+            if group.isRunning {
+                ProgressView().controlSize(.mini)
+            } else {
+                Image(systemName: "wrench.and.screwdriver")
+                    .foregroundStyle(group.failedCount > 0 ? .red : .cyan)
+            }
+            Text(group.summary(titleLimit: 32))
+                .font(.callout.weight(.medium))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer()
+            Text(shortTime(group.representative.timestamp)).font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
+        .help(expanded ? "클릭해 접기" : "클릭해 도구 호출 \(group.events.count)개 펼치기")
+    }
+}
+
+/// "실시간" when updates arrive as they happen, and a note when the source
+/// cannot see permission prompts — so "nothing is waiting" is not confused
+/// with "can't tell".
+struct SessionCapabilityBadges: View {
+    let session: GatewaySession
+
+    var body: some View {
+        if session.isLiveObserved || session.cannotObservePermission || !session.alerts.isEmpty {
+            HStack(spacing: 6) {
+                ForEach(session.alerts, id: \.code) { alert in
+                    Label(alert.badge, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.orange.opacity(0.12), in: Capsule())
+                        .help(alert.message ?? alert.code)
+                }
+                if session.isLiveObserved {
+                    Label("실시간", systemImage: "dot.radiowaves.left.and.right")
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.green)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.green.opacity(0.11), in: Capsule())
+                        .help("hook 또는 Gateway 스트림으로 바로 갱신됩니다")
+                }
+                if session.cannotObservePermission {
+                    Text("권한 대기 감지 불가 (hook 꺼짐)")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .help("이 세션의 권한 요청은 보이지 않습니다. 설정 > 모니터링에서 hook을 켜면 감지합니다.")
+                }
             }
         }
-        .padding(.vertical, 4)
+    }
+}
+
+/// One persisted session in "지난 기록": provider, folder or title, role and
+/// how long ago it was last updated.
+private struct HistorySessionRow: View {
+    @EnvironmentObject private var settings: AppSettings
+    let session: GatewaySession
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 9) {
+            ProviderIcon(provider: session.provider, size: 16).padding(.top, 1)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name).font(.callout).lineLimit(1)
+                Text(subtitle)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.vertical, 2)
+        .help(session.title ?? session.cwd)
+    }
+
+    // Naming policy: the session's name (override, title, or provider ·
+    // folder) leads; the folder goes in the subtitle so rows from one project
+    // are still told apart by what they were doing.
+    private var name: String { settings.sessionName(session) }
+
+    private var subtitle: String {
+        var parts = [session.isFrontdoorRecord ? "Frontdoor" : "Worker"]
+        let folder = (session.cwd as NSString).lastPathComponent
+        if !folder.isEmpty, folder != "/", !name.contains(folder) { parts.append(folder) }
+        if let updated = session.updatedAt.flatMap(parseTimestamp) {
+            parts.append(relativeTimeText(from: updated, to: Date()))
+        }
+        return parts.joined(separator: " · ")
     }
 }
 
@@ -616,7 +943,7 @@ private struct RecordRow: View {
             HStack {
                 Text(record.title).font(.caption.weight(.medium)).lineLimit(2)
                 Spacer()
-                if let status = record.status { Text(status).foregroundStyle(statusColor(status)) }
+                if let status = record.status { Text(sessionStatusLabel(status)).foregroundStyle(statusColor(status)) }
             }
             Text(record.subtitle).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
         }

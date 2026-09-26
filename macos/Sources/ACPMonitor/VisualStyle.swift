@@ -36,6 +36,7 @@ func eventColor(_ kind: String) -> Color {
 /// Status wins over kind: a failed tool call or turn reads red, and a request
 /// still waiting on the user stays orange whatever produced it.
 func eventColor(_ event: MonitorEvent) -> Color {
+    if let color = requestStateColor(event) { return color }
     if event.isFailed { return .red }
     if event.status == "cancelled" { return .secondary }
     return eventColor(event.kind)
@@ -61,8 +62,28 @@ func eventSymbol(_ kind: String) -> String {
     }
 }
 
+/// A permission / input request reads by its outcome: waiting orange,
+/// approved green, denied red, cancelled grey. nil for other kinds.
+func requestStateColor(_ event: MonitorEvent) -> Color? {
+    guard let label = event.requestStateLabel else { return nil }
+    switch label {
+    case "승인됨", "응답됨": return .green
+    case "거부됨", "입력 실패": return .red
+    case "취소됨": return .secondary
+    default: return .orange
+    }
+}
+
 /// A finished tool call shows how it ended instead of the generic wrench.
 func eventSymbol(_ event: MonitorEvent) -> String {
+    if event.kind == "permission_request" {
+        switch event.requestStateLabel {
+        case "승인됨": return "lock.open"
+        case "거부됨": return "hand.raised.slash"
+        case "취소됨": return "slash.circle"
+        default: return eventSymbol(event.kind)
+        }
+    }
     guard event.kind == "tool_call" || event.kind == "subagent" else { return eventSymbol(event.kind) }
     switch event.status {
     case "completed": return "checkmark.circle"
@@ -83,6 +104,9 @@ func eventStatusLabel(_ status: String?) -> String? {
     default: nil
     }
 }
+
+/// Tooltip for every compact context-percent label (menu bar, lanes).
+let contextPercentHelp = "최근 요청이 모델 컨텍스트 창을 차지한 비율입니다 (사용 / 창 크기). 세션 누적 토큰과는 다른 값입니다."
 
 /// Context gauge color: calm until the window is nearly full.
 func contextColor(_ fraction: Double) -> Color {

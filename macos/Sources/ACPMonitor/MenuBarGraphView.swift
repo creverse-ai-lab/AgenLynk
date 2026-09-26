@@ -73,7 +73,7 @@ struct MenuBarLiveGraph: View {
                         Text(contextPercentText(fraction))
                             .font(.system(size: 9).monospacedDigit())
                             .foregroundStyle(contextColor(fraction))
-                            .help("컨텍스트 창 사용률")
+                            .help(contextPercentHelp)
                     }
                 }
                 .padding(.horizontal, 6)

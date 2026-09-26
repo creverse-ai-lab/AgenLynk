@@ -127,9 +127,30 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
     /// `timeline`, `tools`, `thinking`, `usage`, `permission`, `live`), so an
     /// empty timeline can be told apart from a source that cannot see one.
     let capabilities: Set<String>
+    /// Warnings the app must show, e.g. `permission_policy_partial`: a
+    /// read_only/ask Codex session can still edit inside its roots.
+    let alerts: [SessionAlert]
 
     var id: String { sessionId }
-    var displayName: String { title?.isEmpty == false ? title! : sessionId }
+    /// Naming policy (docs/ux-policy.md): the sidecar's title (the CLI's own
+    /// title, else the latest prompt), else "<Provider> · <folder>". A raw
+    /// session id is never a name; it stays available in tooltips.
+    var displayName: String {
+        if let title = title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty { return title }
+        // The provider is the icon beside the name, so it is not repeated in
+        // the text; the folder tells the session apart.
+        let folder = (cwd as NSString).lastPathComponent
+        if !cwd.isEmpty, !folder.isEmpty, folder != "/" { return folder }
+        return "새 세션"
+    }
+    var providerLabel: String {
+        switch provider.lowercased() {
+        case "claude": "Claude"
+        case "codex": "Codex"
+        case "grok": "Grok"
+        default: provider.isEmpty ? "Agent" : provider.capitalized
+        }
+    }
     var isFrontdoorRecord: Bool { role == "frontdoor" }
     var isLocalSource: Bool { source == "local" }
     var sourceLabel: String { isLocalSource ? "LOCAL" : "ACP" }
@@ -144,6 +165,16 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
         openerInstanceId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
     }
     var isRealtimeVisible: Bool { isActive && hasFrontdoorIdentity }
+    /// Updates arrive as they happen (hooks or the Gateway stream), not only
+    /// from a transcript re-read.
+    var isLiveObserved: Bool { capabilities.contains("live") }
+    /// The source cannot see a permission prompt, so "nothing is waiting" is
+    /// not something this session can tell. A record without capabilities
+    /// (older sidecar) and a Gateway session are never flagged.
+    var cannotObservePermission: Bool {
+        guard !capabilities.isEmpty, isLocalSource else { return false }
+        return !capabilities.contains("permission")
+    }
 
     init?(_ value: JSONValue) {
         guard let object = value.objectValue, let sessionId = object.string("sessionId") else { return nil }
@@ -169,6 +200,7 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
             guard case let .string(name) = item else { return nil }
             return name
         })
+        alerts = (object.array("alerts") ?? []).compactMap(SessionAlert.init)
     }
 
     /// `base` followed by the model id when the session reports one. v2 sends
@@ -185,6 +217,24 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
         var copy = self
         copy.status = status
         return copy
+    }
+}
+
+struct SessionAlert: Hashable, Sendable {
+    let level: String
+    let code: String
+    let message: String?
+
+    init?(_ value: JSONValue) {
+        guard let object = value.objectValue, let code = object.string("code") else { return nil }
+        self.code = code
+        level = object.string("level") ?? "warning"
+        message = object.string("message")
+    }
+
+    /// A short badge; the full message is the tooltip.
+    var badge: String {
+        code == "permission_policy_partial" ? "읽기 전용 부분 적용" : code
     }
 }
 
@@ -775,9 +825,63 @@ struct MonitorEvent: Identifiable, Equatable, Sendable {
         payload = value
     }
 
-    /// Short label for the kind, as rows and nodes print it.
-    var kindLabel: String {
-        kind == "agent_message" ? "agent response" : kind.replacingOccurrences(of: "_", with: " ")
+    /// Short Korean label for the kind, as rows and nodes print it.
+    var kindLabel: String { eventKindLabel(kind) }
+
+    /// The one line a timeline row or sequence node leads with. A tool call
+    /// is named by its own compact header ("Bash: ls -la"), a permission or
+    /// input request by how it stands, anything else by its kind.
+    var headline: String {
+        switch kind {
+        case "tool_call": return compactToolTitle()
+        case "permission_request", "input_request": return requestStateLabel ?? kindLabel
+        default: return kindLabel
+        }
+    }
+
+    /// A tool call's name and the head of its argument, cut to `limit`
+    /// characters. The sidecar's title already reads "Bash: ls -la"; without
+    /// one the tool name from `detail` stands in.
+    func compactToolTitle(limit: Int = 30) -> String {
+        let raw = title
+            ?? detail["toolName"]?.stringValue
+            ?? detail["name"]?.stringValue
+            ?? kindLabel
+        let oneLine = raw.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
+        guard oneLine.count > limit else { return oneLine }
+        return String(oneLine.prefix(limit)).trimmingCharacters(in: .whitespaces) + "…"
+    }
+
+    /// How a permission / input request stands: waiting, approved, denied or
+    /// cancelled. `detail.outcome` is the sidecar's verdict; the status is the
+    /// fallback for a source that reports none. nil for other kinds.
+    var requestStateLabel: String? {
+        switch kind {
+        case "permission_request":
+            switch detail["outcome"]?.stringValue {
+            case "approved": return "승인됨"
+            case "denied": return "거부됨"
+            case "cancelled": return "취소됨"
+            default: break
+            }
+            switch status {
+            case "pending", "running", nil: return "권한 요청 대기"
+            case "completed": return "승인됨"
+            case "failed": return "거부됨"
+            case "cancelled": return "취소됨"
+            default: return "권한 요청"
+            }
+        case "input_request":
+            switch status {
+            case "pending", "running", nil: return "입력 요청 대기"
+            case "completed": return "응답됨"
+            case "failed": return "입력 실패"
+            case "cancelled": return "취소됨"
+            default: return "입력 요청"
+            }
+        default:
+            return nil
+        }
     }
 
     /// One line for a list row or tooltip: the sidecar's title, else the head
@@ -791,6 +895,62 @@ struct MonitorEvent: Identifiable, Equatable, Sendable {
     /// Still in flight: a tool call or request that has not finished.
     var isInFlight: Bool { status == "pending" || status == "running" }
     var isFailed: Bool { status == "failed" }
+}
+
+/// Korean label for a canonical event kind; an unknown kind reads as words.
+func eventKindLabel(_ kind: String) -> String {
+    switch kind {
+    case "turn_start": "턴 시작"
+    case "turn_end": "턴 종료"
+    case "session_start": "세션 시작"
+    case "session_end": "세션 종료"
+    case "user_message": "사용자 메시지"
+    case "agent_message": "응답"
+    case "agent_thought": "생각"
+    case "tool_call": "도구"
+    case "permission_request": "권한 요청"
+    case "input_request": "입력 요청"
+    case "subagent": "서브에이전트"
+    case "plan": "계획"
+    case "compaction": "컨텍스트 압축"
+    case "error": "오류"
+    default: kind.replacingOccurrences(of: "_", with: " ")
+    }
+}
+
+/// Korean word for a session (or record) status — the same wording the
+/// dashboard uses, so no header ever prints a raw `waiting_permission`.
+func sessionStatusLabel(_ status: String) -> String {
+    switch status {
+    case "running": "실행 중"
+    case "waiting_permission": "권한 대기"
+    case "waiting_input": "입력 대기"
+    case "idle": "대기"
+    case "ready": "준비됨"
+    case "closed": "종료"
+    case "end_turn", "completed": "완료"
+    case "error": "오류"
+    case "failed": "실패"
+    case "disconnected": "연결 끊김"
+    case "unavailable": "사용 불가"
+    case "cancelling": "취소 중"
+    case "cancelled": "취소됨"
+    case "restoring": "복원 중"
+    case "pending": "대기 중"
+    case "interrupted": "중단됨"
+    case "unknown", "": "알 수 없음"
+    default: status.replacingOccurrences(of: "_", with: " ")
+    }
+}
+
+/// "방금", "12초 전", "3분 전", "2시간 전", "4일 전".
+func relativeTimeText(from date: Date, to now: Date) -> String {
+    let seconds = Int(now.timeIntervalSince(date).rounded())
+    if seconds < 3 { return "방금" }
+    if seconds < 60 { return "\(seconds)초 전" }
+    if seconds < 3_600 { return "\(seconds / 60)분 전" }
+    if seconds < 86_400 { return "\(seconds / 3_600)시간 전" }
+    return "\(seconds / 86_400)일 전"
 }
 
 private func nonEmptyText(_ text: String?) -> String? {
@@ -1125,6 +1285,22 @@ struct MonitoringHookStatus: Equatable, Sendable {
     let consentRequired: Bool
     let targets: [MonitoringHookTarget]
     let errors: [String]
+    /// provider → when this sidecar last received one of its hooks. Missing
+    /// means none has arrived since the sidecar started.
+    var lastReceivedAt: [String: Date] = [:]
+
+    /// The settings row's state text for one CLI.
+    func stateText(for target: MonitoringHookTarget, now: Date = Date()) -> String {
+        if !target.agentPresent { return "설치된 CLI 없음" }
+        if target.error != nil { return "설정 파일 오류" }
+        if target.needsTrust { return "승인 필요" }
+        if target.installed {
+            guard let last = lastReceivedAt[target.provider] else { return "등록됨 · 아직 수신 없음" }
+            return "등록됨 · 마지막 수신 \(relativeTimeText(from: last, to: now))"
+        }
+        if target.partial { return "일부만 등록됨" }
+        return "꺼짐"
+    }
 
     static let providerOrder = ["claude", "codex", "grok"]
 
@@ -1137,8 +1313,80 @@ struct MonitoringHookStatus: Equatable, Sendable {
             enabled: root.bool("enabled") ?? true,
             consentRequired: root.bool("consentRequired") ?? false,
             targets: providerOrder.compactMap { provider in targets[provider].flatMap { MonitoringHookTarget(provider: provider, $0) } },
-            errors: (root.object("errors") ?? [:]).values.compactMap(\.stringValue)
+            errors: (root.object("errors") ?? [:]).values.compactMap(\.stringValue),
+            lastReceivedAt: (root.object("lastReceivedAt") ?? [:]).reduce(into: [String: Date]()) { result, item in
+                if let text = item.value.stringValue, let date = parseTimestamp(text) { result[item.key] = date }
+            }
         )
+    }
+}
+
+/// GET /api/history/stats (and the body of POST /api/history clear): the
+/// on-disk monitor history. `available` is false when disk history is off
+/// (retention 0) or the database could not be opened.
+struct MonitorHistoryStats: Equatable, Sendable {
+    let available: Bool
+    let path: String?
+    let bytes: Double?
+    let sessions: Int?
+    let events: Int?
+    let retentionDays: Double?
+    /// Sessions a clear removed; only on the clear response.
+    let deleted: Int?
+
+    /// Retention 0 keeps nothing on disk.
+    var diskHistoryOff: Bool { (retentionDays ?? 1) <= 0 }
+
+    var retentionText: String? {
+        guard let retentionDays else { return nil }
+        if retentionDays <= 0 { return "보관 안 함" }
+        if retentionDays < 1 { return "\(max(1, Int((retentionDays * 24).rounded())))시간" }
+        return "\(Int(retentionDays.rounded()))일"
+    }
+
+    static func decode(_ data: Data) throws -> MonitorHistoryStats {
+        let raw = try JSONSerialization.jsonObject(with: data)
+        guard let root = JSONValue(any: raw).objectValue else { throw MonitorDecodeError.invalidMessage }
+        return MonitorHistoryStats(
+            available: root.bool("available") ?? false,
+            path: root.string("path"),
+            bytes: root.double("bytes"),
+            sessions: root.int("sessions"),
+            events: root.int("events"),
+            retentionDays: root.double("retentionDays"),
+            deleted: root.int("deleted")
+        )
+    }
+}
+
+/// GET /api/history: persisted session records, newest first.
+struct MonitorHistoryPage: Equatable, Sendable {
+    let sessions: [GatewaySession]
+    let hasMore: Bool
+
+    static func decode(_ data: Data) throws -> MonitorHistoryPage {
+        let raw = try JSONSerialization.jsonObject(with: data)
+        guard let root = JSONValue(any: raw).objectValue else { throw MonitorDecodeError.invalidMessage }
+        let sessions = (root.array("sessions") ?? []).compactMap(GatewaySession.init)
+        return MonitorHistoryPage(sessions: sessions, hasMore: root.bool("hasMore") ?? false)
+    }
+}
+
+/// GET /api/sessions/:id/events: one page of a session's older events,
+/// oldest first. Events naming another session are dropped.
+struct SessionEventsPage: Equatable, Sendable {
+    let sessionId: String
+    let events: [MonitorEvent]
+
+    static func decode(_ data: Data, sessionId: String) throws -> SessionEventsPage {
+        let raw = try JSONSerialization.jsonObject(with: data)
+        guard let root = JSONValue(any: raw).objectValue else { throw MonitorDecodeError.invalidMessage }
+        let id = root.string("sessionId") ?? sessionId
+        guard id == sessionId else { throw MonitorDecodeError.invalidMessage }
+        let events = (root.array("events") ?? []).compactMap(MonitorEvent.init)
+            .filter { $0.sessionId == sessionId }
+            .sorted(by: withinSessionEventOrder)
+        return SessionEventsPage(sessionId: sessionId, events: events)
     }
 }
 

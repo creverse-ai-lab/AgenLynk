@@ -143,3 +143,46 @@ test("worker attribution is remembered after its transcript goes stale", () => {
   assert.equal(second[0].openerInstanceId, "frontdoor-uuid", "attribution survives the transcript going stale");
   assert.equal(second[0].parentSessionId, "local:claude:frontdoor-uuid");
 });
+
+// Regression: idle local sessions now stay listed for the retention window,
+// and a Gateway worker's own transcript outlives its Gateway session. Without
+// remembering the worker, it came back as a parentless local session — a
+// false Frontdoor — right after the delegation finished.
+test("a worker the Gateway closed does not return as a local Frontdoor", () => {
+  const local = projectLocalSnapshot({ sessions: [
+    { provider: "codex", session: "main", state: "ready", time: 100, cwd: "/repo" },
+    { provider: "claude", session: "worker-uuid", state: "ready", time: 101, cwd: "/repo" }
+  ] });
+  const formerWorkerIds = new Set(["acp-1", "worker-uuid"]);
+  const merged = mergeMonitorSessions([], local.sessions, new Map(), formerWorkerIds);
+  assert.deepEqual(merged.map((session) => session.localSessionId), ["main"]);
+  assert.deepEqual(merged.filter((session) => session.role === "frontdoor").map((session) => session.localSessionId), ["main"]);
+});
+
+test("sessions are named by the CLI's title, else their latest prompt, never an id", () => {
+  const long = "please refactor the monitoring pipeline so every provider is normalized the same way";
+  const projected = projectLocalSnapshot({ sessions: [
+    { provider: "codex", session: "x", state: "running", time: 100 },
+    { provider: "claude", session: "c", state: "running", time: 100 }
+  ] }, new Map([
+    ["codex:x", { events: [
+      { kind: "turn_start", title: "first ask", ts: "2026-09-26T00:00:00Z" },
+      { kind: "turn_start", title: long, ts: "2026-09-26T00:01:00Z" }
+    ], session: {} }],
+    ["claude:c", { events: [{ kind: "turn_start", title: "hi", ts: "2026-09-26T00:00:00Z" }], session: { title: "Monitoring refactor" } }]
+  ]));
+  const byId = new Map(projected.sessions.map((session) => [session.localSessionId, session]));
+  assert.equal(byId.get("x").title, `${long.slice(0, 59)}…`, "the latest prompt, cut to a label");
+  assert.equal(byId.get("c").title, "Monitoring refactor", "the CLI's own title wins");
+});
+
+test("a read-only Codex Gateway session carries the partial-policy warning", () => {
+  const [codex, claude, open] = mergeMonitorSessions([
+    { sessionId: "g1", provider: "codex", permissionPolicy: "read_only" },
+    { sessionId: "g2", provider: "claude", permissionPolicy: "read_only" },
+    { sessionId: "g3", provider: "codex", permissionPolicy: "auto_approve" }
+  ], []);
+  assert.equal(codex.alerts[0].code, "permission_policy_partial");
+  assert.deepEqual(claude.alerts, []);
+  assert.deepEqual(open.alerts, [], "auto_approve claims no restriction to weaken");
+});

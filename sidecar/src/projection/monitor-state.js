@@ -37,6 +37,11 @@ export class MonitorState {
     // the merge keeps the last proven attribution here for the session's
     // lifetime (see mergeMonitorSessions).
     this.workerTopology = new Map();
+    // Every provider-side id the Gateway has ever reported. A worker's own
+    // transcript outlives its Gateway session (idle sessions stay listed for
+    // the retention window), and without this it would come back as a
+    // parentless local session — a false Frontdoor.
+    this.formerWorkerIds = new Set();
     // Gateway subscription bookkeeping: one stateful normalizer per session
     // (chunks stream one at a time), the highest daemon sequence seen (the
     // resubscribe cursor), and the identities already applied. The identity
@@ -141,6 +146,15 @@ export class MonitorState {
 
   setGatewaySourceSessions(list) {
     this.gatewaySourceSessions = Array.isArray(list) ? list : [];
+    for (const session of this.gatewaySourceSessions) this.#rememberWorker(session);
+  }
+
+  #rememberWorker(session) {
+    for (const id of [session?.sessionId, session?.acpSessionId]) {
+      if (typeof id !== "string" || !id || this.formerWorkerIds.has(id)) continue;
+      this.formerWorkerIds.add(id);
+      if (this.formerWorkerIds.size > 10_000) this.formerWorkerIds.delete(this.formerWorkerIds.values().next().value);
+    }
   }
 
   /**
@@ -342,6 +356,7 @@ export class MonitorState {
     let restored = 0;
     for (const session of this.persistence.readSessions({ since: now - this.historyRetentionMs })) {
       if (!session?.sessionId || this.sessions.has(session.sessionId)) continue;
+      if (session.source !== "local") this.#rememberWorker(session);
       this.historySessions.set(session.sessionId, session);
       this.historyExpiresAt.set(session.sessionId, now + this.historyRetentionMs);
       this.store.load(session.sessionId, this.persistence.readEvents(session.sessionId, { limit: this.maxEventsPerSession }));

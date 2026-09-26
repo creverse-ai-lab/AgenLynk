@@ -4,6 +4,8 @@ import Foundation
 enum MonitorModelChecks {
     static func main() throws {
         try snapshotDecodesSessionsEventsTasksAndInbox()
+        try dashboardPanelsFoldByWidthAndOpenOnDemand()
+        try sessionNamesFollowTheNamingPolicy()
         try characterizationTracesDecodeExpectedSnapshots()
         try snapshotRejectsUnsupportedSchemaMajorWithoutPartialDecode()
         try compatibilityDistinguishesIncompatibleFromUpdateRequired()
@@ -41,6 +43,11 @@ enum MonitorModelChecks {
         try graphProjectionFollowsOnlyTheCurrentLiveTurn()
         try graphProjectionBoundsLargeLiveHistories()
         try canonicalEventsDecodeTitleBodyStatusAndStableIds()
+        try monitoringHookStatusDecodesLastReceivedAndStateText()
+        try historyEndpointsDecode()
+        try toolCallsGroupPerTurnAndRequestsStayVisible()
+        try permissionOutcomesAndKoreanLabelsRead()
+        try sessionCapabilitiesDistinguishBlindFromIdle()
         try eventsFrameUpsertReplacesInsertsAndOrders()
         try sessionUsageDecodesOnlyKnownNumbers()
         try restartBlockersMatchTheSharedGatewayContract()
@@ -914,6 +921,36 @@ enum MonitorModelChecks {
         try check(runtimeSplitWarning(gateway: nil) == nil, "no gateway info, no warning")
     }
 
+    private static func dashboardPanelsFoldByWidthAndOpenOnDemand() throws {
+        let wide = DashboardPanelLayout(width: 1_200, wantsSessions: true, wantsInspector: true)
+        try check(wide.showsSessions && wide.showsInspector, "a wide window shows both side panels")
+        let medium = DashboardPanelLayout(width: 800, wantsSessions: true, wantsInspector: true)
+        try check(medium.showsSessions && !medium.showsInspector, "the inspector folds first")
+        let narrow = DashboardPanelLayout(width: 560, wantsSessions: true, wantsInspector: true)
+        try check(!narrow.showsSessions && !narrow.showsInspector, "a narrow window keeps only the sequence")
+        let noList = DashboardPanelLayout(width: 700, wantsSessions: false, wantsInspector: true)
+        try check(noList.showsInspector, "without the session list the inspector has room")
+        let forced = DashboardPanelLayout(width: 560, wantsSessions: true, wantsInspector: true, forceSessions: true)
+        try check(forced.showsSessions, "a folded panel opens when the user asks")
+        let hidden = DashboardPanelLayout(width: 1_200, wantsSessions: false, wantsInspector: false)
+        try check(!hidden.showsSessions && !hidden.showsInspector, "a hidden panel stays hidden however wide")
+    }
+
+    private static func sessionNamesFollowTheNamingPolicy() throws {
+        func session(_ fields: [String: JSONValue]) throws -> GatewaySession {
+            var object: [String: JSONValue] = ["sessionId": .string("local:codex:01a0db71-dd81"), "provider": .string("codex")]
+            object.merge(fields) { _, new in new }
+            guard let value = GatewaySession(.object(object)) else { throw CheckError.failed("session did not decode") }
+            return value
+        }
+        let titled = try session(["title": .string("fix the build")])
+        try check(titled.displayName == "fix the build", "a title names the session")
+        let foldered = try session(["cwd": .string("/Users/me/dev/AgenLynk")])
+        try check(foldered.displayName == "AgenLynk", "else its folder; the provider is the icon")
+        let bare = try session([:])
+        try check(bare.displayName == "새 세션" && !bare.displayName.contains("01a0"), "a raw id is never a name")
+    }
+
     /// GET /api/hooks as sidecar/src/hooks/installer.js#hookStatus shapes it.
     private static func monitoringHookStatusDecodesPerCliState() throws {
         let json = """
@@ -931,6 +968,134 @@ enum MonitorModelChecks {
         try check(status.targets[2].disabled && !status.targets[2].installed, "an opted-out CLI must decode as disabled")
         try check(status.targets[0].error == "invalid JSON", "a config error must reach the settings row")
         try check(status.errors.count == 1, "install errors must decode")
+        try check(status.lastReceivedAt.isEmpty, "a missing lastReceivedAt decodes as none received")
+    }
+
+    private static func monitoringHookStatusDecodesLastReceivedAndStateText() throws {
+        let json = """
+        {"receiving":true,"consentRequired":false,"lastReceivedAt":{"claude":"2026-08-07T00:00:00.000Z","codex":"not a date"},"targets":{
+          "claude":{"agentPresent":true,"installed":true},
+          "codex":{"agentPresent":true,"installed":true},
+          "grok":{"agentPresent":true,"partial":true}
+        }}
+        """
+        let status = try MonitoringHookStatus.decode(Data(json.utf8))
+        try check(status.lastReceivedAt["claude"] != nil, "an ISO lastReceivedAt must decode")
+        try check(status.lastReceivedAt["codex"] == nil, "an unparsable time is dropped, not fatal")
+        let now = status.lastReceivedAt["claude"]!.addingTimeInterval(180)
+        try check(status.stateText(for: status.targets[0], now: now) == "등록됨 · 마지막 수신 3분 전", "a received CLI shows how long ago")
+        try check(status.stateText(for: status.targets[1], now: now) == "등록됨 · 아직 수신 없음", "a silent CLI says nothing arrived")
+        try check(status.stateText(for: status.targets[2], now: now) == "일부만 등록됨", "partial registration reads as partial")
+        let trust = MonitoringHookTarget(provider: "codex", .object(["agentPresent": .bool(true), "installed": .bool(true), "needsTrust": .bool(true)]))!
+        try check(status.stateText(for: trust) == "승인 필요", "Codex trust wins over registered")
+        let absent = MonitoringHookTarget(provider: "grok", .object([:]))!
+        try check(status.stateText(for: absent) == "설치된 CLI 없음", "no CLI installed")
+        let off = MonitoringHookTarget(provider: "grok", .object(["agentPresent": .bool(true), "disabled": .bool(true)]))!
+        try check(status.stateText(for: off) == "꺼짐", "an opted-out CLI reads as off")
+        let broken = MonitoringHookTarget(provider: "claude", .object(["agentPresent": .bool(true), "error": .string("bad")]))!
+        try check(status.stateText(for: broken) == "설정 파일 오류", "a config error reads as such")
+    }
+
+    private static func historyEndpointsDecode() throws {
+        let stats = try MonitorHistoryStats.decode(Data(#"{"available":true,"path":"/x/monitor.db","bytes":2048,"sessions":3,"events":40,"retentionDays":14}"#.utf8))
+        try check(stats.available && stats.sessions == 3 && stats.events == 40 && stats.bytes == 2048, "history stats decode")
+        try check(stats.retentionText == "14일" && !stats.diskHistoryOff, "retention reads in days")
+        let off = try MonitorHistoryStats.decode(Data(#"{"available":false,"retentionDays":0}"#.utf8))
+        try check(off.diskHistoryOff && off.retentionText == "보관 안 함", "retention 0 means no disk history")
+        let cleared = try MonitorHistoryStats.decode(Data(#"{"deleted":5,"available":true,"sessions":1}"#.utf8))
+        try check(cleared.deleted == 5 && cleared.retentionText == nil, "a clear response carries the deleted count")
+
+        let page = try MonitorHistoryPage.decode(Data(#"{"sessions":[{"sessionId":"h1","provider":"claude","status":"closed","updatedAt":"2026-08-07T00:00:00.000Z"},{"nope":1}],"hasMore":true}"#.utf8))
+        try check(page.sessions.map(\.sessionId) == ["h1"] && page.hasMore, "history pages decode and skip malformed records")
+
+        let events = try SessionEventsPage.decode(Data(#"""
+        {"sessionId":"s1","events":[
+          {"id":"s1#b","key":"b","sessionId":"s1","sequence":2,"kind":"agent_message","ts":"2026-08-07T00:00:02.000Z"},
+          {"id":"s1#a","key":"a","sessionId":"s1","sequence":1,"kind":"turn_start","ts":"2026-08-07T00:00:01.000Z"},
+          {"id":"s2#c","key":"c","sessionId":"s2","sequence":1,"kind":"turn_start","ts":"2026-08-07T00:00:01.000Z"}
+        ]}
+        """#.utf8), sessionId: "s1")
+        try check(events.events.compactMap(\.sequence) == [1, 2], "session events decode oldest first and only for the session")
+        try check(EventTimeline.olderCursor(in: events.events) == nil, "sequence 1 loaded means nothing older")
+        try check(EventTimeline.olderCursor(in: [events.events[1]]) == 2, "the cursor is the lowest loaded sequence")
+    }
+
+    private static func toolCallsGroupPerTurnAndRequestsStayVisible() throws {
+        let t0 = "2026-08-07T00:00:0"
+        let events = [
+            try canonicalEvent("s1", 1, "turn_start", ts: "\(t0)1.000Z", turnId: "t1"),
+            try canonicalEvent("s1", 2, "tool_call", ts: "\(t0)2.000Z", turnId: "t1", title: "Read: README.md", status: "completed"),
+            try canonicalEvent("s1", 3, "tool_call", ts: "\(t0)3.000Z", turnId: "t1", title: "Bash: npm test -- --watch=false --reporter=dot", status: "running"),
+            try canonicalEvent("s1", 4, "tool_call", ts: "\(t0)4.000Z", turnId: "t1", title: "Edit: a.swift", status: "failed"),
+            try canonicalEvent("s1", 5, "permission_request", ts: "\(t0)5.000Z", turnId: "t1", status: "pending"),
+            try canonicalEvent("s1", 6, "tool_call", ts: "\(t0)6.000Z", turnId: "t1", title: "Bash: ls", status: "completed"),
+            try canonicalEvent("s1", 7, "tool_call", ts: "\(t0)7.000Z", turnId: "t2", title: "Bash: pwd", status: "completed"),
+            try canonicalEvent("s1", 8, "tool_call", ts: "\(t0)8.000Z", turnId: "t2", title: "Bash: whoami", status: "completed"),
+        ]
+        let items = EventTimeline.group(events)
+        try check(items.count == 5, "turn_start, group, permission, single call, next-turn group; got \(items.count)")
+        guard case let .tools(first) = items[1] else { throw CheckError.failed("three calls in one turn must group") }
+        try check(first.events.count == 3 && first.failedCount == 1, "the group counts its calls and failures")
+        try check(first.representative.sequence == 3, "the running call represents the group")
+        try check(first.summary() == "도구 3개 · 실행 중: Bash: npm test -- --watch=fa… · 실패 1", "group summary: \(first.summary())")
+        guard case let .event(permission) = items[2] else { throw CheckError.failed("a permission request stays its own row") }
+        try check(permission.headline == "권한 요청 대기", "a pending permission reads as waiting")
+        guard case .event = items[3] else { throw CheckError.failed("a lone call between breaks stays single") }
+        guard case let .tools(second) = items[4] else { throw CheckError.failed("a new turn starts a new group") }
+        try check(second.representative.sequence == 8 && second.summary().hasPrefix("도구 2개 · 최근: Bash: whoami"), "without a running call the latest represents")
+
+        let interleaved = EventTimeline.group([events[1], try canonicalEvent("s2", 1, "tool_call", turnId: "t1"), events[2]])
+        try check(interleaved.count == 3, "another session's event ends a run")
+
+        let collapsed = EventTimeline.rows(items, expanded: [])
+        try check(collapsed.count == 5 && collapsed[1].coveredEventIds.count == 3, "a collapsed group covers its calls")
+        let expanded = EventTimeline.rows(items, expanded: [first.id])
+        try check(expanded.count == 8, "an expanded group lists its calls under the header")
+        try check(expanded[1].coveredEventIds.isEmpty && expanded[2].parentGroupId == first.id, "expanded calls carry their own rows")
+        try check(EventTimeline.trailingToolGroup(events)?.id == second.id, "the trailing run is the newest group")
+        try check(first.id == "tools:s1#tool_call:2", "a group's id is its first call's, stable as the run grows")
+    }
+
+    private static func permissionOutcomesAndKoreanLabelsRead() throws {
+        func permission(_ status: String, outcome: String?) -> MonitorEvent {
+            var value: [String: JSONValue] = [
+                "id": .string("s#p"), "sessionId": .string("s"), "kind": .string("permission_request"), "status": .string(status)
+            ]
+            if let outcome { value["detail"] = .object(["outcome": .string(outcome)]) }
+            return MonitorEvent(.object(value))!
+        }
+        try check(permission("pending", outcome: nil).headline == "권한 요청 대기", "pending permission")
+        try check(permission("completed", outcome: "approved").headline == "승인됨", "approved permission")
+        try check(permission("completed", outcome: "denied").headline == "거부됨", "denied by outcome wins over status")
+        try check(permission("cancelled", outcome: "cancelled").headline == "취소됨", "cancelled permission")
+        try check(permission("failed", outcome: nil).headline == "거부됨", "a failed permission without outcome reads as denied")
+        for (kind, label) in [("turn_start", "턴 시작"), ("turn_end", "턴 종료"), ("agent_thought", "생각"), ("subagent", "서브에이전트"),
+                              ("plan", "계획"), ("compaction", "컨텍스트 압축"), ("error", "오류"), ("session_start", "세션 시작"),
+                              ("session_end", "세션 종료"), ("input_request", "입력 요청"), ("permission_request", "권한 요청"), ("new_kind", "new kind")] {
+            try check(eventKindLabel(kind) == label, "\(kind) must read as \(label)")
+        }
+        for (status, label) in [("running", "실행 중"), ("waiting_permission", "권한 대기"), ("waiting_input", "입력 대기"), ("idle", "대기"),
+                                ("closed", "종료"), ("error", "오류"), ("disconnected", "연결 끊김"), ("unavailable", "사용 불가"),
+                                ("cancelling", "취소 중"), ("restoring", "복원 중")] {
+            try check(sessionStatusLabel(status) == label, "\(status) must read as \(label)")
+        }
+        let long = MonitorEvent(.object(["id": .string("s#t"), "sessionId": .string("s"), "kind": .string("tool_call"),
+                                         "title": .string("exec_command: wc -l README.md docs/a.md docs/b.md")]))!
+        try check(long.compactToolTitle(limit: 28) == "exec_command: wc -l README.m…", "long titles cut to the limit: \(long.compactToolTitle(limit: 28))")
+    }
+
+    private static func sessionCapabilitiesDistinguishBlindFromIdle() throws {
+        func session(source: String, capabilities: [String]?) -> GatewaySession {
+            var value: [String: JSONValue] = ["sessionId": .string("s"), "provider": .string("claude"), "source": .string(source)]
+            if let capabilities { value["capabilities"] = .array(capabilities.map(JSONValue.string)) }
+            return GatewaySession(.object(value))!
+        }
+        let hooked = session(source: "local", capabilities: ["status", "timeline", "permission", "live"])
+        try check(hooked.isLiveObserved && !hooked.cannotObservePermission, "a hooked local session sees permissions live")
+        let transcript = session(source: "local", capabilities: ["status", "timeline", "tools"])
+        try check(!transcript.isLiveObserved && transcript.cannotObservePermission, "without hooks permissions are invisible")
+        try check(!session(source: "local", capabilities: nil).cannotObservePermission, "no capabilities (older sidecar) flags nothing")
+        try check(!session(source: "gateway", capabilities: ["status"]).cannotObservePermission, "a Gateway session is never flagged")
     }
 
     private static func agentCatalogDecodesInstallAndEnabledState() throws {
@@ -1365,15 +1530,16 @@ enum MonitorModelChecks {
         try check(tool.id == "s1#tool:call-1" && tool.key == "tool:call-1", "the wire id is kept")
         try check(tool.summary == "Bash: ls", "the summary is the sidecar's title")
         try check(tool.isInFlight && !tool.isFailed, "running is in flight")
-        try check(tool.kindLabel == "tool call", "kind labels read as words")
+        try check(tool.kindLabel == "도구", "kind labels read as Korean words")
+        try check(tool.headline == "Bash: ls", "a tool call leads with its compact header")
 
         let message = try canonicalEvent("s1", 4, "agent_message", body: "첫 줄\n둘째 줄")
         try check(message.summary == "첫 줄 둘째 줄", "without a title the summary is the body's head on one line")
-        try check(message.kindLabel == "agent response", "agent messages read as a response")
+        try check(message.kindLabel == "응답", "agent messages read as a response")
 
         let bare = try canonicalEvent("s1", 5, "turn_end", status: "failed")
         try check(bare.title == nil && bare.body == nil, "missing title/body stay nil")
-        try check(bare.summary == "turn end" && bare.isFailed, "a bare event falls back to its kind")
+        try check(bare.summary == "턴 종료" && bare.isFailed, "a bare event falls back to its kind")
 
         let keyOnly = MonitorEvent(.object([
             "sessionId": .string("s1"), "key": .string("turn:t1"), "kind": .string("turn_start"),

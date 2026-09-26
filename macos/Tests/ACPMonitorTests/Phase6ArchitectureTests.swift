@@ -35,6 +35,8 @@ enum Phase6ArchitectureChecks {
         try reducerUpsertsEventsFramesById()
         try reducerArchivesRemovedSessionsFromPriorLiveState()
         try reducerCapsOrdersAndDeduplicatesArchivedHistoryEvents()
+        try reducerPrependsOlderEventsBeyondTheStreamCap()
+        try reducerDropsHistoryButKeepsLiveOnHistoryCleared()
         print("Swift Phase 6 architecture checks passed")
     }
 
@@ -235,6 +237,41 @@ enum Phase6ArchitectureChecks {
         try check(state.historySessions.first { $0.sessionId == "s1" }?.status == "closed", "a closed session is archived as closed")
         try check(state.historyEventsBySession["s1"]?.count == 3, "session_removed must keep the session's events")
         try check(state.logEventsBySession["s1"]?.count == 3, "session_removed must keep the session in the log")
+    }
+
+    private static func reducerPrependsOlderEventsBeyondTheStreamCap() throws {
+        var state = MonitorReducerState()
+        state.eventLimit = 2
+        state.sessions = [try session("s")]
+        MonitorReducer.applyEventsMessage(frame([
+            try event("s", 5, ts: "2026-08-07T00:00:05.000Z"), try event("s", 6, ts: "2026-08-07T00:00:06.000Z")
+        ]), to: &state)
+        let older = [try event("s", 3, ts: "2026-08-07T00:00:03.000Z"), try event("s", 4, ts: "2026-08-07T00:00:04.000Z")]
+        try check(MonitorReducer.prependOlder(older, sessionId: "s", to: &state), "older events must be accepted")
+        try check(state.logEventsBySession["s"]?.compactMap(\.sequence) == [3, 4, 5, 6], "older events merge into the log in order")
+        try check(!MonitorReducer.prependOlder(older, sessionId: "s", to: &state), "a repeated page changes nothing")
+        MonitorReducer.applyEventsMessage(frame([try event("s", 7, ts: "2026-08-07T00:00:07.000Z")]), to: &state)
+        try check(state.logEventsBySession["s"]?.compactMap(\.sequence) == [3, 4, 6, 7],
+                  "the stream cap trims live events only, never the paged-in ones")
+        let foreign = [try event("x", 1)]
+        try check(!MonitorReducer.prependOlder(foreign, sessionId: "s", to: &state), "another session's events are ignored")
+    }
+
+    private static func reducerDropsHistoryButKeepsLiveOnHistoryCleared() throws {
+        var state = MonitorReducerState()
+        state.sessions = [try session("live")]
+        state.eventsBySession = ["live": [try event("live", 2)]]
+        state.historySessions = [try session("old", status: "closed")]
+        state.historyEventsBySession = ["old": [try event("old", 1)]]
+        state.pagedEventsBySession = ["old": [try event("old", 0)], "live": [try event("live", 1)]]
+        MonitorReducer.rebuildLog(in: &state)
+        let effect = MonitorReducer.applyStateMessage(["kind": .string("state"), "historyCleared": .bool(true)], to: &state)
+        try check(effect.logChanged, "historyCleared must mark the log dirty")
+        try check(state.historySessions.isEmpty && state.historyEventsBySession.isEmpty, "history must be gone")
+        try check(state.pagedEventsBySession["old"] == nil, "paged events of a history session must be gone")
+        try check(state.logEventsBySession["old"] == nil, "the log must drop the history session")
+        try check(state.logEventsBySession["live"]?.compactMap(\.sequence) == [1, 2], "live sessions keep all their events")
+        try check(state.logSessions.map(\.sessionId) == ["live"], "only live sessions remain listed")
     }
 
     private static func reducerCapsOrdersAndDeduplicatesArchivedHistoryEvents() throws {

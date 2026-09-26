@@ -6,7 +6,6 @@ enum SequenceRelationLayoutChecks {
         try checkAdjacentLaneSpacing()
         try checkMirroredLaneSpacing()
         try checkLongerSubagentLabel()
-        try checkPageScope()
         print("Swift sequence relation layout checks passed")
     }
 
@@ -41,16 +40,6 @@ enum SequenceRelationLayoutChecks {
             spacing: 8
         )
         try requireGap(parentX: 0, childX: 220, relationX: x, eventWidth: 196, relationWidth: 112, expected: 8)
-    }
-
-    private static func checkPageScope() throws {
-        let values = Array(0..<45)
-        guard Array(SequencePageLayout.entries(in: values, page: 0, pageSize: 20)) == Array(25..<45),
-              Array(SequencePageLayout.entries(in: values, page: 1, pageSize: 20)) == Array(5..<25),
-              Array(SequencePageLayout.entries(in: values, page: 2, pageSize: 20)) == Array(0..<5),
-              SequencePageLayout.range(totalCount: 0, page: 0, pageSize: 20).isEmpty else {
-            throw SequenceRelationLayoutError.failed("pagination must expose only the current page's events")
-        }
     }
 
     private static func requireGap(

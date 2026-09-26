@@ -7,6 +7,10 @@ struct MonitorReducerState: Equatable, Sendable {
     var eventsBySession: [String: [MonitorEvent]] = [:]
     var historySessions: [GatewaySession] = []
     var historyEventsBySession: [String: [MonitorEvent]] = [:]
+    /// Older events paged in on demand (GET /api/sessions/:id/events). Kept
+    /// apart from the live/history buckets so the stream's per-session cap
+    /// never trims them away; merged into the log by id.
+    var pagedEventsBySession: [String: [MonitorEvent]] = [:]
     var logSessions: [GatewaySession] = []
     var logEventsBySession: [String: [MonitorEvent]] = [:]
     var tasks: [MonitorRecord] = []
@@ -66,6 +70,11 @@ enum MonitorReducer {
     static func applyStateMessage(_ message: [String: JSONValue], to state: inout MonitorReducerState) -> MonitorReducerEffect {
         var effect = MonitorReducerEffect()
         var fullRebuild = false
+        // POST /api/history clear: everything not live is gone on disk and in
+        // the sidecar, so it goes here too.
+        if message.bool("historyCleared") == true, clearHistory(in: &state) {
+            fullRebuild = true
+        }
         let removedSessionIds = (message.array("removedSessionIds") ?? []).compactMap { $0.stringValue }
         for sessionId in removedSessionIds where archiveSession(sessionId, status: nil, in: &state) {
             fullRebuild = true
@@ -129,6 +138,35 @@ enum MonitorReducer {
         let touched = upsert(changes, into: &state)
         guard !touched.isEmpty else { return false }
         rebuildLog(sessionIds: touched, in: &state)
+        return true
+    }
+
+    /// Older events of one session, oldest first, as the events endpoint pages
+    /// them. Upserted by id; returns whether anything new arrived.
+    @discardableResult
+    static func prependOlder(_ events: [MonitorEvent], sessionId: String, to state: inout MonitorReducerState) -> Bool {
+        let incoming = events.filter { $0.sessionId == sessionId }
+        guard !incoming.isEmpty else { return false }
+        let known = Set((state.logEventsBySession[sessionId] ?? []).map(\.id))
+        let fresh = incoming.filter { !known.contains($0.id) }
+        guard !fresh.isEmpty else { return false }
+        state.pagedEventsBySession[sessionId] = upsertMonitorEvents(
+            fresh, into: state.pagedEventsBySession[sessionId] ?? [], limit: Int.max
+        )
+        rebuildLog(sessionIds: [sessionId], in: &state)
+        return true
+    }
+
+    /// Drops every history session and event (and paged-in events) of a
+    /// session that is not live. Returns whether anything was removed.
+    static func clearHistory(in state: inout MonitorReducerState) -> Bool {
+        let liveIds = Set(state.sessions.map(\.sessionId))
+        let hadHistory = !state.historySessions.isEmpty || !state.historyEventsBySession.isEmpty
+            || state.pagedEventsBySession.keys.contains { !liveIds.contains($0) }
+        guard hadHistory else { return false }
+        state.historySessions.removeAll { !liveIds.contains($0.sessionId) }
+        state.historyEventsBySession = state.historyEventsBySession.filter { liveIds.contains($0.key) }
+        state.pagedEventsBySession = state.pagedEventsBySession.filter { liveIds.contains($0.key) }
         return true
     }
 
@@ -200,7 +238,10 @@ enum MonitorReducer {
         state.logSessions = Array(sessionsById.values).sorted { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
 
         var merged: [String: [MonitorEvent]] = [:]
-        for sessionId in Set(state.eventsBySession.keys).union(state.historyEventsBySession.keys) {
+        let keys = Set(state.eventsBySession.keys)
+            .union(state.historyEventsBySession.keys)
+            .union(state.pagedEventsBySession.keys)
+        for sessionId in keys {
             merged[sessionId] = mergedLog(sessionId, in: state)
         }
         state.logEventsBySession = merged
@@ -221,9 +262,15 @@ enum MonitorReducer {
     private static func mergedLog(_ sessionId: String, in state: MonitorReducerState) -> [MonitorEvent] {
         let history = state.historyEventsBySession[sessionId] ?? []
         let live = state.eventsBySession[sessionId] ?? []
-        if history.isEmpty { return live }
-        if live.isEmpty { return history }
-        return upsertMonitorEvents(live, into: history, limit: Int.max)
+        let paged = state.pagedEventsBySession[sessionId] ?? []
+        var merged: [MonitorEvent]
+        if history.isEmpty { merged = live }
+        else if live.isEmpty { merged = history }
+        else { merged = upsertMonitorEvents(live, into: history, limit: Int.max) }
+        if paged.isEmpty { return merged }
+        if merged.isEmpty { return paged }
+        // Live/history copies are newer than a paged-in one with the same id.
+        return upsertMonitorEvents(merged, into: paged, limit: Int.max)
     }
 
     private static func heartbeat(existing: Date?, now: Date = Date()) -> Date {
@@ -294,6 +341,15 @@ final class MonitorStore: ObservableObject {
         next.connected = connected
         next.streaming = streaming
         state = next
+    }
+
+    /// Older events paged in for one session.
+    func prependOlder(_ events: [MonitorEvent], sessionId: String) {
+        var next = state
+        if MonitorReducer.prependOlder(events, sessionId: sessionId, to: &next) {
+            state = next
+            logRevision += 1
+        }
     }
 
     func removeSession(_ sessionId: String) {

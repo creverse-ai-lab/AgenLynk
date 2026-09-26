@@ -27,6 +27,8 @@ final class AppSettings: ObservableObject {
         static let petExecutablePath = "monitor.petExecutablePath"
         static let bundledPetDefaultMigration = "monitor.bundledPetDefaultV1"
         static let frontdoorNicknames = "monitor.frontdoorNicknames"
+        static let showSessionColumn = "monitor.showSessionColumn"
+        static let showInspectorColumn = "monitor.showInspectorColumn"
     }
 
     private let defaults: UserDefaults
@@ -36,6 +38,10 @@ final class AppSettings: ObservableObject {
     @Published var showThoughts: Bool { didSet { defaults.set(showThoughts, forKey: Key.showThoughts) } }
     @Published var showToolEvents: Bool { didSet { defaults.set(showToolEvents, forKey: Key.showToolEvents) } }
     @Published var followLatestEvent: Bool { didSet { defaults.set(followLatestEvent, forKey: Key.followLatestEvent) } }
+    /// Dashboard side panels the user wants; the window width may still fold
+    /// them away (see DashboardPanelLayout).
+    @Published var showSessionColumn: Bool { didSet { defaults.set(showSessionColumn, forKey: Key.showSessionColumn) } }
+    @Published var showInspectorColumn: Bool { didSet { defaults.set(showInspectorColumn, forKey: Key.showInspectorColumn) } }
     @Published var nodePath: String { didSet { defaults.set(nodePath, forKey: Key.nodePath) } }
     @Published var petEnabled: Bool { didSet { defaults.set(petEnabled, forKey: Key.petEnabled) } }
     /// Optional custom renderer executable. Empty selects Lynk's bundled Pet.
@@ -88,6 +94,8 @@ final class AppSettings: ObservableObject {
         self.defaults = defaults
         self.bundledPetExecutablePath = bundledPetExecutablePath
         activeOnly = defaults.object(forKey: Key.activeOnly) as? Bool ?? false
+        showSessionColumn = defaults.object(forKey: Key.showSessionColumn) as? Bool ?? true
+        showInspectorColumn = defaults.object(forKey: Key.showInspectorColumn) as? Bool ?? true
         showThoughts = defaults.object(forKey: Key.showThoughts) as? Bool ?? true
         showToolEvents = defaults.object(forKey: Key.showToolEvents) as? Bool ?? true
         if defaults.bool(forKey: Key.followLatestEventUXMigration) {

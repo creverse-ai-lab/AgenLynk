@@ -68,6 +68,26 @@ final class AppModel: ObservableObject {
     private var pendingHookConsent: Set<String>?
     /// Asks an existing user (after an update) whether to turn hooks on.
     @Published var hookConsentPresented = false
+    /// On-disk monitor history (settings > 모니터링 > 기록).
+    @Published private(set) var historyStats: MonitorHistoryStats?
+    @Published private(set) var historyStatsError: String?
+    @Published private(set) var historyClearing = false
+    /// "지난 기록" browsing: persisted sessions paged newest first from
+    /// /api/history, and the events of the ones the user opened.
+    @Published private(set) var browsedHistory: [GatewaySession] = []
+    @Published private(set) var historyHasMore = true
+    @Published private(set) var historyLoading = false
+    @Published private(set) var historyError: String?
+    @Published private(set) var browsedEvents: [String: [MonitorEvent]] = [:]
+    /// A history session opened from the sidebar; while set, the sequence
+    /// shows its timeline instead of the selected Frontdoor's.
+    @Published var selectedHistorySessionId: String?
+    /// Sessions whose older events are being fetched right now.
+    @Published private(set) var olderLoadingSessionIds: Set<String> = []
+    /// Sessions whose oldest event is already loaded.
+    private var olderExhaustedSessionIds: Set<String> = []
+    private static let olderPageSize = 200
+    private static let historyPageSize = 50
     private var hookConsentAsked = false
     @Published private(set) var gatewayConfigOptions: [GatewayConfigOption] = []
     @Published private(set) var gatewayConfigLoading = false
@@ -230,6 +250,8 @@ final class AppModel: ObservableObject {
             return sessionIds.contains(sessionId)
         }
     }
+    /// Only real Workers: a Frontdoor record is never counted as one.
+    var realtimeWorkerCount: Int { realtimeSessions.filter { $0.role == "worker" }.count }
     var realtimeACPCount: Int { realtimeSessions.filter { !$0.isLocalSource }.count }
     var realtimeLocalCount: Int { realtimeSessions.filter(\.isLocalSource).count }
     var pendingInbox: [MonitorRecord] { inbox.filter { $0.status == "pending" || $0.status == "interrupted" } }
@@ -320,6 +342,9 @@ final class AppModel: ObservableObject {
     }
 
     var selectedEvents: [MonitorEvent] {
+        if let selectedHistorySessionId {
+            return (browsedEvents[selectedHistorySessionId] ?? []).filter(eventIsVisible)
+        }
         guard let selectedFrontdoorId,
               let frontdoor = logFrontdoorSessions.first(where: { $0.id == selectedFrontdoorId }) else {
             return allVisibleEvents
@@ -341,6 +366,168 @@ final class AppModel: ObservableObject {
         // resolve one id.
         return selectedEvents.first { $0.id == selectedEventId }
             ?? allVisibleEvents.first { $0.id == selectedEventId }
+    }
+
+    /// Any session the dashboard can show: the merged log first, then the
+    /// history records browsed from disk.
+    func knownSession(_ sessionId: String) -> GatewaySession? {
+        visibleLogSessions.first { $0.sessionId == sessionId }
+            ?? browsedHistory.first { $0.sessionId == sessionId }
+    }
+
+    var selectedHistorySession: GatewaySession? {
+        guard let selectedHistorySessionId else { return nil }
+        return browsedHistory.first { $0.sessionId == selectedHistorySessionId }
+    }
+
+    /// Browsed history minus what the sidebar already lists as a Frontdoor
+    /// member, so one session never shows twice.
+    var browsableHistory: [GatewaySession] {
+        let listed = Set(visibleLogSessions.map(\.sessionId))
+        return browsedHistory.filter { !listed.contains($0.sessionId) && !$0.isInternalReview }
+    }
+
+    // ── Older events & history ────────────────────────────────────────────
+
+    /// Loaded events of a session, wherever they live.
+    private func loadedEvents(_ sessionId: String) -> [MonitorEvent] {
+        browsedEvents[sessionId] ?? logEventsBySession[sessionId] ?? []
+    }
+
+    /// Whether scrolling to the top could still reveal older events.
+    func mayHaveOlderEvents(_ sessionId: String) -> Bool {
+        guard !olderExhaustedSessionIds.contains(sessionId) else { return false }
+        return EventTimeline.olderCursor(in: loadedEvents(sessionId)) != nil
+    }
+
+    func mayHaveOlderEvents(in sessionIds: [String]) -> Bool {
+        sessionIds.contains { mayHaveOlderEvents($0) }
+    }
+
+    /// Pages in the next older events of each given session (the sequence
+    /// view reached its top). Returns whether anything new arrived.
+    @discardableResult
+    func loadOlderEvents(sessionIds: [String]) async -> Bool {
+        guard let endpoint else { return false }
+        var arrived = false
+        for sessionId in Set(sessionIds) where mayHaveOlderEvents(sessionId) && !olderLoadingSessionIds.contains(sessionId) {
+            guard let cursor = EventTimeline.olderCursor(in: loadedEvents(sessionId)) else { continue }
+            olderLoadingSessionIds.insert(sessionId)
+            defer { olderLoadingSessionIds.remove(sessionId) }
+            do {
+                let page = try await client.fetchSessionEvents(
+                    endpoint: endpoint, sessionId: sessionId, before: cursor, limit: Self.olderPageSize
+                )
+                if page.events.count < Self.olderPageSize { olderExhaustedSessionIds.insert(sessionId) }
+                if let browsed = browsedEvents[sessionId] {
+                    let next = upsertMonitorEvents(page.events, into: browsed, limit: Int.max)
+                    if next != browsed {
+                        browsedEvents[sessionId] = next
+                        arrived = true
+                    }
+                } else {
+                    let before = logEventsBySession[sessionId]?.count ?? 0
+                    monitorStore.prependOlder(page.events, sessionId: sessionId)
+                    if (logEventsBySession[sessionId]?.count ?? 0) > before { arrived = true }
+                }
+                // Nothing new although the page was full: the rest is what
+                // is already loaded.
+                if page.events.isEmpty { olderExhaustedSessionIds.insert(sessionId) }
+            } catch {
+                recordNotice("이전 이벤트를 불러오지 못했습니다: \(error.localizedDescription)")
+                olderExhaustedSessionIds.insert(sessionId)
+            }
+        }
+        return arrived
+    }
+
+    /// The next page of "지난 기록"; `reset` starts again from the newest.
+    func loadHistoryPage(reset: Bool = false) async {
+        if reset {
+            browsedHistory = []
+            historyHasMore = true
+            historyError = nil
+        }
+        guard !historyLoading, historyHasMore else { return }
+        if endpoint == nil { await ensureStarted() }
+        guard let endpoint else { return }
+        historyLoading = true
+        defer { historyLoading = false }
+        do {
+            let before = browsedHistory.compactMap(\.updatedAt).min()
+            let page = try await client.fetchHistory(endpoint: endpoint, before: before, limit: Self.historyPageSize)
+            var known = Set(browsedHistory.map(\.sessionId))
+            let fresh = page.sessions.filter { known.insert($0.sessionId).inserted }
+            browsedHistory.append(contentsOf: fresh)
+            // A full page of sessions already listed would page forever.
+            historyHasMore = page.hasMore && !fresh.isEmpty
+            historyError = nil
+        } catch {
+            historyHasMore = false
+            historyError = error.localizedDescription
+        }
+    }
+
+    /// Opens (or closes, with nil) one browsed history session's timeline.
+    func selectHistorySession(_ sessionId: String?) async {
+        selectedHistorySessionId = sessionId
+        selectedEventId = nil
+        guard let sessionId, browsedEvents[sessionId] == nil, let endpoint else { return }
+        olderLoadingSessionIds.insert(sessionId)
+        defer { olderLoadingSessionIds.remove(sessionId) }
+        do {
+            let page = try await client.fetchSessionEvents(
+                endpoint: endpoint, sessionId: sessionId, before: nil, limit: Self.olderPageSize
+            )
+            browsedEvents[sessionId] = page.events
+            if page.events.count < Self.olderPageSize { olderExhaustedSessionIds.insert(sessionId) }
+        } catch {
+            browsedEvents[sessionId] = []
+            olderExhaustedSessionIds.insert(sessionId)
+            recordNotice("기록을 불러오지 못했습니다: \(error.localizedDescription)")
+        }
+    }
+
+    func loadHistoryStats() async {
+        if endpoint == nil { await ensureStarted() }
+        guard let endpoint else {
+            historyStatsError = "Gateway monitor가 아직 연결되지 않았습니다."
+            return
+        }
+        do {
+            historyStats = try await client.fetchHistoryStats(endpoint: endpoint)
+            historyStatsError = nil
+        } catch {
+            historyStatsError = error.localizedDescription
+        }
+    }
+
+    /// Deletes every non-live session from disk and memory. The sidecar also
+    /// broadcasts `historyCleared`, which the reducer applies.
+    @discardableResult
+    func clearHistory() async -> Bool {
+        guard !historyClearing, let endpoint else { return false }
+        historyClearing = true
+        defer { historyClearing = false }
+        do {
+            historyStats = try await client.clearHistory(endpoint: endpoint)
+            historyStatsError = nil
+            resetHistoryBrowsing()
+            return true
+        } catch {
+            historyStatsError = error.localizedDescription
+            return false
+        }
+    }
+
+    private func resetHistoryBrowsing() {
+        browsedHistory = []
+        browsedEvents = [:]
+        historyHasMore = true
+        historyError = nil
+        selectedHistorySessionId = nil
+        let liveIds = Set(sessions.map(\.sessionId))
+        olderExhaustedSessionIds = olderExhaustedSessionIds.filter { liveIds.contains($0) }
     }
 
     func startIfNeeded() {
@@ -1103,6 +1290,10 @@ final class AppModel: ObservableObject {
             monitorStore.applyEventsMessage(message)
         case "state":
             let effect = monitorStore.applyStateMessage(message)
+            if message.bool("historyCleared") == true {
+                resetHistoryBrowsing()
+                Task { await loadHistoryStats() }
+            }
             if monitorStore.state.connected { updateConnectionPhase() }
             else if let error = effect.disconnectedError {
                 let nextPhase = ConnectionPhase.disconnected(error)
@@ -1196,7 +1387,12 @@ final class AppModel: ObservableObject {
             historyEvents: historyEventsBySession
         )
         if selectedFrontdoorId != next.frontdoorId { selectedFrontdoorId = next.frontdoorId }
-        if selectedEventId != next.eventId { selectedEventId = next.eventId }
+        // A browsed history event is not in the live/history buckets the
+        // reconciliation knows; it stays selected while its session is open.
+        let browsedSelection = selectedHistorySessionId.map { id in
+            (browsedEvents[id] ?? []).contains { $0.id == selectedEventId }
+        } ?? false
+        if !browsedSelection, selectedEventId != next.eventId { selectedEventId = next.eventId }
         if let selectedSessionId,
            !visibleLogSessions.contains(where: { $0.sessionId == selectedSessionId }) {
             self.selectedSessionId = selectedFrontdoor?.root?.sessionId ?? selectedFrontdoor?.workers.first?.sessionId
