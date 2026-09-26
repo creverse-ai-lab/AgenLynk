@@ -79,6 +79,18 @@ test("local snapshot projects a real frontdoor and nested local workers", () => 
   assert.equal(projected.events[root.sessionId][0].type, "turn_start");
 });
 
+test("a local parent id uses the parent's provider and is never minted for an unseen parent", () => {
+  const projected = projectLocalSnapshot({ sessions: [
+    { provider: "claude", session: "claude-main", state: "running", time: 100 },
+    { provider: "codex", session: "codex-child", parent: "claude-main", state: "running", time: 101 },
+    { provider: "grok", session: "orphan", parent: "not-in-snapshot", state: "running", time: 102 }
+  ] });
+  const byId = new Map(projected.sessions.map((session) => [session.localSessionId, session]));
+  assert.equal(byId.get("codex-child").parentSessionId, "local:claude:claude-main");
+  assert.equal(byId.get("orphan").parentSessionId, null, "no local:grok:<unseen> id may be invented");
+  assert.equal(byId.get("orphan").parentLocalSessionId, "not-in-snapshot", "the raw link stays for Gateway resolution");
+});
+
 test("gateway-owned provider sessions are deduplicated by ACP or Gateway id", () => {
   const local = projectLocalSnapshot({ sessions: [
     { provider: "codex", session: "main", state: "running", time: 100 },

@@ -253,7 +253,15 @@ export class MonitorState {
       const events = (Array.isArray(values) ? values : []).slice(-this.maxEventsPerSession);
       const signature = externalEventsSignature(events);
       if (this.externalEventSignatures.get(sessionId) === signature) continue;
-      if (this.eventsBySession.has(sessionId)) this.archiveSession(sessionId);
+      // Keep only what the new bucket drops (a transcript window sliding past
+      // old records). Archiving the whole live bucket on every change copied,
+      // merged and sorted up to maxEventsPerSession events per scan tick.
+      const previous = this.eventsBySession.get(sessionId);
+      if (previous?.length) {
+        const kept = new Set(events.map(eventIdentity));
+        const dropped = previous.filter((event) => !kept.has(eventIdentity(event)));
+        if (dropped.length) this.archiveSession(sessionId, dropped);
+      }
       this.eventsBySession.set(sessionId, events);
       this.eventSequencesBySession.set(sessionId, new Set(
         events.map((event) => event.sequence).filter(Number.isFinite)
@@ -290,9 +298,8 @@ export class MonitorState {
     };
   }
 
-  archiveSession(sessionId) {
+  archiveSession(sessionId, currentEvents = this.eventsBySession.get(sessionId) ?? []) {
     const session = this.sessions.get(sessionId) ?? this.historySessions.get(sessionId);
-    const currentEvents = this.eventsBySession.get(sessionId) ?? [];
     if (!session || !currentEvents.length) return;
     this.historySessions.set(sessionId, session);
     const merged = [...(this.historyEventsBySession.get(sessionId) ?? []), ...currentEvents];

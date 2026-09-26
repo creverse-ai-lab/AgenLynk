@@ -42,6 +42,22 @@ test("setExternalEvents reports only the local buckets that changed", () => {
   assert.equal(state.eventsBySession.has("local:codex:b"), false);
 });
 
+test("setExternalEvents archives only events a live bucket drops", () => {
+  const state = new MonitorState();
+  const id = "local:codex:a";
+  state.setSessions([{ sessionId: id, provider: "codex", status: "running" }]);
+  const event = (sequence) => ({ sessionId: id, sequence, type: "agent_message_chunk", text: `m${sequence}` });
+
+  state.setExternalEvents({ [id]: [event(1), event(2)] });
+  state.setExternalEvents({ [id]: [event(1), event(2), event(3)] });
+  assert.equal(state.historyEventsBySession.has(id), false, "an appending live bucket is not copied into history");
+  assert.equal(state.historySessions.has(id), false);
+
+  // The transcript window slides past event 1: only that event is preserved.
+  state.setExternalEvents({ [id]: [event(2), event(3), event(4)] });
+  assert.deepEqual(state.historyEventsBySession.get(id).map((item) => item.sequence), [1]);
+});
+
 test("setExternalEvents replaces a rewritten turn instead of appending it", () => {
   const state = new MonitorState();
   state.setExternalEvents({ "local:codex:a": [{ sessionId: "local:codex:a", sequence: 1, type: "turn_start", turnId: null }] });

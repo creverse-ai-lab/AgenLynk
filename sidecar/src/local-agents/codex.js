@@ -67,6 +67,15 @@ function transcriptStem(path) {
   return path.split("/").pop().replace(/\.jsonl$/, "");
 }
 
+// rollout-<timestamp>-<thread uuid>.jsonl: the trailing uuid is the thread id.
+// Used when a tail-adopted read never sees the session_meta line at offset 0.
+const ROLLOUT_THREAD_ID = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+function transcriptSessionId(path) {
+  const stem = transcriptStem(path);
+  return stem.match(ROLLOUT_THREAD_ID)?.[1] ?? stem;
+}
+
 async function* rolloutPaths(root) {
   let entries;
   try {
@@ -112,7 +121,7 @@ export async function discover({
   // knownModified: recency already known from the thread database, so those
   // candidates cost zero syscalls to consider — discovery runs every 2s, and
   // a stat per candidate was pure duplication of what the DB just reported.
-  const consider = async (path, knownModified = null) => {
+  const consider = async (path, knownModified = null, knownId = null) => {
     // A rollout_path comes from another program's database. Never let a
     // malformed or tampered row turn the monitor into an arbitrary file
     // reader outside the agent-owned transcript directory.
@@ -136,7 +145,9 @@ export async function discover({
       // The DB's updated_at can lag the file slightly; poll() stats the real
       // file before reading, so a coarse recency signal is all that's needed.
       retired.delete(path);
-      cursors.set(path, newCursor(transcriptStem(path), modified, database, {
+      // The thread id from the database (or the filename) is authoritative up
+      // front: a transcript adopted from its tail never reads session_meta.
+      cursors.set(path, newCursor(knownId ?? transcriptSessionId(path), modified, database, {
         conversationWindowMs,
         maxConversationRecords
       }));
@@ -152,7 +163,7 @@ export async function discover({
     // The database answered — possibly "nothing recent", which is complete
     // information, not a reason to fall back to walking the whole tree.
     for (const thread of threads) {
-      await consider(thread.rollout_path, Number(thread.updated_at) || null);
+      await consider(thread.rollout_path, Number(thread.updated_at) || null, thread.id);
     }
     return;
   }

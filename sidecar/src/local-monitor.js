@@ -68,7 +68,13 @@ export function projectLocalSnapshot(snapshot) {
       source: "local",
       role,
       parentLocalSessionId: raw.parent ?? null,
-      parentSessionId: raw.parent ? `local:${byRawId.get(raw.parent)?.provider ?? provider}:${raw.parent}` : null
+      // Only name a local parent this snapshot can see. Guessing its provider
+      // from the child's minted ids like local:codex:<claude id> that point at
+      // nothing; a Gateway-owned parent is resolved from parentLocalSessionId
+      // by mergeMonitorSessions instead.
+      parentSessionId: byRawId.has(raw.parent)
+        ? `local:${byRawId.get(raw.parent).provider ?? "local"}:${raw.parent}`
+        : null
     });
 
     const baseSequence = Math.max(0, Math.floor(Number(raw.time || 0) * 1_000) * 2);

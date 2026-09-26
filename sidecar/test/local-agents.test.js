@@ -720,6 +720,44 @@ test("reversed reading survives multibyte characters straddling chunk boundaries
   });
 });
 
+test("a tail-adopted codex transcript keeps the real thread id without session_meta", async () => {
+  await withTempDirectory(async (root) => {
+    const sessions = join(root, "sessions");
+    await mkdir(sessions, { recursive: true });
+    const threadId = "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001";
+    const fromDatabase = join(sessions, "rollout-2026-09-26T10-00-00-from-db.jsonl");
+    const fromName = join(sessions, `rollout-2026-09-26T10-00-00-${threadId}.jsonl`);
+    // > 12MB so adoption starts from the tail and never sees session_meta.
+    const filler = JSON.stringify({ type: "response_item", payload: { type: "message", text: "x".repeat(1024) } });
+    const body = [
+      '{"type":"session_meta","payload":{"id":"meta-id-unreachable"}}',
+      ...Array.from({ length: 13 * 1024 }, () => filler),
+      '{"type":"event_msg","payload":{"type":"task_started"}}'
+    ].join("\n") + "\n";
+    await writeFile(fromDatabase, body);
+    await writeFile(fromName, body);
+    const now = Date.now() / 1000;
+
+    const database = join(root, "state_5.sqlite");
+    await createCodexDatabase(database, {
+      threads: [{ id: "db-thread", model: "gpt-5", cwd: root, rolloutPath: fromDatabase, updatedAt: Math.floor(now) }]
+    });
+    const cursors = new Map();
+    const states = {};
+    await discover({ root: sessions, cursors, retired: new Map(), staleAfter: 600, now, database });
+    await poll({ cursors, states, parents: new Map(), now });
+    assert.equal(states["db-thread"]?.state, "running", "the database thread id names the session");
+
+    const byName = new Map();
+    const nameStates = {};
+    await discover({
+      root: sessions, explicitPaths: [fromName], cursors: byName, retired: new Map(), staleAfter: 600, now, database: null
+    });
+    await poll({ cursors: byName, states: nameStates, parents: new Map(), now });
+    assert.deepEqual(Object.keys(nameStates), [threadId], "the filename's thread uuid names the session");
+  });
+});
+
 test("codex cursor advances by bytes so multibyte transcripts do not re-parse forever", async () => {
   await withTempDirectory(async (root) => {
     const sessions = join(root, "sessions");
