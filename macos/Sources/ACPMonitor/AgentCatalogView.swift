@@ -24,9 +24,9 @@ struct AgentCatalogView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                ACPLogoLockup(subtitle: "공식 ACP Agent 연결")
+                ACPLogoLockup(subtitle: "공식 ACP 에이전트 연결")
                 Spacer()
-                TextField("Agent 검색", text: $searchText)
+                TextField("에이전트 검색", text: $searchText)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 210)
                 Button("새로고침", systemImage: "arrow.clockwise") {
@@ -42,7 +42,7 @@ struct AgentCatalogView: View {
 
             if model.agentCatalogLoading && model.agentCatalog.isEmpty {
                 Spacer()
-                ProgressView("ACP 공식 registry를 불러오는 중…")
+                ProgressView("ACP 공식 에이전트 목록을 불러오는 중…")
                 Spacer()
             } else {
                 List(filteredAgents) { agent in
@@ -55,9 +55,9 @@ struct AgentCatalogView: View {
             Divider()
             VStack(alignment: .leading, spacing: 5) {
                 HStack {
-                    Label("Registry \(model.agentCatalogSource)\(model.agentCatalogStale ? " · 오래된 cache" : "")", systemImage: "shippingbox")
+                    Label("목록 출처 \(model.agentCatalogSource)\(model.agentCatalogStale ? " · 오래된 캐시" : "")", systemImage: "shippingbox")
                     Spacer()
-                    Text("\(model.agentCatalog.count)개 Agent")
+                    Text("에이전트 \(model.agentCatalog.count)개")
                 }
                 .font(.caption)
                 .foregroundStyle(model.agentCatalogStale ? .orange : .secondary)
@@ -67,7 +67,7 @@ struct AgentCatalogView: View {
                         .foregroundStyle(.orange)
                         .textSelection(.enabled)
                 }
-                Text("Off는 새 ACP 세션에서만 해당 Agent 사용을 막습니다. 이미 실행 중인 세션을 종료하거나 설치 파일을 삭제하지 않습니다.")
+                Text("꺼짐은 새 ACP 세션에서만 해당 에이전트 사용을 막습니다. 이미 실행 중인 세션을 종료하거나 설치 파일을 삭제하지 않습니다.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -178,11 +178,12 @@ private struct AgentCatalogRow: View {
                     .frame(width: 76)
             } else if agent.installed {
                 VStack(alignment: .trailing, spacing: 4) {
-                    Toggle(agent.enabled ? "On" : "Off", isOn: Binding(
+                    Toggle(agent.enabled ? "켜짐" : "꺼짐", isOn: Binding(
                         get: { agent.enabled },
                         set: { enabled in Task { await model.setAgentEnabled(agent, enabled: enabled) } }
                     ))
                     .toggleStyle(.switch)
+                    .accessibilityLabel("\(agent.name) 사용")
                     // Re-installing pulls the registry's current version, so the
                     // update path is just install run again — shown only when
                     // the configured version differs from the registry latest.
@@ -195,7 +196,7 @@ private struct AgentCatalogRow: View {
                 }
                 .frame(width: 76)
             } else if agent.installSupported {
-                Button("Install") { Task { await model.installAgent(agent) } }
+                Button("설치") { Task { await model.installAgent(agent) } }
                     .buttonStyle(.borderedProminent)
                     .frame(width: 76)
             } else if let website = agent.website {

@@ -7,6 +7,8 @@ import SwiftUI
 // install (see AppModel.startOnboardingInstall / completeOnboarding).
 struct OnboardingView: View {
     @EnvironmentObject private var model: AppModel
+    /// CLIs installed on this Mac; only these can be picked for hooks.
+    @State private var installedCLIs = MonitoringConsentChoices.installedCLIs()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -30,9 +32,21 @@ struct OnboardingView: View {
             }
             .frame(maxWidth: 320, alignment: .leading)
 
+            Divider().frame(maxWidth: 520)
+
+            // A separate, optional choice: it edits the CLIs' own config files,
+            // so it must not read as part of the Gateway install above.
             VStack(alignment: .leading, spacing: 8) {
                 Text("실시간 모니터링 (선택)").font(.headline)
-                MonitoringConsentChoices(selection: $model.onboardingMonitoringHooks, disabled: model.onboardingRunning)
+                Text("선택한 설정 파일을 백업한 뒤 AgenLynk hook을 추가합니다. 아무것도 선택하지 않아도 설치를 계속할 수 있고, 나중에 설정 > 모니터링에서 켤 수 있습니다.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                MonitoringConsentChoices(
+                    selection: $model.onboardingMonitoringHooks,
+                    installed: installedCLIs,
+                    disabled: model.onboardingRunning
+                )
             }
             .frame(maxWidth: 520, alignment: .leading)
 

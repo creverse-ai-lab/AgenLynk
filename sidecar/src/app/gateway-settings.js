@@ -29,7 +29,7 @@ export const GATEWAY_SETTING_DEFINITIONS = Object.freeze([
   }),
   numberSetting("resultRetentionMs", "lifecycle", "Result retention", "How long completed task results are retained.", "ACP_GATEWAY_RESULT_RETENTION_MS", 24 * 60 * 60_000, 0, "ms", {
     labelKo: "결과 보존 기간",
-    descriptionKo: "완료된 Task 결과를 보관하는 기간입니다.",
+    descriptionKo: "완료된 태스크 결과를 보관하는 기간입니다.",
     displayUnit: "hours" // default 24 h
   }),
   numberSetting("inboxRetentionMs", "lifecycle", "Inbox retention", "How long resolved inbox requests are retained.", "ACP_GATEWAY_INBOX_RETENTION_MS", 24 * 60 * 60_000, 0, "ms", {
@@ -112,7 +112,7 @@ export const GATEWAY_SETTING_DEFINITIONS = Object.freeze([
   // quiet is still worth showing (and reusing) until it would cold-start.
   numberSetting("localSessionRetentionMs", "monitor", "Idle local session retention", "How long a local session that finished its turn stays listed as idle before it is moved to history.", "ACP_MONITOR_LOCAL_SESSION_RETENTION_MS", 30 * 60_000, 60_000, "ms", {
     labelKo: "대기 세션 유지 시간",
-    descriptionKo: "턴을 마친 로컬 세션을 대기(idle) 상태로 목록에 남겨 두는 시간입니다. 지나면 기록으로 옮겨집니다. 종료가 확인된 세션(SessionEnd, 프로세스 종료)은 바로 옮겨집니다.",
+    descriptionKo: "턴을 마친 로컬 세션을 ‘대기’ 상태로 목록에 남겨 두는 시간입니다. 지나면 기록으로 옮겨집니다. 종료가 확인된 세션(SessionEnd, 프로세스 종료)은 바로 옮겨집니다.",
     displayUnit: "minutes" // default 30 min
   }),
   numberSetting("monitorHistoryRetentionMs", "monitor", "Monitor history retention", "How long AgenLynk keeps session timelines (prompts, tool input and output) in ~/.acp-gateway/agenlynk/monitor.db. 0 keeps no history on disk.", "ACP_MONITOR_HISTORY_RETENTION_MS", 14 * 24 * 60 * 60_000, 0, "ms", {

@@ -12,16 +12,22 @@ struct ToolCallGroup: Identifiable, Equatable, Sendable {
     var sessionId: String { events[0].sessionId }
     var timestamp: String? { events[0].timestamp }
 
-    /// The call still running (the newest one, if several), else the latest.
+    /// The call still running — one a hook reported live first, since that
+    /// is the one really running now — else the latest.
     var representative: MonitorEvent {
-        events.last(where: \.isInFlight) ?? events[events.count - 1]
+        events.last(where: { $0.isInFlight && $0.isHookObserved })
+            ?? events.last(where: \.isInFlight)
+            ?? events[events.count - 1]
     }
     var failedCount: Int { events.filter(\.isFailed).count }
     var isRunning: Bool { events.contains(where: \.isInFlight) }
+    /// Some call in the run arrived through a CLI hook.
+    var isHookObserved: Bool { events.contains(where: \.isHookObserved) }
 
-    /// "도구 12개 · 실행 중: Bash: npm test… · 실패 2".
+    /// "도구 12개 · 실행 중: Bash: npm test… · 실패 2", or "… · 마지막: …"
+    /// when nothing runs.
     func summary(titleLimit: Int = 28) -> String {
-        let lead = isRunning ? "실행 중" : "최근"
+        let lead = isRunning ? "실행 중" : "마지막"
         var text = "도구 \(events.count)개 · \(lead): \(representative.compactToolTitle(limit: titleLimit))"
         if failedCount > 0 { text += " · 실패 \(failedCount)" }
         return text
@@ -150,6 +156,21 @@ enum EventTimeline {
         return rows
     }
 
+    /// The event to keep in place while older events load above: the first
+    /// row that stands for an event on screen. An expanded group header
+    /// covers none, so its first call (the next row) anchors instead; a
+    /// collapsed group anchors on its newest call, which stays in the group
+    /// when older calls join it.
+    static func anchorEventId(in rows: [TimelineRow]) -> String? {
+        rows.lazy.compactMap { $0.coveredEventIds.last }.first
+    }
+
+    /// The row that shows `eventId` after a refresh: its own row, or the
+    /// collapsed group that now covers it.
+    static func rowId(showing eventId: String, in rows: [TimelineRow]) -> String? {
+        rows.first { $0.coveredEventIds.contains(eventId) }?.id
+    }
+
     /// The trailing tool run of a session's timeline, when its newest item is
     /// one — what "지금 무엇을 하는가" should summarize instead of one call.
     static func trailingToolGroup(_ events: [MonitorEvent]) -> ToolCallGroup? {
@@ -176,6 +197,8 @@ struct DashboardPanelLayout: Equatable, Sendable {
 
     let fitsSessions: Bool
     let fitsInspector: Bool
+    /// Room for both side panels beside the sequence.
+    let fitsBoth: Bool
     private(set) var showsSessions: Bool
     let showsInspector: Bool
 
@@ -183,6 +206,7 @@ struct DashboardPanelLayout: Equatable, Sendable {
     init(width: CGFloat, wantsSessions: Bool, wantsInspector: Bool, forceSessions: Bool = false, forceInspector: Bool = false) {
         fitsSessions = width >= Self.centerMinimum + Self.sessionsMinimum
         let roomForBoth = width >= Self.centerMinimum + Self.sessionsMinimum + Self.inspectorMinimum
+        fitsBoth = roomForBoth
         showsSessions = (wantsSessions && fitsSessions) || forceSessions
         // With the session list hidden the inspector only needs its own room.
         fitsInspector = showsSessions ? roomForBoth : width >= Self.centerMinimum + Self.inspectorMinimum

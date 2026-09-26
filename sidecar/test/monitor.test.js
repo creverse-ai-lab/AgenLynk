@@ -127,8 +127,8 @@ test("MonitorState blocks Gateway restart while work or inbox responses are acti
   });
   assert.deepEqual(state.restartBlockers(), [
     "진행 중 세션 1개",
-    "진행 중 Task 1개",
-    "미응답 Inbox 1개"
+    "진행 중 태스크 1개",
+    "미응답 요청 1개"
   ]);
   state.setSessions([{ sessionId: "idle", status: "idle" }]);
   state.setRecords({ tasks: [], inbox: [] });

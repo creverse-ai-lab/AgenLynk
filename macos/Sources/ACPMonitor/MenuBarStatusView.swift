@@ -1,251 +1,255 @@
+import ACPShared
 import AppKit
 import SwiftUI
 
-/// Popover shown from the menu-bar status item. Reuses the single shared
-/// `AppModel`/`AppSettings` instance — no separate connection state.
-///
-/// This is a liveness surface, not a second Monitoring window: it answers
-/// "is anything actually progressing right now?" with the stream heartbeat and
-/// the same `PetActivityProjection` states the Pet renderer consumes. The full
-/// graph stays one click away in the Monitoring window.
-///
-/// Every section has a fixed height so the popover frame never changes size.
-/// `MenuBarExtra(.window)` keeps the largest content size it has shown, so a
-/// layout that grows and shrinks leaves the window stuck at its widest.
+/// The menu bar popover: work in progress as pipelines. One card per
+/// Frontdoor shows its sessions as the delegation chain (Frontdoor → Worker →
+/// nested Worker) with each step's status, the step that needs the user
+/// called out, and this turn's tokens against the usual. Everything else
+/// (idle work, connection detail) is folded away.
 struct MenuBarStatusView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
     @Environment(\.openWindow) private var openWindow
+    @State private var showIdle = false
+    @State private var showConnection = false
 
-    private let popoverWidth: Double = 460
+    private let popoverWidth: Double = 440
     private let contentPadding: Double = 14
-    private let activityListHeight: Double = 210
-    private let graphLabelWidth: Double = 132
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            header
-            Divider()
-            // One shared clock drives every relative timestamp, so the seconds
-            // visibly tick while the popover is open. A frozen counter is
-            // itself the signal that nothing is arriving.
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                VStack(alignment: .leading, spacing: 10) {
-                    heartbeat(now: context.date)
-                    Divider()
-                    metricsRow
-                    Divider()
-                    activitySection(now: context.date)
-                }
+        // Derived when the model changes, not on every clock tick: the
+        // one-second TimelineView below only redraws elapsed times.
+        let pipeline = MenuBarPipeline.make(
+            frontdoors: model.frontdoorSessions,
+            eventsBySession: model.eventsBySession
+        )
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            VStack(alignment: .leading, spacing: 10) {
+                header(now: context.date)
+                summary(pipeline)
+                if model.hookStatus?.consentRequired == true { hookPrompt }
+                Divider()
+                pipelines(pipeline, now: context.date)
+                if !pipeline.idleCards.isEmpty { idleSection(pipeline, now: context.date) }
+                Divider()
+                if showConnection { connectionDetail(now: context.date) }
+                actions
             }
-            Divider()
-            actions
         }
         .padding(contentPadding)
         .frame(width: popoverWidth)
         .task { model.startIfNeeded() }
     }
 
-    private var header: some View {
+    // MARK: Header and summary
+
+    private func header(now: Date) -> some View {
         HStack(spacing: 8) {
             ACPLogoMark().frame(width: 20, height: 20)
             Circle().fill(connectionColor).frame(width: 8, height: 8)
             Text(connectionText).font(.callout.weight(.medium)).lineLimit(1)
+            Text(streamText(now: now))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(streamColor(now: now))
+                .lineLimit(1)
             Spacer()
+            Button {
+                showConnection.toggle()
+            } label: {
+                Image(systemName: showConnection ? "info.circle.fill" : "info.circle")
+            }
+            .buttonStyle(.borderless)
+            .help(showConnection ? "연결 상세 접기" : "연결 상세 보기")
+            .accessibilityLabel(showConnection ? "연결 상세 접기" : "연결 상세 보기")
             Button {
                 model.reconnect()
             } label: {
                 Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.borderless)
-            .help("Gateway monitor에 다시 연결합니다")
+            .help("모니터에 다시 연결합니다. Gateway와 에이전트는 멈추지 않습니다.")
+            .accessibilityLabel("모니터 다시 연결")
         }
     }
 
-    /// Stream liveness. `streamingLive` is the Gateway's own view of the
-    /// subscription; the timestamps show whether that subscription is still
-    /// delivering.
-    private func heartbeat(now: Date) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                Image(systemName: model.streamingLive ? "dot.radiowaves.left.and.right" : "bolt.horizontal.circle")
-                    .foregroundStyle(streamColor(now: now))
-                Text(model.streamingLive ? "이벤트 스트림 수신 중" : "스트림 미연결")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(streamColor(now: now))
-                Spacer()
-                Text(model.lastStreamMessageAt.map { "\(relative(from: $0, to: now)) 갱신" } ?? "수신 없음")
-                    .font(.caption.monospacedDigit())
+    /// "작업 3 · 실행 중 4 · 권한 대기 1 · 입력 대기 0" — the counts that say
+    /// whether anything needs the user right now.
+    private func summary(_ pipeline: MenuBarPipeline) -> some View {
+        HStack(spacing: 10) {
+            summaryItem("작업", pipeline.activeCards.count, color: .primary)
+            summaryItem("실행 중", pipeline.runningCount, color: .green)
+            summaryItem("권한 대기", pipeline.permissionCount, color: .orange)
+            summaryItem("입력 대기", pipeline.inputCount, color: .orange)
+            Spacer()
+        }
+        .font(.caption)
+    }
+
+    private func summaryItem(_ title: String, _ count: Int, color: Color) -> some View {
+        HStack(spacing: 3) {
+            Text(title).foregroundStyle(.secondary)
+            Text("\(count)")
+                .font(.caption.weight(.semibold).monospacedDigit())
+                .foregroundStyle(count > 0 ? color : .secondary)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var hookPrompt: some View {
+        Button {
+            model.hookConsentPresented = true
+            openDashboard()
+        } label: {
+            Label("실시간 모니터링이 꺼져 있습니다 · 켜기…", systemImage: "bolt.horizontal.circle")
+                .font(.caption)
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(.orange)
+        .help("hook을 켜면 도구 실행·권한 대기·턴 종료가 바로 보입니다")
+    }
+
+    // MARK: Pipelines
+
+    @ViewBuilder
+    private func pipelines(_ pipeline: MenuBarPipeline, now: Date) -> some View {
+        if pipeline.activeCards.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("진행 중인 작업이 없습니다")
+                    .font(.callout.weight(.medium))
+                Text(pipeline.idleCards.isEmpty
+                    ? "터미널에서 claude · codex · grok을 실행하면 여기에 파이프라인으로 표시됩니다."
+                    : "대기 중인 작업은 아래에서 볼 수 있습니다.")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            HStack(spacing: 6) {
-                Text("마지막 Agent 이벤트")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                Spacer()
-                Text(model.lastAgentEventAt.map { relative(from: $0, to: now) } ?? "이번 실행에서 없음")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.tertiary)
-            }
-            if let notice = model.lastNotice {
-                Text(notice).font(.caption2).foregroundStyle(.orange).lineLimit(1)
-            }
-        }
-    }
-
-    private var metricsRow: some View {
-        HStack(spacing: 12) {
-            MenuBarMetric(title: "Frontdoor", value: "\(model.activeFrontdoors.count)")
-            MenuBarMetric(title: "Worker", value: "\(model.realtimeWorkerCount)")
-            MenuBarMetric(title: "대기 요청", value: "\(model.pendingInbox.count)")
-            MenuBarMetric(title: "이벤트", value: model.totalEventCount.formatted())
-        }
-    }
-
-    private var liveProjection: GraphProjection {
-        GraphProjection.make(sessions: model.realtimeSessions, eventsBySession: model.eventsBySession)
-    }
-
-    private func activitySection(now: Date) -> some View {
-        let projection = liveProjection
-        let hasLiveLanes = !projection.lanes.isEmpty
-        return VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(hasLiveLanes ? "진행 중인 세션" : "최근 Agent 상태")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text(hasLiveLanes
-                    ? "\(projection.lanes.count) lane · \(projection.turnCount) turn"
-                    : progressSummary(sortedAgents))
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-            Group {
-                if hasLiveLanes {
-                    ScrollView(.vertical) {
-                        MenuBarLiveGraph(projection: projection, timelineWidth: timelineWidth)
+            .padding(.vertical, 6)
+        } else {
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(pipeline.activeCards) { card in
+                        PipelineCardView(
+                            card: card,
+                            now: now,
+                            openFrontdoor: { openDashboard(frontdoorId: card.frontdoor.id) },
+                            openStage: { stage in openDashboard(frontdoorId: card.frontdoor.id, sessionId: stage.id) }
+                        )
                     }
-                } else {
-                    // Nothing is running: fall back to the normalized states so
-                    // the box still says what each known session was last doing.
-                    recentActivityList(now: now)
                 }
             }
-            .frame(height: activityListHeight)
-            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
-            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Color(nsColor: .separatorColor)))
+            .frame(maxHeight: 380)
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    private var timelineWidth: Double {
-        popoverWidth - contentPadding * 2 - graphLabelWidth - 1
-    }
-
-    private func recentActivityList(now: Date) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 2) {
-                if sortedAgents.isEmpty {
-                    Text("알려진 Agent 세션이 없습니다.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 6)
-                } else {
-                    let context = contextFractions()
-                    ForEach(sortedAgents, id: \.id) { agent in
-                        Button { open(agent) } label: {
-                            MenuBarActivityRow(agent: agent, now: now, contextFraction: context[agent.id])
+    private func idleSection(_ pipeline: MenuBarPipeline, now: Date) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                showIdle.toggle()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: showIdle ? "chevron.down" : "chevron.right").font(.caption2)
+                    Text("대기 중 작업 \(pipeline.idleCards.count)개").font(.caption.weight(.medium))
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .accessibilityLabel(showIdle ? "대기 중 작업 접기" : "대기 중 작업 \(pipeline.idleCards.count)개 펼치기")
+            if showIdle {
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(pipeline.idleCards) { card in
+                            IdleWorkRow(card: card, now: now) { openDashboard(frontdoorId: card.frontdoor.id) }
                         }
-                        .buttonStyle(.plain)
                     }
                 }
+                .frame(maxHeight: 160)
+                .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(.horizontal, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    // MARK: Connection and actions
+
+    private func connectionDetail(now: Date) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            detailLine("이벤트 스트림", model.streamingLive ? "수신 중" : "연결 안 됨")
+            detailLine("마지막 갱신", model.lastStreamMessageAt.map { relativeTimeText(from: $0, to: now) } ?? "수신 없음")
+            detailLine("마지막 에이전트 이벤트", model.lastAgentEventAt.map { relativeTimeText(from: $0, to: now) } ?? "이번 실행에서 없음")
+            detailLine("미응답 요청", "\(model.pendingInbox.count)개")
+            if let notice = model.lastNotice {
+                Text(notice)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+                    .help(notice)
+            }
+        }
+        .padding(.bottom, 4)
+    }
+
+    private func detailLine(_ title: String, _ value: String) -> some View {
+        HStack {
+            Text(title).foregroundStyle(.tertiary)
+            Spacer()
+            Text(value).foregroundStyle(.secondary).monospacedDigit()
+        }
+        .font(.caption2)
     }
 
     private var actions: some View {
         HStack(spacing: 12) {
-            Button("대시보드 열기") {
-                model.startIfNeeded()
-                openWindow(id: "dashboard")
-                NSApp.activate(ignoringOtherApps: true)
-            }
-            .buttonStyle(.borderless)
+            Button("대시보드 열기") { openDashboard() }
+                .buttonStyle(.borderless)
             Spacer()
-            // Bottom-right, icon only. SettingsLink is the only supported way
-            // to open the Settings scene from a menu-bar popover on macOS 14;
-            // a plain Button has no window id to target. Activate too, or the
+            // SettingsLink is the only supported way to open the Settings
+            // scene from a menu-bar popover on macOS 14. Activate too, or the
             // window opens behind the app.
             SettingsLink {
                 Image(systemName: "gearshape")
             }
             .buttonStyle(.bordered)
             .help("설정")
+            .accessibilityLabel("설정")
             .simultaneousGesture(TapGesture().onEnded {
                 NSApp.activate(ignoringOtherApps: true)
             })
         }
     }
 
-    private var sortedAgents: [PetAgentActivity] { model.activityProjection.orderedByProgress }
-
-    /// Context-window use per activity row id: a Worker row is its session, a
-    /// Frontdoor row is its root session. Only sessions whose source reports
-    /// a context window appear.
-    private func contextFractions() -> [String: Double] {
-        var result: [String: Double] = [:]
-        for session in model.sessions {
-            if let fraction = session.usage?.contextFraction { result[session.sessionId] = fraction }
-        }
-        for frontdoor in model.frontdoorSessions {
-            if let fraction = frontdoor.root?.usage?.contextFraction { result[frontdoor.id] = fraction }
-        }
-        return result
-    }
-
-    private func progressSummary(_ agents: [PetAgentActivity]) -> String {
-        let running = agents.filter { $0.state == .running || $0.state == .starting }.count
-        let permission = agents.filter { $0.state == .waiting && $0.waitingReason == "permission" }.count
-        let input = agents.filter { $0.state == .waiting && $0.waitingReason != "permission" }.count
-        let parts = [
-            running > 0 ? "진행 중 \(running)" : nil,
-            permission > 0 ? "권한 대기 \(permission)" : nil,
-            input > 0 ? "입력 대기 \(input)" : nil
-        ].compactMap { $0 }
-        return parts.isEmpty ? "진행 중 없음" : parts.joined(separator: " · ")
-    }
-
-    private func open(_ agent: PetAgentActivity) {
+    /// Opens the dashboard scoped to a Frontdoor (and one of its sessions).
+    private func openDashboard(frontdoorId: String? = nil, sessionId: String? = nil) {
         model.startIfNeeded()
-        if agent.role == "worker" {
-            model.selectedFrontdoorId = agent.parentId
-            model.selectedSessionId = agent.id
-            openWindow(id: "session-detail", value: agent.id)
-        } else {
-            model.selectedFrontdoorId = agent.id
-            openWindow(id: "dashboard")
-        }
+        if let frontdoorId { model.selectedFrontdoorId = frontdoorId }
+        if let sessionId { model.selectedSessionId = sessionId }
+        openWindow(id: "dashboard")
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func streamText(now: Date) -> String {
+        guard model.streamingLive else { return "· 스트림 미연결" }
+        guard let last = model.lastStreamMessageAt else { return "· 수신 대기" }
+        return "· \(relativeTimeText(from: last, to: now)) 갱신"
     }
 
     private func streamColor(now: Date) -> Color {
         guard model.streamingLive else { return .red }
         guard let last = model.lastStreamMessageAt else { return .orange }
-        return now.timeIntervalSince(last) > 90 ? .orange : .green
+        return now.timeIntervalSince(last) > 90 ? .orange : .secondary
     }
 
     private var connectionColor: Color {
         if case .connected = model.phase { return .green }
         if case .degraded = model.phase { return .orange }
-        if case .starting = model.phase { return .blue }
+        if case .starting = model.phase { return .secondary }
         return .red
     }
 
     private var connectionText: String {
         switch model.phase {
-        case .idle: "대기 중"
+        case .idle: "연결 준비 중"
         case .starting: "시작 중…"
         case .connected: "Gateway 연결됨"
         case let .degraded(message): message
@@ -254,96 +258,208 @@ struct MenuBarStatusView: View {
     }
 }
 
-private struct MenuBarActivityRow: View {
-    let agent: PetAgentActivity
+/// One Frontdoor's work as a pipeline card.
+private struct PipelineCardView: View {
+    @EnvironmentObject private var settings: AppSettings
+    let card: MenuBarPipeline.Card
     let now: Date
-    /// Share of the session's context window in use, when known.
-    var contextFraction: Double?
+    let openFrontdoor: () -> Void
+    let openStage: (MenuBarPipeline.Stage) -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: 7) {
-            Circle()
-                .fill(stateColor)
-                .frame(width: 7, height: 7)
-                .padding(.top, 4)
+        VStack(alignment: .leading, spacing: 4) {
+            Button(action: openFrontdoor) {
+                HStack(spacing: 6) {
+                    ProviderIcon(provider: card.frontdoor.provider, size: 16)
+                    Text(settings.frontdoorName(id: card.frontdoor.id, auto: card.frontdoor.displayName))
+                        .font(.callout.weight(.semibold))
+                        .lineLimit(1)
+                    Spacer(minLength: 6)
+                    if let total = card.work.totalTokens {
+                        Text("작업 \(formatTokenCount(total))")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .help("이 작업(Frontdoor와 Worker들)의 세션 누적 토큰 합계입니다. 입력은 cache 포함.")
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("대시보드에서 이 작업 보기")
+
             VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 5) {
-                    Text(stateLabel)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(stateColor)
-                    ProviderIcon(provider: agent.provider, size: 13)
-                    Text(agent.role == "worker" ? "Worker" : "Frontdoor")
+                ForEach(card.stages) { stage in
+                    Button { openStage(stage) } label: {
+                        StageRow(stage: stage, now: now, isFocus: stage.id == card.focus?.id && stage.urgency <= .running)
+                    }
+                    .buttonStyle(.plain)
+                    .help("대시보드에서 이 세션 보기")
+                }
+                if card.hiddenStageCount > 0 {
+                    Text("+\(card.hiddenStageCount)개 단계 더 있음")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
-                    if agent.inboxPending > 0 {
-                        Text("요청 \(agent.inboxPending)")
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(.orange)
+                        .padding(.leading, 18)
+                }
+            }
+
+            if let focus = card.focus { FocusLine(stage: focus) }
+        }
+        .padding(8)
+        .background(background, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(border))
+    }
+
+    private var background: Color {
+        card.urgency.needsUser ? Color.orange.opacity(0.08) : Color(nsColor: .textBackgroundColor)
+    }
+
+    private var border: Color {
+        card.urgency.needsUser ? Color.orange.opacity(0.45) : Color(nsColor: .separatorColor)
+    }
+}
+
+/// One step of a pipeline: connector, status dot, provider, name, status.
+private struct StageRow: View {
+    @EnvironmentObject private var settings: AppSettings
+    let stage: MenuBarPipeline.Stage
+    let now: Date
+    var isFocus = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 5) {
+                if stage.depth > 0 {
+                    Text(String(repeating: "  ", count: stage.depth - 1) + "└")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.tertiary)
+                }
+                Circle().fill(stageColor).frame(width: 7, height: 7)
+                ProviderIcon(provider: stage.session.provider, size: 13)
+                Text(settings.sessionName(stage.session))
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Text(stage.session.isFrontdoorRecord ? "Frontdoor" : "Worker")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                if stage.session.cannotObservePermission && stage.urgency <= .running {
+                    Image(systemName: "eye.slash")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .help("권한 대기 감지 불가 (hook 꺼짐) · 설정 > 모니터링에서 켤 수 있습니다")
+                }
+                Spacer(minLength: 4)
+                if isFocus {
+                    Text("← 현재").font(.caption2.weight(.semibold)).foregroundStyle(stageColor)
+                }
+                Text(statusText)
+                    .font(.caption2.weight(.medium).monospacedDigit())
+                    .foregroundStyle(stageColor)
+                    .lineLimit(1)
+            }
+            if let reason = stage.waitReason {
+                Text(reason)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .lineLimit(1)
+                    .padding(.leading, CGFloat(stage.depth) * 10 + 26)
+            }
+        }
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
+
+    /// "실행 중 · 4분째", "권한 대기 · 2분째", "대기".
+    private var statusText: String {
+        let label = sessionStatusLabel(stage.session.status)
+        guard let started = stage.turnStartedAt, stage.urgency <= .running else { return label }
+        return "\(label) · \(elapsedText(from: started, to: now))"
+    }
+
+    private var stageColor: Color {
+        switch stage.urgency {
+        case .permission, .input: .orange
+        case .error: .red
+        case .running: .green
+        case .idle, .closed: .secondary
+        }
+    }
+}
+
+/// The card's call-out: what the most urgent step is doing and what this
+/// turn has used against the usual.
+private struct FocusLine: View {
+    let stage: MenuBarPipeline.Stage
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let step = stage.currentStep {
+                Label(step, systemImage: "arrow.turn.down.right")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            if stage.forecast.currentTurnRunning {
+                HStack(spacing: 6) {
+                    if let current = stage.forecast.currentTurnTokens {
+                        Text("이번 턴 \(formatTokenCount(current))")
+                    } else {
+                        Text("이번 턴 집계 중").help("이 CLI는 턴이 끝날 때 토큰을 확정합니다.")
                     }
-                    Spacer(minLength: 4)
-                    if let contextFraction {
-                        Text("ctx \(contextPercentText(contextFraction))")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(contextColor(contextFraction))
-                            .help(contextPercentHelp)
+                    if let typical = stage.forecast.typicalTurnTokens {
+                        Text("/ 예상 약 \(formatTokenCount(typical))").foregroundStyle(.secondary)
+                        if let progress = stage.forecast.progress {
+                            ProgressView(value: min(progress, 1))
+                                .progressViewStyle(.linear)
+                                .tint(progress > 1 ? .orange : .accentColor)
+                                .frame(maxWidth: 90)
+                        }
                     }
-                    Text(relative(from: agent.updatedAt, to: now))
+                    Spacer()
+                }
+                .font(.caption2.monospacedDigit())
+                .help("예상치는 완료된 최근 턴들이 쓴 토큰의 중앙값입니다.")
+            }
+        }
+        .padding(.leading, 2)
+    }
+}
+
+/// A quiet Frontdoor, one line.
+private struct IdleWorkRow: View {
+    @EnvironmentObject private var settings: AppSettings
+    let card: MenuBarPipeline.Card
+    let now: Date
+    let open: () -> Void
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 6) {
+                ProviderIcon(provider: card.frontdoor.provider, size: 13)
+                Text(settings.frontdoorName(id: card.frontdoor.id, auto: card.frontdoor.displayName))
+                    .font(.caption)
+                    .lineLimit(1)
+                Text(card.urgency == .closed ? "종료" : "대기")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                if let updated = card.frontdoor.updatedAt.flatMap(parseTimestamp) {
+                    Text(relativeTimeText(from: updated, to: now))
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.tertiary)
                 }
-                if let task = agent.task, !task.isEmpty {
-                    Text(task).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                if let total = card.work.totalTokens {
+                    Text(formatTokenCount(total))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.tertiary)
                 }
             }
+            .padding(.vertical, 2)
+            .contentShape(Rectangle())
         }
-        .padding(.vertical, 3)
-        .contentShape(Rectangle())
-    }
-
-    private var stateLabel: String {
-        switch agent.state {
-        case .running: "진행 중"
-        case .waiting: agent.waitingReason == "permission" ? "권한 대기" : agent.waitingReason == "input" ? "입력 대기" : "응답 대기"
-        case .starting: "시작 중"
-        case .completed: "완료"
-        case .failed: "실패"
-        case .idle: "대기"
-        case .offline: "오프라인"
-        case .unknown: "알 수 없음"
-        }
-    }
-
-    private var stateColor: Color {
-        switch agent.state {
-        case .running, .starting: .green
-        case .waiting: .orange
-        case .failed: .red
-        case .completed: .blue
-        case .idle, .offline, .unknown: .secondary
-        }
-    }
-}
-
-/// Relative timestamps for the popover. Deliberately coarse and monospaced so
-/// the digits tick in place instead of reflowing the row.
-private func relative(from date: Date, to now: Date) -> String {
-    let seconds = Int(now.timeIntervalSince(date).rounded())
-    if seconds < 0 { return "방금" }
-    if seconds < 3 { return "방금" }
-    if seconds < 60 { return "\(seconds)초 전" }
-    if seconds < 3_600 { return "\(seconds / 60)분 전" }
-    if seconds < 86_400 { return "\(seconds / 3_600)시간 전" }
-    return "\(seconds / 86_400)일 전"
-}
-
-private struct MenuBarMetric: View {
-    let title: String
-    let value: String
-    var body: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(value).font(.callout.weight(.semibold))
-            Text(title).font(.caption2).foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .buttonStyle(.plain)
+        .help("대시보드에서 이 작업 보기")
     }
 }

@@ -162,3 +162,25 @@ test("Gateway settings cannot create an install state before bootstrap", async (
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("Korean setting text never shows a raw status word", () => {
+  for (const definition of GATEWAY_SETTING_DEFINITIONS) {
+    assert.doesNotMatch(definition.descriptionKo, /\((idle|running|waiting|ready|ended|failed)\)/i,
+      `${definition.id} must use the Korean status name alone`);
+  }
+});
+
+test("a monitor setting is not pending when the running sidecar booted with it", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-gateway-settings-active-"));
+  const statePath = join(directory, "install.json");
+  try {
+    await writeFile(statePath, JSON.stringify({ version: 1, managedMcp: {}, gatewayConfig: { monitor: { localSessionRetentionMs: 5 * 60_000 } } }));
+    const booted = resolveGatewaySettings({ statePath, env: {} });
+    const snapshot = gatewaySettingsSnapshot({ statePath, env: {}, activeValues: { localSessionRetentionMs: booted.localSessionRetentionMs } });
+    const option = snapshot.options.find((item) => item.id === "localSessionRetentionMs");
+    assert.equal(option.pending, false);
+    assert.equal(option.currentValue, 5 * 60_000);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

@@ -412,8 +412,8 @@ export class MonitorState {
     const pendingInbox = this.inbox.filter((item) => item.status === "pending").length;
     return [
       ...(activeSessions ? [`진행 중 세션 ${activeSessions}개`] : []),
-      ...(activeTasks ? [`진행 중 Task ${activeTasks}개`] : []),
-      ...(pendingInbox ? [`미응답 Inbox ${pendingInbox}개`] : [])
+      ...(activeTasks ? [`진행 중 태스크 ${activeTasks}개`] : []),
+      ...(pendingInbox ? [`미응답 요청 ${pendingInbox}개`] : [])
     ];
   }
 

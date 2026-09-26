@@ -64,7 +64,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var hookMutatingProvider: String?
     @Published private(set) var hookError: String?
     /// Monitoring hooks chosen during onboarding, applied once the sidecar is up.
-    @Published var onboardingMonitoringHooks: Set<String> = ["claude", "codex", "grok"]
+    /// Starts with the CLIs installed on this Mac; the others cannot be picked.
+    @Published var onboardingMonitoringHooks: Set<String> = MonitoringConsentChoices.installedCLIs()
     private var pendingHookConsent: Set<String>?
     /// Asks an existing user (after an update) whether to turn hooks on.
     @Published var hookConsentPresented = false
@@ -72,6 +73,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var historyStats: MonitorHistoryStats?
     @Published private(set) var historyStatsError: String?
     @Published private(set) var historyClearing = false
+    /// Set when the user turned disk history off and agreed to delete what is
+    /// there: the file goes once the restarted sidecar no longer has it open.
+    private var diskHistoryDeletionPending = false
     /// "지난 기록" browsing: persisted sessions paged newest first from
     /// /api/history, and the events of the ones the user opened.
     @Published private(set) var browsedHistory: [GatewaySession] = []
@@ -150,6 +154,16 @@ final class AppModel: ObservableObject {
         monitorStore.$logRevision
             .dropFirst()
             .sink { [weak self] _ in self?.invalidateEventCaches() }
+            .store(in: &storeCancellables)
+        // A session that leaves the live log moves to disk history; without a
+        // reload it would be in neither the sidebar nor "지난 기록".
+        monitorStore.$state
+            .map { Set($0.logSessions.map(\.sessionId)) }
+            .removeDuplicates()
+            .scan((Set<String>(), Set<String>())) { ($0.1, $1) }
+            .filter { previous, current in !previous.subtracting(current).isEmpty }
+            .debounce(for: .milliseconds(600), scheduler: RunLoop.main)
+            .sink { [weak self] _ in Task { await self?.mergeNewestHistoryPage() } }
             .store(in: &storeCancellables)
     }
 
@@ -443,14 +457,11 @@ final class AppModel: ObservableObject {
     }
 
     /// The next page of "지난 기록"; `reset` starts again from the newest.
+    ///
+    /// A reset keeps the current list until the new page arrives, and keeps
+    /// the session the user has open, so its timeline does not go blank.
     func loadHistoryPage(reset: Bool = false) async {
-        if reset {
-            browsedHistory = []
-            historyCursor = nil
-            historyHasMore = true
-            historyError = nil
-        }
-        guard !historyLoading, historyHasMore else { return }
+        guard !historyLoading, reset || historyHasMore else { return }
         if endpoint == nil { await ensureStarted() }
         guard let endpoint else { return }
         historyLoading = true
@@ -458,22 +469,49 @@ final class AppModel: ObservableObject {
         do {
             // The server pages newest first on (updatedAt, sessionId); the
             // last row received is the cursor.
-            let cursor = historyCursor
+            let cursor = reset ? nil : historyCursor
             let page = try await client.fetchHistory(
                 endpoint: endpoint, before: cursor?.updatedAt, beforeId: cursor?.sessionId, limit: Self.historyPageSize
             )
+            var list = reset ? [] : browsedHistory
+            var known = Set(list.map(\.sessionId))
+            let fresh = page.sessions.filter { known.insert($0.sessionId).inserted }
+            list.append(contentsOf: fresh)
+            if reset, let selectedHistorySessionId, !known.contains(selectedHistorySessionId),
+               let open = browsedHistory.first(where: { $0.sessionId == selectedHistorySessionId }) {
+                list.append(open)
+            }
+            browsedHistory = list
             if let last = page.sessions.last, let updatedAt = last.updatedAt {
                 historyCursor = (updatedAt, last.sessionId)
+            } else if reset {
+                historyCursor = nil
             }
-            var known = Set(browsedHistory.map(\.sessionId))
-            let fresh = page.sessions.filter { known.insert($0.sessionId).inserted }
-            browsedHistory.append(contentsOf: fresh)
             // A full page of sessions already listed would page forever.
             historyHasMore = page.hasMore && !fresh.isEmpty
             historyError = nil
         } catch {
             historyHasMore = false
             historyError = error.localizedDescription
+        }
+    }
+
+    /// Puts sessions that just moved to disk history at the top of the
+    /// browsed list, keeping the cursor and the open session. Nothing to do
+    /// until the user has looked at history once (the first page loads then).
+    private func mergeNewestHistoryPage() async {
+        guard !historyLoading, historyCursor != nil || !browsedHistory.isEmpty, let endpoint else { return }
+        historyLoading = true
+        defer { historyLoading = false }
+        guard let page = try? await client.fetchHistory(
+            endpoint: endpoint, before: nil, beforeId: nil, limit: Self.historyPageSize
+        ) else { return }
+        let known = Set(browsedHistory.map(\.sessionId))
+        let fresh = page.sessions.filter { !known.contains($0.sessionId) }
+        guard !fresh.isEmpty else { return }
+        browsedHistory.insert(contentsOf: fresh, at: 0)
+        if historyCursor == nil, let last = page.sessions.last, let updatedAt = last.updatedAt {
+            historyCursor = (updatedAt, last.sessionId)
         }
     }
 
@@ -491,10 +529,23 @@ final class AppModel: ObservableObject {
             browsedEvents[sessionId] = page.events
             if page.events.count < Self.olderPageSize { olderExhaustedSessionIds.insert(sessionId) }
         } catch {
-            browsedEvents[sessionId] = []
-            olderExhaustedSessionIds.insert(sessionId)
+            // Left unloaded, not empty, so opening it again (or 다시 시도)
+            // fetches again instead of showing a timeline that is not there.
+            browsedEvents[sessionId] = nil
+            historyLoadFailedSessionIds.insert(sessionId)
             recordNotice("기록을 불러오지 못했습니다: \(error.localizedDescription)")
+            return
         }
+        historyLoadFailedSessionIds.remove(sessionId)
+    }
+
+    /// History sessions whose timeline failed to load; the sequence offers 다시 시도.
+    @Published private(set) var historyLoadFailedSessionIds: Set<String> = []
+
+    func retryHistorySession(_ sessionId: String) async {
+        historyLoadFailedSessionIds.remove(sessionId)
+        olderExhaustedSessionIds.remove(sessionId)
+        await selectHistorySession(sessionId)
     }
 
     func loadHistoryStats() async {
@@ -529,12 +580,36 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// After history was deleted: nothing browsed is valid any more,
+    /// including the cursor and an open history session.
+    /// Bytes of monitor history on disk, when the sidecar reported them.
+    var diskHistoryBytes: Int64? {
+        guard let stats = historyStats, stats.path != nil, let bytes = stats.bytes else { return nil }
+        return Int64(bytes)
+    }
+
+    /// The user turned disk history off and agreed to delete what is there.
+    /// Set before saving retention 0: the monitor reconnects without the file
+    /// open, and then the file is removed. Cleared again if the save failed.
+    func setDiskHistoryDeletionPending(_ pending: Bool) {
+        diskHistoryDeletionPending = pending
+    }
+
+    private func finishPendingDiskHistoryDeletion() async {
+        guard diskHistoryDeletionPending else { return }
+        if await clearHistory() { diskHistoryDeletionPending = false }
+    }
+
     private func resetHistoryBrowsing() {
         browsedHistory = []
         browsedEvents = [:]
+        historyCursor = nil
         historyHasMore = true
         historyError = nil
-        selectedHistorySessionId = nil
+        if selectedHistorySessionId != nil {
+            selectedHistorySessionId = nil
+            selectedEventId = nil
+        }
         let liveIds = Set(sessions.map(\.sessionId))
         olderExhaustedSessionIds = olderExhaustedSessionIds.filter { liveIds.contains($0) }
     }
@@ -767,8 +842,12 @@ final class AppModel: ObservableObject {
     func answerHookConsent(enabled providers: Set<String>) async -> Bool {
         guard let endpoint else { return false }
         hookConsentPresented = false
-        let ordered = Self.frontdoorInstallOrder.filter { providers.contains($0) }
-        let declined = Self.frontdoorInstallOrder.filter { !providers.contains($0) }
+        // A CLI that is not installed was not offered, so leaving it out is
+        // not a "no": it stays "아직 켜지 않음" and can be turned on later.
+        let installed = hookStatus.map { Set($0.targets.filter(\.agentPresent).map(\.provider)) }
+            ?? MonitoringConsentChoices.installedCLIs()
+        let ordered = Self.frontdoorInstallOrder.filter { providers.contains($0) && installed.contains($0) }
+        let declined = Self.frontdoorInstallOrder.filter { !providers.contains($0) && installed.contains($0) }
         do {
             var status: MonitoringHookStatus
             if ordered.isEmpty {
@@ -1024,20 +1103,25 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// What a lower retention would delete, as far as the Gateway can say.
+    enum RetentionPreviewOutcome: Equatable {
+        case counted(RetentionPreview)
+        /// The Gateway cannot count it (no preview in this contract, or the
+        /// request failed). The caller must not claim nothing would be lost.
+        case uncounted
+    }
+
     /// What the Gateway would delete if these retention values were applied.
-    /// Returns nil when the Gateway cannot be asked, in which case the caller
-    /// must not claim that nothing would be lost.
-    func retentionPreview(sessionRetentionMs: Int?, artifactSessionLimit: Int?) async -> RetentionPreview? {
-        guard let endpoint else { return nil }
+    func retentionPreview(sessionRetentionMs: Int?, artifactSessionLimit: Int?) async -> RetentionPreviewOutcome {
+        guard let endpoint else { return .uncounted }
         do {
-            return try await client.retentionPreview(
+            return .counted(try await client.retentionPreview(
                 endpoint: endpoint,
                 sessionRetentionMs: sessionRetentionMs,
                 artifactSessionLimit: artifactSessionLimit
-            )
+            ))
         } catch {
-            gatewayConfigError = error.localizedDescription
-            return nil
+            return .uncounted
         }
     }
 
@@ -1083,6 +1167,9 @@ final class AppModel: ObservableObject {
     }
 
     func restartGateway() async -> Bool {
+        // Saving a monitor setting just reconnected the monitor; wait for it
+        // instead of failing a restart the user asked for in the same click.
+        if endpoint == nil { await ensureStarted() }
         guard let endpoint else {
             gatewayConfigError = "Gateway monitor가 아직 연결되지 않았습니다."
             return false
@@ -1104,8 +1191,16 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func isMonitorConfigOption(_ id: String) -> Bool {
-        ["localScannerEnabled", "localScanIntervalMs", "localDiscoveryIntervalMs", "localTranscriptWindowMs", "localTranscriptRecordLimit"].contains(id)
+    /// Settings the sidecar reads only at start, so saving one reconnects
+    /// the monitor (the Gateway and agents keep running).
+    static let monitorConfigOptionIds: Set<String> = [
+        "localScannerEnabled", "localScanIntervalMs", "localDiscoveryIntervalMs", "localTranscriptWindowMs",
+        "localSessionRetentionMs", "monitorHistoryRetentionMs", "localTranscriptRecordLimit"
+    ]
+
+    func isMonitorConfigOption(_ id: String) -> Bool {
+        if Self.monitorConfigOptionIds.contains(id) { return true }
+        return gatewayConfigOptions.first { $0.id == id }?.group == "monitor"
     }
 
     /// Loads the Worker-advertised config options for one session (ACP
@@ -1219,6 +1314,7 @@ final class AppModel: ObservableObject {
             apply(snapshot)
             await loadGatewayConfig()
             await reconcileHookConsent()
+            await finishPendingDiskHistoryDeletion()
             guard connectionIsCurrent(generation) else { return }
             await client.startStream(endpoint: endpoint, onMessage: { [weak self] value in
                 guard let self, self.connectionIsCurrent(generation) else { return }

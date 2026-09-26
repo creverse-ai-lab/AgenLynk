@@ -285,10 +285,21 @@ function selectedProviders(only) {
   return (only?.length ? only : HOOK_PROVIDERS).filter((provider) => TARGETS[provider]);
 }
 
+/**
+ * The CLIs the user agreed to monitor. A state written before this was
+ * tracked had one consent for every CLI, minus the ones turned off.
+ */
+function consentedProviders(state) {
+  if (Array.isArray(state?.consentedProviders)) return state.consentedProviders.filter((provider) => TARGETS[provider]);
+  if ((state?.consent?.version ?? 0) < HOOKS_CONSENT_VERSION) return [];
+  return HOOK_PROVIDERS.filter((provider) => !(state?.disabledProviders ?? []).includes(provider));
+}
+
 /** Per-CLI hook status, read from the agents' own files. */
 export function hookStatus({ env = process.env, only = null } = {}) {
   const { script } = paths(env);
   const state = readHookState(env);
+  const consented = consentedProviders(state);
   const targets = {};
   for (const provider of selectedProviders(only)) {
     const target = TARGETS[provider];
@@ -301,6 +312,7 @@ export function hookStatus({ env = process.env, only = null } = {}) {
     const entry = {
       agentPresent: present,
       disabled: (state?.disabledProviders ?? []).includes(provider),
+      consented: consented.includes(provider),
       file,
       installed: installedEvents.length === target.events.length,
       partial: installedEvents.length > 0 && installedEvents.length < target.events.length,
@@ -314,13 +326,13 @@ export function hookStatus({ env = process.env, only = null } = {}) {
     }
     targets[provider] = entry;
   }
-  const consented = (state?.consent?.version ?? 0) >= HOOKS_CONSENT_VERSION;
+  const agreed = (state?.consent?.version ?? 0) >= HOOKS_CONSENT_VERSION;
   return {
     version: HOOKS_VERSION,
     enabled: state?.enabled !== false,
     // The app asks before the first install and after a consent bump; a user
     // who declined is not asked again until the scope changes.
-    consentRequired: !consented && state?.declinedConsentVersion !== HOOKS_CONSENT_VERSION,
+    consentRequired: !agreed && state?.declinedConsentVersion !== HOOKS_CONSENT_VERSION,
     consentVersion: HOOKS_CONSENT_VERSION,
     script,
     scriptInstalled: existsSync(script),
@@ -331,7 +343,9 @@ export function hookStatus({ env = process.env, only = null } = {}) {
 
 /**
  * Installs (or refreshes) hooks for every CLI present on this machine, or the
- * ones in `only`. Returns the resulting status plus what was changed.
+ * ones in `only`. Returns the status of every CLI (not only the ones acted
+ * on) plus what was changed. `consent` records the user's agreement for the
+ * CLIs installed: the ones in `only`, or every CLI present.
  */
 export function installHooks({ env = process.env, only = null, now = Date.now(), consent = false } = {}) {
   const locations = paths(env);
@@ -369,6 +383,9 @@ export function installHooks({ env = process.env, only = null, now = Date.now(),
   pruneScripts(env, locations.scriptsRoot, locations.script);
   const previous = previousState;
   const installed = new Set(selectedProviders(only));
+  const agreedNow = consent
+    ? selectedProviders(only).filter((provider) => only?.length || existsSync(TARGETS[provider].home(env)))
+    : [];
   writeHookState(env, {
     version: HOOKS_VERSION,
     enabled: true,
@@ -378,11 +395,12 @@ export function installHooks({ env = process.env, only = null, now = Date.now(),
       : previous?.consent ?? null,
     // Turning one CLI back on clears only its opt-out.
     disabledProviders: (previous?.disabledProviders ?? []).filter((provider) => !installed.has(provider)),
+    consentedProviders: [...new Set([...consentedProviders(previous), ...agreedNow])],
     scriptDigest,
     installedAt: previous?.installedAt ?? new Date(now).toISOString(),
     updatedAt: new Date(now).toISOString()
   });
-  return { ...hookStatus({ env, only }), changes, errors };
+  return { ...hookStatus({ env }), changes, errors };
 }
 
 /** Removes AgenLynk's hooks (and nothing else) and remembers the choice. */
@@ -412,19 +430,21 @@ export function uninstallHooks({ env = process.env, only = null, now = Date.now(
     changes.push({ provider, file, backup: saved });
   }
   const previous = readHookState(env);
+  const removed = new Set(selectedProviders(only));
   writeHookState(env, {
     ...(previous ?? {}),
     version: HOOKS_VERSION,
     // Removing every CLI's hooks turns the feature off; removing one CLI's
-    // records an opt-out so the next start does not put it back.
+    // records an opt-out so the next start does not put it back. Either way
+    // each CLI removed is recorded as off, so turning one back on later does
+    // not bring the others with it.
     enabled: only?.length ? previous?.enabled !== false : false,
-    disabledProviders: only?.length
-      ? [...new Set([...(previous?.disabledProviders ?? []), ...selectedProviders(only)])]
-      : previous?.disabledProviders ?? [],
+    disabledProviders: [...new Set([...(previous?.disabledProviders ?? []), ...removed])],
+    consentedProviders: consentedProviders(previous).filter((provider) => !removed.has(provider)),
     ...(decline ? { declinedConsentVersion: HOOKS_CONSENT_VERSION } : {}),
     updatedAt: new Date(now).toISOString()
   });
-  return { ...hookStatus({ env, only }), changes, errors };
+  return { ...hookStatus({ env }), changes, errors };
 }
 
 /**
@@ -437,7 +457,9 @@ export function ensureHooks({ env = process.env, now = Date.now() } = {}) {
   // Nothing is written to the user's agent configs before they agreed.
   if ((state?.consent?.version ?? 0) < HOOKS_CONSENT_VERSION) return { skipped: "consent_required" };
   const bundled = bundledScript().digest;
-  const wanted = HOOK_PROVIDERS.filter((provider) => !(state?.disabledProviders ?? []).includes(provider));
+  // Only the CLIs the user agreed to, never one they did not pick or that
+  // was installed after they answered.
+  const wanted = consentedProviders(state).filter((provider) => !(state?.disabledProviders ?? []).includes(provider));
   // An empty `only` means "every CLI" to the helpers below.
   if (!wanted.length) return { skipped: "disabled" };
   const status = hookStatus({ env, only: wanted });

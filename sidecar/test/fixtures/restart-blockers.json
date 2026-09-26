@@ -10,7 +10,7 @@
       ],
       "tasks": [{ "status": "working" }, { "status": "completed" }],
       "inbox": [{ "status": "pending" }, { "status": "pending" }, { "status": "answered" }],
-      "expected": ["진행 중 세션 2개", "진행 중 Task 1개", "미응답 Inbox 2개"]
+      "expected": ["진행 중 세션 2개", "진행 중 태스크 1개", "미응답 요청 2개"]
     },
     {
       "name": "every active session status counts",
@@ -50,7 +50,7 @@
       "sessions": [],
       "tasks": [{ "status": "input_required" }, { "status": "working" }],
       "inbox": [],
-      "expected": ["진행 중 Task 2개"]
+      "expected": ["진행 중 태스크 2개"]
     }
   ]
 }

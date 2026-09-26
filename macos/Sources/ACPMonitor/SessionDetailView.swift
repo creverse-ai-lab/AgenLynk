@@ -1,4 +1,5 @@
 import ACPShared
+import AppKit
 import SwiftUI
 
 struct SessionDetailView: View {
@@ -7,6 +8,13 @@ struct SessionDetailView: View {
     let sessionId: String?
     @State private var selectedEventId: String?
     @State private var expandedGroups: Set<String> = []
+    /// Same follow rule as the dashboard sequence (docs/ux-policy.md §5): at
+    /// the bottom it follows new events, scrolled up it stays put.
+    @State private var following = true
+    @State private var settled = false
+    @State private var olderRequestInFlight = false
+    @State private var lastAutoScroll = Date.distantPast
+    private static let bottomId = "detail-bottom"
 
     var body: some View {
         if let session {
@@ -21,35 +29,7 @@ struct SessionDetailView: View {
                     // updates into the call itself.
                     // Runs of tool calls collapse into one row; one continuous
                     // list that pages older events in when its top appears.
-                    List(selection: listSelection) {
-                        if model.mayHaveOlderEvents(session.sessionId) || model.olderLoadingSessionIds.contains(session.sessionId) {
-                            HStack(spacing: 6) {
-                                if model.olderLoadingSessionIds.contains(session.sessionId) {
-                                    ProgressView().controlSize(.mini)
-                                    Text("이전 이벤트 불러오는 중")
-                                } else {
-                                    Button("이전 이벤트 더 보기", systemImage: "arrow.up") {
-                                        Task { await model.loadOlderEvents(sessionIds: [session.sessionId]) }
-                                    }
-                                    .buttonStyle(.borderless)
-                                }
-                            }
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity)
-                            .onAppear { Task { await model.loadOlderEvents(sessionIds: [session.sessionId]) } }
-                        }
-                        ForEach(rows) { row in
-                            switch row.content {
-                            case let .event(event):
-                                EventRow(event: event, session: session, nested: row.parentGroupId != nil)
-                                    .tag(event.id)
-                            case let .group(group, expanded):
-                                ToolGroupRow(group: group, expanded: expanded)
-                                    .tag(group.id)
-                            }
-                        }
-                    }
+                    eventList(session)
                     .frame(minWidth: 430)
                     ScrollView {
                         if let selectedEvent {
@@ -68,6 +48,124 @@ struct SessionDetailView: View {
             }
         } else {
             ContentUnavailableView("세션을 찾을 수 없습니다", systemImage: "questionmark.folder")
+        }
+    }
+
+    /// One continuous list, newest at the bottom: it opens there and
+    /// follows, pages older events in at the top without moving the view.
+    private func eventList(_ session: GatewaySession) -> some View {
+        ScrollViewReader { proxy in
+            VStack(spacing: 0) {
+                HStack(spacing: 8) {
+                    Text("이벤트 \(events.count.formatted())개")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if following {
+                        Label("최신 따라가는 중", systemImage: "arrow.down.to.line")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    } else {
+                        Button("최신으로", systemImage: "arrow.down.to.line") { scrollToBottom(proxy, animated: true) }
+                            .buttonStyle(.borderless)
+                            .font(.caption)
+                            .help("가장 최근 이벤트로 이동하고 새 이벤트를 따라갑니다")
+                    }
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 30)
+                Divider()
+                List(selection: listSelection) {
+                    if model.mayHaveOlderEvents(session.sessionId) || model.olderLoadingSessionIds.contains(session.sessionId) {
+                        HStack(spacing: 6) {
+                            if model.olderLoadingSessionIds.contains(session.sessionId) || olderRequestInFlight {
+                                ProgressView().controlSize(.mini)
+                                Text("이전 이벤트 불러오는 중")
+                            } else {
+                                Button("이전 이벤트 더 보기", systemImage: "arrow.up") {
+                                    requestOlder(session, proxy: proxy, force: true)
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .selectionDisabled()
+                        .onAppear { requestOlder(session, proxy: proxy) }
+                    }
+                    ForEach(rows) { row in
+                        switch row.content {
+                        case let .event(event):
+                            // The window is this session's: its name is in
+                            // the title, not repeated on every row.
+                            EventRow(event: event, session: nil, nested: row.parentGroupId != nil)
+                                .tag(event.id)
+                                .id(row.id)
+                        case let .group(group, expanded):
+                            ToolGroupRow(group: group, expanded: expanded)
+                                .tag(group.id)
+                                .id(row.id)
+                        }
+                    }
+                    if rows.isEmpty {
+                        Text(session.canShowTimeline ? "표시할 이벤트가 없습니다" : "이 소스에서는 이벤트 타임라인을 볼 수 없습니다")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                            .selectionDisabled()
+                    }
+                    Color.clear
+                        .frame(height: 1)
+                        .id(Self.bottomId)
+                        .selectionDisabled()
+                        .listRowSeparator(.hidden)
+                        .onAppear { following = true }
+                        .onDisappear {
+                            guard settled, Date().timeIntervalSince(lastAutoScroll) > 0.6 else { return }
+                            following = false
+                        }
+                }
+            }
+            .onChange(of: events.last?.id) { _, _ in
+                if following { scrollToBottom(proxy, animated: false) }
+            }
+            .onChange(of: events.count) { _, _ in
+                if following { scrollToBottom(proxy, animated: false) }
+            }
+            .task(id: sessionId) {
+                // Open at the newest event, then let the top sentinel page.
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                scrollToBottom(proxy, animated: false)
+                try? await Task.sleep(nanoseconds: 550_000_000)
+                settled = true
+            }
+        }
+    }
+
+    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
+        lastAutoScroll = Date()
+        following = true
+        if animated {
+            withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+        } else {
+            proxy.scrollTo(Self.bottomId, anchor: .bottom)
+        }
+    }
+
+    /// Loads the next older page and keeps the event that was on top in
+    /// place (EventTimeline.anchorEventId), as the dashboard sequence does.
+    private func requestOlder(_ session: GatewaySession, proxy: ScrollViewProxy, force: Bool = false) {
+        guard force || settled, !olderRequestInFlight, model.mayHaveOlderEvents(session.sessionId) else { return }
+        let anchor = EventTimeline.anchorEventId(in: rows)
+        olderRequestInFlight = true
+        Task { @MainActor in
+            let arrived = await model.loadOlderEvents(sessionIds: [session.sessionId])
+            olderRequestInFlight = false
+            guard arrived, let anchor else { return }
+            await Task.yield()
+            guard let rowId = EventTimeline.rowId(showing: anchor, in: rows) else { return }
+            proxy.scrollTo(rowId, anchor: .top)
         }
     }
 
@@ -108,7 +206,9 @@ struct SessionDetailView: View {
 
     private func sessionHeader(_ session: GatewaySession) -> some View {
         HStack(spacing: 14) {
-            Circle().fill(statusColor(session.status)).frame(width: 11, height: 11)
+            Image(systemName: sessionStatusSymbol(session.status))
+                .foregroundStyle(statusColor(session.status))
+                .accessibilityLabel(sessionStatusLabel(session.status))
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 7) {
                     ProviderIcon(provider: session.provider, size: 20)
@@ -120,8 +220,11 @@ struct SessionDetailView: View {
                 SessionCapabilityBadges(session: session)
             }
             Spacer()
-            if let usage = session.usage {
-                SessionUsageView(usage: usage, partial: session.usagePartial, forecast: UsageForecast(session: session))
+            // A running turn shows even before any usage is reported (Grok
+            // settles its tokens only at the turn's end).
+            let forecast = UsageForecast(session: session)
+            if session.usage != nil || forecast.currentTurnRunning {
+                SessionUsageView(usage: session.usage, partial: session.usagePartial, forecast: forecast)
                     .frame(maxWidth: 220)
             }
             VStack(alignment: .trailing, spacing: 3) {
@@ -201,6 +304,7 @@ struct SessionDetailView: View {
 /// `body` are the sidecar's display text, so nothing is dug out of the JSON.
 struct EventBodyView: View {
     let event: MonitorEvent
+    @State private var fullText: FullEventText?
     /// Narrow inspector columns cut long bodies; a full-width pane scrolls
     /// instead and passes nil.
     var characterLimit: Int?
@@ -215,7 +319,8 @@ struct EventBodyView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            if let status = eventStatusLabel(event.status) {
+            // A request's outcome wins: a denied permission never reads "완료".
+            if let status = event.stateLabel {
                 Label(statusLine(status), systemImage: eventSymbol(event))
                     .font(.caption)
                     .foregroundStyle(eventColor(event))
@@ -244,6 +349,9 @@ struct EventBodyView: View {
         // shrink to it, and a vertical ScrollView keeps its bar at the trailing
         // edge only when its content actually fits that width.
         .frame(maxWidth: .infinity, alignment: .leading)
+        .sheet(item: $fullText) { item in
+            FullEventTextSheet(item: item)
+        }
     }
 
     /// "완료 · 1.2초" when the event says how long it took.
@@ -291,10 +399,55 @@ struct EventBodyView: View {
 
     @ViewBuilder private func previewNote(shown: String, full: String, label: String) -> some View {
         if shown.count < full.count {
-            Text("\(label) 미리보기 · 전체 \(full.count.formatted())자")
+            HStack(spacing: 8) {
+                Text("\(label) 미리보기 · 전체 \(full.count.formatted())자")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Button("전체 \(label) 보기…") {
+                    fullText = FullEventText(title: "\(event.kindLabel) · \(label)", text: full)
+                }
+                .buttonStyle(.borderless)
                 .font(.caption2)
-                .foregroundStyle(.tertiary)
+            }
         }
+    }
+}
+
+struct FullEventText: Identifiable {
+    let id = UUID()
+    let title: String
+    let text: String
+}
+
+/// The whole body a narrow inspector cut short: selectable, copyable.
+private struct FullEventTextSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let item: FullEventText
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(item.title).font(.headline)
+                Text("\(item.text.count.formatted())자").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("복사", systemImage: "doc.on.doc") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(item.text, forType: .string)
+                }
+                .help("전체 내용을 클립보드에 복사")
+                Button("닫기") { dismiss() }.keyboardShortcut(.cancelAction)
+            }
+            ScrollView([.vertical, .horizontal]) {
+                Text(item.text)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .padding(8)
+            }
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+        }
+        .padding(16)
+        .frame(minWidth: 560, idealWidth: 720, minHeight: 360, idealHeight: 520)
     }
 }
 
@@ -313,7 +466,8 @@ private func looksLikeCode(_ text: String) -> Bool {
 /// actually reports (every usage field is optional). Shared by the session
 /// header and the dashboard inspector.
 struct SessionUsageView: View {
-    let usage: SessionUsage
+    /// nil while a running turn has reported nothing yet.
+    let usage: SessionUsage?
     /// The totals cover only the part of a long transcript that was read.
     var partial = false
     var forecast: UsageForecast?
@@ -321,6 +475,12 @@ struct SessionUsageView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             if let forecast { TurnForecastView(forecast: forecast) }
+            if let usage { totals(usage) }
+        }
+        .help(ifPresent: partial ? "긴 대화 기록에서 읽은 부분만 합산한 값입니다." : nil)
+    }
+
+    @ViewBuilder private func totals(_ usage: SessionUsage) -> some View {
             if let total = usage.total {
                 Text("세션 누적 토큰 \(formatTokenCount(total))\(partial ? "+" : "")")
                     .font(.caption.weight(.medium).monospacedDigit())
@@ -350,10 +510,8 @@ struct SessionUsageView: View {
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .help("최근 모델 요청에 들어간 토큰 수입니다. 이 source는 컨텍스트 창 크기를 알려 주지 않습니다.")
+                    .help("최근 모델 요청에 들어간 토큰 수입니다. 이 데이터 출처는 컨텍스트 창 크기를 알려 주지 않습니다.")
             }
-        }
-        .help(partial ? "긴 transcript에서 읽은 부분만 합산한 값입니다." : "")
     }
 }
 
@@ -405,15 +563,15 @@ struct TurnForecastView: View {
                 Text(left == 0 ? "컨텍스트가 곧 가득 찹니다" : "컨텍스트 약 \(left)턴 여유")
                     .font(.caption2)
                     .foregroundStyle(left <= 2 ? .orange : .secondary)
-                    .help("최근 턴마다 늘어난 컨텍스트 양으로 계산한 추정치입니다. 압축(compaction)이 일어나면 다시 늘어납니다.")
+                    .help("최근 턴마다 늘어난 컨텍스트 양으로 계산한 추정치입니다. 컨텍스트 압축이 일어나면 다시 늘어납니다.")
             }
         }
     }
 
     private func forecastLine(typical: Double) -> String {
         let base = "예상 약 \(formatTokenCount(typical)) (지난 \(forecast.completedTurns)턴 중앙값)"
-        guard let progress = forecast.progress else { return base }
-        return progress > 1 ? "\(base) · 예상 초과 \(Int((progress * 100).rounded()))%" : "\(base) · \(Int((progress * 100).rounded()))%"
+        guard let progress = forecast.progressText else { return base }
+        return "\(base) · \(progress)"
     }
 }
 
@@ -441,6 +599,7 @@ private struct SessionConfigRow: View {
                     set: onToggle
                 ))
                 .labelsHidden()
+                .accessibilityLabel(option.name)
                 .toggleStyle(.switch)
                 .disabled(disabled)
             case let .select(choices):
@@ -453,6 +612,7 @@ private struct SessionConfigRow: View {
                     }
                 }
                 .labelsHidden()
+                .accessibilityLabel(option.name)
                 .disabled(disabled || choices.isEmpty)
                 .frame(maxWidth: 220)
             case let .unknown(type):

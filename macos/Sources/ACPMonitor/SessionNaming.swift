@@ -35,7 +35,7 @@ struct SessionNameEditor: View {
                 Button("취소") { editing = false }.buttonStyle(.borderless).foregroundStyle(.secondary)
             } else {
                 Text(settings.sessionName(session)).font(font).lineLimit(1)
-                    .help(session.sessionId)
+                    .help("세션 id: \(session.sessionId)")
                 Button {
                     draft = settings.sessionName(session)
                     editing = true
@@ -45,6 +45,7 @@ struct SessionNameEditor: View {
                 .buttonStyle(.borderless)
                 .foregroundStyle(.secondary)
                 .help("이름 변경")
+                .accessibilityLabel("이름 변경")
                 if settings.hasSessionNickname(session) {
                     Button {
                         settings.setSessionName(nil, for: session)
@@ -54,6 +55,7 @@ struct SessionNameEditor: View {
                     .buttonStyle(.borderless)
                     .foregroundStyle(.secondary)
                     .help("자동 이름으로 되돌리기")
+                    .accessibilityLabel("자동 이름으로 되돌리기")
                 }
             }
         }

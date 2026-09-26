@@ -1,6 +1,18 @@
 import SwiftUI
 
+/// What the sequence says when it has no rows, chosen by the caller (a
+/// history session still loading, a source without a timeline, …).
+struct SequenceEmptyState {
+    var title = "표시할 이벤트가 없습니다"
+    var symbol = "timeline.selection"
+    var description = "세션 이벤트가 수신되면 호출 관계와 함께 표시됩니다."
+    var loading = false
+    /// "다시 시도" and what it does, for a failed load.
+    var retry: (() -> Void)? = nil
+}
+
 struct EventSequenceView: View {
+    @Environment(\.openWindow) private var openWindow
     @State private var renamingSession: GatewaySession?
     let sessions: [GatewaySession]
     let events: [MonitorEvent]
@@ -15,11 +27,13 @@ struct EventSequenceView: View {
     var loadingOlder = false
     /// Pages in older events; returns whether any arrived.
     var loadOlder: (() async -> Bool)?
+    var emptyState = SequenceEmptyState()
     @State private var expandedGroups: Set<String> = []
     // Keyboard scrolling: the diagram is a 2-D canvas, so arrow keys step
     // through anchor points (one per row / per lane) and scroll to them.
-    // Focus the diagram (click it) and the arrows move the view.
-    @State private var keyRow: Int?
+    // Focus the diagram (click it) and the arrows move the view. The row is
+    // kept by id, not index, so rows paged in above do not shift it.
+    @State private var keyRowId: String?
     @State private var keyLane = 0
     @FocusState private var diagramFocused: Bool
     /// Set once the initial jump to the bottom has happened, so the top
@@ -153,8 +167,8 @@ struct EventSequenceView: View {
 
                         ForEach(Array(lanes.enumerated()), id: \.element.id) { index, lane in
                             Button {
+                                // Selecting a lane keeps the selected event.
                                 selectedSessionId = lane.session.sessionId
-                                selectedEventId = nil
                             } label: {
                                 SequenceLaneHeader(
                                     lane: lane,
@@ -164,8 +178,9 @@ struct EventSequenceView: View {
                                 .buttonStyle(.plain)
                                 .frame(width: laneWidth - 24, height: 64)
                                 .position(x: laneX(index), y: 35)
-                                .help("\(lane.session.withModel(ProviderIcon.label(lane.session.provider), separator: " ")) 세션 상세")
+                                .help("클릭해 이 세션 선택 · 우클릭으로 이름 바꾸기")
                                 .contextMenu {
+                                    Button("세션 상세 열기") { openWindow(id: "session-detail", value: lane.session.sessionId) }
                                     Button("이름 바꾸기…") { renamingSession = lane.session }
                                 }
                         }
@@ -197,11 +212,21 @@ struct EventSequenceView: View {
                             }
 
                             if rows.isEmpty {
-                                ContentUnavailableView(
-                                    "표시할 이벤트가 없습니다",
-                                    systemImage: "timeline.selection",
-                                    description: Text("세션 이벤트가 수신되면 호출 관계와 함께 표시됩니다.")
-                                )
+                                Group {
+                                    if emptyState.loading {
+                                        ProgressView(emptyState.title)
+                                    } else {
+                                        ContentUnavailableView {
+                                            Label(emptyState.title, systemImage: emptyState.symbol)
+                                        } description: {
+                                            Text(emptyState.description)
+                                        } actions: {
+                                            if let retry = emptyState.retry {
+                                                Button("다시 시도", action: retry)
+                                            }
+                                        }
+                                    }
+                                }
                                 .frame(width: width, height: 240)
                             }
 
@@ -227,18 +252,14 @@ struct EventSequenceView: View {
             .focused($diagramFocused)
             .onMoveCommand { direction in
                 let last = max(0, rows.count - 1)
-                let current = keyRow ?? rows.firstIndex { $0.coveredEventIds.contains(selectedEventId ?? "") } ?? last
+                let current = keyRowId.flatMap { id in rows.firstIndex { $0.id == id } }
+                    ?? rows.firstIndex { $0.coveredEventIds.contains(selectedEventId ?? "") }
+                    ?? last
                 switch direction {
-                case .up:
-                    let next = max(0, current - 1)
-                    keyRow = next
+                case .up, .down:
+                    let next = direction == .up ? max(0, current - 1) : min(last, current + 1)
                     if rows.indices.contains(next) {
-                        withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(rows[next].id, anchor: .center) }
-                    }
-                case .down:
-                    let next = min(last, current + 1)
-                    keyRow = next
-                    if rows.indices.contains(next) {
+                        keyRowId = rows[next].id
                         withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(rows[next].id, anchor: .center) }
                     }
                 case .left:
@@ -270,13 +291,13 @@ struct EventSequenceView: View {
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))
-        .accessibilityLabel("Frontdoor Agent Subagent 이벤트 시퀀스 다이어그램")
+        .accessibilityLabel("이벤트 시퀀스. Frontdoor와 Worker의 호출·응답")
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
         lastAutoScroll = Date()
         followLatestEvent = true
-        keyRow = nil
+        keyRowId = nil
         if animated {
             withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
         } else {
@@ -314,8 +335,9 @@ struct EventSequenceView: View {
     private func requestOlder(rows: [TimelineRow], proxy: ScrollViewProxy, force: Bool = false) {
         guard force || settled, canLoadOlder, !olderRequestInFlight, let loadOlder else { return }
         // Anchor on an event, not a row: a tool group's row id changes when
-        // older calls join it, and a vanished anchor would jump the view.
-        let anchorEventId = rows.first?.coveredEventIds.last
+        // older calls join it, and a vanished anchor would jump the view. An
+        // expanded header covers no event, so its first call anchors.
+        let anchorEventId = EventTimeline.anchorEventId(in: rows)
         olderRequestInFlight = true
         Task { @MainActor in
             let arrived = await loadOlder()
@@ -323,8 +345,8 @@ struct EventSequenceView: View {
             guard arrived, let anchorEventId else { return }
             await Task.yield()
             let refreshed = EventTimeline.rows(EventTimeline.group(events), expanded: expandedGroups)
-            guard let row = refreshed.first(where: { $0.coveredEventIds.contains(anchorEventId) }) else { return }
-            proxy.scrollTo(row.id, anchor: .top)
+            guard let rowId = EventTimeline.rowId(showing: anchorEventId, in: refreshed) else { return }
+            proxy.scrollTo(rowId, anchor: .top)
         }
     }
 
@@ -400,7 +422,7 @@ struct EventSequenceView: View {
                 switch row.content {
                 case let .event(event):
                     Button {
-                        selectedEventId = event.id
+                        select(event)
                     } label: {
                         SequenceEventNode(
                             event: event,
@@ -437,8 +459,16 @@ struct EventSequenceView: View {
             expandedGroups.remove(group.id)
         } else {
             expandedGroups.insert(group.id)
-            selectedEventId = group.representative.id
+            select(group.representative)
         }
+    }
+
+    /// Selecting an event also selects its session, so the selection strip
+    /// and the inspector describe the same thing. The event goes first: the
+    /// session change must find it already selected and keep it.
+    private func select(_ event: MonitorEvent) {
+        selectedEventId = event.id
+        if selectedSessionId != event.sessionId { selectedSessionId = event.sessionId }
     }
 
     private func laneX(_ index: Int) -> Double {
@@ -466,7 +496,12 @@ struct EventSequenceView: View {
         )
         let eventId = response ? edge.returnEventId : edge.eventId
         Button {
-            if let eventId { selectedEventId = eventId }
+            guard let eventId else { return }
+            if let event = events.first(where: { $0.id == eventId }) {
+                select(event)
+            } else {
+                selectedEventId = eventId
+            }
         } label: {
             Label(response ? "응답" : edge.childDepthLabel, systemImage: response ? "arrow.uturn.left" : "arrow.right")
                 .font(.caption2.weight(.medium))
@@ -486,9 +521,10 @@ struct EventSequenceView: View {
         .position(x: capsuleX, y: y)
         .help(
             response
-                ? "\(edge.child.withModel(edge.child.provider, separator: " ")) 응답 반환"
-                : "\(edge.child.withModel(edge.child.provider, separator: " ")) 호출"
+                ? "\(edge.child.withModel(edge.child.providerLabel, separator: " ")) 응답"
+                : "\(edge.child.withModel(edge.child.providerLabel, separator: " ")) \(edge.childDepthLabel)"
         )
+        .accessibilityLabel(response ? "응답" : edge.childDepthLabel)
     }
 
     /// A worker counts as returned once it is no longer working *and* a turn
@@ -548,7 +584,8 @@ private struct SequenceCallEdge: Identifiable {
     let returned: Bool
 
     var id: String { "call:\(child.sessionId)" }
-    var childDepthLabel: String { childDepth <= 1 ? "Agent 호출" : "Subagent 호출" }
+    /// Every lane below the Frontdoor is a Worker; depth only qualifies it.
+    var childDepthLabel: String { "Worker 호출" }
 }
 
 private struct SequenceEventMarks {
@@ -589,11 +626,25 @@ private struct SequenceLaneHeader: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            Text(settings.sessionName(lane.session))
-                .font(.caption2.weight(.medium))
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: 140)
+            HStack(spacing: 4) {
+                // The session's own status, so a Worker waiting on a
+                // permission shows on its lane, not only in the sidebar.
+                Circle().fill(statusColor(lane.session.status)).frame(width: 6, height: 6)
+                Text(settings.sessionName(lane.session))
+                    .font(.caption2.weight(.medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 120)
+                if lane.session.isWaitingForUser {
+                    Text(sessionStatusLabel(lane.session.status))
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(statusColor(lane.session.status))
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(settings.sessionName(lane.session)), \(sessionStatusLabel(lane.session.status))")
             if let model = lane.session.model {
                 Text(model)
                     .font(.system(.caption2, design: .monospaced))
@@ -611,8 +662,8 @@ private struct SequenceLaneHeader: View {
 
     private var roleLabel: String {
         if lane.session.isFrontdoorRecord { return frontdoorLabel }
-        if lane.depth <= 1 { return "Agent" }
-        return "Subagent L\(lane.depth)"
+        if lane.depth <= 1 { return "Worker" }
+        return "Worker · \(lane.depth)단"
     }
 
     /// The user's chosen name when set, otherwise the working folder — stable
@@ -650,6 +701,9 @@ private struct SequenceEventNode: View {
                 Image(systemName: eventSymbol(event))
                     .foregroundStyle(eventColor(event))
                     .frame(width: 15)
+            }
+            if event.kind == "tool_call", event.isHookObserved {
+                HookMarker()
             }
             Text(event.headline)
                 .font(nested ? .caption2 : .caption.weight(.semibold))
@@ -689,6 +743,7 @@ private struct SequenceToolGroupNode: View {
                 Image(systemName: "wrench.and.screwdriver")
                     .foregroundStyle(group.failedCount > 0 ? .red : .cyan)
             }
+            if group.isHookObserved { HookMarker() }
             Text(group.summary(titleLimit: 18))
                 .font(.caption.weight(.semibold))
                 .lineLimit(1)
@@ -699,7 +754,7 @@ private struct SequenceToolGroupNode: View {
         .padding(.vertical, 5)
         .background(selected ? Color.accentColor.opacity(0.12) : Color(nsColor: .windowBackgroundColor), in: Capsule())
         .overlay(Capsule().stroke(selected ? Color.accentColor : Color.cyan.opacity(0.35)))
-        .help(group.summary(titleLimit: 60) + (expanded ? " · 클릭해 접기" : " · 클릭해 펼치기"))
+        .help(group.summary(titleLimit: 60) + (expanded ? " · 도구 호출 \(group.events.count)개 접기" : " · 도구 호출 \(group.events.count)개 펼치기"))
     }
 }
 

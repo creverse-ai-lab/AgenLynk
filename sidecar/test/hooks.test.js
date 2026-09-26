@@ -387,3 +387,69 @@ test("updating one CLI keeps the script version another CLI still uses", async (
     assert.equal(existsSync(oldDir), false, "once nothing references it, it goes");
   });
 });
+
+test("install and uninstall report every CLI, not only the ones acted on", async () => {
+  await withTempDirectory(async (root) => {
+    const { env } = await fakeHomes(root);
+    const installed = installHooks({ env, only: ["codex"], consent: true });
+    assert.deepEqual(Object.keys(installed.targets).sort(), ["claude", "codex", "grok"]);
+    assert.equal(installed.targets.codex.installed, true);
+    assert.equal(installed.targets.claude.installed, false);
+    const removed = uninstallHooks({ env, only: ["codex"] });
+    assert.deepEqual(Object.keys(removed.targets).sort(), ["claude", "codex", "grok"]);
+  });
+});
+
+test("declining everything, then turning one CLI on, never installs the others on start", async () => {
+  await withTempDirectory(async (root) => {
+    const { env } = await fakeHomes(root);
+    const declined = uninstallHooks({ env, decline: true });
+    assert.ok(Object.values(declined.targets).every((target) => target.disabled), "a full decline turns every CLI off");
+    assert.equal(declined.consentRequired, false);
+
+    installHooks({ env, only: ["codex"], consent: true });
+    ensureHooks({ env });
+    const status = hookStatus({ env });
+    assert.equal(status.targets.codex.installed, true);
+    assert.equal(status.targets.codex.consented, true);
+    assert.equal(status.targets.claude.installed, false, "Claude was not agreed to");
+    assert.equal(status.targets.grok.installed, false, "Grok was not agreed to");
+    assert.equal(status.targets.claude.disabled, true);
+  });
+});
+
+test("start installs only the CLIs the user consented to, and not one installed later", async () => {
+  await withTempDirectory(async (root) => {
+    const { env } = await fakeHomes(root);
+    await rm(env.GROK_HOME, { recursive: true, force: true });
+    installHooks({ env, consent: true });
+    assert.equal(hookStatus({ env }).targets.grok.consented, false, "an absent CLI is not agreed to by a full consent");
+
+    // Grok is installed afterwards: start must not register it silently.
+    await mkdir(env.GROK_HOME, { recursive: true });
+    ensureHooks({ env });
+    const status = hookStatus({ env });
+    assert.equal(status.targets.grok.installed, false);
+    assert.equal(status.targets.grok.disabled, false, "it reads as never turned on, not as turned off");
+    assert.equal(status.targets.claude.installed, true);
+
+    // A per-CLI consent from settings adds only that CLI.
+    installHooks({ env, only: ["grok"], consent: true });
+    assert.equal(hookStatus({ env }).targets.grok.installed, true);
+  });
+});
+
+test("a hook state from before per-CLI consent keeps every CLI that was not turned off", async () => {
+  await withTempDirectory(async (root) => {
+    const { env } = await fakeHomes(root);
+    await mkdir(env.AGENLYNK_HOME, { recursive: true });
+    await writeFile(join(env.AGENLYNK_HOME, "hooks-state.json"), JSON.stringify({
+      version: 1, enabled: true, consent: { version: 1 }, disabledProviders: ["grok"]
+    }));
+    ensureHooks({ env });
+    const status = hookStatus({ env });
+    assert.equal(status.targets.claude.installed, true);
+    assert.equal(status.targets.codex.installed, true);
+    assert.equal(status.targets.grok.installed, false);
+  });
+});

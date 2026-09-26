@@ -32,14 +32,7 @@ struct ProviderIcon: View {
         .accessibilityLabel(Self.label(provider))
     }
 
-    static func label(_ provider: String) -> String {
-        switch provider.lowercased() {
-        case "claude": "Claude"
-        case "codex": "Codex"
-        case "grok": "Grok"
-        default: provider.isEmpty ? "Agent" : provider.capitalized
-        }
-    }
+    static func label(_ provider: String) -> String { providerDisplayLabel(provider) }
 
     @MainActor private static var cache: [String: NSImage] = [:]
 

@@ -979,6 +979,9 @@ enum MonitorModelChecks {
         try check(noList.showsInspector, "without the session list the inspector has room")
         let forced = DashboardPanelLayout(width: 560, wantsSessions: true, wantsInspector: true, forceSessions: true)
         try check(forced.showsSessions, "a folded panel opens when the user asks")
+        try check(wide.fitsBoth && !medium.fitsBoth, "fitsBoth tells when opening one panel folds the other")
+        let forcedInspector = DashboardPanelLayout(width: 800, wantsSessions: true, wantsInspector: true, forceInspector: true)
+        try check(forcedInspector.showsInspector && !forcedInspector.showsSessions, "a forced inspector takes the session list's place where both do not fit")
         let hidden = DashboardPanelLayout(width: 1_200, wantsSessions: false, wantsInspector: false)
         try check(!hidden.showsSessions && !hidden.showsInspector, "a hidden panel stays hidden however wide")
     }
@@ -1089,7 +1092,7 @@ enum MonitorModelChecks {
         try check(permission.headline == "권한 요청 대기", "a pending permission reads as waiting")
         guard case .event = items[3] else { throw CheckError.failed("a lone call between breaks stays single") }
         guard case let .tools(second) = items[4] else { throw CheckError.failed("a new turn starts a new group") }
-        try check(second.representative.sequence == 8 && second.summary().hasPrefix("도구 2개 · 최근: Bash: whoami"), "without a running call the latest represents")
+        try check(second.representative.sequence == 8 && second.summary().hasPrefix("도구 2개 · 마지막: Bash: whoami"), "without a running call the latest represents")
 
         let interleaved = EventTimeline.group([events[1], try canonicalEvent("s2", 1, "tool_call", turnId: "t1"), events[2]])
         try check(interleaved.count == 3, "another session's event ends a run")
@@ -1101,6 +1104,23 @@ enum MonitorModelChecks {
         try check(expanded[1].coveredEventIds.isEmpty && expanded[2].parentGroupId == first.id, "expanded calls carry their own rows")
         try check(EventTimeline.trailingToolGroup(events)?.id == second.id, "the trailing run is the newest group")
         try check(first.id == "tools:s1#tool_call:2", "a group's id is its first call's, stable as the run grows")
+
+        // Older-load anchoring: an expanded header covers nothing, so the
+        // first call under it anchors; a collapsed group anchors on its newest.
+        let groupFirst = EventTimeline.rows(Array(items.dropFirst()), expanded: [first.id])
+        try check(EventTimeline.anchorEventId(in: groupFirst) == first.events[0].id, "an expanded header anchors on its first call")
+        let groupCollapsed = EventTimeline.rows(Array(items.dropFirst()), expanded: [])
+        try check(EventTimeline.anchorEventId(in: groupCollapsed) == first.events.last?.id, "a collapsed group anchors on its newest call")
+        try check(EventTimeline.rowId(showing: first.events[0].id, in: groupCollapsed) == first.id, "a call hidden in a collapsed group is found through it")
+
+        // A call a hook reported live represents the run over a transcript-only one.
+        func sourced(_ seq: Int, _ sources: [String]) throws -> MonitorEvent {
+            MonitorEvent(.object(["id": .string("h#\(seq)"), "sessionId": .string("h"), "kind": .string("tool_call"), "turnId": .string("t"),
+                                  "sequence": .number(Double(seq)), "status": .string("running"), "title": .string("call \(seq)"),
+                                  "sources": .array(sources.map(JSONValue.string))]))!
+        }
+        let live = ToolCallGroup(events: [try sourced(1, ["hook"]), try sourced(2, ["transcript"])])
+        try check(live.representative.id == "h#1" && live.isHookObserved, "the hook-seen running call leads the group")
     }
 
     private static func permissionOutcomesAndKoreanLabelsRead() throws {
@@ -1118,14 +1138,38 @@ enum MonitorModelChecks {
         try check(permission("failed", outcome: nil).headline == "거부됨", "a failed permission without outcome reads as denied")
         for (kind, label) in [("turn_start", "턴 시작"), ("turn_end", "턴 종료"), ("agent_thought", "생각"), ("subagent", "서브에이전트"),
                               ("plan", "계획"), ("compaction", "컨텍스트 압축"), ("error", "오류"), ("session_start", "세션 시작"),
-                              ("session_end", "세션 종료"), ("input_request", "입력 요청"), ("permission_request", "권한 요청"), ("new_kind", "new kind")] {
+                              ("session_end", "세션 종료"), ("input_request", "입력 요청"), ("permission_request", "권한 요청"),
+                              ("user_message", "사용자 입력"), ("agent_message", "응답"), ("tool_call", "도구 호출"), ("new_kind", "알 수 없는 이벤트")] {
             try check(eventKindLabel(kind) == label, "\(kind) must read as \(label)")
         }
         for (status, label) in [("running", "실행 중"), ("waiting_permission", "권한 대기"), ("waiting_input", "입력 대기"), ("idle", "대기"),
                                 ("closed", "종료"), ("error", "오류"), ("disconnected", "연결 끊김"), ("unavailable", "사용 불가"),
-                                ("cancelling", "취소 중"), ("restoring", "복원 중")] {
+                                ("cancelling", "취소 중"), ("restoring", "복원 중"), ("ready", "대기"), ("end_turn", "대기"),
+                                ("completed", "대기"), ("mystery", "알 수 없음")] {
             try check(sessionStatusLabel(status) == label, "\(status) must read as \(label)")
         }
+        try check(recordStatusLabel("completed") == "완료" && recordStatusLabel("pending") == "대기 중", "a finished record is done, not resting")
+        for (status, label) in [("pending", "시작 전"), ("running", "실행 중"), ("completed", "완료"), ("failed", "실패"), ("cancelled", "취소됨")] {
+            try check(eventStatusLabel(status) == label, "event status \(status) must read as \(label)")
+        }
+        try check(eventStatusLabel(nil) == nil, "no status, no label")
+        // A request's outcome wins over the generic status word.
+        let denied = permission("completed", outcome: "denied")
+        try check(denied.stateLabel == "거부됨", "a denied permission never reads 완료: \(denied.stateLabel ?? "nil")")
+        let tool = MonitorEvent(.object(["id": .string("s#t2"), "sessionId": .string("s"), "kind": .string("tool_call"), "status": .string("cancelled")]))!
+        try check(tool.stateLabel == "취소됨", "a cancelled tool call reads 취소됨")
+        // Activity headlines (docs/ux-policy.md §3).
+        try check(sessionActivityHeadline(status: "running", isActive: true, latestKind: "agent_thought") == "생각 중", "thinking")
+        try check(sessionActivityHeadline(status: "running", isActive: true, latestKind: "agent_message") == "응답 생성 중", "responding")
+        try check(sessionActivityHeadline(status: "running", isActive: true, latestKind: "tool_call") == "실행 중", "running a tool")
+        try check(sessionActivityHeadline(status: "waiting_permission", isActive: true, latestKind: nil) == "권한 대기 중", "permission wait")
+        try check(sessionActivityHeadline(status: "waiting_input", isActive: true, latestKind: nil) == "입력 대기 중", "input wait")
+        try check(sessionActivityHeadline(status: "end_turn", isActive: false, latestKind: "turn_end") == "대기 · 다음 입력을 기다림", "resting")
+        try check(sessionActivityHeadline(status: "closed", isActive: false, latestKind: nil) == "종료됨", "closed")
+        try check(withObjectParticle("세션 목록") == "세션 목록을" && withObjectParticle("인스펙터") == "인스펙터를", "object particles follow the last syllable")
+        try check(providerDisplayLabel("") == "알 수 없는 CLI" && providerDisplayLabel("codex") == "Codex", "an unknown provider never reads Agent")
+        let unknownAlert = SessionAlert(.object(["code": .string("some_new_code")]))!
+        try check(unknownAlert.badge == "경고" && unknownAlert.tooltip == "자세한 설명이 없는 경고입니다.", "an unknown alert code is never shown raw")
         let long = MonitorEvent(.object(["id": .string("s#t"), "sessionId": .string("s"), "kind": .string("tool_call"),
                                          "title": .string("exec_command: wc -l README.md docs/a.md docs/b.md")]))!
         try check(long.compactToolTitle(limit: 28) == "exec_command: wc -l README.m…", "long titles cut to the limit: \(long.compactToolTitle(limit: 28))")
@@ -1143,6 +1187,22 @@ enum MonitorModelChecks {
         try check(!transcript.isLiveObserved && transcript.cannotObservePermission, "without hooks permissions are invisible")
         try check(!session(source: "local", capabilities: nil).cannotObservePermission, "no capabilities (older sidecar) flags nothing")
         try check(!session(source: "gateway", capabilities: ["status"]).cannotObservePermission, "a Gateway session is never flagged")
+        let closed = GatewaySession(.object(["sessionId": .string("c"), "provider": .string("claude"), "status": .string("closed"),
+                                             "capabilities": .array([.string("live"), .string("status")])]))!
+        try check(!closed.isLiveObserved && !closed.canShowTimeline, "a closed session is not live; no timeline capability means none")
+
+        func member(_ id: String, role: String, status: String) -> GatewaySession {
+            GatewaySession(.object(["sessionId": .string(id), "provider": .string("codex"), "role": .string(role),
+                                    "status": .string(status), "openerInstanceId": .string("fd")]))!
+        }
+        let waiting = FrontdoorSession.make(sessions: [member("root", role: "frontdoor", status: "running"),
+                                                       member("w1", role: "worker", status: "waiting_permission"),
+                                                       member("w2", role: "worker", status: "running")])[0]
+        try check(waiting.statusText == "권한 대기 1" && waiting.statusKey == "waiting_permission", "a waiting member shows on the Frontdoor")
+        try check(waiting.runningCount == 2 && waiting.countsLine == "Worker 2 · 실행 중 2", "waiting is not counted as running: \(waiting.countsLine)")
+        try check(waiting.preferredSession?.sessionId == "w1", "selecting the Frontdoor lands on the waiting worker")
+        let over = FrontdoorSession.make(sessions: [member("root", role: "frontdoor", status: "closed")])[0]
+        try check(over.statusText == "종료" && over.isClosed, "all members closed reads 종료")
     }
 
     private static func agentCatalogDecodesInstallAndEnabledState() throws {
@@ -1577,7 +1637,7 @@ enum MonitorModelChecks {
         try check(tool.id == "s1#tool:call-1" && tool.key == "tool:call-1", "the wire id is kept")
         try check(tool.summary == "Bash: ls", "the summary is the sidecar's title")
         try check(tool.isInFlight && !tool.isFailed, "running is in flight")
-        try check(tool.kindLabel == "도구", "kind labels read as Korean words")
+        try check(tool.kindLabel == "도구 호출", "kind labels read as Korean words")
         try check(tool.headline == "Bash: ls", "a tool call leads with its compact header")
 
         let message = try canonicalEvent("s1", 4, "agent_message", body: "첫 줄\n둘째 줄")

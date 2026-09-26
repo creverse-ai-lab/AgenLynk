@@ -30,10 +30,22 @@ env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/Models.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/GraphProjection.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/EventTimeline.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/MenuBarPipeline.swift" \
   "$REPO_ROOT/macos/Tests/ACPMonitorTests/MonitorModelTests.swift" \
   -o "$OUT"
 
 "$OUT"
+
+PIPELINE_OUT="$CHECK_ROOT/menubar-pipeline"
+env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
+  swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 $SHARED_FLAGS \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/Models.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/EventTimeline.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/MenuBarPipeline.swift" \
+  "$REPO_ROOT/macos/Tests/ACPMonitorTests/MenuBarPipelineTests.swift" \
+  -o "$PIPELINE_OUT"
+
+"$PIPELINE_OUT"
 
 PHASE6_OUT="$CHECK_ROOT/phase6-architecture"
 env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \

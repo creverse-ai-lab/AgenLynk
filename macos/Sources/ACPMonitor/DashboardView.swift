@@ -101,7 +101,8 @@ struct DashboardView: View {
                 } label: {
                     Label("세션 목록", systemImage: "sidebar.left")
                 }
-                .help(panelHelp(shown: panelLayout.showsSessions, folded: settings.showSessionColumn && !panelLayout.fitsSessions, name: "세션 목록"))
+                .help(panelHelp(sessions: true))
+                .accessibilityLabel(panelHelp(sessions: true))
             }
             ToolbarItemGroup {
                 Button {
@@ -109,28 +110,36 @@ struct DashboardView: View {
                 } label: {
                     Label("인스펙터", systemImage: "sidebar.right")
                 }
-                .help(panelHelp(shown: panelLayout.showsInspector, folded: settings.showInspectorColumn && !panelLayout.fitsInspector, name: "인스펙터"))
+                .help(panelHelp(sessions: false))
+                .accessibilityLabel(panelHelp(sessions: false))
                 SettingsLink {
                     Label("설정", systemImage: "gearshape")
                 }
+                .help("설정")
                 // Live monitoring now lives in the menu-bar popover; a second
                 // entry point here was the same window twice.
-                Button("다시 연결", systemImage: "arrow.clockwise") { model.reconnect() }
+                Button("모니터 다시 연결", systemImage: "arrow.clockwise") { model.reconnect() }
+                    .help("모니터 다시 연결")
             }
         }
         .onChange(of: model.selectedFrontdoorId) { _, _ in
             // A new scope opens at its newest event, following.
             settings.followLatestEvent = true
             guard model.selectedHistorySessionId == nil else { return }
-            model.selectedEventId = nil
+            let members = Set(model.selectedFrontdoor?.members.map(\.sessionId) ?? [])
+            // An event of the new scope (it was just clicked) stays selected.
+            if !(model.selectedEvent.map { members.contains($0.sessionId) } ?? false) {
+                model.selectedEventId = nil
+            }
             if model.selectedSession?.openerInstanceId != model.selectedFrontdoorId {
-                model.selectedSessionId = model.selectedFrontdoor?.root?.sessionId
-                    ?? model.selectedFrontdoor?.workers.first?.sessionId
+                // A member waiting on the person is what the selection is for.
+                model.selectedSessionId = model.selectedFrontdoor?.preferredSession?.sessionId
             }
         }
         .onChange(of: model.selectedSessionId) { _, _ in
             guard model.selectedHistorySessionId == nil else { return }
-            model.selectedEventId = nil
+            // Selecting a session (a lane, or an event's session) keeps the
+            // selected event; the scope follows the session's Frontdoor.
             if let openerInstanceId = model.selectedSession?.openerInstanceId,
                openerInstanceId != model.selectedFrontdoorId {
                 model.selectedFrontdoorId = openerInstanceId
@@ -144,7 +153,9 @@ struct DashboardView: View {
     @State private var forceInspectorColumn = false
 
     /// A panel folded away by a narrow window opens on demand; otherwise the
-    /// button is the user's show/hide preference, which persists.
+    /// button is the user's show/hide preference, which persists. Forcing one
+    /// panel open clears the other's force: where both do not fit, the one
+    /// asked for last wins instead of the two fighting over the width.
     private func togglePanel(sessions: Bool) {
         if sessions {
             if panelLayout.showsSessions {
@@ -154,7 +165,10 @@ struct DashboardView: View {
                 // Asking for a panel opens it now, even where the width
                 // would fold it.
                 settings.showSessionColumn = true
-                if !panelLayout.fitsSessions { forceSessionColumn = true }
+                if !panelLayout.fitsSessions || (panelLayout.showsInspector && !panelLayout.fitsBoth) {
+                    forceSessionColumn = true
+                    forceInspectorColumn = false
+                }
             }
         } else {
             if panelLayout.showsInspector {
@@ -162,14 +176,27 @@ struct DashboardView: View {
                 settings.showInspectorColumn = false
             } else {
                 settings.showInspectorColumn = true
-                if !panelLayout.fitsInspector { forceInspectorColumn = true }
+                if !panelLayout.fitsInspector || (panelLayout.showsSessions && !panelLayout.fitsBoth) {
+                    forceInspectorColumn = true
+                    forceSessionColumn = false
+                }
             }
         }
     }
 
-    private func panelHelp(shown: Bool, folded: Bool, name: String) -> String {
+    /// The tooltip says what the click will do, including the panel it
+    /// folds to make room.
+    private func panelHelp(sessions: Bool) -> String {
+        let name = sessions ? "세션 목록" : "인스펙터"
+        let other = sessions ? "인스펙터" : "세션 목록"
+        let shown = sessions ? panelLayout.showsSessions : panelLayout.showsInspector
+        let otherShown = sessions ? panelLayout.showsInspector : panelLayout.showsSessions
         if shown { return "\(name) 숨기기" }
-        return folded ? "창이 좁아 \(name)을(를) 접었습니다 · 누르면 펼치기" : "\(name) 보이기"
+        if otherShown && !panelLayout.fitsBoth { return "\(withObjectParticle(other)) 접고 \(name) 펼치기" }
+        let wanted = sessions ? settings.showSessionColumn : settings.showInspectorColumn
+        let fits = sessions ? panelLayout.fitsSessions : panelLayout.fitsInspector
+        if wanted && !fits { return "창이 좁아 \(withObjectParticle(name)) 접었습니다 · 누르면 펼치기" }
+        return "\(name) 보이기"
     }
 
     private var connectionBar: some View {
@@ -186,6 +213,7 @@ struct DashboardView: View {
                     Text(notice).font(.caption).foregroundStyle(.orange).lineLimit(1)
                 }
                 .buttonStyle(.plain)
+                .help("최근 알림·오류 \(model.noticeLog.count)건 보기")
             }
             if !model.noticeLog.isEmpty {
                 Button { showNoticeLog = true } label: {
@@ -194,6 +222,8 @@ struct DashboardView: View {
                         .foregroundStyle(.orange)
                 }
                 .buttonStyle(.plain)
+                .help("최근 알림·오류 \(model.noticeLog.count)건 보기")
+                .accessibilityLabel("최근 알림·오류 \(model.noticeLog.count)건 보기")
                 .popover(isPresented: $showNoticeLog, arrowEdge: .bottom) {
                     NoticeLogView(entries: model.noticeLog)
                 }
@@ -208,16 +238,16 @@ struct DashboardView: View {
 
     private var metricStrip: some View {
         HStack(spacing: 12) {
-            MetricCard(title: "활성 Frontdoor", value: "\(model.activeFrontdoors.count)", symbol: "bolt.fill", color: .blue)
+            MetricCard(title: "활성 Frontdoor", value: "\(model.activeFrontdoors.count)", symbol: "bolt.fill", color: statusColor("running"))
             MetricCard(
-                title: "실행 Agent · ACP \(model.realtimeACPCount) / Local \(model.realtimeLocalCount)",
+                title: "실행 중 세션 · Gateway \(model.realtimeACPCount) / 로컬 \(model.realtimeLocalCount)",
                 value: "\(model.realtimeSessions.count)",
                 symbol: "person.2.wave.2",
-                color: .cyan
+                color: statusColor("running")
             )
-            MetricCard(title: "대기 요청", value: "\(model.pendingInbox.count)", symbol: "exclamationmark.bubble", color: .orange)
-            MetricCard(title: "태스크", value: "\(model.tasks.count)", symbol: "checklist", color: .green)
-            MetricCard(title: "보관 이벤트", value: model.totalEventCount.formatted(), symbol: "waveform.path.ecg", color: .purple)
+            MetricCard(title: "미응답 요청", value: "\(model.pendingInbox.count)", symbol: "exclamationmark.bubble", color: statusColor("waiting_permission"))
+            MetricCard(title: "태스크", value: "\(model.tasks.count)", symbol: "checklist", color: .secondary)
+            MetricCard(title: "보관 이벤트", value: model.totalEventCount.formatted(), symbol: "waveform.path.ecg", color: .secondary)
         }
         .padding(12)
     }
@@ -236,6 +266,7 @@ struct DashboardView: View {
                     .toggleStyle(.checkbox)
                     .font(.caption)
                     .fixedSize()
+                    .help("실행 중이거나 대기 유지 시간 안에 있는 세션만 보입니다")
             }
             .padding(10)
             Divider()
@@ -244,6 +275,7 @@ struct DashboardView: View {
                     FrontdoorRow(frontdoor: frontdoor)
                         .tag(frontdoor.id)
                 }
+                frontdoorListFooter
                 historySection
             }
             .listStyle(.sidebar)
@@ -251,6 +283,36 @@ struct DashboardView: View {
     }
 
     private static let historyTagPrefix = "history:"
+
+    /// Why the Frontdoor list is short or empty, and the way back.
+    @ViewBuilder private var frontdoorListFooter: some View {
+        let hidden = settings.activeOnly
+            ? model.logFrontdoorSessions.count - model.visibleFrontdoors.count
+            : 0
+        if model.visibleFrontdoors.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                if hidden > 0 {
+                    Text("진행 중인 Frontdoor가 없습니다").font(.caption.weight(.medium))
+                } else {
+                    Text("실행 중인 Frontdoor 없음 · 터미널에서 claude/codex/grok을 실행하면 표시됩니다")
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .foregroundStyle(.secondary)
+            .selectionDisabled()
+        }
+        if hidden > 0 {
+            HStack(spacing: 4) {
+                Text("활성만 보기로 \(hidden)개 숨김")
+                Button("전체 보기") { settings.activeOnly = false }
+                    .buttonStyle(.borderless)
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .selectionDisabled()
+        }
+    }
 
     /// One selection for both sidebar sections: a Frontdoor id, or a
     /// "history:" tag for a browsed history session. Only a click goes
@@ -318,6 +380,7 @@ struct DashboardView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("지난 기록 새로 고침")
+                .accessibilityLabel("지난 기록 새로 고침")
             }
         }
     }
@@ -344,7 +407,6 @@ struct DashboardView: View {
                 )
                     .font(.headline)
                 Spacer()
-                Text("\(model.selectedEvents.count)개").foregroundStyle(.secondary).font(.caption)
             }
             .padding(12)
             Divider()
@@ -364,12 +426,41 @@ struct DashboardView: View {
                 followLatestEvent: $settings.followLatestEvent,
                 canLoadOlder: model.mayHaveOlderEvents(in: sessionIds),
                 loadingOlder: !model.olderLoadingSessionIds.isDisjoint(with: sessionIds),
-                loadOlder: { await model.loadOlderEvents(sessionIds: sessionIds) }
+                loadOlder: { await model.loadOlderEvents(sessionIds: sessionIds) },
+                emptyState: sequenceEmptyState
             )
             // A new scope is a new timeline: fresh scroll position (newest at
             // the bottom) and no groups left expanded from the previous one.
             .id(sequenceScopeKey)
         }
+    }
+
+    /// What an empty sequence should say: a history session still loading or
+    /// failed, a source that cannot show a timeline, or plain "nothing yet".
+    private var sequenceEmptyState: SequenceEmptyState {
+        if let history = model.selectedHistorySession {
+            let id = history.sessionId
+            if model.historyLoadFailedSessionIds.contains(id) {
+                return SequenceEmptyState(
+                    title: "기록을 불러오지 못했습니다",
+                    symbol: "exclamationmark.triangle",
+                    description: "최근 알림에서 원인을 확인하세요.",
+                    retry: { Task { await model.retryHistorySession(id) } }
+                )
+            }
+            if model.browsedEvents[id] == nil {
+                return SequenceEmptyState(title: "기록 불러오는 중…", loading: true)
+            }
+        }
+        let sessions = sequenceSessions
+        if !sessions.isEmpty, !sessions.contains(where: \.canShowTimeline) {
+            return SequenceEmptyState(
+                title: "이 소스에서는 이벤트 타임라인을 볼 수 없습니다",
+                symbol: "eye.slash",
+                description: "상태만 받는 세션입니다. hook을 켜거나 대화 기록을 읽을 수 있으면 표시됩니다."
+            )
+        }
+        return SequenceEmptyState()
     }
 
     /// What the clicked agent is doing right now, read from the newest event
@@ -391,42 +482,22 @@ struct DashboardView: View {
             if let state = latest.requestStateLabel { return [state, latest.title].compactMap { $0 }.joined(separator: " · ") }
             return latest.body ?? latest.title ?? session.title
         }()
-        let kind = latest?.kind ?? ""
-
-        switch session.status {
-        case "waiting_permission":
-            return SessionActivity(symbol: "hand.raised.fill", color: .orange, headline: "권한 요청 대기 중", detail: detail)
-        case "waiting_input":
-            return SessionActivity(symbol: "keyboard", color: .orange, headline: "사용자 입력 대기 중", detail: detail)
-        default:
-            break
-        }
-        if session.isActive {
-            if kind == "tool_call" {
-                let running = latest?.isInFlight ?? false
-                return SessionActivity(
-                    symbol: "wrench.and.screwdriver.fill", color: .cyan,
-                    headline: running ? "도구 실행 중" : "도구 실행 완료", detail: detail
-                )
+        let headline = sessionActivityHeadline(status: session.status, isActive: session.isActive, latestKind: latest?.kind)
+        let symbol: String
+        let color: Color
+        if session.isWaitingForUser || !session.isActive {
+            symbol = sessionStatusSymbol(session.status)
+            color = statusColor(session.status)
+        } else {
+            switch latest?.kind {
+            case "agent_thought": symbol = "brain.head.profile"
+            case "agent_message": symbol = "text.bubble.fill"
+            case "tool_call": symbol = "wrench.and.screwdriver.fill"
+            default: symbol = "bolt.fill"
             }
-            if kind == "agent_thought" {
-                return SessionActivity(symbol: "brain.head.profile", color: .purple, headline: "사고 중", detail: detail)
-            }
-            if kind == "agent_message" {
-                return SessionActivity(symbol: "text.bubble.fill", color: .blue, headline: "답변 생성 중", detail: detail)
-            }
-            return SessionActivity(symbol: "bolt.fill", color: .green, headline: "작업 진행 중", detail: detail)
+            color = statusColor("running")
         }
-        switch session.status {
-        case "idle", "ready", "end_turn", "completed":
-            return SessionActivity(symbol: "pause.circle.fill", color: .secondary, headline: "대기 · 다음 입력을 기다림", detail: detail)
-        case "closed":
-            return SessionActivity(symbol: "checkmark.circle", color: .secondary, headline: "종료됨", detail: detail)
-        case "error":
-            return SessionActivity(symbol: "exclamationmark.triangle.fill", color: .red, headline: "오류로 중단됨", detail: detail)
-        default:
-            return SessionActivity(symbol: "pause.circle", color: .secondary, headline: sessionStatusLabel(session.status), detail: detail)
-        }
+        return SessionActivity(symbol: symbol, color: color, headline: headline, detail: detail)
     }
 
     private var operationsColumn: some View {
@@ -446,15 +517,14 @@ struct DashboardView: View {
                             }
                             LabeledContent("역할", value: session.isFrontdoorRecord ? "Frontdoor" : "Worker")
                             SessionCapabilityBadges(session: session)
-                            if let usage = session.usage {
-                                SessionUsageView(usage: usage, partial: session.usagePartial, forecast: UsageForecast(session: session))
+                            let forecast = UsageForecast(session: session)
+                            if session.usage != nil || forecast.currentTurnRunning {
+                                SessionUsageView(usage: session.usage, partial: session.usagePartial, forecast: forecast)
                             }
                         }
                         LabeledContent("이벤트", value: event.kindLabel)
-                        if let state = event.requestStateLabel {
+                        if let state = event.stateLabel {
                             LabeledContent("상태", value: state)
-                        } else if let status = eventStatusLabel(event.status) {
-                            LabeledContent("상태", value: status)
                         }
                         LabeledContent("시간", value: shortTime(event.timestamp))
                             .lineLimit(1)
@@ -473,14 +543,14 @@ struct DashboardView: View {
                 }
                 InspectorSection(title: "Gateway 상태", symbol: "network") {
                     LabeledContent("연결", value: model.connectionDetail)
-                    LabeledContent("Persistence", value: model.persistenceHealthy.map { $0 ? "정상" : "오류" } ?? "—")
-                    LabeledContent("감지 Provider", value: model.detectedProviderCount.formatted())
+                    LabeledContent("저장소", value: model.persistenceHealthy.map { $0 ? "정상" : "오류" } ?? "—")
+                    LabeledContent("감지된 CLI", value: model.detectedProviderCount.formatted())
                 }
-                InspectorSection(title: "Inbox", symbol: "tray.full") {
+                InspectorSection(title: "미응답 요청", symbol: "tray.full") {
                     if model.inbox.isEmpty { EmptyLabel("요청 없음") }
                     ForEach(model.inbox) { RecordRow(record: $0) }
                 }
-                InspectorSection(title: "Tasks", symbol: "checklist") {
+                InspectorSection(title: "태스크", symbol: "checklist") {
                     if model.tasks.isEmpty { EmptyLabel("태스크 없음") }
                     ForEach(model.tasks) { RecordRow(record: $0) }
                 }
@@ -497,14 +567,14 @@ struct DashboardView: View {
     private var connectionColor: Color {
         if case .connected = model.phase { return .green }
         if case .degraded = model.phase { return .orange }
-        if case .starting = model.phase { return .blue }
+        if case .starting = model.phase { return .secondary }
         return .red
     }
 
     private var connectionText: String {
         switch model.phase {
         case .idle: "대기 중"
-        case .starting: "Observer monitor 시작 중…"
+        case .starting: "모니터 시작 중…"
         case .connected: "Gateway 연결됨"
         case let .degraded(message): message
         case let .disconnected(message): message
@@ -555,6 +625,7 @@ private struct SequenceSelectionContext: View {
                             .buttonStyle(.borderless)
                             .foregroundStyle(.secondary)
                             .help("이름 변경")
+                            .accessibilityLabel("이름 변경")
                             if settings.hasFrontdoorNickname(id: frontdoor.id) {
                                 Button {
                                     settings.setFrontdoorName(nil, id: frontdoor.id)
@@ -563,26 +634,19 @@ private struct SequenceSelectionContext: View {
                                 }
                                 .buttonStyle(.borderless)
                                 .foregroundStyle(.secondary)
-                                .help("자동 이름(폴더명)으로 되돌리기")
+                                .help("자동 이름으로 되돌리기")
+                                .accessibilityLabel("자동 이름으로 되돌리기")
                             }
                         }
                     }
                     .onChange(of: frontdoor.id) { _, _ in editingName = false }
-                    HStack(spacing: 6) {
-                        ProviderIcon(provider: frontdoor.provider, size: 16)
-                        ContextPill(text: frontdoor.isActive ? "진행 중" : "대기", color: frontdoor.isActive ? .green : .secondary)
-                        ContextPill(text: "Worker \(frontdoor.workers.count)", color: .secondary)
-                        // The whole work: the Frontdoor and every worker it opened.
-                        let work = WorkUsage(sessions: frontdoor.members)
-                        if let total = work.totalTokens {
-                            ContextPill(text: "작업 토큰 \(formatTokenCount(total))", color: .secondary)
-                                .help("이 Frontdoor와 Worker들의 세션 누적 토큰 합계입니다(입력은 cache 포함).")
-                            if let current = work.currentTurnTokens {
-                                ContextPill(text: "진행 중 \(formatTokenCount(current))", color: .green)
-                                    .help("지금 실행 중인 턴 \(work.runningSessions)개가 지금까지 쓴 토큰입니다.")
-                            }
-                        }
-                        ContextPill(text: "작업공간 \(frontdoor.workspaceCount)", color: .secondary)
+                    // Narrow widths drop the lower-priority pills instead of
+                    // wrapping them onto a second line.
+                    ViewThatFits(in: .horizontal) {
+                        frontdoorPills(frontdoor, level: 3)
+                        frontdoorPills(frontdoor, level: 2)
+                        frontdoorPills(frontdoor, level: 1)
+                        frontdoorPills(frontdoor, level: 0)
                     }
                     if let task = frontdoor.latestTask, task != frontdoor.displayName {
                         Text(task).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
@@ -601,7 +665,7 @@ private struct SequenceSelectionContext: View {
                 // right so this block stays the same height as the Frontdoor
                 // block beside it.
                 VStack(alignment: .leading, spacing: 5) {
-                    Label("선택 에이전트", systemImage: "rectangle.and.hand.point.up.left")
+                    Label("선택한 세션", systemImage: "rectangle.and.hand.point.up.left")
                         .font(.caption.weight(.semibold))
                     if let activity {
                         HStack(spacing: 6) {
@@ -619,11 +683,13 @@ private struct SequenceSelectionContext: View {
                         // on; role and model are.
                         ContextPill(text: session.isFrontdoorRecord ? "Frontdoor" : "Worker", color: .secondary)
                         ProviderIcon(provider: session.provider, size: 14)
-                        Text(session.model ?? "")
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                            .lineLimit(1)
+                        if let model = session.model {
+                            Text(model)
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .lineLimit(1)
+                        }
                     }
                     SessionCapabilityBadges(session: session)
                 }
@@ -651,7 +717,7 @@ private struct SequenceSelectionContext: View {
             }
 
             if frontdoor == nil, session == nil {
-                Label("왼쪽 Frontdoor 또는 시퀀스 에이전트를 선택하면 지금 무엇을 하는지 표시됩니다", systemImage: "cursorarrow.click")
+                Label("왼쪽 Frontdoor 또는 시퀀스의 세션을 선택하면 지금 무엇을 하는지 표시됩니다", systemImage: "cursorarrow.click")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -660,6 +726,31 @@ private struct SequenceSelectionContext: View {
         .padding(.vertical, 9)
         .frame(maxWidth: .infinity, minHeight: 82, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    /// The Frontdoor's pills, most important first; `level` keeps that many
+    /// optional pills after the status (3 = all).
+    private func frontdoorPills(_ frontdoor: FrontdoorSession, level: Int) -> some View {
+        // The whole work: the Frontdoor and every worker it opened.
+        let work = WorkUsage(sessions: frontdoor.members)
+        return HStack(spacing: 6) {
+            ProviderIcon(provider: frontdoor.provider, size: 16)
+            ContextPill(text: frontdoor.statusText, color: statusColor(frontdoor.statusKey))
+            if let current = work.currentTurnTokens {
+                ContextPill(text: "이번 턴 \(formatTokenCount(current))", color: .secondary)
+                    .help("지금 실행 중인 턴 \(work.runningSessions)개가 지금까지 쓴 토큰입니다.")
+            }
+            if level >= 1 {
+                ContextPill(text: "Worker \(frontdoor.workers.count)", color: .secondary)
+            }
+            if level >= 2, let total = work.totalTokens {
+                ContextPill(text: "작업 토큰 \(formatTokenCount(total))", color: .secondary)
+                    .help("이 Frontdoor와 Worker들의 세션 누적 토큰 합계입니다(입력은 cache 포함).")
+            }
+            if level >= 3 {
+                ContextPill(text: "작업공간 \(frontdoor.workspaceCount)", color: .secondary)
+            }
+        }
     }
 
     private func commitName(_ frontdoor: FrontdoorSession) {
@@ -675,6 +766,8 @@ private struct ContextPill: View {
     var body: some View {
         Text(text)
             .font(.caption2.weight(.medium))
+            .lineLimit(1)
+            .fixedSize()
             .foregroundStyle(color)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
@@ -710,19 +803,29 @@ struct FrontdoorRow: View {
             ProviderIcon(provider: frontdoor.provider, size: 18)
                 .overlay(alignment: .bottomTrailing) {
                     if frontdoor.isActive {
-                        Circle().fill(.green).frame(width: 7, height: 7)
+                        // Orange while a member waits on the person.
+                        Circle().fill(statusColor(frontdoor.statusKey)).frame(width: 7, height: 7)
                             .overlay(Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1.5))
                             .offset(x: 2, y: 2)
                     }
                 }
                 .padding(.top, 1)
             VStack(alignment: .leading, spacing: 3) {
-                Text(settings.frontdoorName(id: frontdoor.id, auto: frontdoor.displayName))
-                    .font(.callout.weight(.medium)).lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(settings.frontdoorName(id: frontdoor.id, auto: frontdoor.displayName))
+                        .font(.callout.weight(.medium)).lineLimit(1)
+                    if frontdoor.waitingPermissionCount + frontdoor.waitingInputCount > 0 {
+                        Text(frontdoor.statusText)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(statusColor(frontdoor.statusKey))
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                }
                 // No opaque instance id, no LOCAL/ACP source — neither is
                 // something a reader acts on. The name identifies the row; the
                 // counts and current task are what tell it apart.
-                Text("Worker \(frontdoor.workers.count) · 진행 중 \(frontdoor.activeWorkerCount) · 작업공간 \(frontdoor.workspaceCount)")
+                Text(frontdoor.countsLine)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
@@ -753,11 +856,12 @@ struct EventRow: View {
                     Image(systemName: eventSymbol(event))
                         .foregroundStyle(eventColor(event)).frame(width: 18)
                 }
+                if event.isHookObserved { HookMarker() }
                 Text(event.compactToolTitle(limit: nested ? 48 : 40))
                     .font(nested ? .caption : .callout)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                if let status = eventStatusLabel(event.status), !event.isInFlight {
+                if let status = event.stateLabel, !event.isInFlight {
                     Text(status).font(.caption2).foregroundStyle(eventColor(event))
                 }
                 Spacer()
@@ -773,10 +877,8 @@ struct EventRow: View {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack {
                         Text(event.kindLabel).font(.callout.weight(.medium))
-                        if let state = event.requestStateLabel {
+                        if let state = event.stateLabel {
                             Text(state).font(.caption2.weight(.semibold)).foregroundStyle(eventColor(event))
-                        } else if let status = eventStatusLabel(event.status) {
-                            Text(status).font(.caption2).foregroundStyle(statusColor(event.status ?? ""))
                         }
                         Spacer()
                         Text(shortTime(event.timestamp)).font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
@@ -809,6 +911,7 @@ struct ToolGroupRow: View {
                 Image(systemName: "wrench.and.screwdriver")
                     .foregroundStyle(group.failedCount > 0 ? .red : .cyan)
             }
+            if group.isHookObserved { HookMarker() }
             Text(group.summary(titleLimit: 32))
                 .font(.callout.weight(.medium))
                 .lineLimit(1)
@@ -818,7 +921,7 @@ struct ToolGroupRow: View {
         }
         .padding(.vertical, 3)
         .contentShape(Rectangle())
-        .help(expanded ? "클릭해 접기" : "클릭해 도구 호출 \(group.events.count)개 펼치기")
+        .help(expanded ? "도구 호출 \(group.events.count)개 접기" : "도구 호출 \(group.events.count)개 펼치기")
     }
 }
 
@@ -838,7 +941,7 @@ struct SessionCapabilityBadges: View {
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(Color.orange.opacity(0.12), in: Capsule())
-                        .help(alert.message ?? alert.code)
+                        .help(alert.tooltip)
                 }
                 if session.isLiveObserved {
                     Label("실시간", systemImage: "dot.radiowaves.left.and.right")
@@ -871,14 +974,17 @@ private struct HistorySessionRow: View {
             ProviderIcon(provider: session.provider, size: 16).padding(.top, 1)
             VStack(alignment: .leading, spacing: 2) {
                 Text(name).font(.callout).lineLimit(1)
-                Text(subtitle)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
+                // "3분 전" keeps counting while the list stays open.
+                TimelineView(.periodic(from: .now, by: 30)) { context in
+                    Text(subtitle(now: context.date))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
             }
         }
         .padding(.vertical, 2)
-        .help(session.title ?? session.cwd)
+        .help(ifPresent: session.title ?? (session.cwd.isEmpty ? nil : session.cwd))
     }
 
     // Naming policy: the session's name (override, title, or provider ·
@@ -886,12 +992,12 @@ private struct HistorySessionRow: View {
     // are still told apart by what they were doing.
     private var name: String { settings.sessionName(session) }
 
-    private var subtitle: String {
+    private func subtitle(now: Date) -> String {
         var parts = [session.isFrontdoorRecord ? "Frontdoor" : "Worker"]
         let folder = (session.cwd as NSString).lastPathComponent
         if !folder.isEmpty, folder != "/", !name.contains(folder) { parts.append(folder) }
         if let updated = session.updatedAt.flatMap(parseTimestamp) {
-            parts.append(relativeTimeText(from: updated, to: Date()))
+            parts.append(relativeTimeText(from: updated, to: now))
         }
         return parts.joined(separator: " · ")
     }
@@ -963,11 +1069,11 @@ private struct RecordRow: View {
             HStack {
                 Text(record.title).font(.caption.weight(.medium)).lineLimit(2)
                 Spacer()
-                if let status = record.status { Text(sessionStatusLabel(status)).foregroundStyle(statusColor(status)) }
+                if let status = record.status { Text(recordStatusLabel(status)).foregroundStyle(statusColor(status)) }
             }
             if !sessionText.isEmpty {
                 Text(sessionText).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
-                    .help(record.subtitle)
+                    .help("세션 id: \(record.subtitle)")
             }
         }
         .padding(.vertical, 3)

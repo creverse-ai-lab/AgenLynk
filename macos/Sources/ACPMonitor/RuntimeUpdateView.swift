@@ -11,6 +11,52 @@ import SwiftUI
 struct RuntimeUpdateView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openURL) private var openURL
+    @State private var pendingSwitch: RuntimeSwitch?
+
+    /// A runtime change waiting for the user's confirmation.
+    private struct RuntimeSwitch: Identifiable {
+        enum Kind { case installSeed, rollback }
+        let id = UUID()
+        let kind: Kind
+        let from: String
+        let to: String
+    }
+
+    private static func versionText(_ version: String?, _ build: String?) -> String {
+        switch (version, build) {
+        case let (version?, build?): "\(version) (\(build))"
+        case let (version?, nil): version
+        case let (nil, build?): build
+        default: "알 수 없는 버전"
+        }
+    }
+
+    private var currentRuntimeText: String {
+        let current = model.runtimeInspection?.current
+        return Self.versionText(current?.gatewayVersion, current?.gatewayBuildId)
+    }
+
+    private func confirmInstallSeed() {
+        let seed = model.seedGatewayVersion
+        pendingSwitch = RuntimeSwitch(
+            kind: .installSeed,
+            from: currentRuntimeText,
+            to: Self.versionText(seed?.gatewayVersion, seed?.gatewayBuildId)
+        )
+    }
+
+    private func confirmRollback() {
+        let previous = model.runtimeInspection?.versions.first(where: \.isPrevious)
+        pendingSwitch = RuntimeSwitch(
+            kind: .rollback,
+            from: currentRuntimeText,
+            to: Self.versionText(previous?.gatewayVersion, previous?.gatewayBuildId)
+        )
+    }
+
+    private var switchPresented: Binding<Bool> {
+        Binding(get: { pendingSwitch != nil }, set: { if !$0 { pendingSwitch = nil } })
+    }
 
     private var appVersion: String {
         let info = Bundle.main.infoDictionary
@@ -31,7 +77,7 @@ struct RuntimeUpdateView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                ACPLogoLockup(subtitle: "버전과 Gateway runtime 업데이트")
+                ACPLogoLockup(subtitle: "버전과 Gateway 런타임 업데이트")
                 Spacer()
                 Button("새로고침", systemImage: "arrow.clockwise") {
                     Task { await refreshAll() }
@@ -72,6 +118,20 @@ struct RuntimeUpdateView: View {
             actionBar
         }
         .task { await refreshAll() }
+        .alert("Gateway 런타임 전환", isPresented: switchPresented, presenting: pendingSwitch) { change in
+            Button("취소", role: .cancel) { pendingSwitch = nil }
+            Button(change.kind == .rollback ? "이전 버전으로 전환" : "설치 및 전환") {
+                pendingSwitch = nil
+                Task {
+                    switch change.kind {
+                    case .installSeed: await model.updateRuntimeFromAppSeed()
+                    case .rollback: await model.rollbackRuntime()
+                    }
+                }
+            }
+        } message: { change in
+            Text("Gateway 런타임을 \(change.from)에서 \(change.to)로 전환할까요? 진행 중 작업이 있으면 완료될 때까지 적용되지 않습니다.")
+        }
     }
 
     /// The unified "업데이트" surface: app, Gateway runtime, and ACP adapters,
@@ -118,10 +178,10 @@ struct RuntimeUpdateView: View {
             current: model.runtimeInspection?.current.map { "\($0.gatewayVersion ?? "—") · \($0.gatewayBuildId ?? "—")" } ?? "—",
             latest: model.seedGatewayVersion.map { "\($0.gatewayVersion) · \($0.gatewayBuildId)" },
             checking: model.runtimeLoading && model.runtimeInspection == nil,
-            failure: model.seedGatewayVersion == nil ? "이 빌드에는 seed runtime이 없습니다" : nil
+            failure: model.seedGatewayVersion == nil ? "이 빌드에는 포함된 런타임이 없습니다" : nil
         ) {
             if model.gatewayUpdateAvailable {
-                Button("이 앱의 runtime 설치 및 적용") { Task { await model.updateRuntimeFromAppSeed() } }
+                Button("이 앱의 런타임 설치 및 적용") { confirmInstallSeed() }
                     .buttonStyle(.borderedProminent)
                     .disabled(model.runtimeBusy)
             } else if model.seedGatewayVersion != nil {
@@ -180,18 +240,18 @@ struct RuntimeUpdateView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if model.runtimeLoading && model.runtimeInspection == nil {
-                    ProgressView("설치된 runtime을 확인하는 중…")
+                    ProgressView("설치된 런타임을 확인하는 중…")
                 } else if let versions = model.runtimeInspection?.versions, !versions.isEmpty {
                     ForEach(versions.sorted { $0.versionId > $1.versionId }) { version in
                         RuntimeVersionRow(version: version)
                     }
                 } else {
-                    Text("설치된 runtime이 없습니다.").font(.caption).foregroundStyle(.secondary)
+                    Text("설치된 런타임이 없습니다.").font(.caption).foregroundStyle(.secondary)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         } label: {
-            Label("설치된 runtime", systemImage: "shippingbox").font(.headline)
+            Label("설치된 런타임", systemImage: "shippingbox").font(.headline)
         }
     }
 
@@ -199,14 +259,14 @@ struct RuntimeUpdateView: View {
         HStack {
             // Rollback only exists once an activation recorded a previous
             // known-good target.
-            Button("이전 버전으로 롤백") { Task { await model.rollbackRuntime() } }
+            Button("이전 버전으로 롤백") { confirmRollback() }
                 .disabled(model.runtimeBusy || !(model.runtimeInspection?.canRollback ?? false))
             Spacer()
             if model.runtimeBusy { ProgressView().controlSize(.small) }
-            Button("이 앱의 runtime 설치 및 적용") { Task { await model.updateRuntimeFromAppSeed() } }
+            Button("이 앱의 런타임 설치 및 적용") { confirmInstallSeed() }
                 .buttonStyle(.borderedProminent)
                 .disabled(model.runtimeBusy)
-                .help("앱에 포함된 Gateway runtime을 설치하고 current로 전환합니다. 진행 중인 작업이 있으면 보류됩니다.")
+                .help("앱에 포함된 Gateway 런타임을 설치하고 현재 버전으로 전환합니다. 진행 중인 작업이 있으면 보류됩니다.")
         }
         .padding(14)
     }

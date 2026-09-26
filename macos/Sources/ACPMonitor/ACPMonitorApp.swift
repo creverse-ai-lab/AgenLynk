@@ -58,9 +58,41 @@ struct ACPMonitorApp: App {
                 .environmentObject(model)
                 .environmentObject(model.settings)
         } label: {
-            Image(nsImage: ACPMenuBarIcon.image)
-                .accessibilityLabel("AgenLynk")
+            MenuBarLabel(model: model)
         }
         .menuBarExtraStyle(.window)
+    }
+}
+
+/// The status item: the mark, plus the one thing worth reading without
+/// opening the popover — how many steps wait for the user, else how many run.
+struct MenuBarLabel: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        let statuses = model.sessions.filter { !$0.isInternalReview }.map(\.status)
+        let permission = statuses.filter { $0 == "waiting_permission" }.count
+        let input = statuses.filter { $0 == "waiting_input" }.count
+        let running = statuses.filter { $0 == "running" }.count
+        HStack(spacing: 3) {
+            Image(nsImage: ACPMenuBarIcon.image)
+            if permission > 0 {
+                Text("권한 \(permission)")
+            } else if input > 0 {
+                Text("입력 \(input)")
+            } else if running > 0 {
+                Text("실행 \(running)")
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibility(permission: permission, input: input, running: running))
+    }
+
+    private func accessibility(permission: Int, input: Int, running: Int) -> String {
+        var parts = ["AgenLynk"]
+        if permission > 0 { parts.append("권한 대기 \(permission)") }
+        if input > 0 { parts.append("입력 대기 \(input)") }
+        if running > 0 { parts.append("실행 중 \(running)") }
+        return parts.joined(separator: ", ")
     }
 }

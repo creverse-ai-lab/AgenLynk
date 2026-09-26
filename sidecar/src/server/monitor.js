@@ -12,7 +12,7 @@
 
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, rm } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -30,6 +30,7 @@ import { pathIsMissing } from "../app/fs-paths.js";
 import { gatewaySocketPath } from "../app/config.js";
 import { defaultInstallStatePath } from "../app/install-state.js";
 import {
+  GATEWAY_SETTING_DEFINITIONS,
   defaultGatewaySettings,
   gatewaySettingsSnapshot,
   resolveGatewaySettings,
@@ -153,6 +154,19 @@ async function main() {
   // every newly introduced setting. Defaults/environment represent what that
   // old process actually booted with; persisted values may only be staged.
   const legacyActiveGatewayValues = defaultGatewaySettings();
+  // What this process booted with. The monitor group is the sidecar's own and
+  // takes effect only at its start, so these are its active values; Worker
+  // settings are passed to a Gateway started with the same snapshot, which
+  // is the best record of them when the Gateway does not report its own.
+  const bootValues = (group) => Object.fromEntries(GATEWAY_SETTING_DEFINITIONS
+    .filter((definition) => definition.group === group)
+    .map((definition) => [definition.id, monitorSettings[definition.id]]));
+  const bootMonitorValues = bootValues("monitor");
+  const bootFallbackValues = { ...legacyActiveGatewayValues, ...bootValues("workers") };
+  const activeConfigValues = () => ({
+    ...activeGatewaySettings(state.gateway, bootFallbackValues),
+    ...bootMonitorValues
+  });
   const rpc = new GatewayRpcClient({
     token: identity.token,
     rootId: identity.rootId,
@@ -163,6 +177,17 @@ async function main() {
   const persistence = HISTORY_ENABLED && historyRetentionMs > 0
     ? await SqliteMonitorStore.open(defaultMonitorDatabasePath(), { retentionDays: historyRetentionMs / 86_400_000 })
     : null;
+  // Stats when no store is open: retention 0 (or history disabled) may still
+  // leave a monitor.db from before, which the app offers to delete.
+  const diskHistoryWithoutStore = () => {
+    const path = defaultMonitorDatabasePath();
+    const file = diskHistoryFileBytes(path);
+    return {
+      available: false,
+      retentionDays: historyRetentionMs / 86_400_000,
+      ...(file.exists ? { path, bytes: file.bytes, fileExists: true } : { fileExists: false })
+    };
+  };
   // A session that leaves the live list stays in the in-memory log as long as
   // an idle one stays live, so every provider disappears on the same clock;
   // older history is browsed from the database.
@@ -651,7 +676,7 @@ async function main() {
       return;
     }
     if (url.pathname === "/api/history/stats" && request.method === "GET") {
-      sendJson(response, persistence ? persistence.stats() : { available: false, retentionDays: historyRetentionMs / 86_400_000 });
+      sendJson(response, persistence ? persistence.stats() : diskHistoryWithoutStore());
       return;
     }
     if (url.pathname === "/api/history" && request.method === "POST") {
@@ -662,10 +687,12 @@ async function main() {
         return;
       }
       const live = new Set(state.sessions.keys());
-      const deleted = persistence ? persistence.clear({ keep: live }) : 0;
+      // With disk history off there is no store, but a file left from when it
+      // was on is still the user's data: clearing removes the file itself.
+      const deleted = persistence ? persistence.clear({ keep: live }) : removeDiskHistoryFiles();
       state.clearHistory();
       state.broadcast({ kind: "state", connected: state.connected, streaming: state.streaming, historyCleared: true });
-      sendJson(response, { deleted, ...(persistence ? persistence.stats() : { available: false }) });
+      sendJson(response, { deleted, ...(persistence ? persistence.stats() : diskHistoryWithoutStore()) });
       return;
     }
     if (url.pathname === "/api/agents" && request.method === "GET") {
@@ -768,7 +795,7 @@ async function main() {
     if (url.pathname === "/api/gateway-config" && request.method === "GET") {
       sendJson(response, gatewaySettingsSnapshot({
         statePath: identity.statePath,
-        activeValues: activeGatewaySettings(state.gateway, legacyActiveGatewayValues)
+        activeValues: activeConfigValues()
       }));
       return;
     }
@@ -785,7 +812,7 @@ async function main() {
       });
       const result = gatewaySettingsSnapshot({
         statePath: identity.statePath,
-        activeValues: activeGatewaySettings(state.gateway, legacyActiveGatewayValues)
+        activeValues: activeConfigValues()
       });
       sendJson(response, result);
       return;
@@ -1063,6 +1090,28 @@ function activeGatewaySettings(gateway, fallback = {}) {
   if (gateway.agentUpdates?.notifications != null) values.agentUpdateNotifications = gateway.agentUpdates.notifications;
   if (gateway.agentUpdates?.intervalMs != null) values.agentUpdateIntervalMs = gateway.agentUpdates.intervalMs;
   return Object.fromEntries(Object.entries(values).filter(([, value]) => value != null));
+}
+
+const DISK_HISTORY_SUFFIXES = ["", "-wal", "-shm"];
+
+/** Size of a monitor.db this process does not have open (disk history off). */
+function diskHistoryFileBytes(path = defaultMonitorDatabasePath()) {
+  let bytes = 0;
+  let exists = false;
+  for (const suffix of DISK_HISTORY_SUFFIXES) {
+    try {
+      bytes += statSync(`${path}${suffix}`).size;
+      exists = true;
+    } catch {
+      // Not present.
+    }
+  }
+  return { exists, bytes };
+}
+
+function removeDiskHistoryFiles(path = defaultMonitorDatabasePath()) {
+  for (const suffix of DISK_HISTORY_SUFFIXES) rmSync(`${path}${suffix}`, { force: true });
+  return 0;
 }
 
 async function readJsonBody(request, limit = 64 * 1024) {

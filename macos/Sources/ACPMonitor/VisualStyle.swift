@@ -1,13 +1,28 @@
 import ACPShared
 import SwiftUI
 
+/// The one status color table (docs/ux-policy.md §3). Every screen colors a
+/// session, record, event or request outcome through it: running green,
+/// waiting orange, resting and closed grey, failure red. Blue is left for
+/// selection and accent.
 func statusColor(_ status: String) -> Color {
     switch status {
-    case "running", "restoring": .blue
-    case "idle", "end_turn", "completed": .green
-    case "waiting_permission", "waiting_input", "cancelling", "interrupted": .orange
-    case "error", "failed", "unavailable": .red
-    default: .secondary
+    case "running", "restoring", "approved": .green
+    case "waiting_permission", "waiting_input", "pending", "interrupted", "cancelling": .orange
+    case "error", "failed", "denied", "unavailable", "disconnected": .red
+    default: .secondary // idle, ready, end_turn, completed, closed, cancelled, answered
+    }
+}
+
+/// The glyph beside a session status; closed is a stop, never a checkmark.
+func sessionStatusSymbol(_ status: String) -> String {
+    switch status {
+    case "running", "restoring": "bolt.fill"
+    case "waiting_permission": "hand.raised.fill"
+    case "waiting_input": "keyboard"
+    case "closed": "stop.circle"
+    case "error", "failed": "exclamationmark.triangle.fill"
+    default: "pause.circle.fill"
     }
 }
 
@@ -27,8 +42,7 @@ func eventColor(_ kind: String) -> Color {
     case "permission_request", "input_request": .orange
     case "agent_thought": .purple
     case "tool_call", "subagent": .cyan
-    case "turn_end", "session_end": .green
-    case "turn_start", "session_start", "user_message": .blue
+    case "turn_start", "turn_end", "session_start", "session_end": .secondary
     default: .primary
     }
 }
@@ -37,8 +51,8 @@ func eventColor(_ kind: String) -> Color {
 /// still waiting on the user stays orange whatever produced it.
 func eventColor(_ event: MonitorEvent) -> Color {
     if let color = requestStateColor(event) { return color }
-    if event.isFailed { return .red }
-    if event.status == "cancelled" { return .secondary }
+    if event.isFailed { return statusColor("failed") }
+    if event.status == "cancelled" { return statusColor("cancelled") }
     return eventColor(event.kind)
 }
 
@@ -62,15 +76,17 @@ func eventSymbol(_ kind: String) -> String {
     }
 }
 
-/// A permission / input request reads by its outcome: waiting orange,
-/// approved green, denied red, cancelled grey. nil for other kinds.
+/// A permission / input request reads by its outcome through the status
+/// table: waiting orange, approved green, denied red, answered and cancelled
+/// grey. nil for other kinds.
 func requestStateColor(_ event: MonitorEvent) -> Color? {
     guard let label = event.requestStateLabel else { return nil }
     switch label {
-    case "승인됨", "응답됨": return .green
-    case "거부됨", "입력 실패": return .red
-    case "취소됨": return .secondary
-    default: return .orange
+    case "승인됨": return statusColor("approved")
+    case "거부됨", "입력 실패": return statusColor("denied")
+    case "취소됨": return statusColor("cancelled")
+    case "응답됨": return statusColor("completed")
+    default: return statusColor("waiting_permission")
     }
 }
 
@@ -93,18 +109,6 @@ func eventSymbol(_ event: MonitorEvent) -> String {
     }
 }
 
-/// Human word for an event status, nil when the event carries none.
-func eventStatusLabel(_ status: String?) -> String? {
-    switch status {
-    case "pending": "대기"
-    case "running": "실행 중"
-    case "completed": "완료"
-    case "failed": "실패"
-    case "cancelled": "취소"
-    default: nil
-    }
-}
-
 /// Tooltip for every compact context-percent label (menu bar, lanes).
 let contextPercentHelp = "최근 요청이 모델 컨텍스트 창을 차지한 비율입니다 (사용 / 창 크기). 세션 누적 토큰과는 다른 값입니다."
 
@@ -112,7 +116,19 @@ let contextPercentHelp = "최근 요청이 모델 컨텍스트 창을 차지한 
 func contextColor(_ fraction: Double) -> Color {
     if fraction >= 0.9 { return .red }
     if fraction >= 0.75 { return .orange }
-    return .blue
+    return .accentColor
+}
+
+/// The small bolt that marks a tool call a CLI hook reported as it
+/// happened — the link between the hook settings and the timeline.
+struct HookMarker: View {
+    var body: some View {
+        Image(systemName: "bolt.fill")
+            .font(.system(size: 8, weight: .bold))
+            .foregroundStyle(.green)
+            .help("hook으로 실시간 수신")
+            .accessibilityLabel("hook으로 실시간 수신")
+    }
 }
 
 func contextPercentText(_ fraction: Double) -> String {
@@ -122,4 +138,12 @@ func contextPercentText(_ fraction: Double) -> String {
 func shortTime(_ timestamp: String?) -> String {
     guard let timestamp, let date = parseTimestamp(timestamp) else { return "—" }
     return date.formatted(date: .omitted, time: .standard)
+}
+
+extension View {
+    /// A tooltip only when there is something to say — never an empty
+    /// `.help("")`.
+    @ViewBuilder func help(ifPresent text: String?) -> some View {
+        if let text, !text.isEmpty { self.help(text) } else { self }
+    }
 }

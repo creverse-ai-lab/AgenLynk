@@ -145,14 +145,7 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
         if !cwd.isEmpty, !folder.isEmpty, folder != "/" { return folder }
         return "새 세션"
     }
-    var providerLabel: String {
-        switch provider.lowercased() {
-        case "claude": "Claude"
-        case "codex": "Codex"
-        case "grok": "Grok"
-        default: provider.isEmpty ? "Agent" : provider.capitalized
-        }
-    }
+    var providerLabel: String { providerDisplayLabel(provider) }
     var isFrontdoorRecord: Bool { role == "frontdoor" }
     var isLocalSource: Bool { source == "local" }
     var sourceLabel: String { isLocalSource ? "LOCAL" : "ACP" }
@@ -169,7 +162,14 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
     var isRealtimeVisible: Bool { isActive && hasFrontdoorIdentity }
     /// Updates arrive as they happen (hooks or the Gateway stream), not only
     /// from a transcript re-read.
-    var isLiveObserved: Bool { capabilities.contains("live") }
+    /// A closed (or history) session is no longer updating, so it never
+    /// claims to be live.
+    var isLiveObserved: Bool { capabilities.contains("live") && status != "closed" }
+    /// The source can see an event timeline at all. A record without
+    /// capabilities (older sidecar) is assumed to.
+    var canShowTimeline: Bool { capabilities.isEmpty || capabilities.contains("timeline") }
+    /// Waiting on the person: a permission prompt or a question.
+    var isWaitingForUser: Bool { status == "waiting_permission" || status == "waiting_input" }
     /// The source cannot see a permission prompt, so "nothing is waiting" is
     /// not something this session can tell. A record without capabilities
     /// (older sidecar) and a Gateway session are never flagged.
@@ -281,6 +281,12 @@ struct UsageForecast: Equatable, Sendable {
         return current / typical
     }
 
+    /// "예상의 80%", "예상의 150%" — a share of the estimate, never an
+    /// ambiguous "초과 150%".
+    var progressText: String? {
+        progress.map { "예상의 \(Int(($0 * 100).rounded()))%" }
+    }
+
     static func median(_ values: [Double]) -> Double? {
         guard !values.isEmpty else { return nil }
         let sorted = values.sorted()
@@ -317,9 +323,15 @@ struct SessionAlert: Hashable, Sendable {
         message = object.string("message")
     }
 
-    /// A short badge; the full message is the tooltip.
+    /// A short badge; the full message is the tooltip. An unknown code is
+    /// never shown raw.
     var badge: String {
-        code == "permission_policy_partial" ? "읽기 전용 부분 적용" : code
+        code == "permission_policy_partial" ? "읽기 전용 부분 적용" : "경고"
+    }
+
+    var tooltip: String {
+        if let message = message?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty { return message }
+        return "자세한 설명이 없는 경고입니다."
     }
 }
 
@@ -413,6 +425,42 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
     }
     var members: [GatewaySession] { (root.map { [$0] } ?? []) + workers }
     var isActive: Bool { members.contains(where: \.isActive) }
+    /// Members actually running — a session waiting on the person is not.
+    var runningCount: Int { members.filter { $0.isActive && !$0.isWaitingForUser }.count }
+    var waitingPermissionCount: Int { members.filter { $0.status == "waiting_permission" }.count }
+    var waitingInputCount: Int { members.filter { $0.status == "waiting_input" }.count }
+    /// Every member closed: the work is over, not just idle.
+    var isClosed: Bool { !members.isEmpty && members.allSatisfy { $0.status == "closed" } }
+    /// The member a selection of this Frontdoor should land on: one waiting
+    /// on the person first, else the root, else the first worker.
+    var preferredSession: GatewaySession? {
+        members.first(where: { $0.status == "waiting_permission" })
+            ?? members.first(where: { $0.status == "waiting_input" })
+            ?? root ?? workers.first
+    }
+    /// The status pill: waiting first (it needs the person), then running,
+    /// closed, idle.
+    var statusText: String {
+        if waitingPermissionCount > 0 { return "권한 대기 \(waitingPermissionCount)" }
+        if waitingInputCount > 0 { return "입력 대기 \(waitingInputCount)" }
+        if isActive { return "실행 중" }
+        if isClosed { return "종료" }
+        return "대기"
+    }
+    /// The status the pill's color follows (see statusColor).
+    var statusKey: String {
+        if waitingPermissionCount > 0 { return "waiting_permission" }
+        if waitingInputCount > 0 { return "waiting_input" }
+        if isActive { return "running" }
+        if isClosed { return "closed" }
+        return "idle"
+    }
+    /// The sidebar row's second line: "Worker 2 · 실행 중 2 · 작업 토큰 34K".
+    var countsLine: String {
+        var parts = ["Worker \(workers.count)", "실행 중 \(runningCount)"]
+        if let total = WorkUsage(sessions: members).totalTokens { parts.append("작업 토큰 \(formatTokenCount(total))") }
+        return parts.joined(separator: " · ")
+    }
     var activeWorkerCount: Int { workers.filter(\.isActive).count }
     var workspaceCount: Int { Set(members.map(\.cwd).filter { !$0.isEmpty }).count }
     var updatedAt: String? { members.compactMap(\.updatedAt).max() }
@@ -940,6 +988,13 @@ struct MonitorEvent: Identifiable, Equatable, Sendable {
     /// Short Korean label for the kind, as rows and nodes print it.
     var kindLabel: String { eventKindLabel(kind) }
 
+    /// How the event stands, in one word: a request's outcome wins over the
+    /// generic status, so a denied permission never reads "완료".
+    var stateLabel: String? { requestStateLabel ?? eventStatusLabel(status) }
+
+    /// Arrived through a CLI hook as it happened, not only from a transcript.
+    var isHookObserved: Bool { sources.contains("hook") }
+
     /// The one line a timeline row or sequence node leads with. A tool call
     /// is named by its own compact header ("Bash: ls -la"), a permission or
     /// input request by how it stands, anything else by its kind.
@@ -1018,17 +1073,77 @@ func eventKindLabel(_ kind: String) -> String {
     case "turn_end": "턴 종료"
     case "session_start": "세션 시작"
     case "session_end": "세션 종료"
-    case "user_message": "사용자 메시지"
+    case "user_message": "사용자 입력"
     case "agent_message": "응답"
     case "agent_thought": "생각"
-    case "tool_call": "도구"
+    case "tool_call": "도구 호출"
     case "permission_request": "권한 요청"
     case "input_request": "입력 요청"
     case "subagent": "서브에이전트"
     case "plan": "계획"
     case "compaction": "컨텍스트 압축"
     case "error": "오류"
-    default: kind.replacingOccurrences(of: "_", with: " ")
+    // An unlisted kind is not shown as raw text (docs/ux-policy.md §5).
+    default: "알 수 없는 이벤트"
+    }
+}
+
+/// Human word for an event (tool call, request) status, nil when the event
+/// carries none.
+func eventStatusLabel(_ status: String?) -> String? {
+    switch status {
+    case "pending": "시작 전"
+    case "running": "실행 중"
+    case "completed": "완료"
+    case "failed": "실패"
+    case "cancelled": "취소됨"
+    default: nil
+    }
+}
+
+/// A provider's display name; an unknown one never reads "Agent".
+func providerDisplayLabel(_ provider: String) -> String {
+    switch provider.lowercased() {
+    case "claude": "Claude"
+    case "codex": "Codex"
+    case "grok": "Grok"
+    case "", "unknown": "알 수 없는 CLI"
+    default: provider.capitalized
+    }
+}
+
+/// "세션 목록을", "인스펙터를": the object particle that fits the word's last
+/// syllable (a final consonant takes 을).
+func withObjectParticle(_ word: String) -> String {
+    guard let scalar = word.unicodeScalars.last else { return word }
+    let value = scalar.value
+    if (0xAC00...0xD7A3).contains(value) {
+        return word + ((value - 0xAC00) % 28 == 0 ? "를" : "을")
+    }
+    return word + "을(를)"
+}
+
+/// The headline of "what the selected session is doing" (docs/ux-policy.md
+/// §3): waiting first, then what the newest event of a running session is,
+/// then the resting state.
+func sessionActivityHeadline(status: String, isActive: Bool, latestKind: String?) -> String {
+    switch status {
+    case "waiting_permission": return "권한 대기 중"
+    case "waiting_input": return "입력 대기 중"
+    default: break
+    }
+    if isActive {
+        switch latestKind {
+        case "agent_thought": return "생각 중"
+        case "agent_message": return "응답 생성 중"
+        default: return "실행 중"
+        }
+    }
+    switch status {
+    case "idle", "ready", "end_turn", "completed": return "대기 · 다음 입력을 기다림"
+    case "closed": return "종료됨"
+    case "error", "failed": return "오류"
+    default: return sessionStatusLabel(status)
     }
 }
 
@@ -1039,10 +1154,9 @@ func sessionStatusLabel(_ status: String) -> String {
     case "running": "실행 중"
     case "waiting_permission": "권한 대기"
     case "waiting_input": "입력 대기"
-    case "idle": "대기"
-    case "ready": "준비됨"
+    // A finished turn is a resting session, not "완료" (docs/ux-policy.md §3).
+    case "idle", "ready", "end_turn", "completed": "대기"
     case "closed": "종료"
-    case "end_turn", "completed": "완료"
     case "error": "오류"
     case "failed": "실패"
     case "disconnected": "연결 끊김"
@@ -1055,6 +1169,12 @@ func sessionStatusLabel(_ status: String) -> String {
     // An unlisted status is not shown as raw text (docs/ux-policy.md §3).
     default: "알 수 없음"
     }
+}
+
+/// A task / inbox record's status: like a session's, except that a finished
+/// record is done ("완료"), not resting.
+func recordStatusLabel(_ status: String) -> String {
+    status == "completed" ? "완료" : sessionStatusLabel(status)
 }
 
 /// "방금", "12초 전", "3분 전", "2시간 전", "4일 전".
@@ -1991,9 +2111,9 @@ func monitorFailureGuidance(code: String?) -> String? {
     case "monitor_update_required":
         "이 앱이 설치된 runtime보다 오래되었습니다. 새 버전의 Lynk로 업데이트하세요."
     case "monitor_unauthorized":
-        "Monitor 인증이 유효하지 않습니다. '다시 연결'을 눌러 세션을 새로 만드세요."
+        "Monitor 인증이 유효하지 않습니다. '모니터 다시 연결'을 눌러 세션을 새로 만드세요."
     case "monitor_restart_blocked":
-        "진행 중인 세션·Task·미응답 요청이 끝나면 다시 시도하세요."
+        "진행 중인 세션·태스크·미응답 요청이 끝나면 다시 시도하세요."
     default:
         nil
     }
@@ -2173,7 +2293,7 @@ func restartBlockerLabels(sessions: [GatewaySession], tasks: [MonitorRecord], in
     let pendingInbox = inbox.filter { $0.status == "pending" }.count
     return [
         activeSessions > 0 ? "진행 중 세션 \(activeSessions)개" : nil,
-        activeTasks > 0 ? "진행 중 Task \(activeTasks)개" : nil,
-        pendingInbox > 0 ? "미응답 Inbox \(pendingInbox)개" : nil
+        activeTasks > 0 ? "진행 중 태스크 \(activeTasks)개" : nil,
+        pendingInbox > 0 ? "미응답 요청 \(pendingInbox)개" : nil
     ].compactMap { $0 }
 }
