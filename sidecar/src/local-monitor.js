@@ -31,7 +31,7 @@ function realModel(value) {
 function resolvedStatus(raw, timeline) {
   const scanned = monitorStatus(raw.state);
   const hinted = timeline?.status;
-  if (!hinted || scanned === "waiting_input") return scanned;
+  if (!hinted || scanned === "waiting_input" || scanned === "waiting_permission") return scanned;
   const scannedAt = Number(raw.time || 0) * 1_000;
   const hintedAt = Date.parse(timeline.statusAt ?? "");
   return Number.isFinite(hintedAt) && hintedAt > scannedAt ? hinted : scanned;

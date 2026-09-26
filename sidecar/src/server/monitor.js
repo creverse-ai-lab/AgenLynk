@@ -612,8 +612,11 @@ async function main() {
         response.end('{"error":"action must be install or uninstall","code":"monitor_bad_request"}');
         return;
       }
-      const run = body.action === "install" ? installHooks : uninstallHooks;
-      sendJson(response, { receiving: HOOKS_ENABLED, ...run({ only: providers?.length ? providers : null }) });
+      const only = providers?.length ? providers : null;
+      const result = body.action === "install"
+        ? installHooks({ only, consent: body.consent === true })
+        : uninstallHooks({ only, decline: body.decline === true });
+      sendJson(response, { receiving: HOOKS_ENABLED, ...result });
       return;
     }
     if (url.pathname === "/api/history" && request.method === "GET") {

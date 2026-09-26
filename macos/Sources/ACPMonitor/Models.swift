@@ -1121,6 +1121,8 @@ struct MonitoringHookStatus: Equatable, Sendable {
     /// The running sidecar accepts hook events (only the app's own does).
     let receiving: Bool
     let enabled: Bool
+    /// Nothing has been installed yet because the user has not been asked.
+    let consentRequired: Bool
     let targets: [MonitoringHookTarget]
     let errors: [String]
 
@@ -1133,6 +1135,7 @@ struct MonitoringHookStatus: Equatable, Sendable {
         return MonitoringHookStatus(
             receiving: root.bool("receiving") ?? false,
             enabled: root.bool("enabled") ?? true,
+            consentRequired: root.bool("consentRequired") ?? false,
             targets: providerOrder.compactMap { provider in targets[provider].flatMap { MonitoringHookTarget(provider: provider, $0) } },
             errors: (root.object("errors") ?? [:]).values.compactMap(\.stringValue)
         )

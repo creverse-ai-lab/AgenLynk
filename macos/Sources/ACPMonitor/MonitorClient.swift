@@ -68,10 +68,20 @@ actor MonitorClient {
     }
 
     /// `action` is "install" or "uninstall"; `providers` limits it to some CLIs.
-    func mutateHooks(endpoint: MonitorEndpoint, action: String, providers: [String]) async throws -> MonitoringHookStatus {
+    /// `consent` records the user's agreement with an install; `decline`
+    /// records a "no" so the app does not ask again until the scope changes.
+    func mutateHooks(
+        endpoint: MonitorEndpoint,
+        action: String,
+        providers: [String],
+        consent: Bool = false,
+        decline: Bool = false
+    ) async throws -> MonitoringHookStatus {
         var request = endpoint.request(path: "api/hooks", method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["action": action, "providers": providers])
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "action": action, "providers": providers, "consent": consent, "decline": decline
+        ] as [String: Any])
         let (data, response) = try await URLSession.shared.data(for: request)
         try validate(response: response, data: data)
         return try MonitoringHookStatus.decode(data)

@@ -63,6 +63,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var hookStatus: MonitoringHookStatus?
     @Published private(set) var hookMutatingProvider: String?
     @Published private(set) var hookError: String?
+    /// Monitoring hooks chosen during onboarding, applied once the sidecar is up.
+    @Published var onboardingMonitoringHooks: Set<String> = ["claude", "codex", "grok"]
+    private var pendingHookConsent: Set<String>?
+    /// Asks an existing user (after an update) whether to turn hooks on.
+    @Published var hookConsentPresented = false
+    private var hookConsentAsked = false
     @Published private(set) var gatewayConfigOptions: [GatewayConfigOption] = []
     @Published private(set) var gatewayConfigLoading = false
     @Published private(set) var gatewayConfigSaving = false
@@ -431,6 +437,7 @@ final class AppModel: ObservableObject {
                     }
                 }
                 self.onboardingRunning = false
+                self.pendingHookConsent = self.onboardingMonitoringHooks
                 self.startupPhase = .ready
                 self.startIfNeeded()
             } catch {
@@ -535,6 +542,45 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// After the sidecar connects: apply the onboarding choice, or ask an
+    /// existing user once if the hooks have never been agreed to.
+    private func reconcileHookConsent() async {
+        await loadHookStatus()
+        guard let status = hookStatus, status.receiving else { return }
+        if let chosen = pendingHookConsent {
+            pendingHookConsent = nil
+            await answerHookConsent(enabled: chosen)
+            return
+        }
+        if status.consentRequired && !hookConsentAsked {
+            hookConsentAsked = true
+            hookConsentPresented = true
+        }
+    }
+
+    /// The user's answer to the monitoring-hook question. An empty set is "no".
+    func answerHookConsent(enabled providers: Set<String>) async {
+        guard let endpoint else { return }
+        hookConsentPresented = false
+        let ordered = Self.frontdoorInstallOrder.filter { providers.contains($0) }
+        let declined = Self.frontdoorInstallOrder.filter { !providers.contains($0) }
+        do {
+            var status: MonitoringHookStatus
+            if ordered.isEmpty {
+                status = try await client.mutateHooks(endpoint: endpoint, action: "uninstall", providers: [], decline: true)
+            } else {
+                status = try await client.mutateHooks(endpoint: endpoint, action: "install", providers: ordered, consent: true)
+                if !declined.isEmpty {
+                    status = try await client.mutateHooks(endpoint: endpoint, action: "uninstall", providers: declined)
+                }
+            }
+            hookStatus = status
+            hookError = status.errors.first
+        } catch {
+            hookError = error.localizedDescription
+        }
+    }
+
     /// Turns one CLI's monitoring hook on or off. Off is remembered, so an app
     /// update does not put it back.
     func setHook(_ provider: String, enabled: Bool) async {
@@ -542,10 +588,12 @@ final class AppModel: ObservableObject {
         hookMutatingProvider = provider
         defer { hookMutatingProvider = nil }
         do {
+            // Turning a CLI on from settings is itself the user's consent.
             let status = try await client.mutateHooks(
                 endpoint: endpoint,
                 action: enabled ? "install" : "uninstall",
-                providers: [provider]
+                providers: [provider],
+                consent: enabled
             )
             hookStatus = status
             hookError = status.errors.first
@@ -963,6 +1011,7 @@ final class AppModel: ObservableObject {
             guard connectionIsCurrent(generation) else { return }
             apply(snapshot)
             await loadGatewayConfig()
+            await reconcileHookConsent()
             guard connectionIsCurrent(generation) else { return }
             await client.startStream(endpoint: endpoint, onMessage: { [weak self] value in
                 guard let self, self.connectionIsCurrent(generation) else { return }

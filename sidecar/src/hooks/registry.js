@@ -38,6 +38,13 @@ export class HookSessions {
    * else the monitor session id and the events it produced.
    */
   record(provider, payload, receivedAt = Date.now()) {
+    // Grok runs the hooks in ~/.claude/settings.json too, with its own
+    // camelCase payload. The script drops those by environment; this catches
+    // the ones that arrive anyway, since Grok also reports them itself.
+    if (provider === "claude" && payload && typeof payload === "object"
+      && payload.session_id == null && (payload.sessionId != null || payload.hookEventName != null)) {
+      return null;
+    }
     const sessionId = readHookPayload(provider, payload).sessionId;
     if (typeof sessionId !== "string" || !sessionId) return null;
     const key = `${provider}:${sessionId}`;

@@ -84,6 +84,15 @@ export function normalizeCodexRecords(records) {
   let usage = null;
   let contextWindow = null;
   const toolNames = new Map();
+  const openTools = new Set();
+  const closeOpenTools = (ts, status, ended) => {
+    for (const id of openTools) {
+      events.add(monitorEvent({
+        key: `tool:${id}`, kind: "tool_call", ts, source: SOURCE, turnId: ended, toolCallId: id, status, endedAt: ts
+      }));
+    }
+    openTools.clear();
+  };
   // Turns whose opening prompt already landed on turn_start.
   const promptedTurns = new Set();
 
@@ -126,6 +135,7 @@ export function normalizeCodexRecords(records) {
             detail: { durationMs: payload.duration_ms }
           }));
         }
+        closeOpenTools(ts, "completed", ended);
         setStatus("idle", ts);
         turnId = null;
       } else if (payload.type === "turn_aborted") {
@@ -136,6 +146,7 @@ export function normalizeCodexRecords(records) {
             title: payload.reason ?? null
           }));
         }
+        closeOpenTools(ts, "cancelled", ended);
         setStatus("idle", ts);
         turnId = null;
       } else if (payload.type === "stream_error" || payload.type === "error") {
@@ -158,6 +169,7 @@ export function normalizeCodexRecords(records) {
         const name = payload.name ?? payload.type;
         const input = parseInput(payload.input ?? payload.arguments ?? payload.action);
         toolNames.set(callId, name);
+        openTools.add(callId);
         events.add(monitorEvent({
           key: `tool:${callId}`, kind: "tool_call", ts, source: SOURCE, turnId: recordTurn ?? turnId, toolCallId: callId,
           title: toolTitle(name, input), status: "running",
@@ -165,6 +177,7 @@ export function normalizeCodexRecords(records) {
         }));
         if (turnId) setStatus("running", ts);
       } else if (TOOL_OUTPUT_TYPES.has(payload.type)) {
+        openTools.delete(callId);
         events.add(monitorEvent({
           key: `tool:${callId}`, kind: "tool_call", ts, source: SOURCE, turnId: recordTurn ?? turnId, toolCallId: callId,
           body: outputText(payload), status: "completed", endedAt: ts

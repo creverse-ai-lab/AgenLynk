@@ -917,7 +917,7 @@ enum MonitorModelChecks {
     /// GET /api/hooks as sidecar/src/hooks/installer.js#hookStatus shapes it.
     private static func monitoringHookStatusDecodesPerCliState() throws {
         let json = """
-        {"receiving":true,"enabled":true,"targets":{
+        {"receiving":true,"enabled":true,"consentRequired":true,"targets":{
           "grok":{"agentPresent":true,"disabled":true,"installed":false,"partial":false,"file":"/g/hooks/agenlynk.json","events":[]},
           "codex":{"agentPresent":true,"disabled":false,"installed":true,"partial":false,"needsTrust":true,"untrustedEvents":["Stop"],"file":"/c/hooks.json","events":["Stop"]},
           "claude":{"agentPresent":true,"disabled":false,"installed":false,"partial":false,"error":"invalid JSON","file":"/a/settings.json","events":[]}
@@ -925,6 +925,7 @@ enum MonitorModelChecks {
         """
         let status = try MonitoringHookStatus.decode(Data(json.utf8))
         try check(status.receiving, "hook receiving flag must decode")
+        try check(status.consentRequired, "a pending consent question must decode")
         try check(status.targets.map(\.provider) == ["claude", "codex", "grok"], "targets must list in a stable CLI order")
         try check(status.targets[1].needsTrust, "Codex pending trust must decode")
         try check(status.targets[2].disabled && !status.targets[2].installed, "an opted-out CLI must decode as disabled")

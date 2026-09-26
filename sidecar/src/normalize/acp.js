@@ -85,6 +85,9 @@ function mapUpdate(collector, update, context) {
   if (type === "tool_call" || type === "tool_call_update") {
     const id = update.toolCallId;
     if (!id) return;
+    const reported = toolStatus(update.status);
+    if (["completed", "failed", "cancelled"].includes(reported)) context.openTools?.delete(id);
+    else context.openTools?.add(id);
     const name = update._meta?.["x.ai/tool"]?.name ?? update.kind ?? null;
     const output = contentText(update.content);
     collector.add(monitorEvent({
@@ -141,13 +144,23 @@ function mapUpdate(collector, update, context) {
   }
 }
 
+/** Closes the tool calls a finished turn left open, with the turn's outcome. */
+function closeOpenTools(collector, context, ts, status, turnId) {
+  for (const id of context.openTools ?? []) {
+    collector.add(monitorEvent({
+      key: `tool:${id}`, kind: "tool_call", ts, source: context.source, turnId, toolCallId: id, status, endedAt: ts
+    }));
+  }
+  context.openTools?.clear();
+}
+
 /**
  * Grok's updates.jsonl window -> events + session facts. Pure over the window.
  * Permission prompts are not in this file; they only arrive through hooks.
  */
 export function normalizeGrokUpdates(records) {
   const collector = new EventCollector();
-  const context = { turnId: null, segment: 0, lastKind: null, ts: null, source: "transcript" };
+  const context = { turnId: null, segment: 0, lastKind: null, ts: null, source: "transcript", openTools: new Set() };
   let pendingPrompt = null;
   let model = null;
   let status = null;
@@ -200,6 +213,7 @@ export function normalizeGrokUpdates(records) {
           detail: { durationMs: update.elapsed_ms, stopReason: update.stop_reason }
         }));
       }
+      closeOpenTools(collector, context, ts, stopStatus(update.stop_reason), ended);
       if (update.usage) turnUsage = update.usage;
       status = "idle";
       statusAt = ts;
@@ -256,7 +270,7 @@ export function grokUsage(usageFile, signalsFile) {
  */
 export class GatewayEventNormalizer {
   constructor() {
-    this.context = { turnId: null, segment: 0, lastKind: null, ts: null, source: "gateway", chunks: new Map() };
+    this.context = { turnId: null, segment: 0, lastKind: null, ts: null, source: "gateway", chunks: new Map(), openTools: new Set() };
   }
 
   ingest(event) {
@@ -286,6 +300,7 @@ export class GatewayEventNormalizer {
           key: `turn:${turnId ?? ts}:end`, kind: "turn_end", ts, source: "gateway", turnId,
           status: stopStatus(event.stopReason), detail: { stopReason: event.stopReason }
         }));
+        closeOpenTools(collector, context, ts, stopStatus(event.stopReason), turnId);
         context.lastKind = type;
         break;
       case "agent_message_chunk":

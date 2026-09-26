@@ -84,7 +84,9 @@ export function signalWithApprovals(record, pending) {
   const approvalChanged = updatePendingApprovals(record, pending);
   // A finished turn clears anything still outstanding.
   if (normal && normal[0] === "ready") pending.clear();
-  if (pending.size > 0) return ["needs_input", "approval/pending"];
+  // An approval is a permission wait, not a question for the user: the app
+  // shows it as "권한 대기" for every CLI.
+  if (pending.size > 0) return ["needs_permission", "approval/pending"];
   if (approvalChanged) return normal ?? ["running", "approval/resolved"];
   return normal;
 }

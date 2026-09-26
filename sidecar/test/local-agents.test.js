@@ -81,7 +81,7 @@ test("an unresolved approval overrides the transcript state until it is answered
         input: 'sandbox_permissions: "require_escalated"'
       }
     }, pending),
-    ["needs_input", "approval/pending"]
+    ["needs_permission", "approval/pending"]
   );
   assert.deepEqual(
     signalWithApprovals({
@@ -98,7 +98,7 @@ test("an unresolved approval overrides the transcript state until it is answered
       type: "event_msg",
       payload: { result: { events: [{ type: "permission_request", requestId: 7 }] } }
     }, pending),
-    ["needs_input", "approval/pending"]
+    ["needs_permission", "approval/pending"]
   );
   assert.deepEqual(
     signalWithApprovals({

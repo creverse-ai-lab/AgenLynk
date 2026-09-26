@@ -19,6 +19,9 @@ struct DashboardView: View {
             }
         }
         .task { model.startIfNeeded() }
+        .sheet(isPresented: $model.hookConsentPresented) {
+            MonitoringConsentSheet()
+        }
         .confirmationDialog(
             "손상된 Gateway runtime을 교체하시겠습니까?",
             isPresented: $showForceRepairConfirmation,

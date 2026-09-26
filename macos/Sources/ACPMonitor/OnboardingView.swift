@@ -30,6 +30,12 @@ struct OnboardingView: View {
             }
             .frame(maxWidth: 320, alignment: .leading)
 
+            VStack(alignment: .leading, spacing: 8) {
+                Text("실시간 모니터링 (선택)").font(.headline)
+                MonitoringConsentChoices(selection: $model.onboardingMonitoringHooks, disabled: model.onboardingRunning)
+            }
+            .frame(maxWidth: 520, alignment: .leading)
+
             if !model.onboardingInstallLocationReady {
                 Label("AgenLynk를 Applications 폴더로 옮긴 뒤 다시 실행해야 설치 경로가 유지됩니다.", systemImage: "externaldrive.badge.exclamationmark")
                     .foregroundStyle(.orange)
@@ -71,7 +77,7 @@ struct OnboardingView: View {
             .buttonStyle(.borderedProminent)
         }
         .padding(32)
-        .frame(minWidth: 560, minHeight: 420, alignment: .topLeading)
+        .frame(minWidth: 560, minHeight: 560, alignment: .topLeading)
     }
 
     private struct FrontdoorChoice { let id: String; let label: String }

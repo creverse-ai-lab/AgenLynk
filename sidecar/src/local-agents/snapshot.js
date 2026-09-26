@@ -65,7 +65,7 @@ export async function snapshotSessions(states, database = null) {
   const activeByCwd = new Map();
   for (const item of sessions) {
     if (item.provider !== "codex") continue;
-    if (item.state !== "running" && item.state !== "needs_input") continue;
+    if (item.state !== "running" && item.state !== "needs_input" && item.state !== "needs_permission") continue;
     if (engines.get(item.session) === "codex-auto-review") continue;
     const cwd = workdirs.get(item.session);
     if (!cwd) continue;

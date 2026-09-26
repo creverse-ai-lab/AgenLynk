@@ -69,6 +69,13 @@ export function normalizeClaudeRecords(records, { agentId = null } = {}) {
   };
   const endTurn = (ts, outcome, detail = null) => {
     if (!turnId) return;
+    // A tool still open when its turn ends never reports back: it went with
+    // the turn (an interrupt kills it), so it must not spin forever.
+    for (const id of openTools) {
+      events.add(monitorEvent({
+        key: `tool:${id}`, kind: "tool_call", ts, source: SOURCE, turnId, toolCallId: id, status: outcome, endedAt: ts
+      }));
+    }
     events.add(monitorEvent({
       key: `turn:${turnId}:end`, kind: "turn_end", ts, source: SOURCE, turnId, status: outcome, detail
     }));

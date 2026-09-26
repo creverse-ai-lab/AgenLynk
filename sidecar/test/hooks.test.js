@@ -46,7 +46,10 @@ async function fakeHomes(root) {
 test("installing hooks appends ours, keeps other tools' hooks, and round-trips on uninstall", async () => {
   await withTempDirectory(async (root) => {
     const { env, claudeSettings, codexHooks } = await fakeHomes(root);
-    const installed = installHooks({ env });
+    assert.equal(hookStatus({ env }).consentRequired, true);
+    assert.deepEqual(ensureHooks({ env }), { skipped: "consent_required" }, "nothing is written before the user agrees");
+    assert.equal(await readFile(join(env.CLAUDE_CONFIG_DIR, "settings.json"), "utf8"), claudeSettings);
+    const installed = installHooks({ env, consent: true });
     assert.deepEqual(installed.errors, {});
     assert.deepEqual(installed.changes.map((change) => change.provider).sort(), ["claude", "codex", "grok"]);
     assert.ok(Object.values(installed.targets).every((target) => target.installed));
@@ -59,7 +62,9 @@ test("installing hooks appends ours, keeps other tools' hooks, and round-trips o
     assert.equal(claude.hooks.Stop[1].matcher, undefined);
     const grok = JSON.parse(await readFile(join(env.GROK_HOME, "hooks", "agenlynk.json"), "utf8"));
     assert.match(grok.hooks.Notification[0].hooks[0].command, /agenlynk-hook\.sh' grok/);
-    assert.ok(existsSync(join(env.AGENLYNK_HOME, "hooks", "agenlynk-hook.sh")), "the script is installed at a stable path");
+    assert.ok(existsSync(installed.script), "the script is installed");
+    assert.match(installed.script, /hooks\/[0-9a-f]{12}\/agenlynk-hook\.sh$/, "under a directory named for its content");
+    assert.equal(hookStatus({ env }).consentRequired, false);
     assert.equal((await readdir(join(env.AGENLYNK_HOME, "backups"))).length, 2, "each existing file is backed up");
 
     assert.deepEqual(installHooks({ env }).changes, [], "a second install is a no-op");
@@ -77,7 +82,7 @@ test("installing hooks appends ours, keeps other tools' hooks, and round-trips o
 test("Codex hooks report pending trust until Codex records it", async () => {
   await withTempDirectory(async (root) => {
     const { env } = await fakeHomes(root);
-    installHooks({ env, only: ["codex"] });
+    installHooks({ env, only: ["codex"], consent: true });
     const pending = hookStatus({ env, only: ["codex"] }).targets.codex;
     assert.equal(pending.needsTrust, true);
     assert.ok(pending.untrustedEvents.includes("PreToolUse"));
@@ -95,6 +100,19 @@ test("Codex hooks report pending trust until Codex records it", async () => {
     // Our PreToolUse group went after the existing one, so its trust key is :1:0
     // and the other tool's :0:0 is untouched.
     assert.equal(hooks.PreToolUse.length, 2);
+
+    // A changed command (a new script version) invalidates that approval:
+    // the trusted_hash Codex recorded belongs to the old definition.
+    const edited = JSON.parse(await readFile(hooksFile, "utf8"));
+    edited.hooks.Stop.find((group) => group.hooks[0].command.includes("agenlynk-hook.sh")).hooks[0].command = "/bin/sh /old/0123456789ab/agenlynk-hook.sh codex";
+    await writeFile(hooksFile, JSON.stringify(edited, null, 2));
+    installHooks({ env, only: ["codex"] });
+    const stale = hookStatus({ env, only: ["codex"] }).targets.codex;
+    assert.equal(stale.needsTrust, true, "an approval of the old definition does not count");
+    assert.ok(stale.untrustedEvents.includes("Stop"));
+    // Re-approval in Codex writes a new hash.
+    await writeFile(join(env.CODEX_HOME, "config.toml"), (await readFile(join(env.CODEX_HOME, "config.toml"), "utf8")).replaceAll('trusted_hash = "x"', 'trusted_hash = "y"'));
+    assert.equal(hookStatus({ env, only: ["codex"] }).targets.codex.needsTrust, false);
   });
 });
 
@@ -102,7 +120,7 @@ test("a malformed config file is left untouched and a per-CLI opt-out survives r
   await withTempDirectory(async (root) => {
     const { env } = await fakeHomes(root);
     await writeFile(join(env.CLAUDE_CONFIG_DIR, "settings.json"), "{ not json");
-    const result = installHooks({ env });
+    const result = installHooks({ env, consent: true });
     assert.match(result.errors.claude, /invalid JSON/);
     assert.equal(await readFile(join(env.CLAUDE_CONFIG_DIR, "settings.json"), "utf8"), "{ not json");
 
@@ -144,7 +162,26 @@ test("a permission prompt is pending until the next sign of progress, for every 
     assert.equal(answered.status, "running", provider);
     const resolved = answered.events.find((event) => event.key === request.key);
     assert.equal(resolved?.status, "completed", `${provider} resolves its prompt`);
+    assert.equal(resolved.detail.outcome, "approved");
   }
+});
+
+test("a denied prompt reads as denied and an abandoned one as cancelled", () => {
+  const ask = { hook_event_name: "PermissionRequest", session_id: "s", tool_name: "Bash" };
+  const denied = new HookNormalizer();
+  denied.ingest("claude", ask);
+  const [refusal] = denied.ingest("claude", { hook_event_name: "PermissionDenied", session_id: "s" }).events;
+  assert.deepEqual([refusal.status, refusal.detail.outcome], ["failed", "denied"]);
+
+  const abandoned = new HookNormalizer();
+  abandoned.ingest("claude", ask);
+  const [ended] = abandoned.ingest("claude", { hook_event_name: "Stop", session_id: "s" }).events;
+  assert.deepEqual([ended.status, ended.detail.outcome], ["cancelled", "cancelled"]);
+
+  const quiet = new HookNormalizer();
+  quiet.ingest("grok", { hook_event_name: "Notification", sessionId: "s", notificationType: "permission_prompt" });
+  assert.deepEqual(quiet.ingest("grok", { hook_event_name: "SubagentStart", sessionId: "s" }).events, [],
+    "an unrelated event says nothing about the prompt");
 });
 
 test("only Claude hooks create tool events, keyed like the transcript", () => {
@@ -164,6 +201,8 @@ test("hook sessions overlay newer status, add unseen sessions, and drop ended on
     registry.record("claude", { hook_event_name: "PermissionRequest", session_id: "c1", cwd: "/w", transcript_path: join(claudeRoot, "p", "c1.jsonl"), tool_name: "Bash" }, at);
     registry.record("grok", { hook_event_name: "UserPromptSubmit", sessionId: "g1", cwd: "/work" }, at);
     registry.record("claude", { hook_event_name: "PreToolUse", session_id: "evil", transcript_path: "/etc/passwd" }, at);
+    assert.equal(registry.record("claude", { hookEventName: "stop", hook_event_name: "Stop", sessionId: "g1" }, at), null,
+      "a Grok payload that came through Claude's hooks is not a Claude session");
 
     const merged = registry.merge([
       { provider: "claude", session: "c1", state: "running", time: at / 1000 - 5, cwd: "/w" }
@@ -270,11 +309,18 @@ test("a live sidecar installs hooks on start and turns a hook into status within
         child.once("exit", () => reject(new Error(`sidecar exited: ${stderr}`)));
       });
       const headers = { authorization: `Bearer ${ready.apiToken}` };
-      const status = await (await fetch(`${ready.url}/api/hooks`, { headers })).json();
-      assert.equal(status.receiving, true);
-      assert.ok(Object.values(status.targets).every((target) => target.installed), "start installs hooks for every CLI present");
+      const before = await (await fetch(`${ready.url}/api/hooks`, { headers })).json();
+      assert.equal(before.receiving, true);
+      assert.equal(before.consentRequired, true, "the app has to ask first");
+      assert.ok(Object.values(before.targets).every((target) => !target.installed), "start alone installs nothing");
+      const status = await (await fetch(`${ready.url}/api/hooks`, {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ action: "install", consent: true })
+      })).json();
+      assert.ok(Object.values(status.targets).every((target) => target.installed), "consent installs hooks for every CLI present");
 
-      const script = join(env.AGENLYNK_HOME, "hooks", "agenlynk-hook.sh");
+      const script = status.script;
       const hookEnv = { HOME: root, AGENLYNK_HOME: env.AGENLYNK_HOME, AGENLYNK_HOOK_ENDPOINT: join(env.AGENLYNK_HOME, "hook-endpoint") };
       await runHookScript(script, "grok", hookEnv, { hook_event_name: "Notification", sessionId: "g-live", cwd: "/work", notificationType: "permission_prompt", message: "Allow write?" });
 

@@ -67,6 +67,23 @@ const STATUS_BY_EVENT = {
   SessionEnd: "closed"
 };
 
+/**
+ * How an open permission prompt ended, judged by what came next: the tool
+ * running means it was allowed, PermissionDenied that it was refused, and a
+ * turn that ended without either that it was abandoned. Anything else (a
+ * notification, a subagent) says nothing yet.
+ */
+function permissionOutcome(event) {
+  if (event === "PreToolUse" || event === "PostToolUse" || event === "PostToolUseFailure") {
+    return { status: "completed", label: "approved" };
+  }
+  if (event === "PermissionDenied") return { status: "failed", label: "denied" };
+  if (["Stop", "StopFailure", "StopCancelled", "Interrupt", "UserPromptSubmit", "SessionEnd"].includes(event)) {
+    return { status: "cancelled", label: "cancelled" };
+  }
+  return null;
+}
+
 function notificationStatus(type) {
   if (type === "permission_prompt") return "waiting_permission";
   if (type === "idle_prompt") return "idle";
@@ -97,10 +114,11 @@ export class HookNormalizer {
     if (hook.agentId && status === "idle") status = "running";
 
     const waitsForPermission = status === "waiting_permission";
-    if (this.openPermission && !waitsForPermission && hook.event !== "Notification") {
+    const outcome = this.openPermission && !waitsForPermission ? permissionOutcome(hook.event) : null;
+    if (outcome) {
       events.push(monitorEvent({
         key: this.openPermission, kind: "permission_request", ts, source: SOURCE, turnId: hook.turnId,
-        status: hook.event === "PermissionDenied" ? "failed" : "completed", endedAt: ts
+        status: outcome.status, endedAt: ts, detail: { outcome: outcome.label }
       }));
       this.openPermission = null;
     }

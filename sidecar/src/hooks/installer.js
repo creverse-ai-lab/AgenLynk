@@ -14,13 +14,16 @@
 //   answers in Codex (/hooks); it is reported, never written.
 
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agenlynkHome } from "./endpoint.js";
 
-export const HOOKS_VERSION = 1;
+export const HOOKS_VERSION = 2;
+// Bumped when what the hooks collect or where they are registered changes in
+// a way the user should agree to again. A new script alone does not ask.
+export const HOOKS_CONSENT_VERSION = 1;
 const SCRIPT_NAME = "agenlynk-hook.sh";
 const BUNDLED_SCRIPT = fileURLToPath(new URL("../../hooks/agenlynk-hook.sh", import.meta.url));
 const HOOK_TIMEOUT_SECONDS = 5;
@@ -34,9 +37,9 @@ const TARGETS = {
     file: (home) => join(home, "settings.json"),
     events: [
       "SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
-      "PermissionRequest", "Notification", "Stop", "StopFailure", "SubagentStart", "SubagentStop"
+      "PermissionRequest", "PermissionDenied", "Notification", "Stop", "StopFailure", "SubagentStart", "SubagentStop"
     ],
-    matcherEvents: new Set(["PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest"]),
+    matcherEvents: new Set(["PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest", "PermissionDenied"]),
     matcher: "*"
   },
   codex: {
@@ -51,7 +54,7 @@ const TARGETS = {
     file: (home) => join(home, "hooks", "agenlynk.json"),
     events: [
       "SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
-      "Notification", "Stop", "StopFailure", "StopCancelled", "SubagentStart", "SubagentStop"
+      "PermissionDenied", "Notification", "Stop", "StopFailure", "StopCancelled", "SubagentStart", "SubagentStop"
     ],
     matcherEvents: new Set(),
     ownsFile: true
@@ -60,18 +63,27 @@ const TARGETS = {
 
 export const HOOK_PROVIDERS = Object.freeze(Object.keys(TARGETS));
 
+function digest(text) {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+function bundledScript() {
+  const source = readFileSync(BUNDLED_SCRIPT, "utf8");
+  return { source, digest: digest(source) };
+}
+
+// The script lives under a directory named for its content, so a new script
+// is a new command string: Codex, which trusts a hook by its definition,
+// then asks the user again instead of silently running changed code.
 function paths(env) {
   const home = agenlynkHome(env);
   return {
     home,
-    script: join(home, "hooks", SCRIPT_NAME),
+    scriptsRoot: join(home, "hooks"),
+    script: join(home, "hooks", bundledScript().digest.slice(0, 12), SCRIPT_NAME),
     state: join(home, "hooks-state.json"),
     backups: join(home, "backups")
   };
-}
-
-function digest(text) {
-  return createHash("sha256").update(text).digest("hex");
 }
 
 function quote(path) {
@@ -155,27 +167,48 @@ function snake(event) {
   return event.replace(/([a-z])([A-Z])/g, "$1_$2").toLowerCase();
 }
 
-/** Codex events whose AgenLynk hook has not been trusted in Codex yet. */
-function untrustedCodexEvents(hooksFile, hooks, codexHome) {
+// `[hooks.state."<hooks.json>:<event>:<group>:<hook>"]` + `trusted_hash`,
+// as Codex writes them after /hooks approval.
+function readCodexTrust(codexHome) {
   let config = "";
   try {
     config = readFileSync(join(codexHome, "config.toml"), "utf8");
   } catch {
-    // No config: nothing is trusted.
+    return new Map();
   }
-  const pending = [];
+  const trust = new Map();
+  const pattern = /^\[hooks\.state\."([^"]+)"\]\s*\n(?:[^\[]*?)trusted_hash\s*=\s*"([^"]*)"/gm;
+  for (const match of config.matchAll(pattern)) trust.set(match[1], match[2]);
+  return trust;
+}
+
+function ourCodexKeys(hooksFile, hooks) {
+  const keys = new Map();
   for (const [event, groups] of Object.entries(hooks ?? {})) {
     if (!Array.isArray(groups)) continue;
     const index = groups.findIndex(isOurs);
-    if (index < 0) continue;
-    const key = `${hooksFile}:${snake(event)}:${index}:0`;
-    if (!config.includes(`[hooks.state."${key}"]`)) pending.push(event);
+    if (index >= 0) keys.set(event, `${hooksFile}:${snake(event)}:${index}:0`);
+  }
+  return keys;
+}
+
+/**
+ * Codex events whose current AgenLynk hook the user has not approved. An
+ * approval recorded before our last change to that hook (same trusted_hash as
+ * when we wrote it) belongs to the old definition and does not count.
+ */
+function untrustedCodexEvents(hooksFile, hooks, codexHome, staleTrust = {}) {
+  const trust = readCodexTrust(codexHome);
+  const pending = [];
+  for (const [event, key] of ourCodexKeys(hooksFile, hooks)) {
+    const hash = trust.get(key);
+    if (hash == null || (Object.hasOwn(staleTrust, key) && staleTrust[key] === hash)) pending.push(event);
   }
   return pending;
 }
 
-function installScript(scriptPath) {
-  const source = readFileSync(BUNDLED_SCRIPT, "utf8");
+function installScript(scriptPath, scriptsRoot) {
+  const { source } = bundledScript();
   let current = null;
   try {
     current = readFileSync(scriptPath, "utf8");
@@ -187,6 +220,17 @@ function installScript(scriptPath) {
     const temporary = `${scriptPath}.${process.pid}.tmp`;
     writeFileSync(temporary, source, { mode: 0o755 });
     renameSync(temporary, scriptPath);
+  }
+  // Older versions are only referenced by configs this install just
+  // rewrote; a config still naming one degrades to the command's no-op guard.
+  const version = basename(dirname(scriptPath));
+  try {
+    for (const entry of readdirSync(scriptsRoot, { withFileTypes: true })) {
+      if (entry.name === version) continue;
+      rmSync(join(scriptsRoot, entry.name), { recursive: true, force: true });
+    }
+  } catch {
+    // Nothing to prune.
   }
   return digest(source);
 }
@@ -234,15 +278,20 @@ export function hookStatus({ env = process.env, only = null } = {}) {
     };
     if (parsed.error) entry.error = parsed.error;
     if (target.trust && installedEvents.length) {
-      const pending = untrustedCodexEvents(file, hooks, home);
+      const pending = untrustedCodexEvents(file, hooks, home, state?.codexStaleTrust ?? {});
       entry.needsTrust = pending.length > 0;
       entry.untrustedEvents = pending;
     }
     targets[provider] = entry;
   }
+  const consented = (state?.consent?.version ?? 0) >= HOOKS_CONSENT_VERSION;
   return {
     version: HOOKS_VERSION,
     enabled: state?.enabled !== false,
+    // The app asks before the first install and after a consent bump; a user
+    // who declined is not asked again until the scope changes.
+    consentRequired: !consented && state?.declinedConsentVersion !== HOOKS_CONSENT_VERSION,
+    consentVersion: HOOKS_CONSENT_VERSION,
     script,
     scriptInstalled: existsSync(script),
     installedVersion: state?.version ?? null,
@@ -254,11 +303,13 @@ export function hookStatus({ env = process.env, only = null } = {}) {
  * Installs (or refreshes) hooks for every CLI present on this machine, or the
  * ones in `only`. Returns the resulting status plus what was changed.
  */
-export function installHooks({ env = process.env, only = null, now = Date.now() } = {}) {
+export function installHooks({ env = process.env, only = null, now = Date.now(), consent = false } = {}) {
   const locations = paths(env);
-  const scriptDigest = installScript(locations.script);
+  const scriptDigest = installScript(locations.script, locations.scriptsRoot);
   const changes = [];
   const errors = {};
+  const previousState = readHookState(env);
+  let codexStaleTrust = previousState?.codexStaleTrust ?? {};
   for (const provider of selectedProviders(only)) {
     const target = TARGETS[provider];
     const home = target.home(env);
@@ -276,12 +327,24 @@ export function installHooks({ env = process.env, only = null, now = Date.now() 
     const saved = backup(file, locations.backups, now);
     writeJsonAtomic(file, next, mode);
     changes.push({ provider, file, backup: saved });
+    if (target.trust) {
+      // Whatever Codex trusted for these positions was the old definition.
+      const trust = readCodexTrust(home);
+      codexStaleTrust = {};
+      for (const key of ourCodexKeys(file, nextHooks).values()) {
+        if (trust.has(key)) codexStaleTrust[key] = trust.get(key);
+      }
+    }
   }
-  const previous = readHookState(env);
+  const previous = previousState;
   const installed = new Set(selectedProviders(only));
   writeHookState(env, {
     version: HOOKS_VERSION,
     enabled: true,
+    codexStaleTrust,
+    consent: consent
+      ? { version: HOOKS_CONSENT_VERSION, at: new Date(now).toISOString() }
+      : previous?.consent ?? null,
     // Turning one CLI back on clears only its opt-out.
     disabledProviders: (previous?.disabledProviders ?? []).filter((provider) => !installed.has(provider)),
     scriptDigest,
@@ -292,7 +355,7 @@ export function installHooks({ env = process.env, only = null, now = Date.now() 
 }
 
 /** Removes AgenLynk's hooks (and nothing else) and remembers the choice. */
-export function uninstallHooks({ env = process.env, only = null, now = Date.now() } = {}) {
+export function uninstallHooks({ env = process.env, only = null, now = Date.now(), decline = false } = {}) {
   const locations = paths(env);
   const changes = [];
   const errors = {};
@@ -327,6 +390,7 @@ export function uninstallHooks({ env = process.env, only = null, now = Date.now(
     disabledProviders: only?.length
       ? [...new Set([...(previous?.disabledProviders ?? []), ...selectedProviders(only)])]
       : previous?.disabledProviders ?? [],
+    ...(decline ? { declinedConsentVersion: HOOKS_CONSENT_VERSION } : {}),
     updatedAt: new Date(now).toISOString()
   });
   return { ...hookStatus({ env, only }), changes, errors };
@@ -339,7 +403,9 @@ export function uninstallHooks({ env = process.env, only = null, now = Date.now(
 export function ensureHooks({ env = process.env, now = Date.now() } = {}) {
   const state = readHookState(env);
   if (state?.enabled === false) return { skipped: "disabled" };
-  const bundled = digest(readFileSync(BUNDLED_SCRIPT, "utf8"));
+  // Nothing is written to the user's agent configs before they agreed.
+  if ((state?.consent?.version ?? 0) < HOOKS_CONSENT_VERSION) return { skipped: "consent_required" };
+  const bundled = bundledScript().digest;
   const wanted = HOOK_PROVIDERS.filter((provider) => !(state?.disabledProviders ?? []).includes(provider));
   // An empty `only` means "every CLI" to the helpers below.
   if (!wanted.length) return { skipped: "disabled" };

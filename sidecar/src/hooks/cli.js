@@ -18,4 +18,5 @@ if (!action) {
   console.error("usage: cli.js status|install|uninstall [--only claude,codex,grok]");
   process.exit(2);
 }
-console.log(JSON.stringify(action({ only: only?.length ? only : null }), null, 2));
+// Running `install` by hand is the user's explicit consent.
+console.log(JSON.stringify(action({ only: only?.length ? only : null, consent: command === "install" }), null, 2));

@@ -262,3 +262,29 @@ test("LocalTimeline tails Claude and Grok sessions and reuses the Codex window",
     assert.equal(grown.results.get("claude:c1").session.usage.outputTokens, 12);
   });
 });
+
+test("a turn that ends closes the tool calls it left open, for every source", () => {
+  const claude = normalizeClaudeRecords([
+    claudeTurn[1],
+    claudeTurn[4],
+    { type: "user", uuid: "i", timestamp: "2026-09-26T00:00:09Z", message: { content: [{ type: "text", text: "[Request interrupted by user]" }] } }
+  ]);
+  assert.equal(claude.events.find((event) => event.kind === "tool_call").status, "cancelled");
+
+  const codex = normalizeCodexRecords([
+    codexTurn[1], codexTurn[6],
+    { timestamp: "2026-09-26T00:00:09Z", type: "event_msg", payload: { type: "turn_aborted", turn_id: "t1" } }
+  ]);
+  assert.equal(codex.events.find((event) => event.kind === "tool_call").status, "cancelled");
+
+  const grok = normalizeGrokUpdates([
+    grokTurn[1], grokTurn[5],
+    { timestamp: 1790380809, method: "_x.ai/session/update", params: { sessionId: "g1", update: { sessionUpdate: "turn_completed", prompt_id: "p1", stop_reason: "cancelled" }, _meta: {} } }
+  ]);
+  assert.equal(grok.events.find((event) => event.kind === "tool_call").status, "cancelled");
+
+  const gateway = new GatewayEventNormalizer();
+  gateway.ingest({ sessionId: "s", sequence: 1, type: "tool_call", ts: "2026-09-26T00:00:01Z", turnId: "t", data: { sessionUpdate: "tool_call", toolCallId: "c1", title: "Read" } });
+  const closed = gateway.ingest({ sessionId: "s", sequence: 2, type: "turn_completed", ts: "2026-09-26T00:00:02Z", turnId: "t", stopReason: "end_turn" });
+  assert.equal(closed.find((event) => event.key === "tool:c1")?.status, "completed");
+});
