@@ -7,7 +7,7 @@ struct AgentCatalogView: View {
     private struct FrontdoorAgent { let id: String; let label: String }
     private static let frontdoorAgents = [
         FrontdoorAgent(id: "codex", label: "Codex"),
-        FrontdoorAgent(id: "claude", label: "Claude"),
+        FrontdoorAgent(id: "claude", label: "Claude Code"),
         FrontdoorAgent(id: "grok", label: "Grok")
     ]
 

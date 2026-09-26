@@ -217,7 +217,7 @@ struct SessionDetailView: View {
                 Text([session.model, sessionStatusLabel(session.status)].compactMap { $0 }.joined(separator: " · "))
                     .foregroundStyle(.secondary)
                 Text(session.cwd).font(.caption).foregroundStyle(.tertiary).textSelection(.enabled)
-                SessionCapabilityBadges(session: session)
+                SessionCapabilityBadges(session: session, inHistory: model.showsAsHistory(session))
             }
             Spacer()
             // A running turn shows even before any usage is reported (Grok

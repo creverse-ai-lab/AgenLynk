@@ -33,13 +33,13 @@ export const GATEWAY_SETTING_DEFINITIONS = Object.freeze([
     displayUnit: "hours" // default 24 h
   }),
   numberSetting("inboxRetentionMs", "lifecycle", "Inbox retention", "How long resolved inbox requests are retained.", "ACP_GATEWAY_INBOX_RETENTION_MS", 24 * 60 * 60_000, 0, "ms", {
-    labelKo: "Inbox 보존 기간",
-    descriptionKo: "응답이 끝난 Inbox 요청을 보관하는 기간입니다.",
+    labelKo: "미응답 요청 보존 기간",
+    descriptionKo: "응답이 끝난 미응답 요청을 보관하는 기간입니다.",
     displayUnit: "hours" // default 24 h
   }),
   numberSetting("sessionRetentionMs", "lifecycle", "Session retention", "How long completed session records are retained.", "ACP_GATEWAY_SESSION_RETENTION_MS", 7 * 24 * 60 * 60_000, 0, "ms", {
     labelKo: "세션 보존 기간",
-    descriptionKo: "완료된 세션 기록을 보관하는 기간입니다.",
+    descriptionKo: "Gateway가 완료된 세션을 보관하는 기간입니다. 모니터 타임라인(monitor.db)과는 별개입니다.",
     displayUnit: "days" // default 7 d
   }),
 
@@ -86,7 +86,7 @@ export const GATEWAY_SETTING_DEFINITIONS = Object.freeze([
   }),
   booleanSetting("workerSubagentTranscript", "workers", "Subagent transcripts", "Collect the full transcript (messages, tools, thinking) of Task subagents a Claude Worker spawns internally. Substantially increases event volume per delegation.", "ACP_GATEWAY_WORKER_SUBAGENT_TRANSCRIPT", false, {
     labelKo: "서브에이전트 대화 기록",
-    descriptionKo: "Claude Worker가 내부적으로 실행한 Task 서브에이전트의 전체 기록(메시지·도구 호출·사고 과정)을 수집합니다. 위임 한 건당 이벤트 양이 크게 늘어납니다."
+    descriptionKo: "Claude Worker가 내부에서 실행한 서브에이전트의 전체 기록(메시지·도구 호출·사고 과정)을 수집합니다. 위임 한 건당 이벤트 양이 크게 늘어납니다."
   }),
 
   booleanSetting("localScannerEnabled", "monitor", "Local scanner", "Detect locally started Codex, Claude, and Grok sessions.", "ACP_MONITOR_LOCAL_SCANNER", true, {

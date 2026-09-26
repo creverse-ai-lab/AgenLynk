@@ -379,11 +379,13 @@ private struct StageRow: View {
     }
 
     private var stageColor: Color {
+        // Winding down, not working: gray like the dashboard.
+        if stage.session.status == "cancelling" { return .secondary }
         switch stage.urgency {
-        case .permission, .input: .orange
-        case .error: .red
-        case .running: .green
-        case .idle, .closed: .secondary
+        case .permission, .input: return .orange
+        case .error: return .red
+        case .running: return .green
+        case .idle, .closed: return .secondary
         }
     }
 }

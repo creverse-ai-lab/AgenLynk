@@ -64,8 +64,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var hookMutatingProvider: String?
     @Published private(set) var hookError: String?
     /// Monitoring hooks chosen during onboarding, applied once the sidecar is up.
-    /// Starts with the CLIs installed on this Mac; the others cannot be picked.
-    @Published var onboardingMonitoringHooks: Set<String> = MonitoringConsentChoices.installedCLIs()
+    /// Explicit opt-in: starts empty. Leaving it empty records nothing, so the
+    /// CLIs stay "아직 켜지 않음" and the app asks again later.
+    @Published var onboardingMonitoringHooks: Set<String> = []
     private var pendingHookConsent: Set<String>?
     /// Asks an existing user (after an update) whether to turn hooks on.
     @Published var hookConsentPresented = false
@@ -708,7 +709,8 @@ final class AppModel: ObservableObject {
                     }
                 }
                 self.onboardingRunning = false
-                self.pendingHookConsent = self.onboardingMonitoringHooks
+                // Nothing chosen is not a "no": onboarding never declines.
+                self.pendingHookConsent = self.onboardingMonitoringHooks.isEmpty ? nil : self.onboardingMonitoringHooks
                 self.startupPhase = .ready
                 self.startIfNeeded()
             } catch {
@@ -837,27 +839,37 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// The user's answer to the monitoring-hook question. An empty set is "no".
+    /// The user's "yes" to the monitoring-hook question: installs hooks for
+    /// the chosen CLIs only. It never removes anything; a CLI left unchecked
+    /// keeps whatever it had. An empty choice changes nothing.
     @discardableResult
     func answerHookConsent(enabled providers: Set<String>) async -> Bool {
         guard let endpoint else { return false }
-        hookConsentPresented = false
-        // A CLI that is not installed was not offered, so leaving it out is
-        // not a "no": it stays "아직 켜지 않음" and can be turned on later.
+        // A CLI that is not installed was not offered, so it is left out.
         let installed = hookStatus.map { Set($0.targets.filter(\.agentPresent).map(\.provider)) }
             ?? MonitoringConsentChoices.installedCLIs()
         let ordered = Self.frontdoorInstallOrder.filter { providers.contains($0) && installed.contains($0) }
-        let declined = Self.frontdoorInstallOrder.filter { !providers.contains($0) && installed.contains($0) }
+        guard !ordered.isEmpty else { return true }
+        hookConsentPresented = false
         do {
-            var status: MonitoringHookStatus
-            if ordered.isEmpty {
-                status = try await client.mutateHooks(endpoint: endpoint, action: "uninstall", providers: [], decline: true)
-            } else {
-                status = try await client.mutateHooks(endpoint: endpoint, action: "install", providers: ordered, consent: true)
-                if !declined.isEmpty {
-                    status = try await client.mutateHooks(endpoint: endpoint, action: "uninstall", providers: declined)
-                }
-            }
+            let status = try await client.mutateHooks(endpoint: endpoint, action: "install", providers: ordered, consent: true)
+            hookStatus = status
+            hookError = status.errors.first
+            return true
+        } catch {
+            hookError = error.localizedDescription
+            return false
+        }
+    }
+
+    /// The sheet's "사용 안 함": removes every AgenLynk hook and remembers the
+    /// answer until the consent scope changes. Only the sheet calls this.
+    @discardableResult
+    func declineHookConsent() async -> Bool {
+        guard let endpoint else { return false }
+        hookConsentPresented = false
+        do {
+            let status = try await client.mutateHooks(endpoint: endpoint, action: "uninstall", providers: [], decline: true)
             hookStatus = status
             hookError = status.errors.first
             return true
@@ -1090,7 +1102,7 @@ final class AppModel: ObservableObject {
         case let .activated(versionId):
             runtimeNotice = "\(versionId)로 전환했습니다. Gateway를 다시 시작하면 적용됩니다."
         case .rolledBack:
-            runtimeNotice = "이전 runtime으로 되돌렸습니다. Gateway를 다시 시작하면 적용됩니다."
+            runtimeNotice = "이전 런타임으로 되돌렸습니다. 이 버전에 고정되며, Gateway를 다시 시작하면 적용됩니다."
         case let .alreadyCurrent(versionId):
             runtimeNotice = "이미 최신 runtime(\(versionId))을 사용 중입니다."
         case .blocked:

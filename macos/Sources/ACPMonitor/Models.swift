@@ -137,8 +137,11 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
     /// Naming policy (docs/ux-policy.md): the sidecar's title (the CLI's own
     /// title, else the latest prompt), else "<Provider> · <folder>". A raw
     /// session id is never a name; it stays available in tooltips.
+    /// A title that is the CLI's current tool call / event path
+    /// ("custom_tool_call/exec") is skipped, like a Frontdoor's.
     var displayName: String {
-        if let title = title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty { return title }
+        if let title = title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty,
+           !isToolishTitle(title) { return title }
         // The provider is the icon beside the name, so it is not repeated in
         // the text; the folder tells the session apart.
         let folder = (cwd as NSString).lastPathComponent
@@ -165,6 +168,15 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
     /// A closed (or history) session is no longer updating, so it never
     /// claims to be live.
     var isLiveObserved: Bool { capabilities.contains("live") && status != "closed" }
+    /// The "실시간" badge: only for a session still in the live snapshot. A
+    /// history session (browsed from disk, or moved to history when its idle
+    /// hold ran out) keeps its `live` capability but is no longer updating.
+    func showsRealtimeBadge(inHistory: Bool) -> Bool { !inHistory && isLiveObserved }
+    /// "권한 대기 감지 불가 (hook 꺼짐)" explains a live session's empty
+    /// permission state; a finished or history session has none to explain.
+    func showsPermissionBlindNote(inHistory: Bool) -> Bool {
+        !inHistory && status != "closed" && cannotObservePermission
+    }
     /// The source can see an event timeline at all. A record without
     /// capabilities (older sidecar) is assumed to.
     var canShowTimeline: Bool { capabilities.isEmpty || capabilities.contains("timeline") }
@@ -300,6 +312,9 @@ struct WorkUsage: Equatable, Sendable {
     let totalTokens: Double?
     let currentTurnTokens: Double?
     let runningSessions: Int
+    /// Running turns without tokens yet — their provider settles a turn only
+    /// at its end (Grok), so they are left out of `currentTurnTokens`.
+    let settlingSessions: Int
 
     init(sessions: [GatewaySession]) {
         let totals = sessions.compactMap { $0.usage?.total }
@@ -307,7 +322,23 @@ struct WorkUsage: Equatable, Sendable {
         let running = sessions.compactMap { session in session.turnUsage.last(where: \.running) }
         runningSessions = running.count
         let current = running.compactMap(\.totalTokens)
+        settlingSessions = running.count - current.count
         currentTurnTokens = current.isEmpty ? nil : current.reduce(0, +)
+    }
+
+    /// The Frontdoor's "이번 턴" pill: the running turns' sum, or "이번 턴 집계
+    /// 중" while every running turn is still unsettled; nil when none runs.
+    var currentTurnText: String? {
+        if let currentTurnTokens { return "이번 턴 \(formatTokenCount(currentTurnTokens))" }
+        return runningSessions > 0 ? "이번 턴 집계 중" : nil
+    }
+
+    /// What the pill's number covers, naming the sessions left out of it.
+    var currentTurnHelp: String? {
+        guard runningSessions > 0 else { return nil }
+        if currentTurnTokens == nil { return "이 CLI는 턴이 끝날 때 토큰을 확정합니다." }
+        if settlingSessions > 0 { return "토큰이 턴 끝에 확정되는 세션 \(settlingSessions)개는 합계에서 빠져 있습니다." }
+        return "지금 실행 중인 턴 \(runningSessions)개가 지금까지 쓴 토큰입니다."
     }
 }
 
@@ -410,9 +441,8 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
     /// The root's title, but only when it reads as a name rather than the
     /// transient event/tool text local sessions park there.
     private var designatedName: String? {
-        guard let title = root?.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else { return nil }
-        let lower = title.lowercased()
-        if lower.contains("tool_call") || lower.contains("function_call") || title.contains("/") { return nil }
+        guard let title = root?.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty,
+              !isToolishTitle(title) else { return nil }
         return title
     }
     /// Last path component of the Frontdoor's working directory, or nil when no
@@ -441,8 +471,11 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
     /// The status pill: waiting first (it needs the person), then running,
     /// closed, idle.
     var statusText: String {
-        if waitingPermissionCount > 0 { return "권한 대기 \(waitingPermissionCount)" }
-        if waitingInputCount > 0 { return "입력 대기 \(waitingInputCount)" }
+        let waits = [
+            waitingPermissionCount > 0 ? "권한 대기 \(waitingPermissionCount)" : nil,
+            waitingInputCount > 0 ? "입력 대기 \(waitingInputCount)" : nil
+        ].compactMap { $0 }
+        if !waits.isEmpty { return waits.joined(separator: " · ") }
         if isActive { return "실행 중" }
         if isClosed { return "종료" }
         return "대기"
@@ -1130,6 +1163,8 @@ func sessionActivityHeadline(status: String, isActive: Bool, latestKind: String?
     switch status {
     case "waiting_permission": return "권한 대기 중"
     case "waiting_input": return "입력 대기 중"
+    // Stopping, not working: never "실행 중".
+    case "cancelling": return "취소 중"
     default: break
     }
     if isActive {
@@ -1145,6 +1180,21 @@ func sessionActivityHeadline(status: String, isActive: Bool, latestKind: String?
     case "error", "failed": return "오류"
     default: return sessionStatusLabel(status)
     }
+}
+
+/// Whether a session is shown from history, not the live snapshot: the one
+/// opened from "지난 기록", or any session no longer in the snapshot.
+func isHistorySession(_ sessionId: String, liveSessionIds: Set<String>, openedHistoryId: String?) -> Bool {
+    sessionId == openedHistoryId || !liveSessionIds.contains(sessionId)
+}
+
+/// A title that is a CLI's transient tool call or event path rather than a
+/// name: "custom_tool_call/exec", "function_call", "hook/PreToolUse". A
+/// sentence that merely mentions a path ("fix src/a.swift") is still a name.
+func isToolishTitle(_ title: String) -> Bool {
+    let lower = title.lowercased()
+    if lower.contains("tool_call") || lower.contains("function_call") { return true }
+    return title.contains("/") && !title.contains(where: \.isWhitespace)
 }
 
 /// Korean word for a session (or record) status — the same wording the
@@ -1673,7 +1723,7 @@ struct RuntimeInspection: Equatable, Sendable {
     var canRollback: Bool { previous != nil }
     var pinnedNotice: String? {
         guard currentPinned else { return nil }
-        return "이 버전으로 롤백해 고정되어 있습니다. 앱을 업데이트해도 런타임은 그대로 유지됩니다 — 버전을 직접 선택하면 고정이 풀립니다."
+        return "이 버전으로 되돌려 고정되어 있습니다. 앱을 업데이트해도 런타임은 바뀌지 않습니다. 아래 \"이 앱의 런타임 설치 및 적용\"으로 이 앱에 포함된 런타임을 설치하면 고정이 풀립니다."
     }
 
     init?(_ value: JSONValue) {

@@ -148,6 +148,8 @@ struct DashboardView: View {
     }
 
     @State private var showNoticeLog = false
+    @State private var showGatewayInfo = false
+    @ObservedObject private var disclosures = InspectorDisclosures.shared
     @State private var panelLayout = DashboardPanelLayout(width: 1200, wantsSessions: true, wantsInspector: true)
     @State private var forceSessionColumn = false
     @State private var forceInspectorColumn = false
@@ -229,8 +231,27 @@ struct DashboardView: View {
                 }
             }
             Spacer()
-            Text("Gateway \(model.gatewayVersion)").foregroundStyle(.secondary)
-            Text("build \(model.gatewayBuild)").font(.system(.caption, design: .monospaced)).foregroundStyle(.tertiary)
+            // Version, build and the retained-event count are reference, not
+            // status: one ⓘ keeps them reachable without crowding the bar.
+            Button { showGatewayInfo = true } label: {
+                Image(systemName: "info.circle")
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help("Gateway 버전 · 보관 이벤트 보기")
+            .accessibilityLabel("Gateway 버전 · 보관 이벤트 보기")
+            .popover(isPresented: $showGatewayInfo, arrowEdge: .bottom) {
+                VStack(alignment: .leading, spacing: 6) {
+                    LabeledContent("Gateway", value: model.gatewayVersion)
+                    LabeledContent("build") {
+                        Text(model.gatewayBuild).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                    }
+                    LabeledContent("보관 이벤트", value: model.totalEventCount.formatted())
+                }
+                .font(.caption)
+                .padding(12)
+                .frame(width: 260)
+            }
         }
         .padding(.horizontal, 16)
         .frame(height: 42)
@@ -246,8 +267,6 @@ struct DashboardView: View {
                 color: statusColor("running")
             )
             MetricCard(title: "미응답 요청", value: "\(model.pendingInbox.count)", symbol: "exclamationmark.bubble", color: statusColor("waiting_permission"))
-            MetricCard(title: "태스크", value: "\(model.tasks.count)", symbol: "checklist", color: .secondary)
-            MetricCard(title: "보관 이벤트", value: model.totalEventCount.formatted(), symbol: "waveform.path.ecg", color: .secondary)
         }
         .padding(12)
     }
@@ -414,7 +433,8 @@ struct DashboardView: View {
             SequenceSelectionContext(
                 frontdoor: model.selectedHistorySessionId == nil ? model.selectedFrontdoor : nil,
                 session: contextSession,
-                activity: contextSession.map { sessionActivity(for: $0) }
+                activity: contextSession.map { sessionActivity(for: $0) },
+                inHistory: contextSession.map { model.showsAsHistory($0) } ?? false
             )
             Divider()
             let sessionIds = sequenceSessions.map(\.sessionId)
@@ -485,7 +505,7 @@ struct DashboardView: View {
         let headline = sessionActivityHeadline(status: session.status, isActive: session.isActive, latestKind: latest?.kind)
         let symbol: String
         let color: Color
-        if session.isWaitingForUser || !session.isActive {
+        if session.isWaitingForUser || !session.isActive || session.status == "cancelling" {
             symbol = sessionStatusSymbol(session.status)
             color = statusColor(session.status)
         } else {
@@ -500,26 +520,53 @@ struct DashboardView: View {
         return SessionActivity(symbol: symbol, color: color, headline: headline, detail: detail)
     }
 
+    /// The session the inspector's usage block describes: the opened
+    /// history session, else the selected one.
+    private var inspectorSession: GatewaySession? {
+        model.selectedHistorySession ?? model.selectedSession
+    }
+
     private var operationsColumn: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                // The selected session's usage and forecast lead, with or
+                // without a selected event: "how far along is this turn" is
+                // what a Frontdoor click is asking.
+                if let session = inspectorSession {
+                    InspectorSection(title: "선택한 세션", symbol: "rectangle.and.hand.point.up.left") {
+                        HStack(spacing: 5) {
+                            ProviderIcon(provider: session.provider, size: 14)
+                            Text(settings.sessionName(session)).lineLimit(1)
+                                .help("세션 id: \(session.sessionId)")
+                        }
+                        if let model = session.model {
+                            LabeledContent("모델", value: model)
+                        }
+                        LabeledContent("역할", value: session.isFrontdoorRecord ? "Frontdoor" : "Worker")
+                        SessionCapabilityBadges(session: session, inHistory: model.showsAsHistory(session))
+                        let forecast = UsageForecast(session: session)
+                        if session.usage != nil || forecast.currentTurnRunning {
+                            SessionUsageView(usage: session.usage, partial: session.usagePartial, forecast: forecast)
+                        }
+                    }
+                }
                 InspectorSection(title: "선택 이벤트", symbol: "doc.text.magnifyingglass") {
                     if let event = model.selectedEvent {
-                        if let session = model.knownSession(event.sessionId) {
+                        let eventSession = model.knownSession(event.sessionId)
+                        if let eventSession, let selected = inspectorSession, selected.sessionId != eventSession.sessionId {
+                            // A lane click moved the session but kept the
+                            // event; say so instead of mixing the two.
+                            Label("이 이벤트는 \(settings.sessionName(eventSession))의 것입니다.", systemImage: "arrow.left.arrow.right")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if let eventSession {
                             LabeledContent("세션") {
                                 HStack(spacing: 5) {
-                                    ProviderIcon(provider: session.provider, size: 14)
-                                    Text(settings.sessionName(session)).lineLimit(1)
+                                    ProviderIcon(provider: eventSession.provider, size: 14)
+                                    Text(settings.sessionName(eventSession)).lineLimit(1)
                                 }
-                            }
-                            if let model = session.model {
-                                LabeledContent("모델", value: model)
-                            }
-                            LabeledContent("역할", value: session.isFrontdoorRecord ? "Frontdoor" : "Worker")
-                            SessionCapabilityBadges(session: session)
-                            let forecast = UsageForecast(session: session)
-                            if session.usage != nil || forecast.currentTurnRunning {
-                                SessionUsageView(usage: session.usage, partial: session.usagePartial, forecast: forecast)
                             }
                         }
                         LabeledContent("이벤트", value: event.kindLabel)
@@ -541,16 +588,18 @@ struct DashboardView: View {
                         EmptyLabel("이벤트를 선택하세요")
                     }
                 }
-                InspectorSection(title: "Gateway 상태", symbol: "network") {
+                // Reference sections start folded so the event and usage stay
+                // on screen; each remembers its state while the app runs.
+                InspectorDisclosure(title: "Gateway 상태", symbol: "network", isExpanded: $disclosures.gateway) {
                     LabeledContent("연결", value: model.connectionDetail)
                     LabeledContent("저장소", value: model.persistenceHealthy.map { $0 ? "정상" : "오류" } ?? "—")
                     LabeledContent("감지된 CLI", value: model.detectedProviderCount.formatted())
                 }
-                InspectorSection(title: "미응답 요청", symbol: "tray.full") {
+                InspectorDisclosure(title: "미응답 요청 \(model.inbox.count)", symbol: "tray.full", isExpanded: $disclosures.inbox) {
                     if model.inbox.isEmpty { EmptyLabel("요청 없음") }
                     ForEach(model.inbox) { RecordRow(record: $0) }
                 }
-                InspectorSection(title: "태스크", symbol: "checklist") {
+                InspectorDisclosure(title: "태스크 \(model.tasks.count)", symbol: "checklist", isExpanded: $disclosures.tasks) {
                     if model.tasks.isEmpty { EmptyLabel("태스크 없음") }
                     ForEach(model.tasks) { RecordRow(record: $0) }
                 }
@@ -594,6 +643,7 @@ private struct SequenceSelectionContext: View {
     let frontdoor: FrontdoorSession?
     let session: GatewaySession?
     var activity: SessionActivity? = nil
+    var inHistory = false
     @State private var editingName = false
     @State private var nameDraft = ""
 
@@ -691,7 +741,7 @@ private struct SequenceSelectionContext: View {
                                 .lineLimit(1)
                         }
                     }
-                    SessionCapabilityBadges(session: session)
+                    SessionCapabilityBadges(session: session, inHistory: inHistory)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -736,9 +786,9 @@ private struct SequenceSelectionContext: View {
         return HStack(spacing: 6) {
             ProviderIcon(provider: frontdoor.provider, size: 16)
             ContextPill(text: frontdoor.statusText, color: statusColor(frontdoor.statusKey))
-            if let current = work.currentTurnTokens {
-                ContextPill(text: "이번 턴 \(formatTokenCount(current))", color: .secondary)
-                    .help("지금 실행 중인 턴 \(work.runningSessions)개가 지금까지 쓴 토큰입니다.")
+            if let current = work.currentTurnText {
+                ContextPill(text: current, color: .secondary)
+                    .help(ifPresent: work.currentTurnHelp)
             }
             if level >= 1 {
                 ContextPill(text: "Worker \(frontdoor.workers.count)", color: .secondary)
@@ -814,13 +864,13 @@ struct FrontdoorRow: View {
                 HStack(spacing: 5) {
                     Text(settings.frontdoorName(id: frontdoor.id, auto: frontdoor.displayName))
                         .font(.callout.weight(.medium)).lineLimit(1)
-                    if frontdoor.waitingPermissionCount + frontdoor.waitingInputCount > 0 {
-                        Text(frontdoor.statusText)
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(statusColor(frontdoor.statusKey))
-                            .lineLimit(1)
-                            .fixedSize()
-                    }
+                    // Always stated, so a resting row and a closed one
+                    // (both "실행 중 0" below) are told apart.
+                    Text(frontdoor.statusText)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(statusColor(frontdoor.statusKey))
+                        .lineLimit(1)
+                        .fixedSize()
                 }
                 // No opaque instance id, no LOCAL/ACP source — neither is
                 // something a reader acts on. The name identifies the row; the
@@ -930,9 +980,14 @@ struct ToolGroupRow: View {
 /// with "can't tell".
 struct SessionCapabilityBadges: View {
     let session: GatewaySession
+    /// Shown from history (browsed, or moved there when its idle hold ran
+    /// out): no longer updating, so no "실시간" and no hook note.
+    var inHistory = false
 
     var body: some View {
-        if session.isLiveObserved || session.cannotObservePermission || !session.alerts.isEmpty {
+        let live = session.showsRealtimeBadge(inHistory: inHistory)
+        let blind = session.showsPermissionBlindNote(inHistory: inHistory)
+        if live || blind || !session.alerts.isEmpty {
             HStack(spacing: 6) {
                 ForEach(session.alerts, id: \.code) { alert in
                     Label(alert.badge, systemImage: "exclamationmark.triangle.fill")
@@ -943,7 +998,7 @@ struct SessionCapabilityBadges: View {
                         .background(Color.orange.opacity(0.12), in: Capsule())
                         .help(alert.tooltip)
                 }
-                if session.isLiveObserved {
+                if live {
                     Label("실시간", systemImage: "dot.radiowaves.left.and.right")
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(.green)
@@ -952,7 +1007,7 @@ struct SessionCapabilityBadges: View {
                         .background(Color.green.opacity(0.11), in: Capsule())
                         .help("hook 또는 Gateway 스트림으로 바로 갱신됩니다")
                 }
-                if session.cannotObservePermission {
+                if blind {
                     Text("권한 대기 감지 불가 (hook 꺼짐)")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
@@ -1051,6 +1106,47 @@ private struct InspectorSection<Content: View>: View {
             VStack(alignment: .leading, spacing: 8) { content }
                 .frame(maxWidth: .infinity, alignment: .leading)
         } label: { Label(title, systemImage: symbol).font(.headline) }
+    }
+}
+
+/// A folded inspector section (Gateway 상태, 미응답 요청, 태스크).
+private struct InspectorDisclosure<Content: View>: View {
+    let title: String
+    let symbol: String
+    @Binding var isExpanded: Bool
+    @ViewBuilder let content: Content
+    var body: some View {
+        GroupBox {
+            DisclosureGroup(isExpanded: $isExpanded) {
+                VStack(alignment: .leading, spacing: 8) { content }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 6)
+            } label: {
+                Label(title, systemImage: symbol).font(.headline)
+            }
+        }
+    }
+}
+
+/// Which folded inspector sections are open. In memory only: each launch
+/// starts folded, and reopening the dashboard window keeps the choice.
+@MainActor
+final class InspectorDisclosures: ObservableObject {
+    static let shared = InspectorDisclosures()
+    @Published var gateway = false
+    @Published var inbox = false
+    @Published var tasks = false
+}
+
+extension AppModel {
+    /// Shown from history rather than the live snapshot: the opened history
+    /// session, or one kept only in history (its idle hold ran out).
+    func showsAsHistory(_ session: GatewaySession) -> Bool {
+        isHistorySession(
+            session.sessionId,
+            liveSessionIds: Set(sessions.map(\.sessionId)),
+            openedHistoryId: selectedHistorySessionId
+        )
     }
 }
 

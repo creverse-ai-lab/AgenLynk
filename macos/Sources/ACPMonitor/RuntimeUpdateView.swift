@@ -130,7 +130,11 @@ struct RuntimeUpdateView: View {
                 }
             }
         } message: { change in
-            Text("Gateway 런타임을 \(change.from)에서 \(change.to)로 전환할까요? 진행 중 작업이 있으면 완료될 때까지 적용되지 않습니다.")
+            if change.kind == .rollback {
+                Text("이전 런타임으로 되돌리면 이 버전에 고정되어, 앱을 업데이트해도 런타임은 바뀌지 않습니다. 진행 중 작업이 있으면 끝난 뒤 전환되고, Gateway를 다시 시작해야 적용됩니다.")
+            } else {
+                Text("Gateway 런타임을 \(change.from)에서 \(change.to)로 전환할까요? 진행 중 작업이 있으면 완료될 때까지 적용되지 않습니다.")
+            }
         }
     }
 
@@ -259,14 +263,17 @@ struct RuntimeUpdateView: View {
         HStack {
             // Rollback only exists once an activation recorded a previous
             // known-good target.
+            let canRollback = model.runtimeInspection?.canRollback ?? false
             Button("이전 버전으로 롤백") { confirmRollback() }
-                .disabled(model.runtimeBusy || !(model.runtimeInspection?.canRollback ?? false))
+                .disabled(model.runtimeBusy || !canRollback)
+                .optionalHelp(canRollback ? nil : "바로 전에 쓰던 런타임이 있을 때만 되돌릴 수 있습니다.")
             Spacer()
             if model.runtimeBusy { ProgressView().controlSize(.small) }
+            // Already on the app's own runtime: nothing to install.
             Button("이 앱의 런타임 설치 및 적용") { confirmInstallSeed() }
                 .buttonStyle(.borderedProminent)
-                .disabled(model.runtimeBusy)
-                .help("앱에 포함된 Gateway 런타임을 설치하고 현재 버전으로 전환합니다. 진행 중인 작업이 있으면 보류됩니다.")
+                .disabled(model.runtimeBusy || !model.gatewayUpdateAvailable)
+                .help("이 앱에 포함된 런타임을 설치하면 고정이 풀립니다.")
         }
         .padding(14)
     }

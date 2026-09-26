@@ -38,15 +38,20 @@ struct OnboardingView: View {
             // so it must not read as part of the Gateway install above.
             VStack(alignment: .leading, spacing: 8) {
                 Text("실시간 모니터링 (선택)").font(.headline)
-                Text("선택한 설정 파일을 백업한 뒤 AgenLynk hook을 추가합니다. 아무것도 선택하지 않아도 설치를 계속할 수 있고, 나중에 설정 > 모니터링에서 켤 수 있습니다.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
                 MonitoringConsentChoices(
                     selection: $model.onboardingMonitoringHooks,
                     installed: installedCLIs,
                     disabled: model.onboardingRunning
                 )
+                // Explicit opt-in: nothing is checked at first, and leaving it
+                // that way records no answer (the app asks again later).
+                Label(hooksChosen
+                      ? "선택한 CLI의 설정 파일에 hook을 추가합니다."
+                      : "hook 없이 계속합니다. 나중에 설정 > 모니터링에서 켤 수 있습니다.",
+                      systemImage: hooksChosen ? "checkmark.circle" : "circle.dashed")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: 520, alignment: .leading)
 
@@ -94,10 +99,14 @@ struct OnboardingView: View {
         .frame(minWidth: 560, minHeight: 560, alignment: .topLeading)
     }
 
+    private var hooksChosen: Bool {
+        !model.onboardingMonitoringHooks.intersection(installedCLIs).isEmpty
+    }
+
     private struct FrontdoorChoice { let id: String; let label: String }
     private static let frontdoorChoices = [
         FrontdoorChoice(id: "codex", label: "Codex"),
-        FrontdoorChoice(id: "claude", label: "Claude"),
+        FrontdoorChoice(id: "claude", label: "Claude Code"),
         FrontdoorChoice(id: "grok", label: "Grok")
     ]
 }

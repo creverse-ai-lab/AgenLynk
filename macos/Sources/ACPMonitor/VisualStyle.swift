@@ -8,9 +8,10 @@ import SwiftUI
 func statusColor(_ status: String) -> Color {
     switch status {
     case "running", "restoring", "approved": .green
-    case "waiting_permission", "waiting_input", "pending", "interrupted", "cancelling": .orange
+    case "waiting_permission", "waiting_input", "pending", "interrupted": .orange
     case "error", "failed", "denied", "unavailable", "disconnected": .red
-    default: .secondary // idle, ready, end_turn, completed, closed, cancelled, answered
+    // cancelling is stopping, not waiting on anyone: grey, not orange.
+    default: .secondary // idle, ready, end_turn, completed, closed, cancelling, cancelled, answered
     }
 }
 
@@ -20,6 +21,7 @@ func sessionStatusSymbol(_ status: String) -> String {
     case "running", "restoring": "bolt.fill"
     case "waiting_permission": "hand.raised.fill"
     case "waiting_input": "keyboard"
+    case "cancelling": "xmark.circle"
     case "closed": "stop.circle"
     case "error", "failed": "exclamationmark.triangle.fill"
     default: "pause.circle.fill"
@@ -28,7 +30,8 @@ func sessionStatusSymbol(_ status: String) -> String {
 
 func providerColor(_ provider: String) -> Color {
     switch provider.lowercased() {
-    case "codex": Color(red: 0.30, green: 0.64, blue: 1.00)
+    // Teal, well away from the accent blue that marks a selection.
+    case "codex": Color(red: 0.07, green: 0.62, blue: 0.55)
     case "claude": Color(red: 0.91, green: 0.58, blue: 0.35)
     case "grok": .purple
     case "cursor": .green

@@ -966,6 +966,12 @@ enum MonitorModelChecks {
         let work = WorkUsage(sessions: [session, newSession])
         try check(work.totalTokens == 10_000 && work.currentTurnTokens == 3_000 && work.runningSessions == 2,
                   "a Frontdoor's work adds up its sessions")
+        try check(work.settlingSessions == 1 && work.currentTurnText == "이번 턴 3.0K"
+                  && work.currentTurnHelp == "토큰이 턴 끝에 확정되는 세션 1개는 합계에서 빠져 있습니다.",
+                  "a mixed sum names the sessions it leaves out: \(work.currentTurnHelp ?? "nil")")
+        let settling = WorkUsage(sessions: [newSession])
+        try check(settling.currentTurnText == "이번 턴 집계 중", "a running Grok turn reads 집계 중, never nothing")
+        try check(WorkUsage(sessions: []).currentTurnText == nil, "nothing running, no pill")
     }
 
     private static func dashboardPanelsFoldByWidthAndOpenOnDemand() throws {
@@ -999,6 +1005,16 @@ enum MonitorModelChecks {
         try check(foldered.displayName == "AgenLynk", "else its folder; the provider is the icon")
         let bare = try session([:])
         try check(bare.displayName == "새 세션" && !bare.displayName.contains("01a0"), "a raw id is never a name")
+        // Tool-call text a local CLI parks in its title is not a name
+        // (the same filter as a Frontdoor's designated name).
+        let toolish = try session(["title": .string("custom_tool_call/exec"), "cwd": .string("/Users/me/dev/AgenLynk")])
+        try check(toolish.displayName == "AgenLynk", "a tool-call title falls back to the folder: \(toolish.displayName)")
+        let functionCall = try session(["title": .string("function_call")])
+        try check(functionCall.displayName == "새 세션", "a function_call title without a folder is 새 세션")
+        let eventPath = try session(["title": .string("hook/PreToolUse"), "cwd": .string("/")])
+        try check(eventPath.displayName == "새 세션", "a /-joined event path is not a name")
+        let sentence = try session(["title": .string("fix src/app.swift build")])
+        try check(sentence.displayName == "fix src/app.swift build", "a prompt that mentions a path is still a name")
     }
 
     /// GET /api/hooks as sidecar/src/hooks/installer.js#hookStatus shapes it.
@@ -1166,6 +1182,8 @@ enum MonitorModelChecks {
         try check(sessionActivityHeadline(status: "waiting_input", isActive: true, latestKind: nil) == "입력 대기 중", "input wait")
         try check(sessionActivityHeadline(status: "end_turn", isActive: false, latestKind: "turn_end") == "대기 · 다음 입력을 기다림", "resting")
         try check(sessionActivityHeadline(status: "closed", isActive: false, latestKind: nil) == "종료됨", "closed")
+        try check(sessionActivityHeadline(status: "cancelling", isActive: true, latestKind: "tool_call") == "취소 중", "cancelling never reads 실행 중")
+        try check(sessionActivityHeadline(status: "mystery", isActive: false, latestKind: nil) == "알 수 없음", "an unlisted status reads 알 수 없음")
         try check(withObjectParticle("세션 목록") == "세션 목록을" && withObjectParticle("인스펙터") == "인스펙터를", "object particles follow the last syllable")
         try check(providerDisplayLabel("") == "알 수 없는 CLI" && providerDisplayLabel("codex") == "Codex", "an unknown provider never reads Agent")
         let unknownAlert = SessionAlert(.object(["code": .string("some_new_code")]))!
@@ -1203,6 +1221,21 @@ enum MonitorModelChecks {
         try check(waiting.preferredSession?.sessionId == "w1", "selecting the Frontdoor lands on the waiting worker")
         let over = FrontdoorSession.make(sessions: [member("root", role: "frontdoor", status: "closed")])[0]
         try check(over.statusText == "종료" && over.isClosed, "all members closed reads 종료")
+        let both = FrontdoorSession.make(sessions: [member("root", role: "frontdoor", status: "waiting_input"),
+                                                    member("w1", role: "worker", status: "waiting_permission"),
+                                                    member("w2", role: "worker", status: "waiting_input")])[0]
+        try check(both.statusText == "권한 대기 1 · 입력 대기 2", "both waits are stated: \(both.statusText)")
+        let resting = FrontdoorSession.make(sessions: [member("root", role: "frontdoor", status: "idle")])[0]
+        try check(resting.statusText == "대기", "a resting Frontdoor reads 대기, apart from 종료")
+
+        // "실시간" and the hook note are for live sessions only.
+        try check(hooked.showsRealtimeBadge(inHistory: false) && !hooked.showsRealtimeBadge(inHistory: true),
+                  "a history session never reads 실시간")
+        try check(transcript.showsPermissionBlindNote(inHistory: false) && !transcript.showsPermissionBlindNote(inHistory: true),
+                  "the hook note explains a live session only")
+        try check(isHistorySession("gone", liveSessionIds: ["live"], openedHistoryId: nil), "a session out of the snapshot is history")
+        try check(isHistorySession("live", liveSessionIds: ["live"], openedHistoryId: "live"), "the opened history session is history")
+        try check(!isHistorySession("live", liveSessionIds: ["live"], openedHistoryId: nil), "a snapshot session is live")
     }
 
     private static func agentCatalogDecodesInstallAndEnabledState() throws {

@@ -11,6 +11,7 @@ struct SettingsView: View {
     @State private var tab: SettingsTab = .display
     /// A Gateway 구성 group to scroll to when that tab opens.
     @State private var gatewayFocusGroup: String?
+    @State private var confirmDisplayReset = false
 
     var body: some View {
         TabView(selection: $tab) {
@@ -29,9 +30,15 @@ struct SettingsView: View {
                     Button("모니터 다시 연결") { model.reconnect() }
                         .help("모니터에 다시 연결합니다. Gateway와 에이전트는 멈추지 않습니다.")
                 }
-                Button("기본값으로 재설정") { model.resetSettings() }
+                Button("기본값으로 재설정") { confirmDisplayReset = true }
             }
             .padding(20)
+            .alert("표시, Node 경로, 펫 설정을 기본값으로 되돌릴까요?", isPresented: $confirmDisplayReset) {
+                Button("취소", role: .cancel) {}
+                Button("기본값으로 재설정", role: .destructive) { model.resetSettings() }
+            } message: {
+                Text("사용자 펫 경로는 지워집니다.")
+            }
             .tabItem { Label("화면", systemImage: "slider.horizontal.3") }
             .tag(SettingsTab.display)
 
@@ -123,6 +130,7 @@ private struct GatewayConfigurationView: View {
             case reset(ids: [String])
         }
         let id = UUID()
+        var title = "기록이 삭제될 수 있습니다"
         let message: String
         let confirmTitle: String
         let action: Action
@@ -195,7 +203,7 @@ private struct GatewayConfigurationView: View {
         } message: {
             Text("진행 중 세션·태스크·미응답 요청이 있으면 서버가 재시작을 차단합니다. 대기 세션 기록은 보존되고 Worker는 다음 요청에서 복원됩니다.")
         }
-        .alert("기록이 삭제될 수 있습니다", isPresented: confirmationPresented, presenting: pendingConfirmation) { confirmation in
+        .alert(pendingConfirmation?.title ?? "", isPresented: confirmationPresented, presenting: pendingConfirmation) { confirmation in
             Button("취소", role: .cancel) { pendingConfirmation = nil }
             Button(confirmation.confirmTitle, role: .destructive) {
                 pendingConfirmation = nil
@@ -245,7 +253,7 @@ private struct GatewayConfigurationView: View {
                         numberValue: numberBinding(option),
                         booleanValue: booleanBinding(option),
                         reconnectsMonitor: model.isMonitorConfigOption(option.id),
-                        onReset: resettable(option) ? { requestReset(ids: [option.id]) } : nil,
+                        onReset: resettable(option) ? { Task { await requestReset(ids: [option.id]) } } : nil,
                         resetDisabled: busy
                     )
                     if index < options.count - 1 { Divider().padding(.leading, 8) }
@@ -267,11 +275,7 @@ private struct GatewayConfigurationView: View {
         HStack {
             Button("모두 기본값으로") {
                 let ids = model.gatewayConfigOptions.filter(\.editable).map(\.id)
-                pendingConfirmation = DestructiveConfirmation(
-                    message: "모든 설정을 기본값으로 되돌립니다. 보존 기간이 줄어들면 기록이 삭제될 수 있습니다.",
-                    confirmTitle: "기본값으로 되돌리기",
-                    action: .reset(ids: ids)
-                )
+                Task { await requestReset(ids: ids, all: true) }
             }
             .disabled(busy)
             Spacer()
@@ -335,46 +339,42 @@ private struct GatewayConfigurationView: View {
         return lowered
     }
 
-    /// A per-row reset asks first only when the default is lower than what
-    /// is configured for a setting whose lower values delete data.
-    private func requestReset(ids: [String]) {
-        let lowers = ids.contains { id in
-            guard Self.destructiveIds.contains(id),
-                  let option = model.gatewayConfigOptions.first(where: { $0.id == id }),
+    /// A reset asks first when a default is lower than what is configured for
+    /// a setting whose lower values delete data, and says what would go, the
+    /// same way saving does. "모두 기본값으로" always asks.
+    private func requestReset(ids: [String], all: Bool = false) async {
+        var lowered: [String: Int] = [:]
+        for id in ids where Self.destructiveIds.contains(id) {
+            guard let option = model.gatewayConfigOptions.first(where: { $0.id == id }),
                   let current = option.configuredValue.intValue,
-                  let fallback = option.defaultValue.intValue else { return false }
-            return fallback < current
+                  let fallback = option.defaultValue.intValue,
+                  fallback < current else { continue }
+            lowered[id] = fallback
         }
-        guard lowers else {
-            Task { await perform(.reset(ids: ids)) }
+        let (messages, _) = await deletionMessages(lowered)
+        guard !messages.isEmpty else {
+            if all {
+                pendingConfirmation = DestructiveConfirmation(
+                    title: "모든 설정을 기본값으로 되돌릴까요?",
+                    message: "저장된 값을 지우고 기본값을 사용합니다. 삭제되는 기록은 없습니다.",
+                    confirmTitle: "기본값으로 되돌리기",
+                    action: .reset(ids: ids)
+                )
+            } else {
+                await perform(.reset(ids: ids))
+            }
             return
         }
         pendingConfirmation = DestructiveConfirmation(
-            message: "이 설정을 기본값으로 되돌립니다. 보존 기간이 줄어들면 기록이 삭제될 수 있습니다.",
-            confirmTitle: "기본값으로 되돌리기",
+            message: ((all ? ["모든 설정을 기본값으로 되돌립니다."] : []) + messages).joined(separator: " "),
+            confirmTitle: "삭제하고 기본값으로",
             action: .reset(ids: ids)
         )
     }
 
-    private func perform(_ action: DestructiveConfirmation.Action) async {
-        switch action {
-        case let .save(andRestart, deletesDiskHistory):
-            _ = await commitDrafts(andRestart: andRestart, deletesDiskHistory: deletesDiskHistory)
-        case let .reset(ids):
-            if await model.resetGatewayConfig(ids: ids) { syncDrafts() }
-        }
-    }
-
-    private func saveDrafts(andRestart: Bool = false) async -> Bool {
-        // Nothing to save can still mean something to do: the restart button is
-        // enabled in the "저장됨 · 적용 대기" state, where drafts are empty and
-        // the whole point of the click is the restart itself.
-        guard !draftValues.isEmpty else {
-            return andRestart ? await model.restartGateway() : true
-        }
-        let lowered = loweredRetentionValues
-        guard !lowered.isEmpty else { return await commitDrafts(andRestart: andRestart, deletesDiskHistory: false) }
-
+    /// What lowering these values would delete, as confirmation sentences
+    /// ending in a question. Empty when nothing would be deleted.
+    private func deletionMessages(_ lowered: [String: Int]) async -> (messages: [String], deletesDiskHistory: Bool) {
         var messages: [String] = []
         var deletesDiskHistory = false
         if !lowered.keys.filter(Self.gatewayCountedIds.contains).isEmpty {
@@ -405,8 +405,30 @@ private struct GatewayConfigurationView: View {
                 messages.append("모니터 기록 보관 기간을 줄이면 그보다 오래된 세션 기록이 디스크에서 삭제됩니다.")
             }
         }
+        if !messages.isEmpty, !(messages.last?.hasSuffix("?") ?? false) { messages.append("계속할까요?") }
+        return (messages, deletesDiskHistory)
+    }
+
+    private func perform(_ action: DestructiveConfirmation.Action) async {
+        switch action {
+        case let .save(andRestart, deletesDiskHistory):
+            _ = await commitDrafts(andRestart: andRestart, deletesDiskHistory: deletesDiskHistory)
+        case let .reset(ids):
+            if await model.resetGatewayConfig(ids: ids) { syncDrafts() }
+        }
+    }
+
+    private func saveDrafts(andRestart: Bool = false) async -> Bool {
+        // Nothing to save can still mean something to do: the restart button is
+        // enabled in the "저장됨 · 적용 대기" state, where drafts are empty and
+        // the whole point of the click is the restart itself.
+        guard !draftValues.isEmpty else {
+            return andRestart ? await model.restartGateway() : true
+        }
+        let lowered = loweredRetentionValues
+        guard !lowered.isEmpty else { return await commitDrafts(andRestart: andRestart, deletesDiskHistory: false) }
+        let (messages, deletesDiskHistory) = await deletionMessages(lowered)
         guard !messages.isEmpty else { return await commitDrafts(andRestart: andRestart, deletesDiskHistory: false) }
-        if !(messages.last?.hasSuffix("?") ?? false) { messages.append("계속할까요?") }
         pendingConfirmation = DestructiveConfirmation(
             message: messages.joined(separator: " "),
             confirmTitle: "삭제하고 저장",
@@ -495,7 +517,20 @@ private struct GatewayRuntimeConfigRow: View {
         }
     }
 
-    private var storedUnitText: String { option.unit == "bytes" ? "바이트" : (option.unit ?? "") }
+    private var storedUnitText: String {
+        switch option.unit {
+        case "bytes": "바이트"
+        case "ms": "밀리초"
+        default: option.unit ?? ""
+        }
+    }
+
+    /// The unit beside the field. History retention 0 means no disk history,
+    /// not "0 일"; a raw millisecond value reads "밀리초".
+    private var suffixText: String {
+        if option.id == "monitorHistoryRetentionMs", numberValue == 0 { return "디스크에 남기지 않음" }
+        return scale.suffix == "ms" ? "밀리초" : scale.suffix
+    }
 
     /// Edits happen in display units and are converted straight back to stored
     /// milliseconds. The result is clamped to the Gateway's own minimum so a
@@ -520,7 +555,7 @@ private struct GatewayRuntimeConfigRow: View {
                     }
                     sourceBadge
                     if option.pending {
-                        Text(reconnectsMonitor ? "다시 연결 대기" : option.requiresRestart ? "재시작 대기" : "적용 대기")
+                        Text(reconnectsMonitor ? "모니터 다시 연결 대기" : option.requiresRestart ? "재시작 대기" : "적용 대기")
                             .font(.caption2).foregroundStyle(.orange)
                     }
                 }
@@ -567,12 +602,13 @@ private struct GatewayRuntimeConfigRow: View {
                 .multilineTextAlignment(.trailing)
                 .frame(width: 145)
                 .disabled(!option.editable)
-                .help(scale.isScaled ? "저장 값: \(numberValue) \(storedUnitText)" : "")
+                .optionalHelp(scale.isScaled ? "저장 값: \(numberValue) \(storedUnitText)" : nil)
                 .accessibilityLabel(option.labelKo)
-            Text(scale.suffix)
+            Text(suffixText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .frame(width: 42, alignment: .leading)
+                .fixedSize()
+                .frame(minWidth: 42, alignment: .leading)
         default:
             Text("지원되지 않는 설정 형식입니다")
                 .font(.caption).foregroundStyle(.secondary)
@@ -584,5 +620,14 @@ private struct GatewayRuntimeConfigRow: View {
             .font(.caption2.weight(.medium))
             .padding(.horizontal, 5).padding(.vertical, 2)
             .background(.quaternary, in: Capsule())
+    }
+}
+
+extension View {
+    /// A tooltip only when there is something to say: an empty `.help("")`
+    /// still registers a blank tooltip.
+    @ViewBuilder
+    func optionalHelp(_ text: String?) -> some View {
+        if let text { help(text) } else { self }
     }
 }

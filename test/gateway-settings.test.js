@@ -170,6 +170,21 @@ test("Korean setting text never shows a raw status word", () => {
   }
 });
 
+test("Korean setting text uses the policy terms, not Inbox or Task", () => {
+  for (const definition of GATEWAY_SETTING_DEFINITIONS) {
+    assert.doesNotMatch(definition.labelKo + definition.descriptionKo, /Inbox|Task/,
+      `${definition.id} must say 미응답 요청 / 태스크 in Korean`);
+  }
+  const byId = Object.fromEntries(GATEWAY_SETTING_DEFINITIONS.map((definition) => [definition.id, definition]));
+  assert.equal(byId.inboxRetentionMs.labelKo, "미응답 요청 보존 기간");
+  assert.equal(byId.inboxRetentionMs.descriptionKo, "응답이 끝난 미응답 요청을 보관하는 기간입니다.");
+  assert.match(byId.workerSubagentTranscript.descriptionKo,
+    /^Claude Worker가 내부에서 실행한 서브에이전트의 전체 기록\(메시지·도구 호출·사고 과정\)을 수집합니다\./);
+  // Gateway session retention and the monitor's own history are separate stores.
+  assert.match(byId.sessionRetentionMs.descriptionKo,
+    /^Gateway가 완료된 세션을 보관하는 기간입니다\. 모니터 타임라인\(monitor\.db\)과는 별개입니다\./);
+});
+
 test("a monitor setting is not pending when the running sidecar booted with it", async () => {
   const directory = await mkdtemp(join(tmpdir(), "acp-gateway-settings-active-"));
   const statePath = join(directory, "install.json");

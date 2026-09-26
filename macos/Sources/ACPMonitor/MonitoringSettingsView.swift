@@ -10,6 +10,8 @@ struct MonitoringSettingsView: View {
     var onEditRetention: () -> Void = {}
     @State private var confirmClear = false
     @State private var consentSheetPresented = false
+    /// The CLI whose hook the user switched off, awaiting confirmation.
+    @State private var pendingHookRemoval: String?
 
     private static let labels = ["claude": "Claude Code", "codex": "Codex", "grok": "Grok"]
     private static let pollInterval: UInt64 = 15_000_000_000
@@ -65,7 +67,7 @@ struct MonitoringSettingsView: View {
                 }
             }
             Section("로컬 세션 감지") {
-                Label("ACP를 통하지 않고 직접 실행한 Codex·Claude·Grok 세션과 그 하위 에이전트를 자동으로 감지해 로컬 세션으로 표시합니다. 모니터에 내장되어 있어 별도 설치가 필요하지 않습니다. hook을 켜면 같은 세션의 상태가 더 빨리 반영됩니다.", systemImage: "rectangle.stack.badge.person.crop")
+                Label("ACP를 통하지 않고 직접 실행한 Codex·Claude Code·Grok 세션과 그 하위 에이전트를 자동으로 감지해 로컬 세션으로 표시합니다. 모니터에 내장되어 있어 별도 설치가 필요하지 않습니다. hook을 켜면 같은 세션의 상태가 더 빨리 반영됩니다.", systemImage: "rectangle.stack.badge.person.crop")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -86,6 +88,19 @@ struct MonitoringSettingsView: View {
         }
         .sheet(isPresented: $consentSheetPresented) {
             MonitoringConsentSheet()
+        }
+        .alert(
+            "\(pendingHookRemoval.map { Self.labels[$0] ?? $0 } ?? "") hook을 제거할까요?",
+            isPresented: Binding(get: { pendingHookRemoval != nil }, set: { if !$0 { pendingHookRemoval = nil } }),
+            presenting: pendingHookRemoval
+        ) { provider in
+            Button("취소", role: .cancel) { pendingHookRemoval = nil }
+            Button("hook 제거", role: .destructive) {
+                pendingHookRemoval = nil
+                Task { await model.setHook(provider, enabled: false) }
+            }
+        } message: { _ in
+            Text("다음 업데이트에서 자동으로 켜지지 않습니다. 대화 기록 감지는 계속됩니다.")
         }
         .alert("모니터 기록을 지금 삭제할까요?", isPresented: $confirmClear) {
             Button("기록 삭제", role: .destructive) {
@@ -164,9 +179,10 @@ struct MonitoringSettingsView: View {
 
     private func retentionValueText(_ option: GatewayConfigOption) -> String {
         guard let value = option.configuredValue.intValue else { return "—" }
-        if value == 0 { return "보관 안 함" }
+        if value == 0 { return option.id == "monitorHistoryRetentionMs" ? "디스크에 남기지 않음" : "보관 안 함" }
         let scale = option.valueScale(for: value)
-        return scale.isScaled ? "\(scale.display(value))\(scale.suffix)" : "\(value) \(scale.suffix)"
+        let suffix = scale.suffix == "ms" ? "밀리초" : scale.suffix
+        return scale.isScaled ? "\(scale.display(value))\(suffix)" : "\(value) \(suffix)"
     }
 
     @ViewBuilder
@@ -234,7 +250,14 @@ struct MonitoringSettingsView: View {
     private func toggleSources(_ target: MonitoringHookTarget) -> [Binding<Bool>] {
         let act = Binding<Bool>(
             get: { target.installed || target.partial },
-            set: { enabled in Task { await model.setHook(target.provider, enabled: enabled) } }
+            set: { enabled in
+                // Removing edits the CLI's config file: ask first.
+                if enabled {
+                    Task { await model.setHook(target.provider, enabled: true) }
+                } else {
+                    pendingHookRemoval = target.provider
+                }
+            }
         )
         guard target.partial, !target.installed else { return [act] }
         return [act, Binding(get: { false }, set: { _ in })]

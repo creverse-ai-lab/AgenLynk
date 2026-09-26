@@ -8,6 +8,8 @@ struct MonitoringConsentChoices: View {
     /// CLIs installed on this Mac. Only these can be chosen; the others are
     /// shown so the user knows they can be turned on later.
     var installed: Set<String>
+    /// CLIs that already have AgenLynk's hooks, marked "등록됨".
+    var registered: Set<String> = []
     var disabled = false
 
     static let choices: [(id: String, label: String, file: String)] = [
@@ -50,7 +52,12 @@ struct MonitoringConsentChoices: View {
                     }
                 )) {
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(choice.label)
+                        HStack(spacing: 6) {
+                            Text(choice.label)
+                            if registered.contains(choice.id) {
+                                Text("등록됨").font(.caption).foregroundStyle(.green)
+                            }
+                        }
                         Text(available ? choice.file : "설치되지 않음 — 나중에 설치하면 설정에서 켤 수 있습니다")
                             .font(available ? .caption.monospaced() : .caption)
                             .foregroundStyle(.secondary)
@@ -76,8 +83,9 @@ struct MonitoringConsentChoices: View {
 struct MonitoringConsentSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
+    /// Explicit opt-in: nothing is checked until the user checks it.
     @State private var selection: Set<String> = []
-    @State private var selectionReady = false
+    @State private var confirmDecline = false
 
     /// Installed CLIs as the sidecar reports them, else as the file system does.
     private var installed: Set<String> {
@@ -87,27 +95,29 @@ struct MonitoringConsentSheet: View {
         return MonitoringConsentChoices.installedCLIs()
     }
 
+    /// CLIs whose config already carries AgenLynk's hooks (fully or partly).
+    private var registered: Set<String> {
+        Set((model.hookStatus?.targets ?? []).filter { $0.installed || $0.partial }.map(\.provider))
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("실시간 모니터링을 켤까요?").font(.title3.weight(.semibold))
-            Text("켜지 않아도 대화 기록 파일로 계속 감지하지만, 권한 대기와 도구 실행이 늦게 보이거나(Claude·Grok은 권한 대기가 보이지 않음) 세션 시작·종료를 놓칠 수 있습니다.")
+            Text("켜지 않아도 대화 기록 파일로 계속 감지하지만, 권한 대기와 도구 실행이 늦게 보이거나(Claude Code·Grok은 권한 대기가 보이지 않음) 세션 시작·종료를 놓칠 수 있습니다.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            MonitoringConsentChoices(selection: $selection, installed: installed)
+            MonitoringConsentChoices(selection: $selection, installed: installed, registered: registered)
             HStack {
                 Button("사용 안 함") {
-                    Task {
-                        await model.answerHookConsent(enabled: [])
-                        dismiss()
-                    }
+                    if registered.isEmpty { decline() } else { confirmDecline = true }
                 }
                 Spacer()
                 Button("나중에") {
                     model.hookConsentPresented = false
                     dismiss()
                 }
-                Button("선택한 CLI 켜기") {
+                Button("선택한 CLI에 hook 추가") {
                     let chosen = selection.intersection(installed)
                     Task {
                         await model.answerHookConsent(enabled: chosen)
@@ -117,16 +127,28 @@ struct MonitoringConsentSheet: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(selection.intersection(installed).isEmpty)
             }
-            Text("설정 > 모니터링에서 언제든 바꿀 수 있습니다.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("나중에: 다음 실행에 다시 묻습니다. 사용 안 함: 수집 범위가 바뀌기 전까지 다시 묻지 않으며, 이미 등록된 hook도 제거됩니다.")
+                Text("설정 > 모니터링에서 언제든 바꿀 수 있습니다.")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
         }
         .padding(24)
         .frame(width: 520)
-        .onAppear {
-            guard !selectionReady else { return }
-            selectionReady = true
-            selection = installed
+        .alert("등록된 hook을 설정 파일에서 제거할까요?", isPresented: $confirmDecline) {
+            Button("취소", role: .cancel) {}
+            Button("제거하고 사용 안 함", role: .destructive) { decline() }
+        } message: {
+            Text("업데이트 때도 자동으로 켜지지 않습니다.")
+        }
+    }
+
+    private func decline() {
+        Task {
+            await model.declineHookConsent()
+            dismiss()
         }
     }
 }

@@ -29,10 +29,11 @@ struct EventSequenceView: View {
     var loadOlder: (() async -> Bool)?
     var emptyState = SequenceEmptyState()
     @State private var expandedGroups: Set<String> = []
-    // Keyboard scrolling: the diagram is a 2-D canvas, so arrow keys step
-    // through anchor points (one per row / per lane) and scroll to them.
-    // Focus the diagram (click it) and the arrows move the view. The row is
-    // kept by id, not index, so rows paged in above do not shift it.
+    // Keyboard selection: up/down step through the rows and select each
+    // row's event (a tool group's representative call), so the inspector
+    // follows; left/right scroll the lanes. Focus the diagram (click it)
+    // first. The row is kept by id, not index, so rows paged in above do
+    // not shift it.
     @State private var keyRowId: String?
     @State private var keyLane = 0
     @FocusState private var diagramFocused: Bool
@@ -110,7 +111,7 @@ struct EventSequenceView: View {
                     ProgressView().controlSize(.mini)
                     Text("이전 이벤트 불러오는 중").font(.caption2).foregroundStyle(.secondary)
                 }
-                Text("화살표: 호출 관계 · 노드: 이벤트 · 클릭 후 방향키로 이동")
+                Text("화살표: 호출 관계 · 노드: 이벤트 · 클릭 후 방향키로 이벤트를 고릅니다")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
@@ -245,7 +246,7 @@ struct EventSequenceView: View {
                     .frame(maxHeight: .infinity)
                 }
             }
-            // Click to focus, then arrow keys scroll the diagram. onMoveCommand
+            // Click to focus, then arrow keys select events. onMoveCommand
             // fires on arrow presses only while this view holds focus, so it
             // never steals arrows from a focused list elsewhere.
             .focusable()
@@ -259,8 +260,13 @@ struct EventSequenceView: View {
                 case .up, .down:
                     let next = direction == .up ? max(0, current - 1) : min(last, current + 1)
                     if rows.indices.contains(next) {
-                        keyRowId = rows[next].id
-                        withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(rows[next].id, anchor: .center) }
+                        let row = rows[next]
+                        keyRowId = row.id
+                        switch row.content {
+                        case let .event(event): select(event)
+                        case let .group(group, _): select(group.representative)
+                        }
+                        withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(row.id, anchor: .center) }
                     }
                 case .left:
                     keyLane = max(0, keyLane - 1)
@@ -630,7 +636,7 @@ private struct SequenceLaneHeader: View {
                 // The session's own status, so a Worker waiting on a
                 // permission shows on its lane, not only in the sidebar.
                 Circle().fill(statusColor(lane.session.status)).frame(width: 6, height: 6)
-                Text(settings.sessionName(lane.session))
+                Text(laneName)
                     .font(.caption2.weight(.medium))
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -644,7 +650,7 @@ private struct SequenceLaneHeader: View {
                 }
             }
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("\(settings.sessionName(lane.session)), \(sessionStatusLabel(lane.session.status))")
+            .accessibilityLabel("\(laneName), \(sessionStatusLabel(lane.session.status))")
             if let model = lane.session.model {
                 Text(model)
                     .font(.system(.caption2, design: .monospaced))
@@ -660,28 +666,22 @@ private struct SequenceLaneHeader: View {
         )
     }
 
+    /// The role, like every lane: "Frontdoor", "Worker", "Worker · 2단".
     private var roleLabel: String {
-        if lane.session.isFrontdoorRecord { return frontdoorLabel }
+        if lane.session.isFrontdoorRecord { return "Frontdoor" }
         if lane.depth <= 1 { return "Worker" }
         return "Worker · \(lane.depth)단"
     }
 
-    /// The user's chosen name when set, otherwise the working folder — stable
-    /// and meaningful — falling back to a designated title only when there is
-    /// no folder, and never to the transient tool-call text a local session
-    /// parks in its title.
-    private var frontdoorLabel: String {
-        settings.frontdoorName(id: lane.session.openerInstanceId ?? "", auto: autoFrontdoorLabel)
-    }
-
-    private var autoFrontdoorLabel: String {
-        let folder = (lane.session.cwd as NSString).lastPathComponent
-        if !folder.isEmpty, folder != "/" { return folder }
-        if let title = lane.session.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
-            let lower = title.lowercased()
-            if !lower.contains("tool_call"), !lower.contains("function_call"), !title.contains("/") { return title }
+    /// The user's name for the session, else for its Frontdoor, else the
+    /// automatic session name (which skips tool-call titles).
+    private var laneName: String {
+        if let name = settings.sessionNickname(id: lane.session.sessionId) { return name }
+        if lane.session.isFrontdoorRecord, let opener = lane.session.openerInstanceId,
+           settings.hasFrontdoorNickname(id: opener) {
+            return settings.frontdoorName(id: opener, auto: lane.session.displayName)
         }
-        return "Frontdoor"
+        return lane.session.displayName
     }
 }
 
