@@ -39,7 +39,10 @@ const common = {
   ACP_GATEWAY_NODE: node,
   ACP_GATEWAY_CLIENT_ENTRYPOINT: join(gateway, "gateway-client/index.js"),
   ACP_GATEWAY_ACTIVE_ROOT: gateway,
-  ACP_GATEWAY_DISABLE_DYNAMIC_PROVIDERS: "1"
+  ACP_GATEWAY_DISABLE_DYNAMIC_PROVIDERS: "1",
+  // The packaged sidecar must not write the user's monitor history.
+  ACP_GATEWAY_MONITOR_DB: join(temporary, "monitor.db"),
+  AGENLYNK_HOME: join(temporary, "agenlynk")
 };
 
 let daemon;

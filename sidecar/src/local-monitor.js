@@ -9,6 +9,7 @@ function monitorStatus(value) {
   switch (value) {
     case "running": return "running";
     case "needs_input": return "waiting_input";
+    case "needs_permission": return "waiting_permission";
     case "ready":
     case "idle": return "idle";
     default: return "disconnected";
@@ -97,7 +98,7 @@ export function projectLocalSnapshot(snapshot, timelines = new Map()) {
       eventCount: timeline?.events?.length ?? 0,
       usage: facts.usage ?? null,
       ...(facts.usagePartial ? { usagePartial: true } : {}),
-      capabilities: localCapabilities(provider, timeline),
+      capabilities: localCapabilities(provider, timeline, raw.hooked === true),
       source: "local",
       role: raw.session === rootId ? "frontdoor" : "worker",
       parentLocalSessionId: raw.parent ?? null,
@@ -119,13 +120,13 @@ export function projectLocalSnapshot(snapshot, timelines = new Map()) {
  * What this monitor can actually show for a local session, so the app can
  * tell "nothing happened" from "this source cannot see it".
  */
-function localCapabilities(provider, timeline) {
-  if (!timeline) return ["status"];
-  const capabilities = ["status", "timeline", "tools", "usage"];
-  if (provider === "claude" || provider === "codex" || provider === "grok") capabilities.push("thinking");
+function localCapabilities(provider, timeline, hooked) {
+  const capabilities = ["status"];
+  if (timeline) capabilities.push("timeline", "tools", "usage", "thinking");
   // Codex writes approval waits into its rollout; Claude and Grok only
   // expose them through hooks.
-  if (provider === "codex") capabilities.push("permission");
+  if (hooked || provider === "codex") capabilities.push("permission");
+  if (hooked) capabilities.push("live");
   return capabilities;
 }
 

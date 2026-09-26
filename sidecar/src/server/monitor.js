@@ -42,6 +42,9 @@ import { mergeMonitorSessions, projectLocalSnapshot } from "../local-monitor.js"
 import { LocalAgentScanner } from "../local-agents/index.js";
 import { LocalTimeline } from "../normalize/local-timeline.js";
 import { SqliteMonitorStore, defaultMonitorDatabasePath } from "../store/sqlite-store.js";
+import { HookSessions } from "../hooks/registry.js";
+import { defaultHookEndpointPath, newHookToken, removeHookEndpoint, writeHookEndpoint } from "../hooks/endpoint.js";
+import { HOOK_PROVIDERS as INSTALLABLE_HOOK_PROVIDERS, ensureHooks, hookStatus, installHooks, uninstallHooks } from "../hooks/installer.js";
 /*
  * Gateway code above comes only from the release artifact's public client.
  */
@@ -57,12 +60,19 @@ const REFRESH_INTERVAL_MS = 3_000;
 const EVENT_BROADCAST_MS = 100;
 const HISTORY_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 const HISTORY_ENABLED = booleanEnv("ACP_GATEWAY_MONITOR_HISTORY", true);
+// Off unless the app turns it on: a sidecar started by tests or by hand must
+// never take over the app's hook endpoint or edit the user's agent configs.
+const HOOKS_ENABLED = booleanEnv("ACP_GATEWAY_MONITOR_HOOKS", false);
+const MAX_HOOK_BODY_BYTES = 1024 * 1024;
+const HOOK_PROVIDERS = new Set(["claude", "codex", "grok"]);
 const GATEWAY_RUNTIME_ROOT = process.env.ACP_GATEWAY_ACTIVE_ROOT ?? null;
 const EXPECTED_GATEWAY_BUILD_ID = expectedGatewayBuildId(GATEWAY_RUNTIME_ROOT);
 // Initialized inside main() so corrupt settings are reported through its
 // guarded startup path instead of throwing while this module is imported.
 let localScanner = null;
 let localTimeline = null;
+// Live facts from agent hooks, overlaid on every local scan.
+const hookSessions = new HookSessions();
 
 // Token accounting is not timeline content, and a session accumulates one of
 // these per turn. Gateway 1.3.2+ already drops them at ingestion, but a
@@ -176,6 +186,10 @@ async function main() {
     state.broadcast({ kind: "events", events });
   };
   const apiToken = randomBytes(32).toString("base64url");
+  // Hooks authenticate with their own token: the API token never leaves the
+  // app process, while this one is written to a 0600 file for hook scripts.
+  const hookToken = newHookToken();
+  const hookEndpointPath = defaultHookEndpointPath();
   let agentMutationActive = false;
   const owner = new GatewaySubscriptionOwner({
     rpc,
@@ -422,6 +436,23 @@ async function main() {
   });
   const address = server.address();
   const port = typeof address === "object" && address ? address.port : MONITOR_PORT;
+  if (HOOKS_ENABLED) {
+    try {
+      writeHookEndpoint(hookEndpointPath, { port, token: hookToken });
+    } catch (error) {
+      console.error(`Hook endpoint unavailable: ${error.message}`);
+    }
+    // Install and update time: a new build refreshes the hooks it ships,
+    // unless the user turned them off in settings.
+    try {
+      const result = ensureHooks();
+      if (result.errors && Object.keys(result.errors).length) {
+        console.error(`Hook install incomplete: ${Object.values(result.errors).join("; ")}`);
+      }
+    } catch (error) {
+      console.error(`Hook install failed: ${error.message}`);
+    }
+  }
   console.log(JSON.stringify({
     kind: "monitor_ready",
     schemaVersion: MONITOR_SCHEMA_VERSION,
@@ -446,8 +477,8 @@ async function main() {
     void refreshGatewayInfo();
   }, REFRESH_INTERVAL_MS);
   interval.unref();
-  const localInterval = setInterval(() => {
-    void (async () => {
+  async function broadcastLocalChanges() {
+    try {
       const { removedSessionIds, changed, localEvents } = await applySessionSources();
       if (!changed) return;
       state.broadcast({
@@ -458,16 +489,57 @@ async function main() {
         removedSessionIds,
         ...(localEvents ? { events: localEvents } : {})
       });
-    })().catch((error) => {
+    } catch (error) {
       // Local scanning is a nicety; a fault here must never take the Gateway
       // view down. Without this catch an unhandled rejection kills the process.
       console.error(`Local session refresh failed: ${error.message}`);
-    });
+    }
+  }
+  const localInterval = setInterval(() => {
+    void broadcastLocalChanges();
   }, localScanIntervalMs);
   localInterval.unref();
 
+  // A hook arrived: its events go straight to the store, and the local scan
+  // runs now instead of on its next tick so the status change is immediate.
+  let hookRefreshTimer = null;
+  const nudgeLocalRefresh = () => {
+    if (hookRefreshTimer) return;
+    hookRefreshTimer = setTimeout(() => {
+      hookRefreshTimer = null;
+      void broadcastLocalChanges();
+    }, 50);
+    hookRefreshTimer.unref?.();
+  };
+
+  async function handleHook(provider, request, response) {
+    let payload;
+    try {
+      payload = await readJsonBody(request, MAX_HOOK_BODY_BYTES);
+    } catch {
+      response.writeHead(400).end();
+      return;
+    }
+    // Answered before any work: the agent is waiting on this hook.
+    response.writeHead(204).end();
+    const recorded = hookSessions.record(provider, payload);
+    if (!recorded) return;
+    const changed = state.setExternalEvents({ [recorded.sessionId]: recorded.events });
+    for (const [sessionId, events] of Object.entries(changed)) queueEvents(sessionId, events);
+    nudgeLocalRefresh();
+  }
+
   async function handleRequest(request, response) {
     const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
+    const hookRoute = url.pathname.match(/^\/api\/hooks\/([a-z]+)$/);
+    if (hookRoute && request.method === "POST") {
+      if (!HOOKS_ENABLED || request.headers["x-agenlynk-hook-token"] !== hookToken || !HOOK_PROVIDERS.has(hookRoute[1])) {
+        response.writeHead(401).end();
+        return;
+      }
+      await handleHook(hookRoute[1], request, response);
+      return;
+    }
     if (request.headers.authorization !== `Bearer ${apiToken}`) {
       response.writeHead(401, { "content-type": "application/json; charset=utf-8" });
       response.end('{"error":"unauthorized","code":"monitor_unauthorized"}');
@@ -524,6 +596,24 @@ async function main() {
         sessionId,
         events: state.store.page(sessionId, { before: Number.isFinite(before) && before > 0 ? before : Infinity, limit })
       });
+      return;
+    }
+    if (url.pathname === "/api/hooks" && request.method === "GET") {
+      sendJson(response, { receiving: HOOKS_ENABLED, ...hookStatus() });
+      return;
+    }
+    if (url.pathname === "/api/hooks" && request.method === "POST") {
+      const body = await readJsonBody(request);
+      const providers = Array.isArray(body.providers)
+        ? body.providers.filter((provider) => INSTALLABLE_HOOK_PROVIDERS.includes(provider))
+        : null;
+      if (body.action !== "install" && body.action !== "uninstall") {
+        response.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+        response.end('{"error":"action must be install or uninstall","code":"monitor_bad_request"}');
+        return;
+      }
+      const run = body.action === "install" ? installHooks : uninstallHooks;
+      sendJson(response, { receiving: HOOKS_ENABLED, ...run({ only: providers?.length ? providers : null }) });
       return;
     }
     if (url.pathname === "/api/history" && request.method === "GET") {
@@ -724,6 +814,7 @@ async function main() {
     clearInterval(historyPrune);
     flushEvents();
     persistence?.close();
+    removeHookEndpoint(hookEndpointPath, hookToken);
     if (parentWatch) clearInterval(parentWatch);
     state.closeSseClients();
     rpc.close();
@@ -741,7 +832,7 @@ async function main() {
 }
 
 async function readLocalProjection() {
-  const sessions = await collectLocalSessions();
+  const sessions = hookSessions.merge(await collectLocalSessions());
   if (!sessions.length) return { sessions: [], events: {} };
   try {
     // One pipeline for every provider: the scanner found the sessions and
@@ -927,12 +1018,12 @@ function activeGatewaySettings(gateway, fallback = {}) {
   return Object.fromEntries(Object.entries(values).filter(([, value]) => value != null));
 }
 
-async function readJsonBody(request) {
+async function readJsonBody(request, limit = 64 * 1024) {
   const chunks = [];
   let bytes = 0;
   for await (const chunk of request) {
     bytes += chunk.length;
-    if (bytes > 64 * 1024) throw new Error("request body is too large");
+    if (bytes > limit) throw new Error("request body is too large");
     chunks.push(chunk);
   }
   if (!chunks.length) return {};

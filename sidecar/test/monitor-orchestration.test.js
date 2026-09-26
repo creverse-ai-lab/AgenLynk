@@ -22,6 +22,10 @@ test("live sidecar make-before-break rewind keeps old events and promotes one su
       ACP_GATEWAY_ROOT_ID: "orchestration-root",
       ACP_GATEWAY_INSTALL_STATE: join(temporary, "install.json"),
       ACP_GATEWAY_MONITOR_PORT: "0",
+      // Never the user's history or hook endpoint.
+      ACP_GATEWAY_MONITOR_DB: join(temporary, "monitor.db"),
+      AGENLYNK_HOME: join(temporary, "agenlynk"),
+      ACP_GATEWAY_MONITOR_HOOKS: "0",
       ACP_GATEWAY_MONITOR_AUTOSTART: "0",
       ACP_MONITOR_LOCAL_SCANNER: "0",
       ACP_GATEWAY_ACTIVE_ROOT: temporary

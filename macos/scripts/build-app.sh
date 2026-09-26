@@ -92,6 +92,8 @@ done
 
 cp "$REPO_ROOT/sidecar/package.json" "$SIDECAR_ROOT/package.json"
 cp -R "$REPO_ROOT/sidecar/src" "$SIDECAR_ROOT/src"
+# The monitoring hook script the sidecar installs for Claude/Codex/Grok.
+cp -R "$REPO_ROOT/sidecar/hooks" "$SIDECAR_ROOT/hooks"
 for REQUIRED in \
   gateway-seed/gateway/src/index.js \
   gateway-seed/gateway/src/bootstrap.js \
@@ -99,7 +101,8 @@ for REQUIRED in \
   gateway-seed/app-runtime/runtime-installer-cli.js \
   sidecar/src/server/monitor.js \
   sidecar/src/local-agents/index.js \
-  sidecar/src/gateway/client.js; do
+  sidecar/src/gateway/client.js \
+  sidecar/hooks/agenlynk-hook.sh; do
   if [ ! -f "$CONTENTS/Resources/$REQUIRED" ]; then
     echo "error: $REQUIRED is missing from the packaged resource roots" >&2
     exit 1
