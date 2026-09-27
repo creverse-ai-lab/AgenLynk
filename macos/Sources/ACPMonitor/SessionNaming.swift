@@ -14,6 +14,24 @@ extension AppSettings {
     func setSessionName(_ name: String?, for session: GatewaySession) {
         setSessionNickname(name, id: session.sessionId)
     }
+
+    /// A step's name in the 현황 cards and 그래프 nodes, as a sequence lane
+    /// names it: the session's own name, else a renamed Frontdoor's name for
+    /// its root, else the automatic session name.
+    func stepName(_ session: GatewaySession) -> String {
+        if let name = sessionNickname(id: session.sessionId) { return name }
+        if session.isFrontdoorRecord, let opener = session.openerInstanceId, hasFrontdoorNickname(id: opener) {
+            return frontdoorName(id: opener, auto: session.displayName)
+        }
+        return session.displayName
+    }
+}
+
+/// The role as every lane, card and node writes it (docs/ux-policy.md §1):
+/// "Frontdoor", "Worker", "Worker · 2단".
+func sessionRoleLabel(_ session: GatewaySession, depth: Int) -> String {
+    if session.isFrontdoorRecord { return "Frontdoor" }
+    return depth <= 1 ? "Worker" : "Worker · \(depth)단"
 }
 
 /// The session's name with an inline pencil editor. An empty save reverts to

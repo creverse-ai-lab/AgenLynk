@@ -20,6 +20,7 @@ struct SettingsView: View {
                 Section("기본 표시") {
                     Toggle("활성 세션만 표시", isOn: $settings.activeOnly)
                 }
+                dashboardViewsSection
                 Section("이벤트") {
                     Toggle("생각 표시", isOn: $settings.showThoughts)
                     Toggle("도구 호출 표시", isOn: $settings.showToolEvents)
@@ -69,6 +70,8 @@ struct SettingsView: View {
         .frame(width: 780, height: 640)
         .task { await model.ensureStarted() }
     }
+
+    private var dashboardViewsSection: some View { DashboardViewsSection() }
 
     private var petConfiguration: some View {
         Form {
@@ -629,5 +632,45 @@ extension View {
     @ViewBuilder
     func optionalHelp(_ text: String?) -> some View {
         if let text { help(text) } else { self }
+    }
+}
+
+/// 화면 > 대시보드 보기: which center views the dashboard offers and which
+/// one a launch opens on (docs/ux-policy.md §9).
+private struct DashboardViewsSection: View {
+    @EnvironmentObject private var settings: AppSettings
+
+    var body: some View {
+        Section {
+            ForEach(DashboardMode.allCases) { mode in
+                let isLast = settings.enabledDashboardModes == [mode]
+                Toggle(isOn: Binding(
+                    get: { settings.isDashboardModeEnabled(mode) },
+                    set: { settings.setDashboardMode(mode, enabled: $0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(mode.label)
+                        Text(mode.summary).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .disabled(isLast)
+                .help(isLast ? "보기를 하나 이상 켜 두어야 합니다" : "\(mode.label) 보기를 대시보드에 보이거나 숨깁니다")
+            }
+            Picker("처음 여는 보기", selection: Binding(
+                get: { settings.defaultDashboardMode },
+                set: { settings.setDefaultDashboardMode($0) }
+            )) {
+                ForEach(settings.enabledDashboardModes) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .help("앱을 실행하면 대시보드가 이 보기로 열립니다. 실행 중에 바꾼 보기는 앱을 끌 때까지 유지됩니다.")
+        } header: {
+            Text("대시보드 보기")
+        } footer: {
+            Text("대시보드 가운데에 보일 보기를 고릅니다. 하나만 켜면 전환 버튼이 사라집니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 }

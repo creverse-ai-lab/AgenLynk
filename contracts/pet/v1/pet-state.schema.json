@@ -81,6 +81,16 @@
         "source": {
           "type": "string",
           "enum": ["local", "gateway"]
+        },
+        "name": {
+          "type": ["string", "null"],
+          "maxLength": 80,
+          "description": "Optional, additive within v1 (older producers omit it): the display name the app shows for this agent (the user's nickname when set, else the automatic name). Renderers must fall back to task when absent."
+        },
+        "waitingReason": {
+          "type": ["string", "null"],
+          "enum": ["permission", "input", null],
+          "description": "Optional, additive within v1 (older producers omit it): why a waiting agent waits. Present only when state is waiting and the reason is known."
         }
       }
     }

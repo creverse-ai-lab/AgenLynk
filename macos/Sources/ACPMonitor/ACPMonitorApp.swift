@@ -64,35 +64,20 @@ struct ACPMonitorApp: App {
     }
 }
 
-/// The status item: the mark, plus the one thing worth reading without
-/// opening the popover — how many steps wait for the user, else how many run.
+/// The status item: the mark, then "main | sub" — how many Frontdoors are
+/// working and how many of their Workers are — as bare numbers, with the
+/// steps that wait for the user called out after them.
 struct MenuBarLabel: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        let statuses = model.sessions.filter { !$0.isInternalReview }.map(\.status)
-        let permission = statuses.filter { $0 == "waiting_permission" }.count
-        let input = statuses.filter { $0 == "waiting_input" }.count
-        let running = statuses.filter { $0 == "running" }.count
+        let counts = MenuBarCounts(model.menuBarPipeline)
         HStack(spacing: 3) {
             Image(nsImage: ACPMenuBarIcon.image)
-            if permission > 0 {
-                Text("권한 \(permission)")
-            } else if input > 0 {
-                Text("입력 \(input)")
-            } else if running > 0 {
-                Text("실행 \(running)")
-            }
+            if let text = counts.text { Text(text).monospacedDigit() }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(accessibility(permission: permission, input: input, running: running))
-    }
-
-    private func accessibility(permission: Int, input: Int, running: Int) -> String {
-        var parts = ["AgenLynk"]
-        if permission > 0 { parts.append("권한 대기 \(permission)") }
-        if input > 0 { parts.append("입력 대기 \(input)") }
-        if running > 0 { parts.append("실행 중 \(running)") }
-        return parts.joined(separator: ", ")
+        .accessibilityLabel(counts.accessibility)
+        .help(counts.accessibility)
     }
 }

@@ -45,14 +45,17 @@ struct MenuBarPipeline: Equatable, Sendable {
         let frontdoor: FrontdoorSession
         /// Pipeline order: parent before child, siblings by creation.
         let stages: [Stage]
-        /// Waiting (idle or closed) Workers left out of `stages`.
-        let hiddenStageCount: Int
+        /// Waiting (idle or closed) Workers left out of `stages`, in pipeline
+        /// order. The menu bar only counts them; the dashboard's 현황 view
+        /// lists them under a folded "대기 중 Worker N개".
+        let restingStages: [Stage]
         let urgency: Urgency
         /// The step the card calls out: the most urgent, newest on ties.
         let focus: Stage?
         let work: WorkUsage
 
         var id: String { frontdoor.id }
+        var hiddenStageCount: Int { restingStages.count }
     }
 
     /// Needs the user, running, or failed — shown as cards.
@@ -105,13 +108,13 @@ struct MenuBarPipeline: Equatable, Sendable {
         // user; Workers that are only waiting (idle, closed) fold into a count,
         // so a card shows what is moving, not every session it ever opened.
         let rootId = frontdoor.root?.sessionId
-        let shown = stages.filter { stage in
+        let isShown: (Stage) -> Bool = { stage in
             stage.urgency <= .running || stage.id == rootId || (rootId == nil && stage.depth == 0 && stage.id == stages.first?.id)
         }
         return Card(
             frontdoor: frontdoor,
-            stages: shown,
-            hiddenStageCount: stages.count - shown.count,
+            stages: stages.filter(isShown),
+            restingStages: stages.filter { !isShown($0) },
             urgency: urgency,
             focus: focus,
             work: WorkUsage(sessions: frontdoor.members)

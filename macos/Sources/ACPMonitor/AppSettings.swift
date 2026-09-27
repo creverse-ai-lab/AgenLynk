@@ -14,6 +14,39 @@ enum BundledPet {
     }
 }
 
+/// The dashboard's center views (docs/ux-policy.md §9). Declared here, not
+/// with the views, so the settings checks compile without SwiftUI.
+enum DashboardMode: String, CaseIterable, Identifiable, Sendable {
+    case cards, graph, sequence
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .cards: "현황"
+        case .graph: "그래프"
+        case .sequence: "시퀀스"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .cards: "rectangle.grid.2x2"
+        case .graph: "point.3.connected.trianglepath.dotted"
+        case .sequence: "timeline.selection"
+        }
+    }
+
+    /// One line on what the view is for (settings, segment tooltip).
+    var summary: String {
+        switch self {
+        case .cards: "Frontdoor마다 카드 한 장, 움직이는 Worker와 상태"
+        case .graph: "Frontdoor → Worker 호출 관계를 한 장의 그래프로"
+        case .sequence: "세션별 레인에 이벤트와 호출·응답을 시간순으로"
+        }
+    }
+}
+
 @MainActor
 final class AppSettings: ObservableObject {
     private enum Key {
@@ -30,6 +63,8 @@ final class AppSettings: ObservableObject {
         static let sessionNicknames = "monitor.sessionNicknames"
         static let showSessionColumn = "monitor.showSessionColumn"
         static let showInspectorColumn = "monitor.showInspectorColumn"
+        static let dashboardModes = "monitor.dashboardModes"
+        static let defaultDashboardMode = "monitor.defaultDashboardMode"
     }
 
     private let defaults: UserDefaults
@@ -63,6 +98,52 @@ final class AppSettings: ObservableObject {
         didSet {
             defaults.set(try? JSONEncoder().encode(sessionNicknames), forKey: Key.sessionNicknames)
         }
+    }
+
+    /// Dashboard views the user keeps, in segment order; never empty.
+    @Published private(set) var enabledDashboardModes: [DashboardMode] {
+        didSet { defaults.set(enabledDashboardModes.map(\.rawValue), forKey: Key.dashboardModes) }
+    }
+    /// The view a launch opens on; always one of `enabledDashboardModes`.
+    @Published private(set) var defaultDashboardMode: DashboardMode {
+        didSet { defaults.set(defaultDashboardMode.rawValue, forKey: Key.defaultDashboardMode) }
+    }
+    /// The view last picked in this launch. In memory only: reopening the
+    /// dashboard window keeps it, the next launch starts at the default.
+    @Published var lastDashboardMode: DashboardMode?
+
+    /// The view to show: the one picked this launch while it stays enabled,
+    /// else the default.
+    var currentDashboardMode: DashboardMode {
+        if let lastDashboardMode, enabledDashboardModes.contains(lastDashboardMode) { return lastDashboardMode }
+        return defaultDashboardMode
+    }
+
+    func isDashboardModeEnabled(_ mode: DashboardMode) -> Bool { enabledDashboardModes.contains(mode) }
+
+    /// Turn a view on or off. The last enabled view cannot be turned off; a
+    /// default that is turned off falls back to the first view still on.
+    func setDashboardMode(_ mode: DashboardMode, enabled: Bool) {
+        var next = Set(enabledDashboardModes)
+        if enabled { next.insert(mode) } else { next.remove(mode) }
+        guard !next.isEmpty else { return }
+        enabledDashboardModes = DashboardMode.allCases.filter(next.contains)
+        if !next.contains(defaultDashboardMode) { defaultDashboardMode = enabledDashboardModes[0] }
+    }
+
+    /// Only an enabled view can be the default.
+    func setDefaultDashboardMode(_ mode: DashboardMode) {
+        guard enabledDashboardModes.contains(mode) else { return }
+        defaultDashboardMode = mode
+    }
+
+    private static func loadDashboardModes(_ defaults: UserDefaults) -> (enabled: [DashboardMode], preferred: DashboardMode) {
+        let stored = Set((defaults.stringArray(forKey: Key.dashboardModes) ?? []).compactMap(DashboardMode.init(rawValue:)))
+        let enabled = stored.isEmpty ? DashboardMode.allCases : DashboardMode.allCases.filter(stored.contains)
+        let preferred = defaults.string(forKey: Key.defaultDashboardMode).flatMap(DashboardMode.init(rawValue:))
+        // The sequence was the only view before; it stays the first-run default.
+        let fallback: DashboardMode = enabled.contains(.sequence) ? .sequence : enabled[0]
+        return (enabled, preferred.flatMap { enabled.contains($0) ? $0 : nil } ?? fallback)
     }
 
     func sessionNickname(id: String) -> String? {
@@ -131,6 +212,9 @@ final class AppSettings: ObservableObject {
             defaults.set(true, forKey: Key.followLatestEventUXMigration)
         }
         nodePath = defaults.string(forKey: Key.nodePath) ?? ""
+        let dashboardModes = Self.loadDashboardModes(defaults)
+        enabledDashboardModes = dashboardModes.enabled
+        defaultDashboardMode = dashboardModes.preferred
         if let data = defaults.data(forKey: Key.sessionNicknames),
            let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
             sessionNicknames = decoded
@@ -169,6 +253,9 @@ final class AppSettings: ObservableObject {
         showToolEvents = true
         followLatestEvent = false
         nodePath = ""
+        enabledDashboardModes = DashboardMode.allCases
+        defaultDashboardMode = .sequence
+        lastDashboardMode = nil
         petEnabled = bundledPetExecutablePath != nil
         petExecutablePath = ""
     }

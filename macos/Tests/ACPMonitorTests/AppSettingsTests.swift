@@ -79,7 +79,74 @@ enum AppSettingsChecks {
             throw SettingsCheckError.failed("clearing a name must revert to the auto name")
         }
 
+        try dashboardModeChecks()
         print("Swift settings checks passed")
+    }
+}
+
+/// Dashboard views: at least one stays on, the default is always an enabled
+/// one, and the choice survives relaunch while the last-picked view does not.
+@MainActor
+private func dashboardModeChecks() throws {
+    let suite = "ACPMonitor.AppSettingsTests.Dashboard.\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suite) else {
+        throw SettingsCheckError.failed("could not create dashboard defaults")
+    }
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let settings = AppSettings(defaults: defaults)
+    guard settings.enabledDashboardModes == DashboardMode.allCases,
+          settings.defaultDashboardMode == .sequence,
+          settings.currentDashboardMode == .sequence else {
+        throw SettingsCheckError.failed("a first run offers every view and opens on the sequence")
+    }
+    settings.setDefaultDashboardMode(.graph)
+    settings.setDashboardMode(.graph, enabled: false)
+    guard settings.enabledDashboardModes == [.cards, .sequence], settings.defaultDashboardMode == .cards else {
+        throw SettingsCheckError.failed("turning off the default falls back to the first view still on")
+    }
+    settings.setDashboardMode(.sequence, enabled: false)
+    settings.setDashboardMode(.cards, enabled: false)
+    guard settings.enabledDashboardModes == [.cards], settings.defaultDashboardMode == .cards else {
+        throw SettingsCheckError.failed("the last enabled view cannot be turned off")
+    }
+    settings.setDefaultDashboardMode(.sequence)
+    guard settings.defaultDashboardMode == .cards else {
+        throw SettingsCheckError.failed("a disabled view cannot become the default")
+    }
+    settings.setDashboardMode(.sequence, enabled: true)
+    settings.lastDashboardMode = .sequence
+    guard settings.currentDashboardMode == .sequence else {
+        throw SettingsCheckError.failed("the view picked this launch is the one shown")
+    }
+    settings.setDashboardMode(.sequence, enabled: false)
+    guard settings.currentDashboardMode == .cards else {
+        throw SettingsCheckError.failed("a picked view that is turned off gives way to the default")
+    }
+    settings.setDashboardMode(.graph, enabled: true)
+    settings.lastDashboardMode = .graph
+    let relaunched = AppSettings(defaults: defaults)
+    guard relaunched.enabledDashboardModes == [.cards, .graph],
+          relaunched.defaultDashboardMode == .cards,
+          relaunched.lastDashboardMode == nil,
+          relaunched.currentDashboardMode == .cards else {
+        throw SettingsCheckError.failed("enabled views and the default persist; the last-picked view is per launch")
+    }
+
+    // Stored values that make no sense recover instead of leaving no view.
+    defaults.set(["bogus"], forKey: "monitor.dashboardModes")
+    defaults.set("graph", forKey: "monitor.defaultDashboardMode")
+    let recovered = AppSettings(defaults: defaults)
+    guard recovered.enabledDashboardModes == DashboardMode.allCases, recovered.defaultDashboardMode == .graph else {
+        throw SettingsCheckError.failed("an unreadable view list falls back to every view")
+    }
+    defaults.set(["cards"], forKey: "monitor.dashboardModes")
+    let stale = AppSettings(defaults: defaults)
+    guard stale.defaultDashboardMode == .cards else {
+        throw SettingsCheckError.failed("a stored default that is not enabled falls back to an enabled view")
+    }
+    stale.reset()
+    guard stale.enabledDashboardModes == DashboardMode.allCases, stale.defaultDashboardMode == .sequence else {
+        throw SettingsCheckError.failed("reset restores every view and the sequence default")
     }
 }
 

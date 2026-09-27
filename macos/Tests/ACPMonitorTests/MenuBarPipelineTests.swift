@@ -13,6 +13,8 @@ struct MenuBarPipelineTests {
         try pipelineFollowsParentLinksAndOrdersByUrgency()
         try waitReasonAndCurrentStepComeFromEvents()
         try manyQuietStepsFoldButWaitingOnesStay()
+        try statusItemCountsMainAndSubAgents()
+        try restingWorkersKeepTheirDepthAndClosedOnesFoldToo()
         try pipelineAndSequenceShareOneTree()
         print("Swift menu bar pipeline checks passed")
     }
@@ -116,5 +118,39 @@ struct MenuBarPipelineTests {
         let card = MenuBarPipeline.make(frontdoors: FrontdoorSession.make(sessions: sessions), eventsBySession: [:]).activeCards[0]
         try check(card.stages.map(\.id) == ["root", "late"], "only the Frontdoor and Workers that need something are listed, got \(card.stages.map(\.id))")
         try check(card.hiddenStageCount == 7, "idle Workers fold into a count")
+        try check(card.restingStages.map(\.id) == (1...7).map { "w\($0)" }, "the dashboard can list the folded Workers, in pipeline order")
+        try check(Set(card.stages.map(\.id)).isDisjoint(with: card.restingStages.map(\.id)), "a step is either moving or resting, never both")
+    }
+
+    /// The dashboard card lists resting Workers under a fold: closed and idle
+    /// ones both rest, and a nested resting Worker keeps its depth.
+    private static func restingWorkersKeepTheirDepthAndClosedOnesFoldToo() throws {
+        let sessions = [
+            try session("root", status: "idle", role: "frontdoor"),
+            try session("w1", status: "closed", parent: "root", created: "2026-09-26T00:01:00.000Z"),
+            try session("w1a", status: "idle", parent: "w1", created: "2026-09-26T00:02:00.000Z"),
+            try session("w2", status: "error", parent: "root", created: "2026-09-26T00:03:00.000Z")
+        ]
+        let pipeline = MenuBarPipeline.make(frontdoors: FrontdoorSession.make(sessions: sessions), eventsBySession: [:])
+        guard let card = pipeline.activeCards.first else { throw CheckError.failed("an erroring Worker keeps the card active") }
+        try check(card.stages.map(\.id) == ["root", "w2"], "the Frontdoor and the failed Worker are listed, got \(card.stages.map(\.id))")
+        try check(card.restingStages.map(\.id) == ["w1", "w1a"], "closed and idle Workers rest, got \(card.restingStages.map(\.id))")
+        try check(card.restingStages.map(\.depth) == [1, 2], "a resting nested Worker keeps its depth")
+    }
+
+    private static func statusItemCountsMainAndSubAgents() throws {
+        let busy = FrontdoorSession.make(sessions: [
+            try session("root", status: "running", role: "frontdoor"),
+            try session("w1", status: "running", parent: "root", created: "2026-09-26T00:01:00.000Z"),
+            try session("w2", status: "waiting_permission", parent: "w1", created: "2026-09-26T00:02:00.000Z"),
+            try session("w3", status: "idle", parent: "root", created: "2026-09-26T00:03:00.000Z")
+        ])
+        let other = FrontdoorSession.make(sessions: [try session("r", status: "running", opener: "main-3", role: "frontdoor")])
+        let quiet = FrontdoorSession.make(sessions: [try session("q", status: "idle", opener: "main-2", role: "frontdoor")])
+        let counts = MenuBarCounts(MenuBarPipeline.make(frontdoors: busy + other + quiet, eventsBySession: [:]))
+        try check(counts.main == 2 && counts.sub == 2, "two working Frontdoors, two moving Workers (idle one not counted), got \(counts)")
+        try check(counts.text == "2 | 2 · 권한 1", "bare numbers, the user's wait after them, got \(counts.text ?? "nil")")
+        let idle = MenuBarCounts(MenuBarPipeline.make(frontdoors: quiet, eventsBySession: [:]))
+        try check(idle.text == nil, "nothing moving shows the icon alone")
     }
 }

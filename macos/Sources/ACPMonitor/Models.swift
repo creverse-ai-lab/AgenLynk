@@ -617,6 +617,10 @@ struct PetAgentActivity: Equatable, Sendable {
     /// Why a waiting agent waits ("permission" or "input"): the Pet contract
     /// folds both into `waiting`, the menu bar tells them apart.
     var waitingReason: String? = nil
+    /// The app's name for this agent (docs/ux-policy.md §2): the user's
+    /// nickname when the caller resolves one, else the automatic name.
+    /// Bounded like `task`; nil only for hand-built projections.
+    var name: String? = nil
 }
 
 /// "permission" / "input" for a waiting status, else nil.
@@ -632,10 +636,14 @@ func waitingReason(for statuses: [String]) -> String? {
 struct PetActivityProjection: Equatable, Sendable {
     let agents: [PetAgentActivity]
 
+    /// `nickname` resolves a user-chosen name for a projected agent id
+    /// (`role` is "frontdoor" or "worker", since the two are stored apart);
+    /// nil falls back to the automatic name.
     static func make(
         sessions: [GatewaySession],
         inbox: [MonitorRecord],
-        now: Date = Date()
+        now: Date = Date(),
+        nickname: (_ id: String, _ role: String) -> String? = { _, _ in nil }
     ) -> PetActivityProjection {
         let pendingBySession = Dictionary(grouping: inbox.filter {
             $0.status == "pending" && $0.payload.objectValue?.string("sessionId") != nil
@@ -643,11 +651,23 @@ struct PetActivityProjection: Equatable, Sendable {
             $0.payload.objectValue!.string("sessionId")!
         }).mapValues(\.count)
 
+        // The same groups as the dashboard and menu bar: a session joins the
+        // Frontdoor its proven parent chain leads to. A known group is one
+        // Frontdoor whatever folders its Workers run in; only sessions with no
+        // group fall back to the provider + folder key.
+        let groupKey = FrontdoorSession.groupKeyResolver(sessions)
+        // A known group's opener is its root's, so a Worker whose own opener
+        // field differs does not split it.
+        let openerByGroup = Dictionary(sessions.compactMap { session -> (String, String)? in
+            guard session.isFrontdoorRecord, let id = groupKey(session) else { return nil }
+            return (id, normalizedFrontdoor(session.opener ?? session.provider))
+        }, uniquingKeysWith: { first, _ in first })
         let groups = Dictionary(grouping: sessions) { gatewaySession in
-            FrontdoorKey(
-                provider: normalizedFrontdoor(gatewaySession.opener),
-                cwd: gatewaySession.cwd,
-                instanceId: gatewaySession.openerInstanceId
+            let instanceId = groupKey(gatewaySession)
+            return FrontdoorKey(
+                provider: instanceId.flatMap { openerByGroup[$0] } ?? normalizedFrontdoor(gatewaySession.opener),
+                cwd: instanceId == nil ? gatewaySession.cwd : "",
+                instanceId: instanceId
             )
         }
         var agents: [PetAgentActivity] = []
@@ -669,6 +689,8 @@ struct PetActivityProjection: Equatable, Sendable {
             }
             let frontdoorState = frontdoorContractState(memberStates)
             let frontdoorCwd = root?.cwd ?? key.cwd
+            let frontdoorName = nickname(frontdoorId, "frontdoor")
+                ?? FrontdoorSession(id: frontdoorId, provider: key.provider, root: root, workers: workers).displayName
             agents.append(PetAgentActivity(
                 id: frontdoorId,
                 parentId: nil,
@@ -683,7 +705,8 @@ struct PetActivityProjection: Equatable, Sendable {
                 cwd: frontdoorCwd.isEmpty ? nil : frontdoorCwd,
                 inboxPending: 0,
                 memberStates: memberStates,
-                waitingReason: waitingReason(for: group.map(\.status))
+                waitingReason: waitingReason(for: group.map(\.status)),
+                name: boundedName(frontdoorName)
             ))
             agents.append(contentsOf: workers.map { gatewaySession in
                 let pending = pendingBySession[gatewaySession.sessionId] ?? 0
@@ -702,7 +725,8 @@ struct PetActivityProjection: Equatable, Sendable {
                     cwd: gatewaySession.cwd.isEmpty ? nil : gatewaySession.cwd,
                     inboxPending: pending,
                     memberStates: [],
-                    waitingReason: waitingReason(for: [gatewaySession.status])
+                    waitingReason: waitingReason(for: [gatewaySession.status]),
+                    name: boundedName(nickname(gatewaySession.sessionId, "worker") ?? gatewaySession.displayName)
                 )
             })
         }
@@ -792,6 +816,12 @@ private func boundedTaskText(_ text: String?) -> String? {
     guard let text else { return nil }
     let collapsed = oneLineText(text, limit: 200, ellipsis: false)
     return collapsed.isEmpty ? nil : collapsed
+}
+
+/// A display name bounded for the Pet contract (`name`, maxLength 80).
+private func boundedName(_ text: String) -> String? {
+    let line = oneLineText(text, limit: 80, ellipsis: false)
+    return line.isEmpty ? nil : line
 }
 
 /// The one line a label shows of any text: newlines become spaces, the ends
@@ -928,6 +958,11 @@ struct PetStateEnvelope: Encodable, Equatable, Sendable {
         let task: String?
         let updatedAt: String
         let source: String
+        /// Optional, additive (renderers that predate it ignore it): the
+        /// app's display name. Omitted from the JSON when nil.
+        let name: String?
+        /// Optional, additive: "permission" or "input" for a waiting agent.
+        let waitingReason: String?
     }
 
     let contract: String
@@ -959,7 +994,9 @@ struct PetStateEnvelope: Encodable, Equatable, Sendable {
                     state: agent.state,
                     task: agent.task,
                     updatedAt: monitorTimestamp(agent.updatedAt),
-                    source: agent.source
+                    source: agent.source,
+                    name: agent.name,
+                    waitingReason: agent.state == .waiting ? agent.waitingReason : nil
                 )
             }
         )

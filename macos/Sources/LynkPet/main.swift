@@ -20,6 +20,9 @@ private struct PetStateEnvelope: Decodable {
         let state: String
         let task: String?
         let updatedAt: String
+        // Optional additions within v1: absent from older producers.
+        let name: String?
+        let waitingReason: String?
     }
 
     let contract: String
@@ -62,12 +65,20 @@ private struct AgentSession: Decodable, Identifiable, Equatable {
     let task: String?
     let tool: String?
     let delegated: Bool?
+    /// The app's display name (pet-state `name`), when the producer sends one.
+    let name: String?
+    /// The pet-state `state` verbatim, for the hover status phrase; nil for
+    /// legacy snapshot/agent-state sessions, which are phrased by `state`.
+    let contractState: String?
+    /// "permission" / "input" for a waiting agent, when known.
+    let waitingReason: String?
     var id: String { session }
 
     private enum CodingKeys: String, CodingKey {
-        case provider, session, state, parent, role, engine, time, cwd, task, tool, delegated
+        case provider, session, state, parent, role, engine, time, cwd, task, tool, delegated, name
         case commDirection = "comm_direction"
         case inboxPending = "inbox_pending"
+        case waitingReason = "waiting_reason"
     }
 
     init(
@@ -83,7 +94,10 @@ private struct AgentSession: Decodable, Identifiable, Equatable {
         cwd: String? = nil,
         task: String? = nil,
         tool: String? = nil,
-        delegated: Bool? = nil
+        delegated: Bool? = nil,
+        name: String? = nil,
+        contractState: String? = nil,
+        waitingReason: String? = nil
     ) {
         self.provider = provider
         self.session = session
@@ -98,6 +112,9 @@ private struct AgentSession: Decodable, Identifiable, Equatable {
         self.task = task
         self.tool = tool
         self.delegated = delegated
+        self.name = name
+        self.contractState = contractState
+        self.waitingReason = waitingReason
     }
 
     init(contractAgent agent: PetStateEnvelope.Agent, action: String?) {
@@ -112,6 +129,9 @@ private struct AgentSession: Decodable, Identifiable, Equatable {
         task = agent.task
         tool = action == "useTool" ? "tool" : nil
         delegated = agent.role == "worker"
+        name = agent.name
+        contractState = agent.state
+        waitingReason = agent.waitingReason
 
         switch action {
         case "waitForUser":
@@ -164,6 +184,9 @@ private struct AgentSession: Decodable, Identifiable, Equatable {
         task = try values.decodeIfPresent(String.self, forKey: .task)
         tool = try values.decodeIfPresent(String.self, forKey: .tool)
         delegated = try values.decodeIfPresent(Bool.self, forKey: .delegated)
+        name = try values.decodeIfPresent(String.self, forKey: .name)
+        contractState = nil
+        waitingReason = try values.decodeIfPresent(String.self, forKey: .waitingReason)
     }
 }
 
@@ -181,6 +204,11 @@ private let rootMinGap: CGFloat = 46
 private let minimumSpan: CGFloat = 2.4
 private let edgeMargin: CGFloat = 90
 private let parkArcStep: CGFloat = 0.35
+// Hover: once the cursor rests this long with the graph settled, the graph
+// holds still so the cursor can travel out to a node; it follows again once
+// the cursor leaves the graph's reach.
+private let holdDwell: TimeInterval = 0.3
+private let hoverFadeRate: CGFloat = 9
 
 private func shouldDisplayACP(_ session: AgentSession, now: TimeInterval) -> Bool {
     session.state != "offline" || now - (session.time ?? 0) <= acpCompletionVisibility
@@ -435,7 +463,18 @@ private struct RenderNode: Identifiable {
     let opacity: CGFloat
     let labelOpacity: CGFloat
     let warm: Bool
+    let depth: Int
     var id: String { agent.id }
+}
+
+/// The node the cursor points at and what its bubble says.
+private struct RenderHover {
+    let nodeID: String
+    let center: CGPoint
+    let radius: CGFloat
+    let text: PetHoverText
+    let accent: Color
+    let opacity: CGFloat
 }
 
 private struct RenderEdge: Identifiable {
@@ -455,6 +494,7 @@ private struct RenderFrame {
     var activeCount = 0
     var warmCount = 0
     var needsAttention = false
+    var hover: RenderHover?
     var time: TimeInterval = 0
 }
 
@@ -477,6 +517,13 @@ private final class MotionController: ObservableObject {
     private var lastMousePoint: NSPoint?
     private var restTicks = 0
     private var lastOrigin = NSPoint(x: CGFloat.infinity, y: CGFloat.infinity)
+    private var mouseStillSince: TimeInterval = 0
+    /// Screen point the graph is held at while the cursor explores it.
+    private var hold: CGPoint?
+    /// Outermost node reach from the hub in the last frame (points).
+    private var holdReach: CGFloat = 0
+    private var hoverID: String?
+    private var hoverProgress: CGFloat = 0
 
     init(store: StatusStore) {
         self.store = store
@@ -517,6 +564,19 @@ private final class MotionController: ObservableObject {
         let sessionsChanged = sessions != lastSessions
         lastSessions = sessions
 
+        // Hold: the window ignores mouse events (clicks must reach the apps
+        // below), so hover is the polled cursor hit-tested against the
+        // layout — no event monitor and no extra permission. The graph only
+        // stops following once the cursor has rested and the springs settled,
+        // so ordinary motion keeps the old follow-the-cursor feel.
+        if mouseMoved { mouseStillSince = clock }
+        if let held = hold {
+            if petHoldReleased(mouse: mouse, hub: held, reach: holdReach) || frame.nodes.isEmpty { hold = nil }
+        } else if clock - mouseStillSince >= holdDwell,
+                  let hub, hypot(hub.vx, hub.vy) < 5, spread > 0.97, !frame.nodes.isEmpty {
+            hold = CGPoint(x: hub.x, y: hub.y)
+        }
+
         // Deep rest: once visually still for 30 ticks the publish was already
         // suppressed, but the layout/spring/frame work kept burning ~0.5% CPU
         // at 60Hz forever. The only things that can wake a resting scene are
@@ -530,8 +590,10 @@ private final class MotionController: ObservableObject {
 
         // Follow the mouse only up to a margin inside the screen: at the edges the
         // graph stops and stays fully visible instead of riding off with the cursor.
-        let followX = min(max(mouse.x, screenFrame.minX + edgeMargin), max(screenFrame.minX + edgeMargin, screenFrame.maxX - edgeMargin))
-        let followY = min(max(mouse.y, screenFrame.minY + edgeMargin), max(screenFrame.minY + edgeMargin, screenFrame.maxY - edgeMargin))
+        let followX = hold?.x
+            ?? min(max(mouse.x, screenFrame.minX + edgeMargin), max(screenFrame.minX + edgeMargin, screenFrame.maxX - edgeMargin))
+        let followY = hold?.y
+            ?? min(max(mouse.y, screenFrame.minY + edgeMargin), max(screenFrame.minY + edgeMargin, screenFrame.maxY - edgeMargin))
         var hub = self.hub ?? Motion(x: followX, y: followY, vx: 0, vy: 0)
         hub.vx += (120 * (followX - hub.x) - 11 * hub.vx) * dt
         hub.vy += (120 * (followY - hub.y) - 11 * hub.vy) * dt
@@ -612,7 +674,8 @@ private final class MotionController: ObservableObject {
                 size: size,
                 opacity: (0.25 + 0.75 * spreadOp) * (target.warm ? 0.5 : 1) * fade,
                 labelOpacity: (target.warm ? (target.parentID != nil ? spreadOp * 0.45 : 0) : spreadOp) * fade,
-                warm: target.warm
+                warm: target.warm,
+                depth: target.depth
             ))
         }
         motions = motions.filter { ids.contains($0.key) }
@@ -636,7 +699,37 @@ private final class MotionController: ObservableObject {
             ))
         }
 
+        holdReach = nodes.reduce(0) { max($0, hypot($1.point.x - anchor.x, $1.point.y - anchor.y) + $1.size / 2) }
+
+        // Hit-test in window coordinates (top-left origin, like the Canvas).
+        // Only a spread, visible node can be pointed at: mid-collapse the
+        // nodes are racing to the cursor and a bubble would only flicker.
+        let local = CGPoint(x: mouse.x - origin.x, y: windowSize.height - (mouse.y - origin.y))
+        let hovered = spreadOp > 0.9
+            ? petHoveredNodeID(
+                nodes.filter { $0.opacity > 0.3 }.map { PetHoverCandidate(id: $0.id, center: $0.point, radius: $0.size / 2) },
+                at: local
+            )
+            : nil
+        if hovered != hoverID {
+            hoverID = hovered
+            // Reduce motion: the bubble appears at once instead of fading in.
+            hoverProgress = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 1 : 0
+        }
+        let hoverFading = hoverID != nil && hoverProgress < 1
+        if hoverFading { hoverProgress = min(1, hoverProgress + dt * hoverFadeRate) }
+
         var next = RenderFrame()
+        if let hoverID, let node = nodes.first(where: { $0.id == hoverID }) {
+            next.hover = RenderHover(
+                nodeID: hoverID,
+                center: node.point,
+                radius: node.size / 2,
+                text: hoverText(node.agent, depth: node.depth),
+                accent: node.warm ? .gray : stateColor(node.agent.state),
+                opacity: hoverProgress
+            )
+        }
         next.nodes = nodes
         next.edges = edges
         next.anchor = anchor
@@ -655,7 +748,7 @@ private final class MotionController: ObservableObject {
         }
             || targets.contains { $0.agent.state == "offline" }
             || edges.contains { $0.mode == .flowingToChild || $0.mode == .flowingToParent || $0.mode == .paused }
-        let animating = sessionsChanged || mouseMoved || hasLiveMotion
+        let animating = sessionsChanged || mouseMoved || hasLiveMotion || hoverFading
             || speed > 2 || maxNodeSpeed > 2 || abs(spreadTarget - spread) > 0.01
         if animating {
             restTicks = 0
@@ -746,16 +839,33 @@ private func logoForProvider(_ provider: String) -> NSImage? {
     providerLogos[provider.lowercased()]
 }
 
-// One line only: the repo (top folder of the session's cwd), falling back to
-// the task snippet, then the engine name so multiple instances stay tellable.
-private func nodeLabel(_ agent: AgentSession) -> String {
-    let prefix = isFrontdoor(agent) ? "Frontdoor · " : ""
+// One line only: the app's name for the session when the producer sends it
+// (pet-state `name`), else the repo (top folder of the session's cwd), the
+// task snippet, then the engine name so multiple instances stay tellable.
+private func nodeName(_ agent: AgentSession) -> String {
+    if let name = agent.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty { return name }
     if let cwd = agent.cwd, !cwd.isEmpty {
-        return prefix + URL(fileURLWithPath: cwd).lastPathComponent
+        return URL(fileURLWithPath: cwd).lastPathComponent
     }
-    if let task = agent.task, !task.isEmpty { return prefix + task }
+    if let task = agent.task, !task.isEmpty { return task }
     let raw = agent.engine ?? agent.provider
-    return prefix + String(raw.replacingOccurrences(of: "gpt-", with: "").prefix(12))
+    return String(raw.replacingOccurrences(of: "gpt-", with: "").prefix(12))
+}
+
+private func nodeLabel(_ agent: AgentSession) -> String {
+    (isFrontdoor(agent) ? "Frontdoor · " : "") + nodeName(agent)
+}
+
+private func hoverText(_ agent: AgentSession, depth: Int) -> PetHoverText {
+    petHoverText(
+        name: agent.name,
+        fallbackName: nodeName(agent),
+        role: agent.role,
+        depth: depth,
+        status: petStatusPhrase(contractState: agent.contractState, legacyState: agent.state, waitingReason: agent.waitingReason),
+        provider: agent.provider,
+        task: agent.task
+    )
 }
 
 private struct TreeFlowScene: View {
@@ -775,7 +885,7 @@ private struct TreeFlowScene: View {
                 drawEdge(edge, time: frame.time, opacity: frame.edgeOpacity, in: &context)
             }
             for node in frame.nodes {
-                drawNode(node, time: frame.time, in: &context)
+                drawNode(node, time: frame.time, hovered: node.id == frame.hover?.nodeID, in: &context)
             }
             if frame.badgeOpacity > 0.02 {
                 drawBadge(
@@ -788,6 +898,10 @@ private struct TreeFlowScene: View {
                     in: &context
                 )
             }
+            // Last, so the bubble sits above every node and edge.
+            if let hover = frame.hover {
+                drawHoverBubble(hover, in: &context)
+            }
         }
         .frame(width: windowSize.width, height: windowSize.height)
         // Canvas draws pixels, not an accessibility tree. This closure is only
@@ -796,7 +910,8 @@ private struct TreeFlowScene: View {
         .accessibilityRepresentation {
             VStack {
                 ForEach(frame.nodes) { node in
-                    Text("\(isFrontdoor(node.agent) ? "frontdoor " : "")\(node.agent.provider) \(nodeLabel(node.agent)) \(node.agent.state)")
+                    let text = hoverText(node.agent, depth: node.depth)
+                    Text(verbatim: ([text.title, text.detail] + (text.task.map { [$0] } ?? [])).joined(separator: ", "))
                 }
             }
         }
@@ -808,7 +923,7 @@ private struct TreeFlowScene: View {
     // (This was tried as a speedup too, since a sample shows Text resolution
     // dominating this function; it made no measurable difference. The cost is
     // in resolving to an attributed string, which `verbatim` does not skip.)
-    private func drawNode(_ node: RenderNode, time: TimeInterval, in context: inout GraphicsContext) {
+    private func drawNode(_ node: RenderNode, time: TimeInterval, hovered: Bool, in context: inout GraphicsContext) {
         guard node.opacity > 0.02 else { return }
         let center = node.point
         let pulsing = demandsAttention(node.agent) && !node.warm
@@ -888,7 +1003,18 @@ private struct TreeFlowScene: View {
             )
         }
 
-        let labelOpacity = node.labelOpacity * node.opacity
+        if hovered {
+            // A static ring, no growth: the bubble names the node, and a
+            // node that jumps in size on hover would be motion for nothing.
+            context.stroke(
+                circle(diameter: node.size + 10),
+                with: .color(.white.opacity(0.9 * node.opacity)),
+                lineWidth: 1.5
+            )
+        }
+
+        // The bubble replaces the small label while hovered.
+        let labelOpacity = hovered ? 0 : node.labelOpacity * node.opacity
         guard labelOpacity > 0.02 else { return }
         context.drawLayer { layer in
             // Stands in for lineLimit(1).frame(maxWidth: 92): a long repo name
@@ -901,6 +1027,46 @@ private struct TreeFlowScene: View {
                     .foregroundStyle(.white.opacity(0.75 * labelOpacity)),
                 at: anchor
             )
+        }
+    }
+
+    private func drawHoverBubble(_ hover: RenderHover, in context: inout GraphicsContext) {
+        guard hover.opacity > 0.02 else { return }
+        let opacity = Double(hover.opacity)
+        let lines: [Text] = [
+            Text(verbatim: hover.text.title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white.opacity(opacity)),
+            Text(verbatim: hover.text.detail)
+                .font(.system(size: 9.5, weight: .medium))
+                .foregroundStyle(.white.opacity(0.85 * opacity))
+        ] + (hover.text.task.map { task in
+            [Text(verbatim: task)
+                .font(.system(size: 9.5))
+                .foregroundStyle(.white.opacity(0.65 * opacity))]
+        } ?? [])
+        let maxTextWidth: CGFloat = 240
+        let resolved = lines.map { context.resolve($0) }
+        let sizes = resolved.map { $0.measure(in: CGSize(width: maxTextWidth, height: 40)) }
+        let padding: CGFloat = 8, spacing: CGFloat = 2
+        let textWidth = min(maxTextWidth, sizes.map(\.width).max() ?? 0)
+        let textHeight = sizes.map(\.height).reduce(0, +) + spacing * CGFloat(max(0, sizes.count - 1))
+        let rect = petBubbleRect(
+            size: CGSize(width: textWidth + padding * 2, height: textHeight + padding * 2),
+            center: hover.center,
+            nodeRadius: hover.radius + 5,
+            bounds: CGRect(origin: .zero, size: windowSize)
+        )
+        let shape = Path(roundedRect: rect, cornerRadius: 7)
+        context.fill(shape, with: .color(.black.opacity(0.8 * opacity)))
+        context.stroke(shape, with: .color(hover.accent.opacity(0.9 * opacity)), lineWidth: 1)
+        context.drawLayer { layer in
+            layer.clip(to: Path(rect.insetBy(dx: padding - 1, dy: 0)))
+            var y = rect.minY + padding
+            for (line, size) in zip(resolved, sizes) {
+                layer.draw(line, at: CGPoint(x: rect.minX + padding, y: y), anchor: .topLeading)
+                y += size.height + spacing
+            }
         }
     }
 
@@ -1042,6 +1208,18 @@ private func selfTest() {
         AgentSession(contractAgent: unknownState.agents[0], action: "unknown").state == "blocked",
         "an unknown contract state must map to blocked"
     )
+
+    // Hover: an older producer (no name/waitingReason) still labels by task;
+    // the optional fields, when present, name the node and split waiting.
+    let legacyHover = hoverText(contractSessions.first { $0.id == "worker-1" }!, depth: 1)
+    require(legacyHover == PetHoverText(title: "Implement", detail: "Worker · 실행 중 · Claude", task: nil))
+    let namedJSON = #"{"contract":"pet-state","version":"1.0.0","sequence":9,"agents":[{"id":"w","parentId":"f","role":"worker","provider":"codex","engine":"gpt-5","state":"waiting","task":"Fix the flaky login test","updatedAt":"2026-08-10T12:34:55.000Z","source":"gateway","name":"login-fix","waitingReason":"permission"}]}"#
+    let namedState = try! JSONDecoder().decode(PetStateEnvelope.self, from: Data(namedJSON.utf8))
+    let named = AgentSession(contractAgent: namedState.agents[0], action: "waitForUser")
+    require(nodeLabel(named) == "login-fix")
+    require(hoverText(named, depth: 2) == PetHoverText(
+        title: "login-fix", detail: "Worker · 2단 · 권한 대기 · Codex", task: "Fix the flaky login test"
+    ))
 
     let root1 = AgentSession(provider: "codex", session: "a-root", state: "running", time: now)
     let frontdoor = AgentSession(provider: "codex", session: "frontdoor", state: "running", role: "frontdoor", time: now)

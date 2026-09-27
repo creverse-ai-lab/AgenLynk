@@ -45,10 +45,23 @@ env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/SessionTree.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/EventTimeline.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/MenuBarPipeline.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/MenuBarCounts.swift" \
   "$REPO_ROOT/macos/Tests/ACPMonitorTests/MenuBarPipelineTests.swift" \
   -o "$PIPELINE_OUT"
 
 "$PIPELINE_OUT"
+
+GRAPH_LAYOUT_OUT="$CHECK_ROOT/graph-layout"
+env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
+  swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 $SHARED_FLAGS \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/Models.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/TimeText.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/SessionTree.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/GraphLayout.swift" \
+  "$REPO_ROOT/macos/Tests/ACPMonitorTests/GraphLayoutTests.swift" \
+  -o "$GRAPH_LAYOUT_OUT"
+
+"$GRAPH_LAYOUT_OUT"
 
 PHASE6_OUT="$CHECK_ROOT/phase6-architecture"
 env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
@@ -90,6 +103,7 @@ env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/TimeText.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/SessionTree.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/PetController.swift" \
+  "$REPO_ROOT/macos/Sources/LynkPet/PetHover.swift" \
   "$REPO_ROOT/macos/Tests/ACPMonitorTests/PetControllerTests.swift" \
   -o "$PET_CONTROLLER_OUT"
 

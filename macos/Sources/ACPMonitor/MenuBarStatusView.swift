@@ -405,16 +405,7 @@ private struct StageRow: View {
         return "\(label) · \(elapsedText(from: started, to: now))"
     }
 
-    private var stageColor: Color {
-        // Winding down, not working: gray like the dashboard.
-        if stage.session.status == "cancelling" { return .secondary }
-        switch stage.urgency {
-        case .permission, .input: return .orange
-        case .error: return .red
-        case .running: return .green
-        case .idle, .closed: return .secondary
-        }
-    }
+    private var stageColor: Color { stage.color }
 }
 
 /// The card's call-out: what the most urgent step is doing and what this

@@ -259,6 +259,9 @@ final class AppModel: ObservableObject {
         var visibleLogSessions: [GatewaySession]?
         var logFrontdoorSessions: [FrontdoorSession]?
         var menuBarPipeline: MenuBarPipeline?
+        var dashboardPipeline: MenuBarPipeline?
+        /// 그래프 layouts by scope (a Frontdoor, a history session, or all).
+        var dashboardGraphs: [String: DashboardGraph] = [:]
     }
     private var derivedCache = DerivedCache()
 
@@ -298,10 +301,38 @@ final class AppModel: ObservableObject {
     }
     /// The menu bar's pipelines, rebuilt only when the monitor state changes
     /// (a heartbeat no longer counts as one).
+    /// The names the user gave, for the Pet (Frontdoors and sessions are named apart).
+    private var petNickname: (String, String) -> String? {
+        { [settings] id, role in
+            role == "frontdoor"
+                ? (settings.hasFrontdoorNickname(id: id) ? settings.frontdoorName(id: id, auto: "") : nil)
+                : settings.sessionNickname(id: id)
+        }
+    }
+
     var menuBarPipeline: MenuBarPipeline {
         derived(\.menuBarPipeline) {
             MenuBarPipeline.make(frontdoors: frontdoorSessions, eventsBySession: eventsBySession)
         }
+    }
+    /// The dashboard 현황 cards: the menu bar's pipelines, but over the
+    /// sidebar's Frontdoors (live + retained history), so every row in the
+    /// list has its card.
+    var dashboardPipeline: MenuBarPipeline {
+        derived(\.dashboardPipeline) {
+            MenuBarPipeline.make(frontdoors: logFrontdoorSessions, eventsBySession: logEventsBySession)
+        }
+    }
+    /// The 그래프 view's layout for a scope, built once per monitor revision.
+    /// `scope` must name everything `make` reads beyond the monitor state.
+    func dashboardGraph(scope: String, _ make: () -> DashboardGraph) -> DashboardGraph {
+        if derivedCache.revision != monitorStore.revision {
+            derivedCache = DerivedCache(revision: monitorStore.revision)
+        }
+        if let cached = derivedCache.dashboardGraphs[scope] { return cached }
+        let value = make()
+        derivedCache.dashboardGraphs[scope] = value
+        return value
     }
     var realtimeACPCount: Int { realtimeSessions.filter { !$0.isLocalSource }.count }
     var realtimeLocalCount: Int { realtimeSessions.filter(\.isLocalSource).count }
@@ -1595,7 +1626,7 @@ final class AppModel: ObservableObject {
     private func startPet() {
         petStore.start(
             executablePath: settings.resolvedPetExecutablePath,
-            projection: PetActivityProjection.make(sessions: realtimeSessions, inbox: realtimeInbox),
+            projection: PetActivityProjection.make(sessions: realtimeSessions, inbox: realtimeInbox, nickname: petNickname),
             enabled: { [weak self] in self?.settings.petEnabled == true }
         )
     }
@@ -1604,7 +1635,7 @@ final class AppModel: ObservableObject {
         // Nothing to feed: skip building the projection on every frame.
         guard settings.petEnabled, petRunning else { return }
         petStore.sync(
-            projection: PetActivityProjection.make(sessions: realtimeSessions, inbox: realtimeInbox),
+            projection: PetActivityProjection.make(sessions: realtimeSessions, inbox: realtimeInbox, nickname: petNickname),
             enabled: settings.petEnabled
         )
     }

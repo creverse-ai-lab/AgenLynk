@@ -131,8 +131,10 @@ struct DashboardView: View {
             if !(model.selectedEvent.map { members.contains($0.sessionId) } ?? false) {
                 model.selectedEventId = nil
             }
-            if model.selectedSession?.openerInstanceId != model.selectedFrontdoorId {
-                // A member waiting on the person is what the selection is for.
+            // A member of the new scope (a card stage or graph node was just
+            // clicked) stays selected; otherwise a member waiting on the
+            // person is what the selection is for.
+            if !(model.selectedSessionId.map { members.contains($0) } ?? false) {
                 model.selectedSessionId = model.selectedFrontdoor?.preferredSession?.sessionId
             }
         }
@@ -141,7 +143,8 @@ struct DashboardView: View {
             // Selecting a session (a lane, or an event's session) keeps the
             // selected event; the scope follows the session's Frontdoor.
             if let openerInstanceId = model.selectedSession?.openerInstanceId,
-               openerInstanceId != model.selectedFrontdoorId {
+               openerInstanceId != model.selectedFrontdoorId,
+               !(model.selectedFrontdoor?.members.contains { $0.sessionId == model.selectedSessionId } ?? false) {
                 model.selectedFrontdoorId = openerInstanceId
             }
         }
@@ -416,18 +419,48 @@ struct DashboardView: View {
         return model.selectedFrontdoorId ?? "all"
     }
 
+    /// The center view: 현황 cards, 그래프, or the sequence, as picked in the
+    /// header (only the views turned on in Settings are offered).
+    private var dashboardMode: Binding<DashboardMode> {
+        Binding(
+            get: { settings.currentDashboardMode },
+            set: { settings.lastDashboardMode = $0 }
+        )
+    }
+
+    private var centerTitle: String {
+        let history = model.selectedHistorySessionId != nil
+        let scoped = model.selectedFrontdoorId != nil
+        switch settings.currentDashboardMode {
+        case .cards: return "작업 현황"
+        case .graph: return history ? "지난 기록 호출 그래프" : scoped ? "Frontdoor 호출 그래프" : "전체 호출 그래프"
+        case .sequence: return history ? "지난 기록 이벤트 시퀀스" : scoped ? "Frontdoor 이벤트 시퀀스" : "전체 이벤트 시퀀스"
+        }
+    }
+
     private var eventColumn: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Label(
-                    model.selectedHistorySessionId != nil ? "지난 기록 이벤트 시퀀스"
-                        : model.selectedFrontdoorId == nil ? "전체 이벤트 시퀀스" : "Frontdoor 이벤트 시퀀스",
-                    systemImage: "timeline.selection"
-                )
+            HStack(spacing: 10) {
+                Label(centerTitle, systemImage: settings.currentDashboardMode.symbol)
                     .font(.headline)
-                Spacer()
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                // One view on: nothing to switch between, so no control.
+                if settings.enabledDashboardModes.count > 1 {
+                    Picker("보기", selection: dashboardMode) {
+                        ForEach(settings.enabledDashboardModes) { mode in
+                            Text(mode.label).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
+                    .help("가운데 보기 전환 · 보일 보기는 설정 > 화면에서 고릅니다")
+                    .accessibilityLabel("대시보드 보기")
+                }
             }
-            .padding(12)
+            .padding(.horizontal, 12)
+            .frame(height: 44)
             Divider()
             let contextSession = model.selectedHistorySession ?? model.selectedSession
             SequenceSelectionContext(
@@ -437,24 +470,104 @@ struct DashboardView: View {
                 inHistory: contextSession.map { model.showsAsHistory($0) } ?? false
             )
             Divider()
-            let sessionIds = sequenceSessions.map(\.sessionId)
-            EventSequenceView(
-                sessions: sequenceSessions,
-                events: model.selectedEvents,
-                selectedSessionId: $model.selectedSessionId,
-                selectedEventId: $model.selectedEventId,
-                followLatestEvent: $settings.followLatestEvent,
-                canLoadOlder: model.mayHaveOlderEvents(in: sessionIds),
-                loadingOlder: !model.olderLoadingSessionIds.isDisjoint(with: sessionIds),
-                olderCapped: !model.olderCappedSessionIds.isDisjoint(with: sessionIds),
-                loadOlder: { await model.loadOlderEvents(sessionIds: sessionIds) },
-                emptyState: sequenceEmptyState,
-                eventsRevision: model.eventsRevision
-            )
-            // A new scope is a new timeline: fresh scroll position (newest at
-            // the bottom) and no groups left expanded from the previous one.
-            .id(sequenceScopeKey)
+            switch settings.currentDashboardMode {
+            case .cards:
+                DashboardCardsView(
+                    cards: dashboardCards,
+                    selectedFrontdoorId: model.selectedHistorySessionId == nil ? model.selectedFrontdoorId : nil,
+                    selectedSessionId: model.selectedHistorySessionId == nil ? model.selectedSessionId : nil,
+                    emptyState: overviewEmptyState,
+                    selectFrontdoor: { selectFromOverview(frontdoorId: $0, sessionId: nil) },
+                    selectStage: { selectFromOverview(frontdoorId: $0, sessionId: $1) }
+                )
+            case .graph:
+                DashboardGraphView(
+                    graph: dashboardGraph,
+                    selectedFrontdoorId: model.selectedFrontdoorId,
+                    selectedSessionId: model.selectedHistorySessionId ?? model.selectedSessionId,
+                    emptyState: overviewEmptyState,
+                    selectFrontdoor: { selectFromOverview(frontdoorId: $0, sessionId: nil) },
+                    selectSession: { frontdoorId, sessionId in
+                        // An opened history session is the whole graph.
+                        guard model.selectedHistorySessionId == nil else { return }
+                        selectFromOverview(frontdoorId: frontdoorId, sessionId: sessionId)
+                    }
+                )
+                .id("graph:\(sequenceScopeKey)")
+            case .sequence:
+                sequenceView
+            }
         }
+    }
+
+    private var sequenceView: some View {
+        let sessionIds = sequenceSessions.map(\.sessionId)
+        return EventSequenceView(
+            sessions: sequenceSessions,
+            events: model.selectedEvents,
+            selectedSessionId: $model.selectedSessionId,
+            selectedEventId: $model.selectedEventId,
+            followLatestEvent: $settings.followLatestEvent,
+            canLoadOlder: model.mayHaveOlderEvents(in: sessionIds),
+            loadingOlder: !model.olderLoadingSessionIds.isDisjoint(with: sessionIds),
+            olderCapped: !model.olderCappedSessionIds.isDisjoint(with: sessionIds),
+            loadOlder: { await model.loadOlderEvents(sessionIds: sessionIds) },
+            emptyState: sequenceEmptyState,
+            eventsRevision: model.eventsRevision
+        )
+        // A new scope is a new timeline: fresh scroll position (newest at
+        // the bottom) and no groups left expanded from the previous one.
+        .id(sequenceScopeKey)
+    }
+
+    /// Every sidebar Frontdoor's card, most urgent first (the pipeline's
+    /// order); "활성만" hides the same ones it hides in the list.
+    private var dashboardCards: [MenuBarPipeline.Card] {
+        let pipeline = model.dashboardPipeline
+        let cards = pipeline.activeCards + pipeline.idleCards
+        guard settings.activeOnly else { return cards }
+        let visible = Set(model.visibleFrontdoors.map(\.id))
+        return cards.filter { visible.contains($0.id) }
+    }
+
+    /// The graph's scope, like the sequence's: the opened history session,
+    /// else the selected Frontdoor, else every listed Frontdoor stacked.
+    private var dashboardGraph: DashboardGraph {
+        if let history = model.selectedHistorySession {
+            return model.dashboardGraph(scope: "history:\(history.sessionId)") { .make(session: history) }
+        }
+        if let frontdoor = model.selectedFrontdoor {
+            return model.dashboardGraph(scope: "frontdoor:\(frontdoor.id)") { .make(frontdoors: [frontdoor]) }
+        }
+        let frontdoors = model.visibleFrontdoors
+        return model.dashboardGraph(scope: "all:\(settings.activeOnly)") { .make(frontdoors: frontdoors) }
+    }
+
+    /// The sidebar's own empty wording, so the two never disagree.
+    private var overviewEmptyState: SequenceEmptyState {
+        if settings.activeOnly, !model.logFrontdoorSessions.isEmpty {
+            return SequenceEmptyState(
+                title: "진행 중인 Frontdoor가 없습니다",
+                symbol: "rectangle.stack",
+                description: "활성만 보기를 끄면 대기·종료된 작업도 보입니다."
+            )
+        }
+        return SequenceEmptyState(
+            title: "실행 중인 Frontdoor 없음",
+            symbol: "rectangle.stack",
+            description: "터미널에서 claude/codex/grok을 실행하면 표시됩니다."
+        )
+    }
+
+    /// A card or node click: the same selection a sidebar row plus a lane
+    /// header click would make, leaving an opened history session.
+    private func selectFromOverview(frontdoorId: String?, sessionId: String?) {
+        if model.selectedHistorySessionId != nil {
+            Task { await model.selectHistorySession(nil) }
+            settings.followLatestEvent = true
+        }
+        if let sessionId { model.selectedSessionId = sessionId }
+        if let frontdoorId { model.selectedFrontdoorId = frontdoorId }
     }
 
     /// What an empty sequence should say: a history session still loading or
