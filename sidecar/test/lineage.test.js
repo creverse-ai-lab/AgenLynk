@@ -201,7 +201,7 @@ test("lineage projects a shell-launched agent as a worker of its launcher", () =
   assert.equal(merged.some((session) => session.localSessionId === GROK_ID && session.source === "local"), false);
 });
 
-test("a hook-only session with no activity and no transcript is held back, then dropped", async () => {
+test("a hook-only session with no activity is held back, then dropped, even with a transcript", async () => {
   await withTempDirectory(async (root) => {
     const claudeRoot = join(root, "projects");
     const registry = new HookSessions({ claudeRoot, grokRoot: join(root, "grok") });
@@ -230,14 +230,15 @@ test("a hook-only session with no activity and no transcript is held back, then 
     assert.equal(prompted.heldBack, false);
     assert.equal(registry.merge([], at + 1_000).find((raw) => raw.session === "real")?.state, "running");
 
-    // A session with a transcript on disk (a resumed one) is listed at start.
+    // A transcript on disk is no proof: a probe writes one and deletes it.
+    // A real resumed session is listed by the scanner instead (below).
     await mkdir(join(claudeRoot, "p"), { recursive: true });
     await writeFile(join(claudeRoot, "p", "resumed.jsonl"), "{}\n");
     const resumed = registry.record("claude", {
       ...probe, session_id: "resumed", transcript_path: join(claudeRoot, "p", "resumed.jsonl"), hook_event_name: "SessionStart"
     }, at);
-    assert.equal(resumed.heldBack, false);
-    assert.ok(registry.merge([], at).some((raw) => raw.session === "resumed"));
+    assert.equal(resumed.heldBack, true);
+    assert.ok(!registry.merge([], at).some((raw) => raw.session === "resumed"));
 
     // The scanner seeing a transcript lists it whatever the hooks said.
     registry.record("codex", { session_id: "scanned", hook_event_name: "SessionStart" }, at);

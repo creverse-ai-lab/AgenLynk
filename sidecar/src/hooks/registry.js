@@ -7,13 +7,14 @@
 // permission" show up the moment they happen for all three CLIs.
 //
 // A session a hook has only seen start (no prompt, tool, subagent or
-// permission prompt) and that has no transcript is held back: it is not
+// permission prompt) is held back, transcript or not: it is not
 // listed, and it is forgotten at its SessionEnd or after HELD_BACK_TTL_MS.
 // Tools that run an agent CLI as a probe (a usage meter starting `claude`
 // every few minutes) would otherwise add an empty Frontdoor per run. The
-// first real activity lists it like any other session.
+// first real activity lists it like any other session. A transcript on disk
+// is no proof: a probe writes one and deletes it, and a real session with a
+// transcript is listed by the scanner on its own.
 
-import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isWithin } from "../app/fs-paths.js";
@@ -35,9 +36,9 @@ function isActivity(hook) {
   return hook.event === "Notification" && hook.notificationType === "permission_prompt";
 }
 
-/** Listed at all: real activity, or a transcript that exists on disk. */
+/** Listed at all: a hook saw real activity. */
 function listable(entry) {
-  return entry.active || entry.transcriptExists;
+  return entry.active;
 }
 
 // Hook status -> the scanner's state vocabulary (see local-monitor.js).
@@ -89,7 +90,7 @@ export class HookSessions {
     if (!entry) {
       entry = {
         provider, session: sessionId, normalizer: new HookNormalizer(), status: null, statusAt: 0,
-        firstSeen: receivedAt, active: false, transcriptExists: false, markers: {}, ppid: null, parent: null
+        firstSeen: receivedAt, active: false, markers: {}, ppid: null, parent: null
       };
       this.sessions.set(key, entry);
       if (this.sessions.size > MAX_SESSIONS) this.sessions.delete(this.sessions.keys().next().value);
@@ -110,7 +111,6 @@ export class HookSessions {
     } else if (provider === "grok" && entry.cwd && /^[A-Za-z0-9-]+$/.test(entry.session)) {
       entry.transcript = join(this.grokRoot, encodeURIComponent(entry.cwd), entry.session);
     }
-    if (entry.transcript && !entry.transcriptExists) entry.transcriptExists = existsSync(entry.transcript);
     if (status) {
       entry.status = status;
       entry.statusAt = Date.parse(statusAt) || receivedAt;
