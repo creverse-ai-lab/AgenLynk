@@ -79,7 +79,10 @@ export async function snapshotSessions(states, database = null) {
 
   for (const item of sessions) {
     if (item.provider !== "codex") continue;
-    item.parent = item.parent || spawnParents.get(item.session) || null;
+    const spawnParent = spawnParents.get(item.session);
+    item.parent = item.parent || spawnParent || null;
+    // A spawn edge in Codex's own thread DB proves the parent is a Codex thread.
+    if (spawnParent && item.parent === spawnParent && !item.parent_provider) item.parent_provider = "codex";
     // Process lineage (a `codex exec` from another agent's shell) only
     // fills in when nothing proven names a parent.
     const lineage = item.lineage_parent;

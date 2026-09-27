@@ -109,9 +109,14 @@ export class HookNormalizer {
     let status = hook.event === "Notification"
       ? notificationStatus(hook.notificationType)
       : STATUS_BY_EVENT[hook.event] ?? null;
+    // Grok runs a sub-agent in a session of its own, and SubagentStop fires
+    // in that session at the sub-agent's own turn end: it is that session's
+    // Stop. (Claude and Codex fire it in the parent, which keeps working.)
+    if (provider === "grok" && hook.event === "SubagentStop") status = "idle";
     // Inside a Task subagent the parent session is still working; the
-    // subagent's own line is the transcript's business.
-    if (hook.agentId && status === "idle") status = "running";
+    // subagent's own line is the transcript's business. Grok's payload is
+    // always about its own session.
+    if (provider !== "grok" && hook.agentId && status === "idle") status = "running";
 
     const waitsForPermission = status === "waiting_permission";
     const outcome = this.openPermission && !waitsForPermission ? permissionOutcome(hook.event) : null;

@@ -246,6 +246,10 @@ export async function detectClaudeSessions(root, now, readyAfter, staleAfter, pa
         time: signal.time,
         pid: null,
         parent: signal.parent ?? externalParent(parents ?? new Map(), "claude", signal.session),
+        // A Task sub-agent lives in its parent's own transcript, so the
+        // parent's provider is proven even when the parent (a finished
+        // `claude -p`) has already left the scan.
+        ...(signal.parent ? { parent_provider: "claude" } : {}),
         engine: "claude-cli",
         cwd: signal.cwd,
         link_session: signal.session,

@@ -5,12 +5,12 @@
 // open. That transcript's last turn marker says whether it is still working.
 
 import { execFile } from "node:child_process";
-import { readdir, realpath, stat } from "node:fs/promises";
+import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { reversedRecords } from "./jsonl.js";
-import { headlessArgs } from "./lineage.js";
+import { headlessArgs, LINEAGE_ID } from "./lineage.js";
 import { claudeAcpLinks, externalParent, linkKey } from "./parent-links.js";
 
 const execFileAsync = promisify(execFile);
@@ -140,6 +140,104 @@ export async function recordGrokAcpLinks(states, parents, now, grokRoot = null, 
   }
   if (cache) for (const link of [...cache.keys()]) if (!current.has(link)) cache.delete(link);
   return changed;
+}
+
+/**
+ * Sub-agent -> parent links Grok records in one workspace (encoded-cwd)
+ * directory: a session that spawned a sub-agent keeps
+ * `<parent>/subagents/<child>/meta.json`, and the child's own session sits
+ * next to it. meta.json names both ids when it can be read; the directory
+ * layout stands in when it cannot.
+ */
+export async function grokSubagentLinks(workspace) {
+  const links = new Map();
+  let sessions;
+  try {
+    sessions = await readdir(workspace, { withFileTypes: true });
+  } catch {
+    return links;
+  }
+  for (const session of sessions) {
+    if (!session.isDirectory() || !LINEAGE_ID.test(session.name)) continue;
+    let children;
+    try {
+      children = await readdir(join(workspace, session.name, "subagents"), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of children) {
+      if (!entry.isDirectory() || !LINEAGE_ID.test(entry.name)) continue;
+      let parent = session.name;
+      let child = entry.name;
+      try {
+        const meta = JSON.parse(await readFile(join(workspace, session.name, "subagents", entry.name, "meta.json"), "utf8"));
+        if (typeof meta?.parent_session_id === "string" && LINEAGE_ID.test(meta.parent_session_id)) parent = meta.parent_session_id;
+        if (typeof meta?.child_session_id === "string" && LINEAGE_ID.test(meta.child_session_id)) child = meta.child_session_id;
+      } catch {
+        // Not written yet or unreadable: the directory layout already names both.
+      }
+      if (child !== parent) links.set(child, parent);
+    }
+  }
+  return links;
+}
+
+/**
+ * Gives each Grok sub-agent session the Grok session that spawned it. This is
+ * Grok's own record, so it wins over process lineage: a sub-agent runs inside
+ * its parent's process and inherits that process's environment, which would
+ * otherwise attribute it to whatever launched the parent.
+ *
+ * Links are cached per workspace directory and reread only when its mtime
+ * moves. Grok writes `subagents/<child>` before it creates the child's session
+ * directory, and creating that directory is what moves the mtime.
+ */
+export class GrokSubagentParents {
+  constructor() {
+    this.cache = new Map();
+  }
+
+  async annotate(items) {
+    const pass = new Map();
+    for (const item of items ?? []) {
+      if (item?.provider !== "grok") continue;
+      const session = item.link_session ?? item.session;
+      const workspace = grokWorkspace(item, session);
+      if (!workspace) continue;
+      if (!pass.has(workspace)) pass.set(workspace, await this.#links(workspace));
+      const parent = pass.get(workspace).get(session);
+      if (!parent || parent === session) continue;
+      item.parent = parent;
+      item.parent_provider = "grok";
+      item.parent_source = "grok-subagent";
+      // The parent's `grok -p` argv is not the sub-agent's: it is a worker,
+      // not a one-shot run.
+      delete item.headless;
+    }
+    for (const workspace of [...this.cache.keys()]) if (!pass.has(workspace)) this.cache.delete(workspace);
+  }
+
+  async #links(workspace) {
+    let mtime;
+    try {
+      mtime = (await stat(workspace)).mtimeMs;
+    } catch {
+      this.cache.delete(workspace);
+      return new Map();
+    }
+    const cached = this.cache.get(workspace);
+    if (cached?.mtime === mtime) return cached.links;
+    const links = await grokSubagentLinks(workspace);
+    this.cache.set(workspace, { mtime, links });
+    return links;
+  }
+}
+
+/** The encoded-cwd directory holding a Grok session, from its transcript or cwd. */
+function grokWorkspace(item, session) {
+  if (typeof session !== "string" || !LINEAGE_ID.test(session)) return null;
+  if (typeof item.transcript === "string" && basename(item.transcript) === session) return dirname(item.transcript);
+  return null;
 }
 
 export function isGrokProcess(command, args) {

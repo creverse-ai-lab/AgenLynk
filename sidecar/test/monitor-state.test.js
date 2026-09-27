@@ -336,3 +336,21 @@ test("history restore skips local sessions nothing but start/end reached", () =>
   assert.equal(isEmptyHookOnlySession({ ...probe, title: "작업" }, []), false);
   assert.equal(isEmptyHookOnlySession({ ...probe, source: "gateway" }, []), false);
 });
+
+test("a local session that leaves mid-turn is archived idle; a Gateway one keeps its status", () => {
+  const state = new MonitorState();
+  const local = {
+    sessionId: "local:grok:child", provider: "grok", source: "local", status: "running", turnId: "t1",
+    stopReason: null, updatedAt: "2026-09-27T04:46:55.848Z",
+    turnUsage: [{ turnId: "t1", startedAt: "2026-09-27T04:46:52.300Z", endedAt: null, running: true }]
+  };
+  const gateway = { sessionId: "gw-1", provider: "grok", source: "gateway", status: "running" };
+  state.setSessions([local, gateway]);
+  state.setSessions([]);
+  const archived = state.historySessions.get(local.sessionId);
+  assert.equal(archived.status, "idle");
+  assert.equal(archived.turnId, null);
+  assert.equal(archived.stopReason, "completed");
+  assert.deepEqual(archived.turnUsage[0], { ...local.turnUsage[0], running: false, endedAt: local.updatedAt });
+  assert.equal(state.historySessions.get("gw-1").status, "running", "a Gateway session is closed by the Gateway");
+});

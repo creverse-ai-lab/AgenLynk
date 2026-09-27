@@ -947,6 +947,9 @@ async function main() {
 
 async function readLocalProjection() {
   const sessions = hookSessions.merge(await collectLocalSessions());
+  // A Grok sub-agent only a hook reported carries the hook's lineage parent
+  // (its parent's launcher); Grok's own record of the parent replaces it.
+  await localScanner?.annotateGrokSubagents(sessions);
   if (!sessions.length) return { sessions: [], events: {}, changedSessionIds: new Set() };
   try {
     // One pipeline for every provider: the scanner found the sessions and

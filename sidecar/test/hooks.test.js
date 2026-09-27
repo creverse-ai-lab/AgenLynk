@@ -511,3 +511,46 @@ test("only the newest few backups of each config file are kept", async () => {
     for (const [file, count] of perFile) assert.equal(count, 5, `${file} keeps five backups`);
   });
 });
+
+test("a grok sub-agent's SubagentStop is its own turn end, and a Claude subagent's is not", () => {
+  const child = new HookNormalizer().ingest("grok", {
+    hook_event_name: "SubagentStop", hookEventName: "subagent_stop", sessionId: "child", subagentType: "general-purpose", agentId: "child"
+  });
+  assert.equal(child.status, "idle", "Grok fires SubagentStop in the sub-agent's own session");
+  const grokStop = new HookNormalizer().ingest("grok", { hook_event_name: "Stop", sessionId: "child", agentId: "child" });
+  assert.equal(grokStop.status, "idle", "a Grok payload is always about its own session");
+  const claude = new HookNormalizer().ingest("claude", { hook_event_name: "SubagentStop", session_id: "parent", agent_id: "a1" });
+  assert.equal(claude.status, "running", "Claude fires it in the parent, which keeps working");
+});
+
+test("a grok sub-agent and its grok -p parent both end idle, whichever of SessionEnd and the turn end the scan sees", async () => {
+  const { MonitorState } = await import("../src/projection/monitor-state.js");
+  const { projectLocalSnapshot } = await import("../src/local-monitor.js");
+  await withTempDirectory(async (root) => {
+    const registry = new HookSessions({ claudeRoot: join(root, "projects"), grokRoot: join(root, "grok") });
+    const state = new MonitorState();
+    const at = Date.parse("2026-09-27T04:46:52Z");
+    const pass = (nowMs) => state.setSessions(projectLocalSnapshot({ sessions: registry.merge([], nowMs) }).sessions);
+    registry.record("grok", { hook_event_name: "UserPromptSubmit", sessionId: "parent", cwd: "/w" }, at);
+    registry.record("grok", { hook_event_name: "UserPromptSubmit", sessionId: "child", cwd: "/w", subagentType: "general-purpose" }, at + 100);
+    pass(at + 200);
+    assert.equal(state.sessions.get("local:grok:child").status, "running");
+
+    // The child's turn end, then its teardown.
+    registry.record("grok", { hook_event_name: "SubagentStop", sessionId: "child", subagentType: "general-purpose" }, at + 3_000);
+    pass(at + 3_100);
+    assert.equal(state.sessions.get("local:grok:child").status, "idle", "SubagentStop settles the sub-agent");
+    registry.record("grok", { hook_event_name: "SessionEnd", sessionId: "child", subagentType: "general-purpose" }, at + 3_200);
+    pass(at + 3_300);
+    assert.equal(state.historySessions.get("local:grok:child").status, "idle");
+
+    // The parent's SessionEnd beats any sign of its turn end to the scan.
+    registry.record("grok", { hook_event_name: "SessionEnd", sessionId: "parent" }, at + 6_000);
+    pass(at + 6_100);
+    const parent = state.historySessions.get("local:grok:parent");
+    assert.equal(parent.status, "idle", "an ended session is not archived mid-turn");
+    assert.equal(parent.turnId, null);
+    assert.equal(parent.stopReason, "completed");
+    assert.equal(state.sessions.has("local:grok:parent"), false);
+  });
+});

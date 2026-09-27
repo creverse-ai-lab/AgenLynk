@@ -470,6 +470,9 @@ test("claude subagent records project as child sessions instead of overwriting t
     assert.equal(detected["main-session"].state, "running");
     assert.equal(detected["main-session"].parent, null, "the parent stays a root");
     assert.equal(detected.abc.parent, "main-session", "the subagent hangs under its parent session");
+    assert.equal(detected.abc.parent_provider, "claude",
+      "its parent's provider is proven, so the link holds after a finished parent leaves the scan");
+    assert.equal(detected["main-session"].parent_provider, undefined);
   });
 });
 

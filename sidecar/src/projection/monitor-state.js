@@ -10,6 +10,30 @@ import { EventStore } from "../store/event-store.js";
 // source's `type`, a store-assigned `sequence`, a stable `id`, and the same
 // shape whether the Gateway, a transcript, or a hook produced them.
 export const MONITOR_SCHEMA_VERSION = 2;
+
+const LOCAL_ACTIVE_STATUSES = new Set(["running", "waiting_permission", "waiting_input"]);
+
+/**
+ * A local session leaves the live list only once it is over: its SessionEnd
+ * hook came, its process exited, or it went stale. Whatever turn it last
+ * showed is over too, so history keeps it as idle rather than frozen mid-turn
+ * (a SessionEnd can beat the transcript's own turn end to the scan).
+ */
+function settledLocalSession(session) {
+  if (session.source !== "local" || !LOCAL_ACTIVE_STATUSES.has(session.status)) return session;
+  return {
+    ...session,
+    status: "idle",
+    turnId: null,
+    stopReason: "completed",
+    turnUsage: Array.isArray(session.turnUsage)
+      ? session.turnUsage.map((turn) => (turn?.running
+        ? { ...turn, running: false, endedAt: turn.endedAt ?? session.updatedAt ?? null }
+        : turn))
+      : session.turnUsage
+  };
+}
+
 export const MONITOR_API_VERSION = "2.0";
 const MAX_PENDING_SSE_FRAMES = 512;
 const MAX_PENDING_SSE_BYTES = 4 * 1024 * 1024;
@@ -178,7 +202,7 @@ export class MonitorState {
     const session = this.sessions.get(sessionId);
     const existed = Boolean(session) || this.store.has(sessionId);
     if (session) {
-      const archived = closed ? { ...session, status: "closed" } : session;
+      const archived = closed ? { ...session, status: "closed" } : settledLocalSession(session);
       this.historySessions.set(sessionId, archived);
       this.historyExpiresAt.set(sessionId, Date.now() + this.historyRetentionMs);
       this.persistence?.writeSession(archived);

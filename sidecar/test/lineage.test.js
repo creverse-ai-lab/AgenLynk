@@ -421,3 +421,113 @@ test("a proven codex parent beats a codex exec lineage parent", async () => {
   assert.equal(proven.parent, "mcp");
   assert.equal(proven.parent_source, undefined);
 });
+
+const GROK_PARENT_ID = "01a0e12f-cc46-7f10-85c7-4552b92ec473";
+const GROK_CHILD_ID = "01a0e12f-f6dc-7292-833a-fefdfcd67baf";
+
+/** Grok's layout for a `spawn_subagent`: the child sits next to its parent, which records it. */
+async function grokSubagentLayout(grokRoot, cwd, { meta = true } = {}) {
+  const workspace = join(grokRoot, encodeURIComponent(cwd));
+  const record = join(workspace, GROK_PARENT_ID, "subagents", GROK_CHILD_ID);
+  await mkdir(record, { recursive: true });
+  if (meta) {
+    await writeFile(join(record, "meta.json"), JSON.stringify({
+      subagent_id: GROK_CHILD_ID, parent_session_id: GROK_PARENT_ID, child_session_id: GROK_CHILD_ID, status: "completed"
+    }));
+  }
+  await mkdir(join(workspace, GROK_CHILD_ID), { recursive: true });
+  await writeFile(join(workspace, GROK_CHILD_ID, "summary.json"), JSON.stringify({ session_kind: "subagent" }));
+  return workspace;
+}
+
+test("a grok sub-agent's parent is the grok session that spawned it, not its process lineage", async () => {
+  await withTempDirectory(async (root) => {
+    const grokRoot = join(root, "grok");
+    await grokSubagentLayout(grokRoot, "/w");
+    const sessions = join(root, "sessions");
+    await claudePidFile(sessions, 16964, CLAUDE_ID);
+    // The sub-agent runs inside its parent's `grok -p`, so its hooks carry
+    // the same process chain and the same CLAUDE_CODE_SESSION_ID.
+    const { run } = fakePs({
+      16964: { ppid: 1, comm: "claude", args: "claude" },
+      4860: { ppid: 16964, comm: "/bin/zsh", args: "zsh -c grok -p x" },
+      4866: { ppid: 4860, comm: "grok", args: "grok -p x", env: `CLAUDE_CODE_SESSION_ID=${CLAUDE_ID}` },
+      4900: { ppid: 4866, comm: "/bin/sh", args: "sh -c hook" }
+    });
+    const lineage = new ProcessLineage({ claudeSessionsDir: sessions, run });
+    const registry = new HookSessions({ claudeRoot: join(root, "projects"), grokRoot });
+    const at = Date.parse("2026-09-27T04:46:52Z");
+    for (const sessionId of [GROK_PARENT_ID, GROK_CHILD_ID]) {
+      const recorded = registry.record("grok", { hook_event_name: "UserPromptSubmit", sessionId, cwd: "/w" }, at,
+        { markers: { claude: CLAUDE_ID }, ppid: 4900 });
+      await registry.resolveLineage(recorded.key, lineage, at);
+    }
+    const scanner = new LocalAgentScanner({
+      sessionsRoot: join(root, "codex"), database: join(root, "none.sqlite"), claudeRoot: join(root, "projects"),
+      grokRoot, orcaAccounts: null, orcaStatus: join(root, "orca.json"), lineage: null
+    });
+    const raws = await scanner.annotateGrokSubagents(registry.merge([], at));
+    const byId = new Map(raws.map((raw) => [raw.session, raw]));
+    const child = byId.get(GROK_CHILD_ID);
+    assert.equal(child.parent, GROK_PARENT_ID, "Grok's subagents/ record wins over the hook's lineage");
+    assert.equal(child.parent_provider, "grok");
+    assert.equal(child.headless, undefined, "a sub-agent is a worker, not a one-shot run");
+    assert.equal(byId.get(GROK_PARENT_ID).parent, CLAUDE_ID, "the parent itself keeps its lineage parent");
+    assert.equal(byId.get(GROK_PARENT_ID).headless, true);
+
+    const projected = new Map(projectLocalSnapshot({ sessions: raws }).sessions.map((session) => [session.localSessionId, session]));
+    assert.equal(projected.get(GROK_CHILD_ID).parentSessionId, `local:grok:${GROK_PARENT_ID}`);
+    assert.equal(projected.get(GROK_CHILD_ID).parentProof, undefined);
+    assert.equal(projected.get(GROK_CHILD_ID).openerInstanceId, CLAUDE_ID, "the chain still roots at the launcher");
+    assert.equal(projected.get(GROK_PARENT_ID).parentSessionId, `local:claude:${CLAUDE_ID}`);
+  });
+});
+
+test("the grok sub-agent resolver beats lineage in the scan and rereads a workspace only when it changes", async () => {
+  const { GrokSubagentParents, grokSubagentLinks } = await import("../src/local-agents/grok.js");
+  const { utimes } = await import("node:fs/promises");
+  await withTempDirectory(async (root) => {
+    const grokRoot = join(root, "grok");
+    const workspace = await grokSubagentLayout(grokRoot, "/w", { meta: false });
+    assert.deepEqual([...await grokSubagentLinks(workspace)], [[GROK_CHILD_ID, GROK_PARENT_ID]],
+      "the directory layout names the parent without meta.json");
+
+    // A process-scanned child: it shares its parent's pid and argv.
+    const item = (session) => ({
+      provider: "grok", session, link_session: session, pid: 4866, headless: true, parent: null,
+      transcript: join(workspace, session)
+    });
+    const items = [item(GROK_PARENT_ID), item(GROK_CHILD_ID)];
+    // Whole seconds, so restoring the mtime below restores it exactly.
+    const mtime = 1_790_000_000;
+    await utimes(workspace, mtime, mtime);
+    const resolver = new GrokSubagentParents();
+    await resolver.annotate(items);
+    const resolveCalls = [];
+    await annotateLineage(items, {
+      refresh: async () => {},
+      resolve: async (pid, self) => {
+        resolveCalls.push(self.session);
+        return { parent: { provider: "claude", session: CLAUDE_ID }, headless: true };
+      }
+    });
+    assert.equal(items[1].parent, GROK_PARENT_ID);
+    assert.equal(items[1].parent_source, "grok-subagent");
+    assert.equal(items[1].headless, undefined);
+    assert.deepEqual(resolveCalls, [GROK_PARENT_ID], "lineage is only the fallback");
+    assert.equal(items[0].parent, CLAUDE_ID);
+
+    // A second sub-agent recorded without the workspace mtime moving is not
+    // looked for: the cached links stand.
+    await mkdir(join(workspace, GROK_PARENT_ID, "subagents", "second-child"), { recursive: true });
+    await utimes(workspace, mtime, mtime);
+    const second = [item("second-child")];
+    await resolver.annotate(second);
+    assert.equal(second[0].parent, null, "an unchanged workspace is not rescanned");
+    // Its session directory appearing is what moves the mtime.
+    await mkdir(join(workspace, "second-child"));
+    await utimes(workspace, mtime, mtime + 5);
+    await resolver.annotate(second);
+    assert.equal(second[0].parent, GROK_PARENT_ID);
+  });
+});

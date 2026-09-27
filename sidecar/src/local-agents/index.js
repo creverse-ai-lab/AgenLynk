@@ -11,7 +11,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { detectClaudeSessions } from "./claude.js";
 import { discover, poll, prune } from "./codex.js";
-import { detectCliProcesses, recordGrokAcpLinks } from "./grok.js";
+import { detectCliProcesses, GrokSubagentParents, recordGrokAcpLinks } from "./grok.js";
 import { detectOrcaSessions } from "./orca.js";
 import { annotateExecLineage, annotateLineage, ProcessLineage } from "./lineage.js";
 import { externalParent, pruneExternalParents } from "./parent-links.js";
@@ -64,6 +64,7 @@ export class LocalAgentScanner {
     this.processStates = {};
     this.grokEventPathCache = new Map();
     this.grokLinkCache = new Map();
+    this.grokSubagents = new GrokSubagentParents();
     this.lastProcessScan = 0;
     // Parent links are in-memory now. The old watcher reloaded them from its
     // snapshot file; here a monitor restart simply rediscovers them from the
@@ -88,6 +89,20 @@ export class LocalAgentScanner {
       if (cursor.session === sessionId) return cursor.conversation;
     }
     return [];
+  }
+
+  /**
+   * Parents Grok itself recorded for its sub-agents. Also applied by the
+   * monitor to sessions only a hook reported, after the hook overlay, so the
+   * proven parent replaces the hook's process-lineage guess.
+   */
+  async annotateGrokSubagents(items) {
+    try {
+      await this.grokSubagents.annotate(items);
+    } catch {
+      // A refinement; the listing stands without it.
+    }
+    return items;
   }
 
   /** Every known local session, shaped like the old watcher's snapshot entries. */
@@ -185,6 +200,9 @@ export class LocalAgentScanner {
         }
       }
     }
+    // A Grok sub-agent runs inside its parent's process, so the process tree
+    // would name the parent's launcher; Grok's own subagents/ record decides.
+    await this.annotateGrokSubagents(Object.values(detected));
     // Lineage comes after every proven link: a Gateway/MCP-proven parent is
     // never replaced by what the process tree suggests.
     try {
