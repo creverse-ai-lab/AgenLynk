@@ -43,6 +43,16 @@ struct AgentCatalogView: View {
                 ProgressView("ACP 공식 에이전트 목록을 불러오는 중…")
                 Spacer()
             } else {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Worker 에이전트")
+                        .font(.callout.weight(.semibold))
+                    Text("Gateway가 작업을 맡길 때 실행하는 ACP 에이전트입니다. 켜짐·꺼짐은 Worker 사용 여부이며, 위의 Frontdoor 설치와는 별개입니다.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 14)
+                .padding(.top, 10)
                 List(filteredAgents) { agent in
                     AgentCatalogRow(agent: agent)
                         .environmentObject(model)
@@ -84,7 +94,7 @@ struct AgentCatalogView: View {
         VStack(alignment: .leading, spacing: 6) {
             Label("Frontdoor MCP 설치", systemImage: "door.left.hand.open")
                 .font(.callout.weight(.semibold))
-            Text("에이전트에 Control MCP를 설치해 Frontdoor로 모니터링되게 합니다. 이미 설치된 것은 그대로 유지되며, 한 번에 하나씩 설치됩니다.")
+            Text("Frontdoor는 사용자가 직접 대화하며 Worker에게 일을 맡기는 CLI입니다. Control MCP를 설치해야 Frontdoor가 되고, 가이드 MCP만 있으면 위임 방법만 읽을 수 있습니다. 이미 설치된 것은 그대로 유지되며, 한 번에 하나씩 설치됩니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             VStack(spacing: 4) {
@@ -130,6 +140,12 @@ struct AgentCatalogView: View {
                     .foregroundStyle(.green)
                     .labelStyle(.titleAndIcon)
             } else {
+                if model.guideOnlyFrontdoors.contains(agent.id) {
+                    Text("가이드 MCP만 설치됨")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .help("위임 방법 안내(agent-acp-guide)만 있고 Control MCP(agent-acp)가 없어 Frontdoor로 동작하지 않습니다.")
+                }
                 // Only this agent's row shows its own progress; the others are
                 // just disabled while one install runs.
                 Button(installingThis ? "설치 중…" : "설치") {
@@ -181,7 +197,7 @@ private struct AgentCatalogRow: View {
                         set: { enabled in Task { await model.setAgentEnabled(agent, enabled: enabled) } }
                     ))
                     .toggleStyle(.switch)
-                    .accessibilityLabel("\(agent.name) 사용")
+                    .accessibilityLabel("\(agent.name) Worker 사용")
                     // Re-installing pulls the registry's current version, so the
                     // update path is just install run again — shown only when
                     // the configured version differs from the registry latest.

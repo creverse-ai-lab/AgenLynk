@@ -30,6 +30,8 @@ final class AppModel: ObservableObject {
     /// exclusive primary (nil when none). Drives the Settings install-state
     /// badges; empty until `loadInstalledFrontdoors()` first succeeds.
     @Published private(set) var installedFrontdoors: [String] = []
+    /// Agents carrying only the guide MCP (not Frontdoors), per `/api/frontdoors`.
+    @Published private(set) var guideOnlyFrontdoors: [String] = []
     @Published private(set) var primaryFrontdoor: String?
     /// The agent whose Control MCP install is running right now (nil when idle),
     /// so only its row shows progress.
@@ -1054,8 +1056,9 @@ final class AppModel: ObservableObject {
         guard let endpoint else { return }
         do {
             let snapshot = try await client.fetchInstalledFrontdoors(endpoint: endpoint)
-            installedFrontdoors = snapshot.installed
-            primaryFrontdoor = snapshot.primary
+            if installedFrontdoors != snapshot.installed { installedFrontdoors = snapshot.installed }
+            if guideOnlyFrontdoors != snapshot.guideOnly { guideOnlyFrontdoors = snapshot.guideOnly }
+            if primaryFrontdoor != snapshot.primary { primaryFrontdoor = snapshot.primary }
         } catch {
             // Non-fatal: the badges just stay at their last known state rather
             // than surfacing an error into Settings.

@@ -1245,16 +1245,18 @@ enum MonitorModelChecks {
 
     private static func installedFrontdoorsDecodePrimaryInstalledAndNullEmpty() throws {
         let populated = try InstalledFrontdoors.decode(Data(#"""
-        {"primary":"codex","installed":["codex","claude"]}
+        {"primary":"codex","installed":["codex","claude"],"guideOnly":["grok"]}
         """#.utf8))
         try check(populated.primary == "codex", "installed frontdoors primary decode failed")
         try check(populated.installed == ["codex", "claude"], "installed frontdoors list decode failed")
+        try check(populated.guideOnly == ["grok"], "guide-only frontdoors decode failed")
 
         let empty = try InstalledFrontdoors.decode(Data(#"""
         {"primary":null,"installed":[]}
         """#.utf8))
         try check(empty.primary == nil, "null primary must decode to nil")
         try check(empty.installed.isEmpty, "empty installed list decode failed")
+        try check(empty.guideOnly.isEmpty, "a missing guideOnly decodes to empty")
     }
 
     private static func gatewayConfigDecodesAllControlMetadata() throws {

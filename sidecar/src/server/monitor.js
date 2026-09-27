@@ -983,21 +983,23 @@ async function collectLocalSessions() {
 const FRONT_DOOR_AGENTS = new Set(["codex", "claude", "grok"]);
 // Matches the control section but not agent-acp-guide (next char is `-`).
 const CONTROL_MCP_TOML = /^\[mcp_servers\.agent-acp[\].]/m;
+const GUIDE_MCP_TOML = /^\[mcp_servers\.agent-acp-guide[\].]/m;
 
-async function tomlHasControlMcp(path) {
+async function tomlMcp(path) {
   try {
-    return CONTROL_MCP_TOML.test(await readFile(path, "utf8"));
+    const text = await readFile(path, "utf8");
+    return { control: CONTROL_MCP_TOML.test(text), guide: GUIDE_MCP_TOML.test(text) };
   } catch {
-    return false;
+    return { control: false, guide: false };
   }
 }
 
-async function claudeJsonHasControlMcp(path) {
+async function claudeJsonMcp(path) {
   try {
-    const raw = JSON.parse(await readFile(path, "utf8"));
-    return Boolean(raw?.mcpServers && raw.mcpServers["agent-acp"]);
+    const servers = JSON.parse(await readFile(path, "utf8"))?.mcpServers ?? {};
+    return { control: Boolean(servers["agent-acp"]), guide: Boolean(servers["agent-acp-guide"]) };
   } catch {
-    return false;
+    return { control: false, guide: false };
   }
 }
 
@@ -1005,16 +1007,16 @@ async function readInstalledFrontdoors() {
   const home = homedir();
   const codexHome = process.env.CODEX_HOME || join(home, ".codex");
   const grokHome = process.env.GROK_HOME || join(home, ".grok");
-  const [codex, grok, claude] = await Promise.all([
-    tomlHasControlMcp(join(codexHome, "config.toml")),
-    tomlHasControlMcp(join(grokHome, "config.toml")),
-    claudeJsonHasControlMcp(join(home, ".claude.json"))
+  const [codex, claude, grok] = await Promise.all([
+    tomlMcp(join(codexHome, "config.toml")),
+    claudeJsonMcp(join(home, ".claude.json")),
+    tomlMcp(join(grokHome, "config.toml"))
   ]);
-  const installed = [
-    ...(codex ? ["codex"] : []),
-    ...(claude ? ["claude"] : []),
-    ...(grok ? ["grok"] : [])
-  ];
+  const agents = { codex, claude, grok };
+  const installed = Object.keys(agents).filter((agent) => agents[agent].control);
+  // Only the guide MCP: the agent can read how to delegate but is not a
+  // Frontdoor, so Settings must not show it as installed nor as untouched.
+  const guideOnly = Object.keys(agents).filter((agent) => agents[agent].guide && !agents[agent].control);
   // The exclusive primary is still whatever install.json recorded; it is only
   // a label, and a missing/invalid file just means "no primary".
   let primary = null;
@@ -1024,7 +1026,7 @@ async function readInstalledFrontdoors() {
   } catch {
     // no install.json → no primary
   }
-  return { primary, installed };
+  return { primary, installed, guideOnly };
 }
 
 function gatewayIdentity(state, identity) {

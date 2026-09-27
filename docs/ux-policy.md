@@ -11,6 +11,7 @@ Claude · Codex · Grok · Gateway 세션을 **같은 규칙으로** 보여 주�
 - 레인 헤더 첫 줄은 역할(**Frontdoor** / Worker / "Worker · 2단"), 둘째 줄은 이름(사용자 지정, 없으면 자동 이름)이다.
 - 레인·배지 이름은 **Frontdoor / Worker**만 쓴다. 중첩(depth≥2)은 "Worker · 2단". "Agent"/"Subagent"로 부르지 않는다. 호출 화살표는 "Worker 호출", 돌아오는 화살표는 "응답".
 - 이벤트 종류 `subagent`(CLI 내부 서브에이전트)는 레인이 아니므로 그대로 "서브에이전트"로 쓴다.
+- 설정의 **Frontdoor MCP 설치**와 **Worker 에이전트** 목록은 별개다. Frontdoor는 Control MCP(`agent-acp`)가 있을 때만 "설치됨"이고, 가이드 MCP(`agent-acp-guide`)만 있으면 "가이드 MCP만 설치됨"과 설치 버튼을 함께 보인다. Worker 목록의 켜짐·꺼짐은 Worker 사용 여부이며, 목록 위에 그 뜻을 한 줄로 적는다.
 
 ## 2. 이름
 - provider는 **아이콘**으로 보여 준다(Claude / Codex / Grok). 이름 텍스트에 provider를 반복하지 않는다.

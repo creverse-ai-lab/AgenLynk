@@ -1431,13 +1431,17 @@ struct MonitorMeta: Equatable, Sendable {
 struct InstalledFrontdoors: Equatable, Sendable {
     let primary: String?
     let installed: [String]
+    /// Agents with only the guide MCP: they can read how to delegate but are
+    /// not Frontdoors (the Gateway installs the guide into every agent).
+    var guideOnly: [String] = []
 
     static func decode(_ data: Data) throws -> InstalledFrontdoors {
         let raw = try JSONSerialization.jsonObject(with: data)
         guard let root = JSONValue(any: raw).objectValue else { throw MonitorDecodeError.invalidMessage }
         return InstalledFrontdoors(
             primary: root.string("primary"),
-            installed: (root.array("installed") ?? []).compactMap { $0.stringValue }
+            installed: (root.array("installed") ?? []).compactMap { $0.stringValue },
+            guideOnly: (root.array("guideOnly") ?? []).compactMap { $0.stringValue }
         )
     }
 }
