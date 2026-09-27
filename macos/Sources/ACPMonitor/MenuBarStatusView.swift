@@ -323,10 +323,15 @@ private struct PipelineCardView: View {
                     .help("대시보드에서 이 세션 보기")
                 }
                 if card.hiddenStageCount > 0 {
-                    Text("대기 중 Worker \(card.hiddenStageCount)개")
+                    // Counted, never listed: the dashboard opens the box.
+                    Label("대기 중 Worker \(card.hiddenStageCount)개", systemImage: "moon.zzz")
                         .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .restingBox(cornerRadius: 5)
                         .padding(.leading, 18)
+                        .padding(.top, 2)
                 }
             }
 

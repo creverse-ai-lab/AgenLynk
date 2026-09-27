@@ -149,6 +149,27 @@ struct GraphLayout: Equatable, Sendable {
     }
 }
 
+extension GraphLayout {
+    /// A tree split into what the drawing keeps and what rests in the
+    /// "대기 중 Worker" box, both in the input's depth-first order.
+    struct Partition: Equatable, Sendable {
+        let tree: [Input]
+        let resting: [Input]
+    }
+
+    /// Keeps `anchors` (the Frontdoor, moving Workers) and every ancestor
+    /// that connects one to the root; every other node rests. An idle parent
+    /// of a running child stays, so the running child keeps its edge.
+    static func partition(_ nodes: [Input], anchors: Set<String>) -> Partition {
+        let resting = SessionTree.restingIds(nodes.map { (id: $0.id, parentId: $0.parentId) }, anchors: anchors)
+        guard !resting.isEmpty else { return Partition(tree: nodes, resting: []) }
+        return Partition(
+            tree: nodes.filter { !resting.contains($0.id) },
+            resting: nodes.filter { resting.contains($0.id) }
+        )
+    }
+}
+
 /// What the 그래프 view draws: the layout plus the sessions and Frontdoors
 /// its nodes and tree labels stand for. Built once per monitor revision and
 /// scope (AppModel.dashboardGraph).
@@ -157,8 +178,18 @@ struct DashboardGraph: Equatable, Sendable {
     let sessions: [String: GatewaySession]
     /// The Frontdoor (or history group) each tree stands for, by group id.
     let frontdoors: [String: FrontdoorSession]
+    /// Resting Workers left out of the drawing, per tree, in tree order.
+    let resting: [RestingGroup]
 
-    static let empty = DashboardGraph(layout: GraphLayout.make(groups: []), sessions: [:], frontdoors: [:])
+    struct RestingGroup: Identifiable, Equatable, Sendable {
+        /// The tree's group id (its Frontdoor's id).
+        let id: String
+        let nodes: [GraphLayout.Input]
+    }
+
+    var restingCount: Int { resting.reduce(0) { $0 + $1.nodes.count } }
+
+    static let empty = DashboardGraph(layout: GraphLayout.make(groups: []), sessions: [:], frontdoors: [:], resting: [])
 
     /// One tree per Frontdoor, from the same `SessionTree` resolution the
     /// sequence and the menu bar use. Labels each tree when there are several.
@@ -167,18 +198,31 @@ struct DashboardGraph: Equatable, Sendable {
         if frontdoors.count > 1 { metrics.groupHeaderHeight = 24 }
         var sessions: [String: GatewaySession] = [:]
         var groups: [GraphLayout.Group] = []
+        var resting: [RestingGroup] = []
+        // A session is drawn (or boxed) once, in the first tree listing it.
+        var listed = Set<String>()
         for frontdoor in frontdoors {
             let tree = SessionTree.order(frontdoor.members, firstRootId: frontdoor.root?.sessionId)
             for node in tree where sessions[node.session.sessionId] == nil { sessions[node.session.sessionId] = node.session }
-            groups.append(GraphLayout.Group(
-                id: frontdoor.id,
-                nodes: tree.map { GraphLayout.Input(id: $0.session.sessionId, parentId: $0.parentSessionId, depth: $0.depth) }
-            ))
+            // The Frontdoor (the first top without one, like the menu bar
+            // card) and every moving Worker stay; the idle rest is boxed.
+            var anchors = Set(tree.filter { MenuBarPipeline.isMoving($0.session) }.map(\.session.sessionId))
+            if let root = frontdoor.root?.sessionId ?? tree.first?.session.sessionId { anchors.insert(root) }
+            let split = GraphLayout.partition(
+                tree.map { GraphLayout.Input(id: $0.session.sessionId, parentId: $0.parentSessionId, depth: $0.depth) },
+                anchors: anchors
+            )
+            groups.append(GraphLayout.Group(id: frontdoor.id, nodes: split.tree))
+            let boxed = split.resting.filter { !listed.contains($0.id) }
+            listed.formUnion(split.tree.map(\.id))
+            listed.formUnion(boxed.map(\.id))
+            if !boxed.isEmpty { resting.append(RestingGroup(id: frontdoor.id, nodes: boxed)) }
         }
         return DashboardGraph(
             layout: GraphLayout.make(groups: groups, metrics: metrics),
             sessions: sessions,
-            frontdoors: Dictionary(frontdoors.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            frontdoors: Dictionary(frontdoors.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }),
+            resting: resting
         )
     }
 }

@@ -111,6 +111,10 @@ final class AppSettings: ObservableObject {
     /// The view last picked in this launch. In memory only: reopening the
     /// dashboard window keeps it, the next launch starts at the default.
     @Published var lastDashboardMode: DashboardMode?
+    /// Whether the 그래프 / 시퀀스 views have their "대기 중 Worker" box open.
+    /// In memory only, like `lastDashboardMode`: every launch starts folded.
+    @Published var showRestingGraphWorkers = false
+    @Published var showRestingSequenceLanes = false
 
     /// The view to show: the one picked this launch while it stays enabled,
     /// else the default.

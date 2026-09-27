@@ -150,3 +150,17 @@ extension View {
         if let text, !text.isEmpty { self.help(text) } else { self }
     }
 }
+
+extension View {
+    /// The "대기 중 Worker" box every view folds resting Workers into
+    /// (docs/ux-policy.md §13, §14): a subtle, rounded, bordered area set
+    /// apart from the moving steps.
+    func restingBox(cornerRadius: CGFloat = 8) -> some View {
+        self
+            .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: cornerRadius))
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .strokeBorder(Color(nsColor: .separatorColor), style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
+            )
+    }
+}

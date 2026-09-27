@@ -4,7 +4,8 @@ import SwiftUI
 /// The dashboard's 그래프 view: the delegation tree as a static node-link
 /// drawing (GraphLayout). Fixed node size, both-axis scrolling, no motion:
 /// status shows as a dot and a tint, never as animation. Clicking a node
-/// selects its session, like a sequence lane header.
+/// selects its session, like a sequence lane header. Resting Workers that
+/// connect no moving one sit in a folded "대기 중 Worker N개" box below.
 struct DashboardGraphView: View {
     @EnvironmentObject private var settings: AppSettings
     @Environment(\.openWindow) private var openWindow
@@ -27,16 +28,23 @@ struct DashboardGraphView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            GeometryReader { proxy in
-                ScrollView([.horizontal, .vertical]) {
-                    drawing
-                        // A small tree sits in the corner without scrolling;
-                        // a big one scrolls both ways at the same node size.
-                        .frame(
-                            width: max(layout.width, proxy.size.width),
-                            height: max(layout.height, proxy.size.height),
-                            alignment: .topLeading
-                        )
+            VStack(spacing: 0) {
+                GeometryReader { proxy in
+                    ScrollView([.horizontal, .vertical]) {
+                        drawing
+                            // A small tree sits in the corner without scrolling;
+                            // a big one scrolls both ways at the same node size.
+                            .frame(
+                                width: max(layout.width, proxy.size.width),
+                                height: max(layout.height, proxy.size.height),
+                                alignment: .topLeading
+                            )
+                    }
+                }
+                if graph.restingCount > 0 {
+                    restingBox
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
                 }
             }
             .background(Color(nsColor: .textBackgroundColor))
@@ -136,12 +144,104 @@ struct DashboardGraphView: View {
                 session: session,
                 name: name,
                 selected: session.sessionId == selectedSessionId,
+                // An idle parent kept only to connect a moving Worker.
+                dimmed: node.depth > 0 && !session.isFrontdoorRecord && !MenuBarPipeline.isMoving(session),
                 width: layout.metrics.nodeWidth,
                 height: layout.metrics.nodeHeight
             )
         }
         .buttonStyle(.plain)
         .help(nodeHelp(session, name: name, role: role, status: status))
+        .accessibilityLabel("\(role), \(name), \(status)")
+        .contextMenu {
+            Button("세션 상세 열기") { openWindow(id: "session-detail", value: session.sessionId) }
+            Button("이름 바꾸기…") { renamingSession = session }
+        }
+    }
+
+    /// Resting Workers left out of the tree, folded by default; open, a
+    /// grid of chips per tree (labelled when there are several).
+    private var restingBox: some View {
+        let open = settings.showRestingGraphWorkers
+        let count = graph.restingCount
+        return VStack(alignment: .leading, spacing: 6) {
+            Button {
+                settings.showRestingGraphWorkers.toggle()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: open ? "chevron.down" : "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        .frame(width: 12)
+                    Image(systemName: "moon.zzz").font(.caption2)
+                    Text("대기 중 Worker \(count)개").font(.caption)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help(open ? "대기 중 Worker 접기" : "대기 중 Worker \(count)개 펼치기")
+            .accessibilityLabel(open ? "대기 중 Worker 접기" : "대기 중 Worker \(count)개 펼치기")
+            if open {
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(graph.resting) { group in
+                            if graph.resting.count > 1, let frontdoor = graph.frontdoors[group.id] {
+                                Text(settings.frontdoorName(id: frontdoor.id, auto: frontdoor.displayName))
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 6, alignment: .leading)],
+                                      alignment: .leading, spacing: 6) {
+                                ForEach(group.nodes, id: \.id) { input in
+                                    if let session = graph.sessions[input.id] {
+                                        restingChip(session, depth: input.depth, groupId: group.id)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 150)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(8)
+        .restingBox()
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("대기 중 Worker \(count)개")
+    }
+
+    private func restingChip(_ session: GatewaySession, depth: Int, groupId: String) -> some View {
+        let name = settings.stepName(session)
+        let role = sessionRoleLabel(session, depth: depth)
+        let status = sessionStatusLabel(session.status)
+        let selected = session.sessionId == selectedSessionId
+        var help = nodeHelp(session, name: name, role: role, status: status)
+        if graph.resting.count > 1, let frontdoor = graph.frontdoors[groupId] {
+            help = "Frontdoor: \(settings.frontdoorName(id: frontdoor.id, auto: frontdoor.displayName))\n" + help
+        }
+        return Button {
+            selectSession(graph.frontdoors[groupId]?.id, session.sessionId)
+        } label: {
+            HStack(spacing: 5) {
+                ProviderIcon(provider: session.provider, size: 12)
+                Text(name).font(.caption2).lineLimit(1).truncationMode(.tail)
+                Spacer(minLength: 2)
+                Text(status)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(statusColor(session.status))
+                    .fixedSize()
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(selected ? Color.accentColor.opacity(0.14) : Color(nsColor: .controlBackgroundColor), in: Capsule())
+            .overlay(Capsule().strokeBorder(selected ? Color.accentColor : Color(nsColor: .separatorColor), lineWidth: selected ? 1.5 : 1))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help(help)
         .accessibilityLabel("\(role), \(name), \(status)")
         .contextMenu {
             Button("세션 상세 열기") { openWindow(id: "session-detail", value: session.sessionId) }
@@ -164,6 +264,7 @@ private struct GraphNodeView: View {
     let session: GatewaySession
     let name: String
     let selected: Bool
+    var dimmed = false
     let width: Double
     let height: Double
 
@@ -198,6 +299,7 @@ private struct GraphNodeView: View {
             RoundedRectangle(cornerRadius: 8)
                 .strokeBorder(selected ? Color.accentColor : borderColor, lineWidth: selected ? 2 : 1)
         )
+        .opacity(dimmed && !selected ? 0.6 : 1)
         .contentShape(RoundedRectangle(cornerRadius: 8))
     }
 

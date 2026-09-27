@@ -16,6 +16,10 @@ struct GraphLayoutTests {
         try treesStackWithoutSharingRows()
         try cyclesAndDuplicatesStillDrawOnce()
         try dashboardGraphFollowsSessionTree()
+        try partitionKeepsAncestorsOfMovingWorkers()
+        try partitionFortyNodes()
+        try dashboardGraphBoxesRestingWorkers()
+        try sequenceHidesRestingLanes()
         print("Swift graph layout checks passed")
     }
 
@@ -127,9 +131,11 @@ struct GraphLayoutTests {
         try check(GraphLayout.make(groups: []).isEmpty && GraphLayout.make(groups: []).height == 0, "nothing to draw is empty")
     }
 
-    private static func session(_ id: String, role: String = "worker", parent: String? = nil, created: String) throws -> GatewaySession {
+    private static func session(
+        _ id: String, role: String = "worker", parent: String? = nil, status: String = "running", created: String
+    ) throws -> GatewaySession {
         var object: [String: JSONValue] = [
-            "sessionId": .string(id), "provider": .string("claude"), "status": .string("running"),
+            "sessionId": .string(id), "provider": .string("claude"), "status": .string(status),
             "openerInstanceId": .string("main"), "role": .string(role), "createdAt": .string(created),
             "updatedAt": .string(created)
         ]
@@ -153,5 +159,79 @@ struct GraphLayoutTests {
         try check(early.y < late.y, "siblings follow creation order, like SessionTree")
         try check(Set(graph.sessions.keys) == ["root", "late", "early", "nested"], "every node has its session")
         try check(layout.metrics.groupHeaderHeight == 0, "one Frontdoor needs no tree label")
+    }
+
+    private static func partitionKeepsAncestorsOfMovingWorkers() throws {
+        // root → idle → running, root → idle leaf, root → closed → idle leaf.
+        let nodes = [
+            input("root", nil, 0), input("idle", "root", 1), input("run", "idle", 2),
+            input("leaf", "root", 1), input("closed", "root", 1), input("deep", "closed", 2)
+        ]
+        let split = GraphLayout.partition(nodes, anchors: ["root", "run"])
+        try check(split.tree.map(\.id) == ["root", "idle", "run"], "an idle parent of a running child stays, got \(split.tree.map(\.id))")
+        try check(split.resting.map(\.id) == ["leaf", "closed", "deep"], "resting leaves and subtrees are boxed in order, got \(split.resting.map(\.id))")
+        try check(split.tree.count + split.resting.count == nodes.count, "every node lands on one side")
+        let layout = GraphLayout.make(groups: [GraphLayout.Group(id: "g", nodes: split.tree)])
+        try check(layout.edges.map(\.id) == ["root>idle", "idle>run"], "the kept chain keeps its edges")
+
+        let none = GraphLayout.partition(nodes, anchors: Set(nodes.map(\.id)))
+        try check(none.resting.isEmpty && none.tree == nodes, "all moving boxes nothing")
+        let onlyRoot = GraphLayout.partition(nodes, anchors: ["root"])
+        try check(onlyRoot.tree.map(\.id) == ["root"] && onlyRoot.resting.count == 5, "an idle tree keeps only its Frontdoor")
+        let cycle = GraphLayout.partition([input("a", "b", 1), input("b", "a", 1), input("c", "a", 2)], anchors: ["c"])
+        try check(Set(cycle.tree.map(\.id)) == ["a", "b", "c"] && cycle.resting.isEmpty, "a parent cycle still ends the walk")
+    }
+
+    private static func partitionFortyNodes() throws {
+        // A Frontdoor with 13 Workers of 2 nested each; one nested Worker runs.
+        var nodes = [input("root", nil, 0)]
+        for worker in 0..<13 {
+            nodes.append(input("w\(worker)", "root", 1))
+            nodes.append(input("w\(worker).a", "w\(worker)", 2))
+            nodes.append(input("w\(worker).b", "w\(worker)", 2))
+        }
+        try check(nodes.count == 40, "the case has 40 nodes")
+        let split = GraphLayout.partition(nodes, anchors: ["root", "w7.b"])
+        try check(split.tree.map(\.id) == ["root", "w7", "w7.b"], "only the moving chain is drawn, got \(split.tree.map(\.id))")
+        try check(split.resting.count == 37, "the other 37 rest in the box, got \(split.resting.count)")
+        let layout = GraphLayout.make(groups: [GraphLayout.Group(id: "g", nodes: split.tree)])
+        try check(layout.nodes.count == 3 && !overlaps(layout), "the trimmed tree lays out without overlap")
+    }
+
+    private static func dashboardGraphBoxesRestingWorkers() throws {
+        let sessions = [
+            try session("root", role: "frontdoor", status: "idle", created: "2026-09-26T00:00:00.000Z"),
+            try session("parent", parent: "root", status: "idle", created: "2026-09-26T00:01:00.000Z"),
+            try session("child", parent: "parent", status: "waiting_permission", created: "2026-09-26T00:02:00.000Z"),
+            try session("done", parent: "root", status: "closed", created: "2026-09-26T00:03:00.000Z"),
+            try session("rest", parent: "root", status: "idle", created: "2026-09-26T00:04:00.000Z"),
+            try session("err", parent: "root", status: "error", created: "2026-09-26T00:05:00.000Z")
+        ]
+        let graph = DashboardGraph.make(frontdoors: FrontdoorSession.make(sessions: sessions))
+        try check(Set(graph.layout.nodes.map(\.id)) == ["root", "parent", "child", "err"],
+                  "the Frontdoor, moving Workers and their ancestors are drawn, got \(graph.layout.nodes.map(\.id))")
+        try check(graph.resting.flatMap(\.nodes).map(\.id) == ["done", "rest"], "idle and closed leaves are boxed, got \(graph.resting.flatMap(\.nodes).map(\.id))")
+        try check(graph.restingCount == 2, "the box counts its Workers")
+        try check(graph.sessions["done"] != nil, "a boxed Worker keeps its session for its chip")
+    }
+
+    private static func sequenceHidesRestingLanes() throws {
+        let sessions = [
+            try session("root", role: "frontdoor", status: "idle", created: "2026-09-26T00:00:00.000Z"),
+            try session("parent", parent: "root", status: "idle", created: "2026-09-26T00:01:00.000Z"),
+            try session("child", parent: "parent", status: "running", created: "2026-09-26T00:02:00.000Z"),
+            try session("done", parent: "root", status: "closed", created: "2026-09-26T00:03:00.000Z"),
+            try session("doneKid", parent: "done", status: "idle", created: "2026-09-26T00:03:30.000Z"),
+            try session("rest", parent: "root", status: "idle", created: "2026-09-26T00:04:00.000Z")
+        ]
+        let lanes = SessionTree.order(sessions, firstRootId: "root")
+        let hidden = MenuBarPipeline.restingLaneIds(lanes, selectedSessionId: nil)
+        try check(hidden == ["done", "doneKid", "rest"], "resting Worker lanes hide, the moving chain and Frontdoor stay, got \(hidden.sorted())")
+        let selected = MenuBarPipeline.restingLaneIds(lanes, selectedSessionId: "doneKid")
+        try check(selected == ["rest"], "the selected lane and its parent stay, got \(selected.sorted())")
+        // A top-level Worker lane (no Frontdoor in view) is never hidden.
+        let orphan = try session("orphan", status: "idle", created: "2026-09-26T00:05:00.000Z")
+        let orphanLanes = SessionTree.order([orphan])
+        try check(MenuBarPipeline.restingLaneIds(orphanLanes, selectedSessionId: nil).isEmpty, "a top-level lane stays")
     }
 }

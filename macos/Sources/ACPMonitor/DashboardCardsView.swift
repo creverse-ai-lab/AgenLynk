@@ -18,7 +18,7 @@ extension MenuBarPipeline.Stage {
 
 /// The dashboard's 현황 view: one card per Frontdoor, the menu bar's
 /// pipelines with room to spare. Moving steps are listed; Workers that only
-/// rest (idle, closed) fold under "대기 중 Worker N개" per card. The selected
+/// rest (idle, closed) fold into a bordered "대기 중 Worker N개" box per card. The selected
 /// Frontdoor's card is outlined and scrolled into view — cards never reorder
 /// on a click, so the one just clicked stays under the pointer.
 struct DashboardCardsView: View {
@@ -181,8 +181,10 @@ private struct DashboardCardView: View {
         }
     }
 
+    /// Resting Workers in their own folded, bordered box at the card's foot.
     private var restingSection: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        let count = card.restingStages.count
+        return VStack(alignment: .leading, spacing: 2) {
             Button {
                 showResting.toggle()
             } label: {
@@ -190,19 +192,38 @@ private struct DashboardCardView: View {
                     Image(systemName: showResting ? "chevron.down" : "chevron.right")
                         .font(.caption2.weight(.semibold))
                         .frame(width: 12)
-                    Text("대기 중 Worker \(card.restingStages.count)개").font(.caption)
+                    Image(systemName: "moon.zzz").font(.caption2)
+                    Text("대기 중 Worker \(count)개").font(.caption)
                     Spacer()
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
-            .padding(.top, 2)
-            .help(showResting ? "대기 중 Worker 접기" : "대기 중 Worker \(card.restingStages.count)개 펼치기")
-            .accessibilityLabel(showResting ? "대기 중 Worker 접기" : "대기 중 Worker \(card.restingStages.count)개 펼치기")
+            .help(showResting ? "대기 중 Worker 접기" : "대기 중 Worker \(count)개 펼치기")
+            .accessibilityLabel(showResting ? "대기 중 Worker 접기" : "대기 중 Worker \(count)개 펼치기")
             if showResting {
-                ForEach(card.restingStages) { stage in stageButton(stage) }
+                TimelineView(.periodic(from: .now, by: 30)) { context in
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(card.restingStages) { stage in restingButton(stage, now: context.date) }
+                    }
+                }
             }
+        }
+        .padding(6)
+        .restingBox()
+        .padding(.top, 4)
+    }
+
+    private func restingButton(_ stage: MenuBarPipeline.Stage, now: Date) -> some View {
+        Button { selectStage(stage.id) } label: {
+            RestingStageRow(stage: stage, selected: stage.id == selectedSessionId, now: now)
+        }
+        .buttonStyle(.plain)
+        .help("\(sessionRoleLabel(stage.session, depth: stage.depth)) · 클릭해 이 세션 선택 · 우클릭으로 이름 바꾸기")
+        .contextMenu {
+            Button("세션 상세 열기") { openWindow(id: "session-detail", value: stage.id) }
+            Button("이름 바꾸기…") { rename(stage.session) }
         }
     }
 
@@ -295,6 +316,42 @@ private struct DashboardStageRow: View {
         }
         guard let total = stage.session.usage?.total else { return nil }
         return (formatTokenCount(total), "세션 누적 토큰(입력은 cache 포함)")
+    }
+}
+
+/// A resting Worker in the card's box, one compact line: provider, name,
+/// status, how long ago it last moved.
+private struct RestingStageRow: View {
+    @EnvironmentObject private var settings: AppSettings
+    let stage: MenuBarPipeline.Stage
+    let selected: Bool
+    let now: Date
+
+    var body: some View {
+        HStack(spacing: 5) {
+            ProviderIcon(provider: stage.session.provider, size: 12)
+            Text(settings.stepName(stage.session))
+                .font(.caption2)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 4)
+            Text(sessionStatusLabel(stage.session.status))
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(stage.color)
+                .fixedSize()
+            if let updated = stage.session.updatedAt.flatMap(parseTimestamp) {
+                Text(relativeTimeText(from: updated, to: now))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+                    .fixedSize()
+            }
+        }
+        .padding(.vertical, 2)
+        .padding(.horizontal, 4)
+        .padding(.leading, 16)
+        .background(selected ? Color.accentColor.opacity(0.14) : Color.clear, in: RoundedRectangle(cornerRadius: 5))
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
     }
 }
 

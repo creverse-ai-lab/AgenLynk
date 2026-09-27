@@ -22,6 +22,10 @@ struct EventSequenceView: View {
     /// is driven by the scroll position: scrolling up stops following,
     /// scrolling back to the bottom (or "최신으로") resumes.
     @Binding var followLatestEvent: Bool
+    /// Whether resting Worker lanes are shown. Folded (false) hides every
+    /// lane `MenuBarPipeline.restingLaneIds` names, with its rows, behind one
+    /// "대기 중 Worker N개 · 펼치기" box; held per launch by the caller.
+    @Binding var showRestingLanes: Bool
     /// Some session in view may have events older than the loaded ones.
     var canLoadOlder = false
     var loadingOlder = false
@@ -35,7 +39,8 @@ struct EventSequenceView: View {
     /// selection, a follow toggle) reuses them.
     var eventsRevision = 0
     @State private var expandedGroups: Set<String> = []
-    @State private var derivedCache = SequenceDerivedCache()
+    @State private var laneCache = SequenceDerivedCache<SequenceLaneKey, SequenceLaneBase>()
+    @State private var derivedCache = SequenceDerivedCache<SequenceDerivedKey, SequenceDerived>()
     // Keyboard selection: up/down step through the rows and select each
     // row's event (a tool group's representative call), so the inspector
     // follows; left/right scroll the lanes. Focus the diagram (click it)
@@ -74,14 +79,23 @@ struct EventSequenceView: View {
     }
 
     @ViewBuilder private var timeline: some View {
+        let base = laneCache.value(for: SequenceLaneKey(
+            revision: eventsRevision,
+            count: events.count,
+            firstId: events.first?.id,
+            lastId: events.last?.id,
+            sessions: sessions
+        )) { deriveLanes() }
+        let hidden = hiddenLaneIds(base)
         let derived = derivedCache.value(for: SequenceDerivedKey(
             revision: eventsRevision,
             count: events.count,
             firstId: events.first?.id,
             lastId: events.last?.id,
             expanded: expandedGroups,
-            sessions: sessions
-        )) { derive() }
+            sessions: sessions,
+            hidden: hidden
+        )) { derive(base: base, hidden: hidden) }
         let rows = derived.rows
         let lanes = derived.lanes
         let laneIndex = derived.laneIndex
@@ -95,6 +109,9 @@ struct EventSequenceView: View {
                 Text("이벤트 \(events.count.formatted())개")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
+                if !hidden.isEmpty || (showRestingLanes && !base.resting.isEmpty) {
+                    restingLanesToggle(count: showRestingLanes ? base.resting.count : hidden.count)
+                }
                 if loadingOlder {
                     ProgressView().controlSize(.mini)
                     Text("이전 이벤트 불러오는 중").font(.caption2).foregroundStyle(.secondary)
@@ -185,7 +202,7 @@ struct EventSequenceView: View {
                     // out the rows on screen.
                     ScrollView(.vertical) {
                         LazyVStack(spacing: 0) {
-                            olderSentinel(rows: rows, proxy: proxy)
+                            olderSentinel(rows: rows, hidden: hidden, proxy: proxy)
                                 .frame(width: width, height: sentinelHeight)
                                 .background(alignment: .topLeading) {
                                     lifelines(lanes, height: sentinelHeight, offset: lifelineStubLength)
@@ -289,12 +306,51 @@ struct EventSequenceView: View {
                 // from the start then fills itself once.
                 try? await Task.sleep(nanoseconds: 700_000_000)
                 settled = true
-                if topVisible { requestOlder(rows: rows, proxy: proxy) }
+                if topVisible { requestOlder(rows: rows, hidden: hidden, proxy: proxy) }
             }
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))
         .accessibilityLabel("이벤트 시퀀스. Frontdoor와 Worker의 호출·응답")
+    }
+
+    /// The lanes to hide now: the resting ones while folded, less the
+    /// selected session's lane and its parents (a selection is never hidden).
+    private func hiddenLaneIds(_ base: SequenceLaneBase) -> Set<String> {
+        guard !showRestingLanes, !base.resting.isEmpty else { return [] }
+        if let selected = selectedSessionId, base.resting.contains(selected) {
+            return MenuBarPipeline.restingLaneIds(base.nodes, selectedSessionId: selected)
+        }
+        return base.resting
+    }
+
+    private func visibleEvents(_ hidden: Set<String>) -> [MonitorEvent] {
+        hidden.isEmpty ? events : events.filter { !hidden.contains($0.sessionId) }
+    }
+
+    /// The one box standing for the hidden lanes, over the lane headers.
+    private func restingLanesToggle(count: Int) -> some View {
+        let label = showRestingLanes ? "대기 중 Worker \(count)개 · 접기" : "대기 중 Worker \(count)개 · 펼치기"
+        return Button {
+            showRestingLanes.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: showRestingLanes ? "chevron.down" : "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                Image(systemName: "moon.zzz").font(.caption2)
+                Text(label).font(.caption2)
+            }
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .restingBox(cornerRadius: 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(showRestingLanes
+            ? "대기(idle)·종료 Worker의 레인과 이벤트를 다시 숨깁니다"
+            : "대기(idle)·종료 Worker \(count)개의 레인과 이벤트를 숨겼습니다 · 클릭해 펼치기")
+        .accessibilityLabel(label)
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
@@ -309,14 +365,14 @@ struct EventSequenceView: View {
     }
 
     /// The row above the first event: reaching it pages older events in.
-    @ViewBuilder private func olderSentinel(rows: [TimelineRow], proxy: ScrollViewProxy) -> some View {
+    @ViewBuilder private func olderSentinel(rows: [TimelineRow], hidden: Set<String>, proxy: ScrollViewProxy) -> some View {
         HStack(spacing: 6) {
             if canLoadOlder {
                 if loadingOlder || olderRequestInFlight {
                     ProgressView().controlSize(.mini)
                     Text("이전 이벤트 불러오는 중").font(.caption2).foregroundStyle(.secondary)
                 } else {
-                    Button("이전 이벤트 더 보기", systemImage: "arrow.up") { requestOlder(rows: rows, proxy: proxy, force: true) }
+                    Button("이전 이벤트 더 보기", systemImage: "arrow.up") { requestOlder(rows: rows, hidden: hidden, proxy: proxy, force: true) }
                         .buttonStyle(.borderless)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -330,14 +386,14 @@ struct EventSequenceView: View {
         .frame(maxWidth: .infinity)
         .onAppear {
             topVisible = true
-            requestOlder(rows: rows, proxy: proxy)
+            requestOlder(rows: rows, hidden: hidden, proxy: proxy)
         }
         .onDisappear { topVisible = false }
     }
 
     /// Loads the next older page and keeps the row that was on top in place,
     /// so the prepended events appear above it instead of shoving the view.
-    private func requestOlder(rows: [TimelineRow], proxy: ScrollViewProxy, force: Bool = false) {
+    private func requestOlder(rows: [TimelineRow], hidden: Set<String>, proxy: ScrollViewProxy, force: Bool = false) {
         guard force || settled, canLoadOlder, !olderRequestInFlight, let loadOlder else { return }
         // Anchor on an event, not a row: a tool group's row id changes when
         // older calls join it, and a vanished anchor would jump the view. An
@@ -349,7 +405,7 @@ struct EventSequenceView: View {
             olderRequestInFlight = false
             guard arrived, let anchorEventId else { return }
             await Task.yield()
-            let refreshed = EventTimeline.rows(EventTimeline.group(events), expanded: expandedGroups)
+            let refreshed = EventTimeline.rows(EventTimeline.group(visibleEvents(hidden)), expanded: expandedGroups)
             guard let rowId = EventTimeline.rowId(showing: anchorEventId, in: refreshed) else { return }
             proxy.scrollTo(rowId, anchor: .top)
         }
@@ -570,14 +626,17 @@ struct EventSequenceView: View {
     /// Everything the timeline derives from its events, sessions and expanded
     /// groups. Events arrive whole (one message per stream, one node per tool
     /// call); runs of tool calls in one turn collapse into one representative row.
-    private func derive() -> SequenceDerived {
-        let rows = EventTimeline.rows(EventTimeline.group(events), expanded: expandedGroups)
-        let marks = sessionEventMarks()
-        // One continuous timeline: every loaded row is in the same scroll, so
-        // the lanes come from the loaded events themselves — a lane appears
-        // for exactly the sessions that have a row somewhere in this scroll
-        // (plus their parents), never for an unrelated older session.
-        let lanes = makeSequenceLanes(sessions: sessions, events: events)
+    private func derive(base: SequenceLaneBase, hidden: Set<String>) -> SequenceDerived {
+        // A hidden lane takes its rows with it. Its subtree is hidden too, so
+        // every lane left keeps its parent; a call or 응답 arrow into a
+        // hidden lane has no child index and is simply not drawn.
+        let shown = visibleEvents(hidden)
+        let rows = EventTimeline.rows(EventTimeline.group(shown), expanded: expandedGroups)
+        let marks = sessionEventMarks(shown)
+        let lanes = base.nodes.compactMap { node -> SequenceLane? in
+            hidden.contains(node.session.sessionId) ? nil
+                : SequenceLane(session: node.session, parentSessionId: node.parentSessionId, depth: node.depth)
+        }
         let laneIndex = lanes.enumerated().reduce(into: [String: Int]()) { result, item in
             result[item.element.session.sessionId] = item.offset
         }
@@ -620,9 +679,19 @@ struct EventSequenceView: View {
         )
     }
 
+    /// One continuous timeline: every loaded row is in the same scroll, so
+    /// the lanes come from the loaded events themselves — a lane appears for
+    /// exactly the sessions that have a row somewhere in this scroll (plus
+    /// their parents), never for an unrelated older session. Keyed without
+    /// the selection or the fold, so neither re-walks the events.
+    private func deriveLanes() -> SequenceLaneBase {
+        let nodes = makeSequenceLanes(sessions: sessions, events: events)
+        return SequenceLaneBase(nodes: nodes, resting: MenuBarPipeline.restingLaneIds(nodes, selectedSessionId: nil))
+    }
+
     /// Earliest event id and newest `turn_end` id per session, in one grouping
     /// pass instead of a filter+sort of every event per edge.
-    private func sessionEventMarks() -> SequenceEventMarks {
+    private func sessionEventMarks(_ events: [MonitorEvent]) -> SequenceEventMarks {
         var earliest: [String: MonitorEvent] = [:]
         var latestTurnEnd: [String: MonitorEvent] = [:]
         for event in events {
@@ -679,6 +748,21 @@ private struct SequenceDerivedKey: Equatable {
     let lastId: String?
     let expanded: Set<String>
     let sessions: [GatewaySession]
+    let hidden: Set<String>
+}
+
+private struct SequenceLaneKey: Equatable {
+    let revision: Int
+    let count: Int
+    let firstId: String?
+    let lastId: String?
+    let sessions: [GatewaySession]
+}
+
+/// Every lane the loaded events call for, and the resting ones among them.
+private struct SequenceLaneBase {
+    let nodes: [SessionTree.Node]
+    let resting: Set<String>
 }
 
 private struct SequenceDerived {
@@ -694,11 +778,11 @@ private struct SequenceDerived {
 
 /// Holds the last derivation across body passes. A reference type in
 /// `@State`, so filling it during `body` publishes nothing.
-private final class SequenceDerivedCache {
-    private var key: SequenceDerivedKey?
-    private var cached: SequenceDerived?
+private final class SequenceDerivedCache<Key: Equatable, Value> {
+    private var key: Key?
+    private var cached: Value?
 
-    func value(for key: SequenceDerivedKey, make: () -> SequenceDerived) -> SequenceDerived {
+    func value(for key: Key, make: () -> Value) -> Value {
         if let cached, self.key == key { return cached }
         let value = make()
         self.key = key
@@ -861,9 +945,6 @@ private struct SequenceToolGroupNode: View {
 
 /// Lanes for the sessions that have an event in view, plus their parents,
 /// in `SessionTree` order — the same tree the menu bar pipeline draws.
-private func makeSequenceLanes(sessions: [GatewaySession], events: [MonitorEvent]) -> [SequenceLane] {
-    let members = SessionTree.withAncestors(of: Set(events.map(\.sessionId)), in: sessions)
-    return SessionTree.order(members).map {
-        SequenceLane(session: $0.session, parentSessionId: $0.parentSessionId, depth: $0.depth)
-    }
+private func makeSequenceLanes(sessions: [GatewaySession], events: [MonitorEvent]) -> [SessionTree.Node] {
+    SessionTree.order(SessionTree.withAncestors(of: Set(events.map(\.sessionId)), in: sessions))
 }

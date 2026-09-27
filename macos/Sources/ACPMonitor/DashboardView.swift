@@ -525,6 +525,7 @@ struct DashboardView: View {
             selectedSessionId: model.selectedHistoryGroupId == nil ? $model.selectedSessionId : $model.selectedHistoryMemberId,
             selectedEventId: $model.selectedEventId,
             followLatestEvent: $settings.followLatestEvent,
+            showRestingLanes: $settings.showRestingSequenceLanes,
             canLoadOlder: model.mayHaveOlderEvents(in: sessionIds),
             loadingOlder: !model.olderLoadingSessionIds.isDisjoint(with: sessionIds),
             olderCapped: !model.olderCappedSessionIds.isDisjoint(with: sessionIds),

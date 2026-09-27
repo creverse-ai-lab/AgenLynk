@@ -94,4 +94,25 @@ enum SessionTree {
         var seen = Set<String>()
         return sessions.filter { included.contains($0.sessionId) && seen.insert($0.sessionId).inserted }
     }
+
+    /// The resting ids of a tree: every node that is neither an anchor nor an
+    /// ancestor of one. Anchors are what must stay in view (moving Workers,
+    /// the Frontdoor, a selection); their ancestors stay so the anchors keep
+    /// their connection, and everything else goes to the "대기 중" box.
+    /// `parentId` links within `nodes`; an unknown parent ends the walk and a
+    /// parent cycle stops at the first repeat.
+    static func restingIds(_ nodes: [(id: String, parentId: String?)], anchors: Set<String>) -> Set<String> {
+        var parentOf: [String: String] = [:]
+        for node in nodes where parentOf[node.id] == nil {
+            if let parent = node.parentId, parent != node.id { parentOf[node.id] = parent }
+        }
+        var kept = Set<String>()
+        for anchor in anchors {
+            var current: String? = anchor
+            while let id = current, kept.insert(id).inserted { current = parentOf[id] }
+        }
+        var resting = Set<String>()
+        for node in nodes where !kept.contains(node.id) { resting.insert(node.id) }
+        return resting
+    }
 }

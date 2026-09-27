@@ -24,6 +24,25 @@ struct MenuBarPipeline: Equatable, Sendable {
         }
 
         var needsUser: Bool { self == .permission || self == .input }
+        /// Running, waiting on the user, or failed: what the views list.
+        /// Idle and closed Workers rest in a folded "대기 중" box.
+        var isMoving: Bool { self <= .running }
+    }
+
+    /// Whether a session is moving (see `Urgency.isMoving`).
+    static func isMoving(_ session: GatewaySession) -> Bool { Urgency(status: session.status).isMoving }
+
+    /// The sequence lanes to hide behind "대기 중 Worker N개": resting Workers
+    /// that are not a Frontdoor (or any top-level lane), not the selected
+    /// session, and not on the way to a lane that stays. Hiding a lane
+    /// therefore hides its whole subtree, so no visible lane loses its parent.
+    static func restingLaneIds(_ lanes: [SessionTree.Node], selectedSessionId: String?) -> Set<String> {
+        var anchors = Set<String>()
+        for lane in lanes where lane.depth == 0 || lane.session.isFrontdoorRecord || isMoving(lane.session)
+            || lane.session.sessionId == selectedSessionId {
+            anchors.insert(lane.session.sessionId)
+        }
+        return SessionTree.restingIds(lanes.map { (id: $0.session.sessionId, parentId: $0.parentSessionId) }, anchors: anchors)
     }
 
     struct Stage: Identifiable, Equatable, Sendable {
@@ -105,16 +124,19 @@ struct MenuBarPipeline: Equatable, Sendable {
             .filter { $0.urgency == urgency }
             .max { ($0.session.updatedAt ?? "") < ($1.session.updatedAt ?? "") }
         // The Frontdoor and every Worker that is doing something or needs the
-        // user; Workers that are only waiting (idle, closed) fold into a count,
-        // so a card shows what is moving, not every session it ever opened.
-        let rootId = frontdoor.root?.sessionId
-        let isShown: (Stage) -> Bool = { stage in
-            stage.urgency <= .running || stage.id == rootId || (rootId == nil && stage.depth == 0 && stage.id == stages.first?.id)
-        }
+        // user, plus the parents that connect them; Workers that are only
+        // waiting (idle, closed) fold into a count, so a card shows what is
+        // moving, not every session it ever opened.
+        var anchors = Set(stages.filter { $0.urgency.isMoving }.map(\.id))
+        if let rootId = frontdoor.root?.sessionId ?? stages.first(where: { $0.depth == 0 })?.id { anchors.insert(rootId) }
+        let resting = SessionTree.restingIds(
+            ordered.map { (id: $0.session.sessionId, parentId: $0.parentSessionId) },
+            anchors: anchors
+        )
         return Card(
             frontdoor: frontdoor,
-            stages: stages.filter(isShown),
-            restingStages: stages.filter { !isShown($0) },
+            stages: stages.filter { !resting.contains($0.id) },
+            restingStages: stages.filter { resting.contains($0.id) },
             urgency: urgency,
             focus: focus,
             work: WorkUsage(sessions: frontdoor.members)
@@ -124,9 +146,9 @@ struct MenuBarPipeline: Equatable, Sendable {
     /// Depth-first from the Frontdoor, following `parentSessionId`; a worker
     /// whose parent is not in the group hangs off the Frontdoor. The same
     /// `SessionTree` resolution the dashboard sequence lays its lanes out by.
-    static func pipelineOrder(_ frontdoor: FrontdoorSession) -> [(session: GatewaySession, depth: Int)] {
+    static func pipelineOrder(_ frontdoor: FrontdoorSession) -> [(session: GatewaySession, depth: Int, parentSessionId: String?)] {
         SessionTree.order(frontdoor.members, firstRootId: frontdoor.root?.sessionId)
-            .map { (session: $0.session, depth: $0.depth) }
+            .map { (session: $0.session, depth: $0.depth, parentSessionId: $0.parentSessionId) }
     }
 
     private static func stage(_ session: GatewaySession, depth: Int, events: [MonitorEvent]) -> Stage {

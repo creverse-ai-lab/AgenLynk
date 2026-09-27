@@ -16,6 +16,7 @@ struct MenuBarPipelineTests {
         try statusItemCountsMainAndSubAgents()
         try restingWorkersKeepTheirDepthAndClosedOnesFoldToo()
         try pipelineAndSequenceShareOneTree()
+        try idleParentOfAMovingWorkerStaysListed()
         print("Swift menu bar pipeline checks passed")
     }
 
@@ -124,6 +125,19 @@ struct MenuBarPipelineTests {
 
     /// The dashboard card lists resting Workers under a fold: closed and idle
     /// ones both rest, and a nested resting Worker keeps its depth.
+    private static func idleParentOfAMovingWorkerStaysListed() throws {
+        let sessions = [
+            try session("root", status: "idle", role: "frontdoor"),
+            try session("p", status: "idle", parent: "root", created: "2026-09-26T00:01:00.000Z"),
+            try session("c", status: "running", parent: "p", created: "2026-09-26T00:02:00.000Z"),
+            try session("q", status: "idle", parent: "root", created: "2026-09-26T00:03:00.000Z")
+        ]
+        let pipeline = MenuBarPipeline.make(frontdoors: FrontdoorSession.make(sessions: sessions), eventsBySession: [:])
+        guard let card = pipeline.activeCards.first else { throw CheckError.failed("a running Worker keeps the card active") }
+        try check(card.stages.map(\.id) == ["root", "p", "c"], "the idle parent connects the running child, got \(card.stages.map(\.id))")
+        try check(card.restingStages.map(\.id) == ["q"], "only the unconnected idle Worker rests, got \(card.restingStages.map(\.id))")
+    }
+
     private static func restingWorkersKeepTheirDepthAndClosedOnesFoldToo() throws {
         let sessions = [
             try session("root", status: "idle", role: "frontdoor"),
