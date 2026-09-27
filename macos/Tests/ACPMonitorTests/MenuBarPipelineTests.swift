@@ -74,7 +74,8 @@ struct MenuBarPipelineTests {
             try session("root", status: "running", role: "frontdoor"),
             try session("w1", status: "running", parent: "root", created: "2026-09-26T00:01:00.000Z"),
             try session("w2", status: "waiting_permission", parent: "w1", created: "2026-09-26T00:02:00.000Z"),
-            try session("w3", status: "idle", created: "2026-09-26T00:03:00.000Z")
+            try session("w3", status: "running", created: "2026-09-26T00:03:00.000Z"),
+            try session("w4", status: "idle", parent: "root", created: "2026-09-26T00:04:00.000Z")
         ])
         let quiet = FrontdoorSession.make(sessions: [try session("other", status: "idle", opener: "main-2", role: "frontdoor")])
         let running = FrontdoorSession.make(sessions: [try session("r", status: "running", opener: "main-3", role: "frontdoor")])
@@ -85,8 +86,9 @@ struct MenuBarPipelineTests {
         let card = pipeline.activeCards[0]
         try check(card.stages.map(\.id) == ["root", "w1", "w2", "w3"], "stages follow the delegation chain, parent before child")
         try check(card.stages.map(\.depth) == [0, 1, 2, 1], "a worker without a parent link hangs off the Frontdoor")
+        try check(card.hiddenStageCount == 1, "an idle Worker is counted, not listed")
         try check(card.urgency == .permission && card.focus?.id == "w2", "the card calls out the step that needs the user")
-        try check(pipeline.permissionCount == 1 && pipeline.runningCount == 3, "summary counts steps across cards")
+        try check(pipeline.permissionCount == 1 && pipeline.runningCount == 4, "summary counts steps across cards")
     }
 
     private static func waitReasonAndCurrentStepComeFromEvents() throws {
@@ -111,8 +113,8 @@ struct MenuBarPipelineTests {
             sessions.append(try session("w\(index)", status: "idle", parent: "root", created: "2026-09-26T00:0\(index):00.000Z"))
         }
         sessions.append(try session("late", status: "waiting_input", parent: "root", created: "2026-09-26T00:09:00.000Z"))
-        let card = MenuBarPipeline.make(frontdoors: FrontdoorSession.make(sessions: sessions), eventsBySession: [:], maxStages: 4).activeCards[0]
-        try check(card.stages.count == 5 && card.stages.last?.id == "late", "a waiting step is never folded away")
-        try check(card.hiddenStageCount == 4, "quiet steps past the limit fold into +N")
+        let card = MenuBarPipeline.make(frontdoors: FrontdoorSession.make(sessions: sessions), eventsBySession: [:]).activeCards[0]
+        try check(card.stages.map(\.id) == ["root", "late"], "only the Frontdoor and Workers that need something are listed, got \(card.stages.map(\.id))")
+        try check(card.hiddenStageCount == 7, "idle Workers fold into a count")
     }
 }

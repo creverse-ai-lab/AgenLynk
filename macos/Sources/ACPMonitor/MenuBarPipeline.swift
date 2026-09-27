@@ -45,7 +45,7 @@ struct MenuBarPipeline: Equatable, Sendable {
         let frontdoor: FrontdoorSession
         /// Pipeline order: parent before child, siblings by creation.
         let stages: [Stage]
-        /// Stages beyond the card's limit (still counted in `urgency`).
+        /// Waiting (idle or closed) Workers left out of `stages`.
         let hiddenStageCount: Int
         let urgency: Urgency
         /// The step the card calls out: the most urgent, newest on ties.
@@ -72,11 +72,10 @@ struct MenuBarPipeline: Equatable, Sendable {
 
     static func make(
         frontdoors: [FrontdoorSession],
-        eventsBySession: [String: [MonitorEvent]],
-        maxStages: Int = 5
+        eventsBySession: [String: [MonitorEvent]]
     ) -> MenuBarPipeline {
         let cards = frontdoors
-            .map { card(for: $0, eventsBySession: eventsBySession, maxStages: maxStages) }
+            .map { card(for: $0, eventsBySession: eventsBySession) }
             .sorted(by: cardOrder)
         return MenuBarPipeline(
             activeCards: cards.filter { $0.urgency <= .running },
@@ -93,7 +92,7 @@ struct MenuBarPipeline: Equatable, Sendable {
         return lhs.urgency.needsUser ? left < right : left > right
     }
 
-    private static func card(for frontdoor: FrontdoorSession, eventsBySession: [String: [MonitorEvent]], maxStages: Int) -> Card {
+    private static func card(for frontdoor: FrontdoorSession, eventsBySession: [String: [MonitorEvent]]) -> Card {
         let ordered = pipelineOrder(frontdoor)
         let stages = ordered.map { member in
             stage(member.session, depth: member.depth, events: eventsBySession[member.session.sessionId] ?? [])
@@ -102,11 +101,12 @@ struct MenuBarPipeline: Equatable, Sendable {
         let focus = stages
             .filter { $0.urgency == urgency }
             .max { ($0.session.updatedAt ?? "") < ($1.session.updatedAt ?? "") }
-        // Keep the head of the pipeline and every step that needs attention;
-        // quiet steps past the limit fold into "+N".
-        var shown: [Stage] = []
-        for stage in stages where shown.count < maxStages || stage.urgency <= .running {
-            shown.append(stage)
+        // The Frontdoor and every Worker that is doing something or needs the
+        // user; Workers that are only waiting (idle, closed) fold into a count,
+        // so a card shows what is moving, not every session it ever opened.
+        let rootId = frontdoor.root?.sessionId
+        let shown = stages.filter { stage in
+            stage.urgency <= .running || stage.id == rootId || (rootId == nil && stage.depth == 0 && stage.id == stages.first?.id)
         }
         return Card(
             frontdoor: frontdoor,

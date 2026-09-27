@@ -323,7 +323,7 @@ private struct PipelineCardView: View {
                     .help("대시보드에서 이 세션 보기")
                 }
                 if card.hiddenStageCount > 0 {
-                    Text("+\(card.hiddenStageCount)개 단계 더 있음")
+                    Text("대기 중 Worker \(card.hiddenStageCount)개")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                         .padding(.leading, 18)
