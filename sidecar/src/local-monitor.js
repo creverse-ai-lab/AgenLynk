@@ -126,6 +126,11 @@ export function projectLocalSnapshot(snapshot, timelines = new Map()) {
       .filter(Boolean)
       .reduce((latest, value) => (value > latest ? value : latest), scannedAt);
     const active = status === "running" || status === "waiting_input" || status === "waiting_permission";
+    // A one-shot run (`claude -p`, `grok -p`, `codex exec`) is automation,
+    // not a session a person opened: without a known launcher it is an
+    // unattributed Worker, never a Frontdoor of its own.
+    const headless = Boolean(raw.headless || facts.headless === true);
+    const orphanRun = headless && raw.session === rootId && !raw.parent;
 
     sessions.push({
       sessionId,
@@ -136,7 +141,7 @@ export function projectLocalSnapshot(snapshot, timelines = new Map()) {
       status,
       title: sessionTitle(facts, timeline?.events, raw),
       opener: root?.provider ?? rootLink.provider ?? raw.provider ?? "local",
-      openerInstanceId: rootId,
+      openerInstanceId: orphanRun ? null : rootId,
       cwd: raw.cwd ?? facts.cwd ?? root?.cwd ?? "",
       turnId: active ? facts.turnId ?? `local-turn:${raw.session}` : null,
       stopReason: status === "idle" ? "completed" : null,
@@ -148,7 +153,7 @@ export function projectLocalSnapshot(snapshot, timelines = new Map()) {
       ...(facts.usagePartial ? { usagePartial: true } : {}),
       capabilities: localCapabilities(provider, timeline, raw.hooked === true),
       source: "local",
-      role: raw.session === rootId ? "frontdoor" : "worker",
+      role: raw.session === rootId && !orphanRun ? "frontdoor" : "worker",
       parentLocalSessionId: raw.parent ?? null,
       // Only name a local parent this snapshot can see, or one whose provider
       // the link itself proved (process lineage). Guessing it from the
@@ -161,7 +166,7 @@ export function projectLocalSnapshot(snapshot, timelines = new Map()) {
       ...(raw.parent && raw.parent_source === "lineage" ? { parentProof: "lineage" } : {}),
       // A one-shot run (`claude -p`, `grok -p`, `codex exec`), so the app can
       // tell it from an interactive session.
-      ...(raw.headless || facts.headless === true ? { headless: true } : {})
+      ...(headless ? { headless: true } : {})
     });
     if (timeline?.events?.length) events[sessionId] = timeline.events;
   }

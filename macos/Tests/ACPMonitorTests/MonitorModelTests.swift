@@ -794,6 +794,27 @@ enum MonitorModelChecks {
         let orphans = frontdoors.first(where: \.isUnattributed)
         try check(orphans?.workers.map(\.sessionId) == ["legacy"] && orphans?.displayName == "연결 미확인 Worker",
                   "a worker without an opener is listed under 연결 미확인 Worker")
+
+        // A Worker whose opener id lags its proven parent (its record still
+        // names itself) joins the group of its topmost ancestor, not a group
+        // of its own; so does a nested Worker with no opener id at all.
+        func member(_ id: String, role: String, instanceId: String?, parent: String?) throws -> GatewaySession {
+            var value: [String: JSONValue] = [
+                "sessionId": .string(id), "provider": .string("codex"), "status": .string("idle"),
+                "role": .string(role), "opener": .string("claude"), "updatedAt": .string("2026-08-07T00:00:00Z")
+            ]
+            if let instanceId { value["openerInstanceId"] = .string(instanceId) }
+            if let parent { value["parentSessionId"] = .string(parent) }
+            guard let decoded = GatewaySession(.object(value)) else { throw CheckError.failed("group fixture") }
+            return decoded
+        }
+        let chained = FrontdoorSession.make(sessions: [
+            try member("fd", role: "frontdoor", instanceId: "main", parent: nil),
+            try member("w1", role: "worker", instanceId: "w1", parent: "fd"),
+            try member("w2", role: "worker", instanceId: nil, parent: "w1")
+        ])
+        try check(chained.count == 1 && chained.first?.id == "main" && chained.first?.workers.count == 2,
+                  "workers follow their parent chain into one Frontdoor group, got \(chained.map(\.id))")
     }
 
     /// The Frontdoor name is its working folder first; a title is only used

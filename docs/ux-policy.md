@@ -13,6 +13,8 @@ Claude · Codex · Grok · Gateway 세션을 **같은 규칙으로** 보여 주�
 - **hook으로만 보였고 활동(프롬프트·도구·서브에이전트·권한 요청)도 대화 기록 파일도 없는 세션은 목록에 올리지 않는다.** SessionEnd가 오면 바로, 끝이 안 오면 2분 뒤 잊는다. 사용량 측정 앱처럼 `claude`를 주기적으로 띄우는 도구가 빈 Frontdoor를 쌓지 않게 하려는 것이다. 첫 활동이 오면 그때부터 평소처럼 보인다.
 - Gateway가 본 worker id는 `~/.acp-gateway/agenlynk/workers.json`에 남겨, sidecar 재시작이나 기록 보관 0 이후에도 Frontdoor가 되지 않는다. (알려진 한계: 예전에 worker였던 Claude 세션을 터미널에서 `--resume`하면 로컬 Frontdoor로 보이지 않는다.)
 - opener를 모르는 Gateway worker는 Frontdoor로 올리지 않되 숨기지도 않고 **연결 미확인 Worker** 한 그룹에 둔다.
+- 부모를 끝내 모르는 1회성 실행(`claude -p`, `grok -p`, `codex exec`, headless)도 사람이 연 세션이 아니므로 Frontdoor로 올리지 않고 **연결 미확인 Worker**에 둔다.
+- 화면의 Frontdoor 묶음은 opener id보다 **증명된 부모 사슬**(`parentSessionId`)을 먼저 따른다. 부모가 목록에 있으면 그 최상위 조상의 묶음에 들어간다.
 - 레인 헤더 첫 줄은 역할(**Frontdoor** / Worker / "Worker · 2단"), 둘째 줄은 이름(사용자 지정, 없으면 자동 이름)이다.
 - 레인·배지 이름은 **Frontdoor / Worker**만 쓴다. 중첩(depth≥2)은 "Worker · 2단". "Agent"/"Subagent"로 부르지 않는다. 호출 화살표는 "Worker 호출", 돌아오는 화살표는 "응답".
 - 이벤트 종류 `subagent`(CLI 내부 서브에이전트)는 레인이 아니므로 그대로 "서브에이전트"로 쓴다.

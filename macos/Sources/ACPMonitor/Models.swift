@@ -514,6 +514,32 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
             .first { !$0.isEmpty }
     }
 
+    /// Which Frontdoor group a session belongs to: that of its topmost
+    /// ancestor present in `sessions` (following `parentSessionId`), else its
+    /// own `openerInstanceId`. The parent chain wins because it is what the
+    /// monitor proved; an opener id can lag behind it (a Worker whose parent
+    /// was learned after its record was written) and would otherwise show a
+    /// Worker as a Frontdoor group of its own.
+    static func groupKeyResolver(_ sessions: [GatewaySession]) -> (GatewaySession) -> String? {
+        var byId: [String: GatewaySession] = [:]
+        for session in sessions where byId[session.sessionId] == nil { byId[session.sessionId] = session }
+        func opener(_ session: GatewaySession) -> String? {
+            guard session.hasFrontdoorIdentity else { return nil }
+            return session.openerInstanceId
+        }
+        return { session in
+            var top = session
+            var seen: Set<String> = [session.sessionId]
+            while !top.isFrontdoorRecord,
+                  let parentId = top.parentSessionId,
+                  let parent = byId[parentId],
+                  seen.insert(parentId).inserted {
+                top = parent
+            }
+            return opener(top) ?? opener(session)
+        }
+    }
+
     /// Workers the Gateway reports without a known opener (an older daemon,
     /// or a Main whose transcript this Mac cannot see). They are never promoted
     /// to Frontdoors, but they must not vanish either: they share one group.
@@ -521,15 +547,18 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
     var isUnattributed: Bool { id == Self.unattributedId }
 
     static func make(sessions: [GatewaySession]) -> [FrontdoorSession] {
-        let mapped = sessions.filter(\.hasFrontdoorIdentity)
-        let orphans = sessions.filter { !$0.hasFrontdoorIdentity && !$0.isFrontdoorRecord }
+        let groupKey = groupKeyResolver(sessions)
+        let keyed = sessions.compactMap { session in groupKey(session).map { (key: $0, session: session) } }
+        let mapped = keyed.map(\.session)
+        let keyById = Dictionary(keyed.map { ($0.session.sessionId, $0.key) }, uniquingKeysWith: { first, _ in first })
+        let orphans = sessions.filter { keyById[$0.sessionId] == nil && !$0.isFrontdoorRecord }
         let unattributed = orphans.isEmpty ? [] : [FrontdoorSession(
             id: unattributedId,
             provider: orphans.first?.provider.lowercased() ?? "agent",
             root: nil,
             workers: orphans.sorted { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
         )]
-        return Dictionary(grouping: mapped, by: { $0.openerInstanceId! })
+        return Dictionary(grouping: mapped, by: { keyById[$0.sessionId]! })
             .map { instanceId, members in
                 let roots = members.filter(\.isFrontdoorRecord)
                 let root = roots.max { ($0.updatedAt ?? "") < ($1.updatedAt ?? "") }

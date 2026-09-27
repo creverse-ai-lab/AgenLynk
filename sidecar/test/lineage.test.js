@@ -191,7 +191,8 @@ test("lineage projects a shell-launched agent as a worker of its launcher", () =
   assert.equal(grok.headless, true);
   assert.equal(grok.parentProof, "lineage");
   const solo = sessions.find((session) => session.localSessionId === "solo");
-  assert.equal(solo.role, "frontdoor", "unparented headless work is kept, not hidden");
+  assert.equal(solo.role, "worker", "unparented headless work is kept, but never as a Frontdoor");
+  assert.equal(solo.openerInstanceId, null, "it lands in the unattributed Worker group");
   assert.equal(solo.headless, true);
 
   const merged = mergeMonitorSessions(

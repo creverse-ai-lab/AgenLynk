@@ -192,6 +192,9 @@ export class MonitorState {
     return {
       ...session,
       role: "worker",
+      // The group it belongs to follows the parent (the app groups by opener).
+      opener: previous.opener ?? session.opener,
+      openerInstanceId: previous.openerInstanceId ?? session.openerInstanceId,
       parentSessionId: previous.parentSessionId,
       parentLocalSessionId: previous.parentLocalSessionId ?? session.parentLocalSessionId ?? null,
       ...(previous.parentProof ? { parentProof: previous.parentProof } : {})

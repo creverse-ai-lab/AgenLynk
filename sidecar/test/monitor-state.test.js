@@ -358,11 +358,14 @@ test("a local session that leaves mid-turn is archived idle; a Gateway one keeps
 test("a local session keeps a parent it once had when a later scan lacks it", () => {
   const state = new MonitorState();
   const child = { sessionId: "local:grok:c", source: "local", provider: "grok", status: "running", role: "worker",
+    opener: "claude", openerInstanceId: "main",
     parentSessionId: "local:claude:main", parentLocalSessionId: "main", parentProof: "lineage" };
   state.setSessions([child]);
-  state.setSessions([{ ...child, role: "frontdoor", parentSessionId: null, parentLocalSessionId: null, parentProof: undefined, status: "idle" }]);
+  state.setSessions([{ ...child, role: "frontdoor", opener: "grok", openerInstanceId: "c",
+    parentSessionId: null, parentLocalSessionId: null, parentProof: undefined, status: "idle" }]);
   const [kept] = state.snapshot().sessions;
   assert.equal(kept.role, "worker");
+  assert.equal(kept.openerInstanceId, "main", "it stays in its Frontdoor's group");
   assert.equal(kept.parentSessionId, "local:claude:main");
   assert.equal(kept.parentProof, "lineage");
   assert.equal(kept.status, "idle", "everything else follows the new scan");
