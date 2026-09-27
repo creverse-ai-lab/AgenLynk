@@ -58,6 +58,12 @@ struct EventSequenceView: View {
     private let headerHeight = 82.0
     private let eventRowHeight = 44.0
     private let childRowHeight = 34.0
+    private let sentinelHeight = 24.0
+    /// The lifeline dash: `lifelineDash` on, `lifelineDash` off.
+    private let lifelineDash = 5.0
+    /// Where the header's lifeline stub starts, as the origin of the one
+    /// dash pattern every slice below continues.
+    private let lifelineStubLength = 8.0
     private let relationNodeSpacing = 8.0
     private static let bottomId = "sequence-bottom"
 
@@ -137,12 +143,12 @@ struct EventSequenceView: View {
                             for (index, lane) in lanes.enumerated() {
                                 let x = laneX(index)
                                 var lifeline = Path()
-                                lifeline.move(to: CGPoint(x: x, y: headerHeight - 8))
+                                lifeline.move(to: CGPoint(x: x, y: headerHeight - lifelineStubLength))
                                 lifeline.addLine(to: CGPoint(x: x, y: headerHeight))
                                 context.stroke(
                                     lifeline,
                                     with: .color(providerColor(lane.session.provider).opacity(0.34)),
-                                    style: StrokeStyle(lineWidth: 1.5, dash: [5, 5])
+                                    style: lifelineStyle(phase: 0)
                                 )
                             }
                         }
@@ -180,7 +186,10 @@ struct EventSequenceView: View {
                     ScrollView(.vertical) {
                         LazyVStack(spacing: 0) {
                             olderSentinel(rows: rows, proxy: proxy)
-                                .frame(width: width, height: 24)
+                                .frame(width: width, height: sentinelHeight)
+                                .background(alignment: .topLeading) {
+                                    lifelines(lanes, height: sentinelHeight, offset: lifelineStubLength)
+                                }
 
                             ForEach(rows) { row in
                                 sequenceRow(
@@ -189,7 +198,8 @@ struct EventSequenceView: View {
                                     laneIndex: laneIndex,
                                     callEdge: row.coveredEventIds.lazy.compactMap { callAnchors[$0] }.first,
                                     responseEdge: row.coveredEventIds.lazy.compactMap { responseAnchors[$0] }.first,
-                                    width: width
+                                    width: width,
+                                    lifelineOffset: derived.rowOffsets[row.id] ?? 0
                                 )
                                 .id(row.id)
                             }
@@ -215,6 +225,11 @@ struct EventSequenceView: View {
 
                             Color.clear
                                 .frame(width: width, height: 12)
+                                .background(alignment: .topLeading) {
+                                    if !rows.isEmpty {
+                                        lifelines(lanes, height: 12, offset: derived.rowsEndOffset)
+                                    }
+                                }
                                 .id(Self.bottomId)
                                 .onAppear { followLatestEvent = true }
                                 .onDisappear {
@@ -340,6 +355,36 @@ struct EventSequenceView: View {
         }
     }
 
+    /// Every row draws its own slice of the lifelines. The dash continues from
+    /// the slice above (`offset` is this slice's distance from the header
+    /// stub's top) — restarting it per row left uneven breaks wherever a row
+    /// height is not a whole number of dashes.
+    private func lifelineStyle(phase offset: Double) -> StrokeStyle {
+        StrokeStyle(
+            lineWidth: 1.5,
+            dash: [lifelineDash, lifelineDash],
+            dashPhase: offset.truncatingRemainder(dividingBy: lifelineDash * 2)
+        )
+    }
+
+    private func lifelines(_ lanes: [SequenceLane], height: Double, offset: Double) -> some View {
+        Canvas { context, _ in
+            for (index, lane) in lanes.enumerated() {
+                let x = laneX(index)
+                var lifeline = Path()
+                lifeline.move(to: CGPoint(x: x, y: 0))
+                lifeline.addLine(to: CGPoint(x: x, y: height))
+                context.stroke(
+                    lifeline,
+                    with: .color(providerColor(lane.session.provider).opacity(0.34)),
+                    style: lifelineStyle(phase: offset)
+                )
+            }
+        }
+        .frame(height: height)
+        .accessibilityHidden(true)
+    }
+
     private func rowHeight(_ row: TimelineRow) -> Double {
         row.parentGroupId == nil ? eventRowHeight : childRowHeight
     }
@@ -352,23 +397,14 @@ struct EventSequenceView: View {
         laneIndex: [String: Int],
         callEdge: SequenceCallEdge?,
         responseEdge: SequenceCallEdge?,
-        width: Double
+        width: Double,
+        lifelineOffset: Double
     ) -> some View {
         let height = rowHeight(row)
         let y = height / 2
         ZStack(alignment: .topLeading) {
+            lifelines(lanes, height: height, offset: lifelineOffset)
             Canvas { context, _ in
-                for (index, lane) in lanes.enumerated() {
-                    let x = laneX(index)
-                    var lifeline = Path()
-                    lifeline.move(to: CGPoint(x: x, y: 0))
-                    lifeline.addLine(to: CGPoint(x: x, y: height))
-                    context.stroke(
-                        lifeline,
-                        with: .color(providerColor(lane.session.provider).opacity(0.34)),
-                        style: StrokeStyle(lineWidth: 1.5, dash: [5, 5], dashPhase: 0)
-                    )
-                }
                 // A call travels parent→child; a 응답 travels back, so its
                 // head lands on the parent lane and its stroke is dashed.
                 func drawArrow(_ edge: SequenceCallEdge, response: Bool) {
@@ -570,9 +606,17 @@ struct EventSequenceView: View {
         let responseAnchors = Dictionary(edges.compactMap { edge in
             edge.returned ? edge.returnEventId.map { ($0, edge) } : nil
         }, uniquingKeysWith: { first, _ in first })
+        var rowOffsets: [String: Double] = [:]
+        rowOffsets.reserveCapacity(rows.count)
+        var offset = lifelineStubLength + sentinelHeight
+        for row in rows {
+            rowOffsets[row.id] = offset
+            offset += rowHeight(row)
+        }
         return SequenceDerived(
             rows: rows, lanes: lanes, laneIndex: laneIndex,
-            callAnchors: callAnchors, responseAnchors: responseAnchors
+            callAnchors: callAnchors, responseAnchors: responseAnchors,
+            rowOffsets: rowOffsets, rowsEndOffset: offset
         )
     }
 
@@ -643,6 +687,9 @@ private struct SequenceDerived {
     let laneIndex: [String: Int]
     let callAnchors: [String: SequenceCallEdge]
     let responseAnchors: [String: SequenceCallEdge]
+    /// Each row's distance from the header's lifeline stub, for the dash phase.
+    let rowOffsets: [String: Double]
+    let rowsEndOffset: Double
 }
 
 /// Holds the last derivation across body passes. A reference type in
