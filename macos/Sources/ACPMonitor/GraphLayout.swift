@@ -155,7 +155,7 @@ struct GraphLayout: Equatable, Sendable {
 struct DashboardGraph: Equatable, Sendable {
     let layout: GraphLayout
     let sessions: [String: GatewaySession]
-    /// The Frontdoor each tree stands for, by group id (none for history).
+    /// The Frontdoor (or history group) each tree stands for, by group id.
     let frontdoors: [String: FrontdoorSession]
 
     static let empty = DashboardGraph(layout: GraphLayout.make(groups: []), sessions: [:], frontdoors: [:])
@@ -179,18 +179,6 @@ struct DashboardGraph: Equatable, Sendable {
             layout: GraphLayout.make(groups: groups, metrics: metrics),
             sessions: sessions,
             frontdoors: Dictionary(frontdoors.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        )
-    }
-
-    /// A single opened history session.
-    static func make(session: GatewaySession) -> DashboardGraph {
-        DashboardGraph(
-            layout: GraphLayout.make(groups: [GraphLayout.Group(
-                id: "history:\(session.sessionId)",
-                nodes: [GraphLayout.Input(id: session.sessionId, parentId: nil, depth: 0)]
-            )]),
-            sessions: [session.sessionId: session],
-            frontdoors: [:]
         )
     }
 }

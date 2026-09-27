@@ -125,7 +125,7 @@ struct DashboardView: View {
         .onChange(of: model.selectedFrontdoorId) { _, _ in
             // A new scope opens at its newest event, following.
             settings.followLatestEvent = true
-            guard model.selectedHistorySessionId == nil else { return }
+            guard model.selectedHistoryGroupId == nil else { return }
             let members = Set(model.selectedFrontdoor?.members.map(\.sessionId) ?? [])
             // An event of the new scope (it was just clicked) stays selected.
             if !(model.selectedEvent.map { members.contains($0.sessionId) } ?? false) {
@@ -139,7 +139,7 @@ struct DashboardView: View {
             }
         }
         .onChange(of: model.selectedSessionId) { _, _ in
-            guard model.selectedHistorySessionId == nil else { return }
+            guard model.selectedHistoryGroupId == nil else { return }
             // Selecting a session (a lane, or an event's session) keeps the
             // selected event; the scope follows the session's Frontdoor.
             if let openerInstanceId = model.selectedSession?.openerInstanceId,
@@ -337,23 +337,23 @@ struct DashboardView: View {
     }
 
     /// One selection for both sidebar sections: a Frontdoor id, or a
-    /// "history:" tag for a browsed history session. Only a click goes
+    /// "history:" tag for a "지난 기록" group. Only a click goes
     /// through here, so the reconciliation that re-picks a Frontdoor on
     /// updates never closes an opened history session.
     private var sidebarSelection: Binding<String?> {
         Binding(
             get: {
-                if let id = model.selectedHistorySessionId { return Self.historyTagPrefix + id }
+                if let id = model.selectedHistoryGroupId { return Self.historyTagPrefix + id }
                 return model.selectedFrontdoorId
             },
             set: { value in
                 if let value, value.hasPrefix(Self.historyTagPrefix) {
-                    let sessionId = String(value.dropFirst(Self.historyTagPrefix.count))
+                    let groupId = String(value.dropFirst(Self.historyTagPrefix.count))
                     settings.followLatestEvent = true
-                    Task { await model.selectHistorySession(sessionId) }
+                    Task { await model.selectHistoryGroup(groupId) }
                 } else {
-                    if model.selectedHistorySessionId != nil {
-                        Task { await model.selectHistorySession(nil) }
+                    if model.selectedHistoryGroupId != nil {
+                        Task { await model.selectHistoryGroup(nil) }
                         settings.followLatestEvent = true
                     }
                     model.selectedFrontdoorId = value
@@ -362,16 +362,16 @@ struct DashboardView: View {
         )
     }
 
-    /// Older sessions from the on-disk history, paged in as the list's end
-    /// scrolls into view.
+    /// Older work from the on-disk history, one row per Frontdoor group
+    /// (§10), paged in as the list's end scrolls into view.
     private var historySection: some View {
         Section {
-            ForEach(model.browsableHistory) { session in
-                HistorySessionRow(session: session)
-                    .tag(Self.historyTagPrefix + session.sessionId)
+            ForEach(model.historyRows) { group in
+                HistoryGroupRow(group: group)
+                    .tag(Self.historyTagPrefix + group.id)
                     .onAppear {
-                        guard session.sessionId == model.browsableHistory.last?.sessionId else { return }
-                        Task { await model.loadHistoryPage() }
+                        guard group.id == model.historyRows.last?.id else { return }
+                        Task { await model.loadMoreHistoryRows() }
                     }
             }
             // The end of the list: reaching it loads the next page.
@@ -382,15 +382,15 @@ struct DashboardView: View {
                 } else if let error = model.historyError {
                     Label(error, systemImage: "exclamationmark.triangle").lineLimit(2)
                 } else if model.historyHasMore {
-                    Button("더 불러오기") { Task { await model.loadHistoryPage() } }
+                    Button("더 불러오기") { Task { await model.loadMoreHistoryRows() } }
                         .buttonStyle(.borderless)
-                } else if model.browsableHistory.isEmpty {
+                } else if model.historyRows.isEmpty {
                     Text("지난 기록 없음")
                 }
             }
             .font(.caption2)
             .foregroundStyle(.secondary)
-            .onAppear { Task { await model.loadHistoryPage() } }
+            .onAppear { Task { await model.loadMoreHistoryRows() } }
         } header: {
             HStack(spacing: 4) {
                 Text("지난 기록")
@@ -407,16 +407,24 @@ struct DashboardView: View {
         }
     }
 
-    /// The sessions the sequence shows: the opened history session, else the
-    /// selected Frontdoor's members, else every visible session.
+    /// The sessions the sequence shows: the opened history group's
+    /// members, else the selected Frontdoor's (expired Workers included),
+    /// else every visible session.
     private var sequenceSessions: [GatewaySession] {
-        if let history = model.selectedHistorySession { return [history] }
+        if model.selectedHistoryGroupId != nil { return model.selectedHistoryGroup?.members ?? [] }
         return model.selectedFrontdoor?.members ?? model.visibleLogSessions
     }
 
     private var sequenceScopeKey: String {
-        if let id = model.selectedHistorySessionId { return "history:\(id)" }
+        if let id = model.selectedHistoryGroupId { return "history:\(id)" }
         return model.selectedFrontdoorId ?? "all"
+    }
+
+    /// Changes when the selected Frontdoor gains expired Workers to load.
+    private var expiredWorkersLoadKey: String {
+        guard model.selectedHistoryGroupId == nil, let id = model.selectedFrontdoorId,
+              let expired = model.historyGroups.expiredWorkers[id] else { return "" }
+        return id + ":" + expired.map(\.sessionId).joined(separator: ",")
     }
 
     /// The center view: 현황 cards, 그래프, or the sequence, as picked in the
@@ -429,7 +437,7 @@ struct DashboardView: View {
     }
 
     private var centerTitle: String {
-        let history = model.selectedHistorySessionId != nil
+        let history = model.selectedHistoryGroupId != nil
         let scoped = model.selectedFrontdoorId != nil
         switch settings.currentDashboardMode {
         case .cards: return "작업 현황"
@@ -462,9 +470,10 @@ struct DashboardView: View {
             .padding(.horizontal, 12)
             .frame(height: 44)
             Divider()
-            let contextSession = model.selectedHistorySession ?? model.selectedSession
+            let history = model.selectedHistoryGroupId != nil
+            let contextSession = history ? model.selectedHistorySession : model.selectedSession
             SequenceSelectionContext(
-                frontdoor: model.selectedHistorySessionId == nil ? model.selectedFrontdoor : nil,
+                frontdoor: history ? model.selectedHistoryGroup : model.selectedFrontdoor,
                 session: contextSession,
                 activity: contextSession.map { sessionActivity(for: $0) },
                 inHistory: contextSession.map { model.showsAsHistory($0) } ?? false
@@ -474,8 +483,8 @@ struct DashboardView: View {
             case .cards:
                 DashboardCardsView(
                     cards: dashboardCards,
-                    selectedFrontdoorId: model.selectedHistorySessionId == nil ? model.selectedFrontdoorId : nil,
-                    selectedSessionId: model.selectedHistorySessionId == nil ? model.selectedSessionId : nil,
+                    selectedFrontdoorId: history ? nil : model.selectedFrontdoorId,
+                    selectedSessionId: history ? nil : model.selectedSessionId,
                     emptyState: overviewEmptyState,
                     selectFrontdoor: { selectFromOverview(frontdoorId: $0, sessionId: nil) },
                     selectStage: { selectFromOverview(frontdoorId: $0, sessionId: $1) }
@@ -483,13 +492,21 @@ struct DashboardView: View {
             case .graph:
                 DashboardGraphView(
                     graph: dashboardGraph,
-                    selectedFrontdoorId: model.selectedFrontdoorId,
-                    selectedSessionId: model.selectedHistorySessionId ?? model.selectedSessionId,
+                    selectedFrontdoorId: history ? nil : model.selectedFrontdoorId,
+                    selectedSessionId: history ? model.selectedHistorySession?.sessionId : model.selectedSessionId,
                     emptyState: overviewEmptyState,
-                    selectFrontdoor: { selectFromOverview(frontdoorId: $0, sessionId: nil) },
+                    selectFrontdoor: { frontdoorId in
+                        // An opened history group is the whole graph.
+                        guard model.selectedHistoryGroupId == nil else { return }
+                        selectFromOverview(frontdoorId: frontdoorId, sessionId: nil)
+                    },
                     selectSession: { frontdoorId, sessionId in
-                        // An opened history session is the whole graph.
-                        guard model.selectedHistorySessionId == nil else { return }
+                        // Within an opened history group a node picks the
+                        // member the inspector describes.
+                        guard model.selectedHistoryGroupId == nil else {
+                            model.selectedHistoryMemberId = sessionId
+                            return
+                        }
                         selectFromOverview(frontdoorId: frontdoorId, sessionId: sessionId)
                     }
                 )
@@ -505,7 +522,7 @@ struct DashboardView: View {
         return EventSequenceView(
             sessions: sequenceSessions,
             events: model.selectedEvents,
-            selectedSessionId: $model.selectedSessionId,
+            selectedSessionId: model.selectedHistoryGroupId == nil ? $model.selectedSessionId : $model.selectedHistoryMemberId,
             selectedEventId: $model.selectedEventId,
             followLatestEvent: $settings.followLatestEvent,
             canLoadOlder: model.mayHaveOlderEvents(in: sessionIds),
@@ -518,6 +535,11 @@ struct DashboardView: View {
         // A new scope is a new timeline: fresh scroll position (newest at
         // the bottom) and no groups left expanded from the previous one.
         .id(sequenceScopeKey)
+        // Expired Workers of the selected Frontdoor are only on disk.
+        .task(id: expiredWorkersLoadKey) {
+            guard !expiredWorkersLoadKey.isEmpty, let id = model.selectedFrontdoorId else { return }
+            await model.loadExpiredWorkerEvents(frontdoorId: id)
+        }
     }
 
     /// Every sidebar Frontdoor's card, most urgent first (the pipeline's
@@ -530,11 +552,12 @@ struct DashboardView: View {
         return cards.filter { visible.contains($0.id) }
     }
 
-    /// The graph's scope, like the sequence's: the opened history session,
+    /// The graph's scope, like the sequence's: the opened history group,
     /// else the selected Frontdoor, else every listed Frontdoor stacked.
     private var dashboardGraph: DashboardGraph {
-        if let history = model.selectedHistorySession {
-            return model.dashboardGraph(scope: "history:\(history.sessionId)") { .make(session: history) }
+        if model.selectedHistoryGroupId != nil {
+            guard let group = model.selectedHistoryGroup else { return .empty }
+            return model.dashboardGraph(scope: "history:\(group.id)") { .make(frontdoors: [group]) }
         }
         if let frontdoor = model.selectedFrontdoor {
             return model.dashboardGraph(scope: "frontdoor:\(frontdoor.id)") { .make(frontdoors: [frontdoor]) }
@@ -560,30 +583,30 @@ struct DashboardView: View {
     }
 
     /// A card or node click: the same selection a sidebar row plus a lane
-    /// header click would make, leaving an opened history session.
+    /// header click would make, leaving an opened history group.
     private func selectFromOverview(frontdoorId: String?, sessionId: String?) {
-        if model.selectedHistorySessionId != nil {
-            Task { await model.selectHistorySession(nil) }
+        if model.selectedHistoryGroupId != nil {
+            Task { await model.selectHistoryGroup(nil) }
             settings.followLatestEvent = true
         }
         if let sessionId { model.selectedSessionId = sessionId }
         if let frontdoorId { model.selectedFrontdoorId = frontdoorId }
     }
 
-    /// What an empty sequence should say: a history session still loading or
+    /// What an empty sequence should say: a history group still loading or
     /// failed, a source that cannot show a timeline, or plain "nothing yet".
     private var sequenceEmptyState: SequenceEmptyState {
-        if let history = model.selectedHistorySession {
-            let id = history.sessionId
-            if model.historyLoadFailedSessionIds.contains(id) {
+        if let group = model.selectedHistoryGroup {
+            let ids = group.members.map(\.sessionId)
+            if ids.contains(where: model.historyLoadFailedSessionIds.contains) {
                 return SequenceEmptyState(
                     title: "기록을 불러오지 못했습니다",
                     symbol: "exclamationmark.triangle",
                     description: "최근 알림에서 원인을 확인하세요.",
-                    retry: { Task { await model.retryHistorySession(id) } }
+                    retry: { Task { await model.retryHistoryGroup() } }
                 )
             }
-            if model.browsedEvents[id] == nil {
+            if ids.contains(where: { model.browsedEvents[$0] == nil }) {
                 return SequenceEmptyState(title: "기록 불러오는 중…", loading: true)
             }
         }
@@ -638,9 +661,9 @@ struct DashboardView: View {
     }
 
     /// The session the inspector's usage block describes: the opened
-    /// history session, else the selected one.
+    /// history group's picked member, else the selected session.
     private var inspectorSession: GatewaySession? {
-        model.selectedHistorySession ?? model.selectedSession
+        model.selectedHistoryGroupId != nil ? model.selectedHistorySession : model.selectedSession
     }
 
     private var operationsColumn: some View {
@@ -1135,15 +1158,17 @@ struct SessionCapabilityBadges: View {
     }
 }
 
-/// One persisted session in "지난 기록": provider, folder or title, role and
-/// how long ago it was last updated.
-private struct HistorySessionRow: View {
+/// One "지난 기록" group (§10): its Frontdoor's name, how many Workers
+/// ran under it, its folder, and how long ago it last moved. A Worker is
+/// never a row of its own; one with no provable Frontdoor is counted in
+/// the "연결 미확인 Worker" row.
+private struct HistoryGroupRow: View {
     @EnvironmentObject private var settings: AppSettings
-    let session: GatewaySession
+    let group: FrontdoorSession
 
     var body: some View {
         HStack(alignment: .top, spacing: 9) {
-            ProviderIcon(provider: session.provider, size: 16).padding(.top, 1)
+            ProviderIcon(provider: group.root?.provider ?? group.provider, size: 16).padding(.top, 1)
             VStack(alignment: .leading, spacing: 2) {
                 Text(name).font(.callout).lineLimit(1)
                 // "3분 전" keeps counting while the list stays open.
@@ -1156,19 +1181,19 @@ private struct HistorySessionRow: View {
             }
         }
         .padding(.vertical, 2)
-        .help(ifPresent: session.title ?? (session.cwd.isEmpty ? nil : session.cwd))
+        .help(ifPresent: group.latestTask ?? group.root.flatMap { $0.cwd.isEmpty ? nil : $0.cwd })
     }
 
-    // Naming policy: the session's name (override, title, or provider ·
-    // folder) leads; the folder goes in the subtitle so rows from one project
-    // are still told apart by what they were doing.
-    private var name: String { settings.sessionName(session) }
+    private var name: String {
+        if group.isUnattributed { return group.displayName }
+        return settings.frontdoorName(id: group.id, auto: group.displayName)
+    }
 
     private func subtitle(now: Date) -> String {
-        var parts = [session.isFrontdoorRecord ? "Frontdoor" : "Worker"]
-        let folder = (session.cwd as NSString).lastPathComponent
-        if !folder.isEmpty, folder != "/", !name.contains(folder) { parts.append(folder) }
-        if let updated = session.updatedAt.flatMap(parseTimestamp) {
+        var parts = group.isUnattributed ? [] : ["Frontdoor"]
+        parts.append("Worker \(group.workers.count)")
+        if let folder = group.workingFolder, !name.contains(folder) { parts.append(folder) }
+        if let updated = group.updatedAt.flatMap(parseTimestamp) {
             parts.append(relativeTimeText(from: updated, to: now))
         }
         return parts.joined(separator: " · ")
@@ -1256,13 +1281,15 @@ final class InspectorDisclosures: ObservableObject {
 }
 
 extension AppModel {
-    /// Shown from history rather than the live snapshot: the opened history
-    /// session, or one kept only in history (its idle hold ran out).
+    /// Shown from history rather than the live snapshot: a member of the
+    /// opened history group, or one kept only in history (its idle hold ran
+    /// out, or it is an expired Worker under its Frontdoor).
     func showsAsHistory(_ session: GatewaySession) -> Bool {
-        isHistorySession(
+        let opened = selectedHistoryGroup?.members.contains { $0.sessionId == session.sessionId } ?? false
+        return isHistorySession(
             session.sessionId,
             liveSessionIds: Set(sessions.map(\.sessionId)),
-            openedHistoryId: selectedHistorySessionId
+            openedHistoryId: opened ? session.sessionId : nil
         )
     }
 }

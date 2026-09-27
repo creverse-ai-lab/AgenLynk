@@ -48,6 +48,7 @@ enum MonitorModelChecks {
         try eventsFrameUpsertReplacesInsertsAndOrders()
         try eventEqualityIgnoresRawPayloadAndUpsertReportsChange()
         try recentKeysKeepTheOpenOneAndTheNewestFew()
+        try historyRowsAreFrontdoorGroupsNeverLoneWorkers()
         try selectionFindsAnEventInItsOwnSessionBucket()
         try trailingItemMatchesFullGrouping()
         try sessionUsageDecodesOnlyKnownNumbers()
@@ -1620,6 +1621,70 @@ enum MonitorModelChecks {
         try check(upsertMonitorEvents([done], into: &bucket, limit: 10), "a visible change is reported")
         try check(bucket.count == 1 && bucket[0].status == "completed", "the event is replaced in place")
         try check(!upsertMonitorEvents([], into: &bucket, limit: 10), "an empty frame reports nothing")
+    }
+
+    /// "지난 기록" (docs/ux-policy.md §10): one row per Frontdoor group, the
+    /// way the live list groups. A Worker whose retention ran out never comes
+    /// back as a row of its own: it joins its group's row, joins the listed
+    /// Frontdoor when that one is live, or goes to 연결 미확인 Worker.
+    private static func historyRowsAreFrontdoorGroupsNeverLoneWorkers() throws {
+        func member(
+            _ id: String, role: String, instanceId: String?, parent: String? = nil, updatedAt: String
+        ) throws -> GatewaySession {
+            var value: [String: JSONValue] = [
+                "sessionId": .string(id), "provider": .string("claude"), "status": .string("closed"),
+                "role": .string(role), "opener": .string("claude"), "cwd": .string("/tmp/project"),
+                "updatedAt": .string(updatedAt)
+            ]
+            if let instanceId { value["openerInstanceId"] = .string(instanceId) }
+            if let parent { value["parentSessionId"] = .string(parent) }
+            guard let decoded = GatewaySession(.object(value)) else { throw CheckError.failed("history group fixture") }
+            return decoded
+        }
+        let liveRoot = try member("live-fd", role: "frontdoor", instanceId: "live-main", updatedAt: "2026-09-27T14:00:00Z")
+        let listed = [liveRoot]
+        let listedIds = Set(FrontdoorSession.make(sessions: listed).map(\.id))
+        let browsed = [
+            // Already listed live: never repeated below.
+            liveRoot,
+            try member("new-fd", role: "frontdoor", instanceId: "new-main", updatedAt: "2026-09-27T13:00:00Z"),
+            // No group at all, and a group whose Frontdoor record is gone.
+            try member("orphan", role: "worker", instanceId: nil, updatedAt: "2026-09-27T12:00:00Z"),
+            try member("rootless", role: "worker", instanceId: "gone-main", updatedAt: "2026-09-27T08:00:00Z"),
+            // Expired Workers of the live Frontdoor: by opener id, and by a
+            // parent chain that only the listed session resolves.
+            try member("x-w1", role: "worker", instanceId: "live-main", parent: "live-fd", updatedAt: "2026-09-27T11:00:00Z"),
+            try member("x-w2", role: "worker", instanceId: nil, parent: "live-fd", updatedAt: "2026-09-27T11:30:00Z"),
+            // A history group: its Workers follow the parent chain even when
+            // the opener id lags (names itself) or is missing.
+            try member("h-fd", role: "frontdoor", instanceId: "old-main", updatedAt: "2026-09-27T10:00:00Z"),
+            try member("h-w1", role: "worker", instanceId: "h-w1", parent: "h-fd", updatedAt: "2026-09-27T09:00:00Z"),
+            try member("h-w2", role: "worker", instanceId: nil, parent: "h-w1", updatedAt: "2026-09-27T09:30:00Z")
+        ]
+        let groups = HistoryGroups.make(browsed: browsed, listed: listed, listedFrontdoorIds: listedIds)
+
+        try check(groups.rows.map(\.id) == ["new-main", FrontdoorSession.unattributedId, "old-main"],
+                  "rows are groups, newest member update first, got \(groups.rows.map(\.id))")
+        try check(groups.rows.allSatisfy { $0.root != nil || $0.isUnattributed },
+                  "a Worker never stands for a row of its own")
+        let rowSessionIds = groups.rows.flatMap { $0.members.map(\.sessionId) }
+        try check(!rowSessionIds.contains("live-fd"), "a listed session is never repeated in history")
+        try check(Set(groups.rows.first { $0.id == "old-main" }?.workers.map(\.sessionId) ?? []) == ["h-w1", "h-w2"],
+                  "a history group's Workers are under its row")
+        try check(Set(groups.rows.first(where: \.isUnattributed)?.workers.map(\.sessionId) ?? []) == ["orphan", "rootless"],
+                  "Workers with no provable Frontdoor share the 연결 미확인 Worker row")
+        try check(!rowSessionIds.contains("x-w1") && !rowSessionIds.contains("x-w2"),
+                  "a Worker whose Frontdoor is listed live makes no history row")
+        try check(Set(groups.expiredWorkers["live-main"]?.map(\.sessionId) ?? []) == ["x-w1", "x-w2"],
+                  "expired Workers join their listed Frontdoor")
+        let joined = FrontdoorSession.make(sessions: listed).first?.addingWorkers(groups.expiredWorkers["live-main"] ?? [])
+        try check(joined?.workers.count == 2 && joined?.root?.sessionId == "live-fd",
+                  "the listed Frontdoor's views include its expired Workers")
+        try check(groups.rows.first { $0.id == "old-main" }?.countsLine.hasPrefix("Worker 2") == true,
+                  "a history row counts its Workers")
+
+        let nothing = HistoryGroups.make(browsed: [liveRoot], listed: listed, listedFrontdoorIds: listedIds)
+        try check(nothing.rows.isEmpty && nothing.expiredWorkers.isEmpty, "only listed sessions: no history rows")
     }
 
     private static func recentKeysKeepTheOpenOneAndTheNewestFew() throws {

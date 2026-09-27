@@ -574,6 +574,109 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
             .sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
             + unattributed
     }
+
+    /// The same Frontdoor with more Workers appended (expired Workers browsed
+    /// back from disk history).
+    func addingWorkers(_ extra: [GatewaySession]) -> FrontdoorSession {
+        guard !extra.isEmpty else { return self }
+        let known = Set(members.map(\.sessionId))
+        let added = extra.filter { !known.contains($0.sessionId) }
+        guard !added.isEmpty else { return self }
+        return FrontdoorSession(
+            id: id, provider: provider, root: root,
+            workers: (workers + added).sorted { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
+        )
+    }
+}
+
+/// "지난 기록" as Frontdoor-level rows (docs/ux-policy.md §10): the sessions
+/// browsed from disk history, grouped the way the live list groups
+/// (`FrontdoorSession.groupKeyResolver`, parent chain first), so a Worker
+/// whose live retention ran out never comes back as a row of its own.
+struct HistoryGroups: Sendable {
+    /// One row per group, newest member update first. Workers with no
+    /// provable group share one "연결 미확인 Worker" row.
+    let rows: [FrontdoorSession]
+    /// Expired Workers whose group's Frontdoor is listed live, by that
+    /// Frontdoor's id: they join its views instead of making a row.
+    let expiredWorkers: [String: [GatewaySession]]
+
+    static let empty = HistoryGroups(rows: [], expiredWorkers: [:])
+
+    /// `listed` is what the Frontdoor list above already shows (live plus
+    /// retained sessions); it resolves parents and is never repeated here.
+    /// `listedFrontdoorIds` are that list's group ids.
+    static func make(
+        browsed: [GatewaySession],
+        listed: [GatewaySession],
+        listedFrontdoorIds: Set<String>
+    ) -> HistoryGroups {
+        let listedIds = Set(listed.map(\.sessionId))
+        var seen = listedIds
+        let candidates = browsed.filter { !$0.isInternalReview && seen.insert($0.sessionId).inserted }
+        guard !candidates.isEmpty else { return .empty }
+        // Listed sessions first: where both know a parent, the listed one wins.
+        let groupKey = FrontdoorSession.groupKeyResolver(listed + candidates)
+        var grouped: [String: [GatewaySession]] = [:]
+        var expired: [String: [GatewaySession]] = [:]
+        var loneRoots: [GatewaySession] = []
+        var orphans: [GatewaySession] = []
+        for session in candidates {
+            guard let key = groupKey(session), key != FrontdoorSession.unattributedId else {
+                // A Frontdoor record is a Frontdoor even without an opener id;
+                // a Worker without a group is unattributed.
+                if session.isFrontdoorRecord { loneRoots.append(session) } else { orphans.append(session) }
+                continue
+            }
+            if listedFrontdoorIds.contains(key) {
+                // The live list has this group's Frontdoor: an expired Worker
+                // joins it; an older Frontdoor record of the same instance is
+                // still a Frontdoor and keeps a row.
+                if session.isFrontdoorRecord { loneRoots.append(session) } else { expired[key, default: []].append(session) }
+            } else {
+                grouped[key, default: []].append(session)
+            }
+        }
+        var rows: [FrontdoorSession] = []
+        for (key, members) in grouped {
+            let roots = members.filter(\.isFrontdoorRecord)
+            let workers = members.filter { !$0.isFrontdoorRecord }
+            guard let root = roots.max(by: { ($0.updatedAt ?? "") < ($1.updatedAt ?? "") }) else {
+                // No Frontdoor record to stand for the group: showing it as a
+                // row named after its folder is exactly how a Worker would
+                // pass for a Frontdoor.
+                orphans.append(contentsOf: workers)
+                continue
+            }
+            rows.append(FrontdoorSession(
+                id: key, provider: (root.provider).lowercased(), root: root,
+                workers: workers.sorted { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
+            ))
+            // More Frontdoor records of one instance: each stays reachable.
+            loneRoots.append(contentsOf: roots.filter { $0.sessionId != root.sessionId })
+        }
+        for root in loneRoots {
+            rows.append(FrontdoorSession(
+                id: "session:\(root.sessionId)", provider: root.provider.lowercased(), root: root, workers: []
+            ))
+        }
+        if !orphans.isEmpty {
+            rows.append(FrontdoorSession(
+                id: FrontdoorSession.unattributedId,
+                provider: orphans.first?.provider.lowercased() ?? "agent",
+                root: nil,
+                workers: orphans.sorted { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
+            ))
+        }
+        rows.sort { lhs, rhs in
+            let left = lhs.updatedAt ?? "", right = rhs.updatedAt ?? ""
+            return left == right ? lhs.id < rhs.id : left > right
+        }
+        return HistoryGroups(
+            rows: rows,
+            expiredWorkers: expired.mapValues { $0.sorted { ($0.createdAt ?? "") < ($1.createdAt ?? "") } }
+        )
+    }
 }
 
 // MARK: - Pet contract v1
