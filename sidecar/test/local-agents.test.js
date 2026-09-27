@@ -25,6 +25,8 @@ import {
 import { signalFor, signalWithApprovals } from "../src/local-agents/signals.js";
 import { snapshotSessions, stateRecord } from "../src/local-agents/snapshot.js";
 import { withReadOnlyDatabase } from "../src/local-agents/sqlite.js";
+import { subagentLabel } from "../src/local-agents/thread-db.js";
+import { projectLocalSnapshot } from "../src/local-monitor.js";
 
 // These mirror the Python watcher's self_test so the port can be checked
 // against the behaviour it replaces rather than against itself.
@@ -652,6 +654,48 @@ test("codex thread database supplies engine, cwd, spawn edges and sub-agent pare
     assert.equal(find("review").parent, "two");
     assert.equal(find("lonely").parent, null, "nothing is running in /solo");
   });
+});
+
+test("a codex sub-agent is titled from its spawn task, not left nameless", async () => {
+  await withTempDirectory(async (root) => {
+    const database = join(root, "state.sqlite");
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(database);
+    // The columns Codex 0.157's state_5.sqlite really has for this.
+    db.exec("CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT)");
+    db.exec(`CREATE TABLE threads (id TEXT, model TEXT, model_provider TEXT, cwd TEXT, thread_source TEXT,
+      source TEXT, title TEXT NOT NULL DEFAULT '', first_user_message TEXT NOT NULL DEFAULT '',
+      agent_nickname TEXT, agent_role TEXT, agent_path TEXT, name TEXT)`);
+    db.prepare("INSERT INTO thread_spawn_edges VALUES (?, ?)").run("parent", "child");
+    const insert = db.prepare(`INSERT INTO threads (id, model, cwd, thread_source, source, title, first_user_message,
+      agent_nickname, agent_role, agent_path, name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    insert.run("parent", "gpt", "/work", "user", "exec", "spawn a sub-agent to read a.txt", "spawn a sub-agent to read a.txt", null, null, null, null);
+    insert.run("child", "gpt", "/work", "subagent", '{"subagent":{}}', "", "", "Kepler", null, "/root/read_a", null);
+    insert.run("named", "gpt", "/work", "subagent", '{"subagent":{}}', "", "", "Ada", "explorer", "/root/scan", "Scan the\nrepo");
+    db.close();
+
+    const now = Date.now() / 1000;
+    const raw = await snapshotSessions({
+      parent: stateRecord("parent", "running", "task_started", now),
+      child: stateRecord("child", "running", "task_started", now),
+      named: stateRecord("named", "ready", "task_complete", now)
+    }, database);
+    const find = (id) => raw.find((item) => item.session === id);
+    assert.equal(find("child").parent, "parent");
+    assert.equal(find("child").task, "read_a (Kepler)");
+    assert.equal(find("parent").task, undefined, "only spawned threads take a label from the database");
+
+    const { sessions } = projectLocalSnapshot({ sessions: raw });
+    const titled = (id) => sessions.find((session) => session.localSessionId === id).title;
+    assert.equal(titled("child"), "read_a (Kepler)");
+    assert.equal(titled("named"), "Scan the repo", "a thread's own name wins, cut to one line");
+  });
+  assert.equal(subagentLabel({ agent_path: "/root/a/b", agent_nickname: "N", agent_role: "worker" }), "b (N, worker)");
+  assert.equal(subagentLabel({ agent_nickname: "N" }), "N");
+  assert.equal(subagentLabel({ first_user_message: "  " }), null);
+  const long = subagentLabel({ title: "x".repeat(200) });
+  const [projected] = projectLocalSnapshot({ sessions: [{ provider: "codex", session: "s", state: "idle", time: 1, task: long }] }).sessions;
+  assert.equal(projected.title.length, 60, "a database title is bounded like any other");
 });
 
 test("the same-cwd fallback never re-parents an orchestrator under its own worker", async () => {

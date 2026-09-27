@@ -18,24 +18,27 @@ function monitorStatus(value) {
 
 const TITLE_FROM_PROMPT_LIMIT = 60;
 
+/** One line, bounded: every title source goes through the same cut. */
+function titleLabel(value) {
+  if (typeof value !== "string") return null;
+  const line = value.replace(/\s+/g, " ").trim();
+  if (!line) return null;
+  return line.length > TITLE_FROM_PROMPT_LIMIT ? `${line.slice(0, TITLE_FROM_PROMPT_LIMIT - 1)}…` : line;
+}
+
 /**
  * One naming rule for every provider: the CLI's own title when it has one
- * (Claude's ai-title), else the latest prompt, cut to a label. Never a raw id
+ * (Claude's ai-title), else the task a sub-agent was spawned with (Codex's
+ * thread database), else the latest prompt, cut to a label. Never a raw id
  * or a scanner event name — the app falls back to "<provider> · <folder>".
  */
 function sessionTitle(facts, events, raw) {
-  if (typeof facts.title === "string" && facts.title.trim()) return facts.title.trim();
-  if (typeof raw.task === "string" && raw.task.trim()) return raw.task.trim();
-  let prompt = null;
+  const own = titleLabel(facts.title) ?? titleLabel(raw.task);
+  if (own) return own;
   for (let index = (events?.length ?? 0) - 1; index >= 0; index -= 1) {
-    if (events[index].kind === "turn_start" && events[index].title) {
-      prompt = events[index].title;
-      break;
-    }
+    if (events[index].kind === "turn_start" && events[index].title) return titleLabel(events[index].title);
   }
-  if (!prompt) return null;
-  const line = prompt.replace(/\s+/g, " ").trim();
-  return line.length > TITLE_FROM_PROMPT_LIMIT ? `${line.slice(0, TITLE_FROM_PROMPT_LIMIT - 1)}…` : line;
+  return null;
 }
 
 /**
@@ -158,7 +161,7 @@ export function projectLocalSnapshot(snapshot, timelines = new Map()) {
       ...(raw.parent && raw.parent_source === "lineage" ? { parentProof: "lineage" } : {}),
       // A one-shot run (`claude -p`, `grok -p`, `codex exec`), so the app can
       // tell it from an interactive session.
-      ...(raw.headless ? { headless: true } : {})
+      ...(raw.headless || facts.headless === true ? { headless: true } : {})
     });
     if (timeline?.events?.length) events[sessionId] = timeline.events;
   }

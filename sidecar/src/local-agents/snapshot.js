@@ -53,6 +53,7 @@ export async function snapshotSessions(states, database = null) {
   const subagents = new Set();
   const spawnParents = new Map();
   const headless = new Set();
+  const titles = new Map();
   for (const [databasePath, ids] of idsByDatabase) {
     const facts = await readThreadFacts(databasePath, ids);
     for (const [id, value] of facts.engines) engines.set(id, value);
@@ -60,6 +61,7 @@ export async function snapshotSessions(states, database = null) {
     for (const id of facts.subagents) subagents.add(id);
     for (const [id, value] of facts.parents) spawnParents.set(id, value);
     for (const id of facts.headless ?? []) headless.add(id);
+    for (const [id, value] of facts.titles ?? []) titles.set(id, value);
   }
 
   // Codex's auto-review threads are machinery, not work someone started, so
@@ -89,6 +91,8 @@ export async function snapshotSessions(states, database = null) {
     }
     item.engine = engines.get(item.session) || item.engine;
     if (headless.has(item.session)) item.headless = true;
+    // A spawned thread's task label (its transcript carries no readable prompt).
+    if (!item.task && titles.has(item.session)) item.task = titles.get(item.session);
     const cwd = workdirs.get(item.session);
     if (cwd) item.cwd = cwd;
   }

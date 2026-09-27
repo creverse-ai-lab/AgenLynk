@@ -113,6 +113,7 @@ export class LocalTimeline {
         directory: raw.transcript,
         usageFile: null,
         signalsFile: null,
+        summaryFile: null,
         tail: new RecordTail(join(raw.transcript, "updates.jsonl"), { ...this.tailOptions, keep: keepGrokRecord })
       };
     }
@@ -143,11 +144,18 @@ export class LocalTimeline {
       const tailChanged = await entry.tail.poll(nowMs);
       entry.usageFile = await readJsonIfChanged(join(entry.directory, "usage.json"), entry.usageFile);
       entry.signalsFile = await readJsonIfChanged(join(entry.directory, "signals.json"), entry.signalsFile);
-      if (!tailChanged && !entry.usageFile.changed && !entry.signalsFile.changed && entry.result) return false;
+      entry.summaryFile = await readJsonIfChanged(join(entry.directory, "summary.json"), entry.summaryFile);
+      if (!tailChanged && !entry.usageFile.changed && !entry.signalsFile.changed && !entry.summaryFile.changed && entry.result) {
+        return false;
+      }
       const result = normalizeGrokUpdates(entry.tail.records);
       const files = grokUsage(entry.usageFile.value, entry.signalsFile.value);
       result.session.usage = overlayUsage(result.session.usage, files.usage);
       if (!result.session.model && files.model) result.session.model = files.model;
+      // Grok names a one-shot run (`grok -p`) itself. The process lineage
+      // cannot always tell: a hook's shell has usually exited by the time the
+      // process table is read, and a short run is gone before a process scan.
+      if (entry.summaryFile.value?.session_kind === "headless") result.session.headless = true;
       delete result.session.lastTurnUsage;
       entry.result = result;
       return true;

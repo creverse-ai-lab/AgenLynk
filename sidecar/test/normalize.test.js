@@ -10,6 +10,7 @@ import { ClaudeUsageAccumulator, normalizeClaudeRecords } from "../src/normalize
 import { normalizeCodexRecords } from "../src/normalize/codex.js";
 import { LocalTimeline } from "../src/normalize/local-timeline.js";
 import { EVENT_KINDS, mergeEvent, monitorEvent } from "../src/normalize/model.js";
+import { projectLocalSnapshot } from "../src/local-monitor.js";
 
 // One logical turn — prompt, thought, message, one successful tool call, end —
 // written the way each CLI writes it (shapes taken from real transcripts,
@@ -268,6 +269,31 @@ test("LocalTimeline tails Claude and Grok sessions and reuses the Codex window",
     assert.deepEqual([...grown.changed], ["claude:c1"]);
     assert.deepEqual(shape(grown.results.get("claude:c1").events), ["turn_start", "agent_thought", "agent_message", "tool_call/completed", "turn_end/completed"]);
     assert.equal(grown.results.get("claude:c1").session.usage.outputTokens, 12);
+  });
+});
+
+test("a grok -p run is headless by Grok's own session summary", async () => {
+  await withTempDirectory(async (root) => {
+    const directory = join(root, "grok", "g1");
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "updates.jsonl"), grokTurn.map((record) => JSON.stringify(record)).join("\n") + "\n");
+    const timeline = new LocalTimeline();
+    const raw = { provider: "grok", session: "g1", transcript: directory, state: "ready", time: 1 };
+    const before = await timeline.update([raw], Date.parse("2026-09-26T00:10:00Z"));
+    assert.equal(before.results.get("grok:g1").session.headless, undefined, "no summary, no claim");
+
+    await writeFile(join(directory, "summary.json"), JSON.stringify({ info: { id: "g1" }, session_kind: "headless" }));
+    const after = await timeline.update([raw], Date.parse("2026-09-26T00:10:01Z"));
+    assert.deepEqual([...after.changed], ["grok:g1"], "a new summary alone refreshes the facts");
+    assert.equal(after.results.get("grok:g1").session.headless, true);
+    // Projected even when process lineage never saw the (already exited) process.
+    const [session] = projectLocalSnapshot({ sessions: [raw] }, after.results).sessions;
+    assert.equal(session.headless, true);
+
+    await writeFile(join(directory, "summary.json"), JSON.stringify({ info: { id: "g1" }, session_kind: "subagent" }));
+    const interactive = await timeline.update([raw], Date.parse("2026-09-26T00:10:02Z"));
+    assert.equal(interactive.results.get("grok:g1").session.headless, undefined);
+    assert.equal(projectLocalSnapshot({ sessions: [raw] }, interactive.results).sessions[0].headless, undefined);
   });
 });
 

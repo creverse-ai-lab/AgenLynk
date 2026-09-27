@@ -17,12 +17,32 @@ const FACTS_TTL_MS = 5_000;
 const factsCache = new Map();
 
 /**
+ * A sub-agent thread's label from its row. Codex leaves `title` and
+ * `first_user_message` empty for a spawned thread (its task arrives as an
+ * encrypted inter-agent message), so the spawn's task name (the last
+ * `agent_path` segment, e.g. "/root/read_a") and the agent's nickname/role
+ * are the only readable name it has.
+ */
+export function subagentLabel(row) {
+  for (const field of ["name", "title", "first_user_message"]) {
+    if (typeof row?.[field] === "string" && row[field].trim()) return row[field].trim();
+  }
+  const clean = (value) => (typeof value === "string" && value.trim() ? value.trim() : null);
+  const task = clean(clean(row?.agent_path)?.split("/").filter(Boolean).at(-1));
+  const who = [clean(row?.agent_nickname), clean(row?.agent_role)].filter(Boolean).join(", ");
+  if (task && who) return `${task} (${who})`;
+  return task ?? (who || null);
+}
+
+/**
  * Looks up the given thread ids in one database.
  * Returns engines/workdirs/subagents/parents keyed by thread id.
  */
 export async function readThreadFacts(databasePath, threadIds) {
   const ids = [...new Set(threadIds)].filter((id) => typeof id === "string" && id.length > 0);
-  const empty = { engines: new Map(), workdirs: new Map(), subagents: new Set(), parents: new Map(), headless: new Set() };
+  const empty = {
+    engines: new Map(), workdirs: new Map(), subagents: new Set(), parents: new Map(), headless: new Set(), titles: new Map()
+  };
   if (!ids.length) return empty;
 
   const cacheKey = `${databasePath}\u0000${[...ids].sort().join(",")}`;
@@ -52,6 +72,18 @@ export async function readThreadFacts(databasePath, threadIds) {
       `SELECT id FROM threads WHERE source = 'exec' AND id IN (${placeholders})`,
       ids
     ).map((row) => row?.id).filter(Boolean));
+    // Sub-agent labels: a separate query, since older databases lack the
+    // nickname/role/path/name columns and must not lose the facts above.
+    const titles = new Map();
+    for (const row of selectAll(
+      database,
+      `SELECT id, name, title, first_user_message, agent_nickname, agent_role, agent_path
+         FROM threads WHERE thread_source = 'subagent' AND id IN (${placeholders})`,
+      ids
+    )) {
+      const label = row?.id ? subagentLabel(row) : null;
+      if (label) titles.set(row.id, label);
+    }
     for (const row of edges) {
       if (row?.child_thread_id) parents.set(row.child_thread_id, row.parent_thread_id ?? null);
     }
@@ -61,7 +93,7 @@ export async function readThreadFacts(databasePath, threadIds) {
       if (row.cwd != null) workdirs.set(row.id, row.cwd);
       if (row.thread_source === "subagent") subagents.add(row.id);
     }
-    return { engines, workdirs, subagents, parents, headless };
+    return { engines, workdirs, subagents, parents, headless, titles };
   }, empty);
 
   // Cache misses as well as hits: a missing database costs a stat per call too.
