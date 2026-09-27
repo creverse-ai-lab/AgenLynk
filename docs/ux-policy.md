@@ -6,7 +6,7 @@ Claude · Codex · Grok · Gateway 세션을 **같은 규칙으로** 보여 주�
 - Frontdoor는 사람이 직접 연 세션, Worker는 다른 세션이 연 세션이다.
 - Gateway가 한 번이라도 보고한 세션은 Gateway가 닫은 뒤에도 **Frontdoor로 승격하지 않는다** (worker transcript가 로컬 세션으로 남아도 동일).
 - 부모를 모르는 로컬 세션만 Frontdoor 후보가 된다. provider가 다른 부모도 그 provider 아이디로 연결한다.
-- **다른 에이전트의 셸 도구에서 띄운 에이전트는 그 세션의 Worker다** (예: Claude Code Bash에서 실행한 `grok -p`, `codex exec`, 중첩 `claude -p`). 부모는 프로세스 계보로 정한다: 띄운 CLI가 자식에게 넘기는 세션 id(`CLAUDE_CODE_SESSION_ID`, `GROK_SESSION_ID`, `CODEX_THREAD_ID`)와 부모 pid 사슬(`~/.claude/sessions/<pid>.json`). 자기 세션 id는 부모가 아니다. 환경 변수는 이 세 id만 id 문자 규칙으로 읽고, 나머지는 저장·기록하지 않는다.
+- **다른 에이전트의 셸 도구에서 띄운 에이전트는 그 세션의 Worker다** (예: Claude Code Bash에서 실행한 `grok -p`, `codex exec`, 중첩 `claude -p`). 부모는 프로세스 계보로 정한다: 띄운 CLI가 자식에게 넘기는 세션 id(`CLAUDE_CODE_SESSION_ID`, `GROK_SESSION_ID`, `CODEX_THREAD_ID`)와 부모 pid 사슬(`~/.claude/sessions/<pid>.json`). 자기 세션 id는 부모가 아니다. `codex exec`는 rollout 파일을 열어 두지 않으므로, thread DB의 `source = 'exec'` thread를 같은 작업 폴더에서 thread 생성 시각 ±15초 안에 시작한 codex 프로세스 하나(유일할 때만)에 맞춰 계보를 찾고, 찾은 부모는 프로세스가 끝나도 유지한다. 환경 변수는 이 세 id만 id 문자 규칙으로 읽고, 나머지는 저장·기록하지 않는다.
 - 부모 연결 우선순위: Gateway/MCP 응답으로 증명된 연결 > 프로세스 계보. 계보만으로는 Gateway worker의 opener를 정하지 않는다(데몬이 우연히 물려받은 환경일 수 있다).
 - 부모 없는 일회성 실행(`claude -p`/SDK, `grok -p`, `codex exec`)은 실제 활동이 있으면 지금처럼 Frontdoor로 두되 세션에 `headless: true`를 붙인다(숨기지 않는다).
 - **hook으로만 보였고 활동(프롬프트·도구·서브에이전트·권한 요청)도 대화 기록 파일도 없는 세션은 목록에 올리지 않는다.** SessionEnd가 오면 바로, 끝이 안 오면 2분 뒤 잊는다. 사용량 측정 앱처럼 `claude`를 주기적으로 띄우는 도구가 빈 Frontdoor를 쌓지 않게 하려는 것이다. 첫 활동이 오면 그때부터 평소처럼 보인다.

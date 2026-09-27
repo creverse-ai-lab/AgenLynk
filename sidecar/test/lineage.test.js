@@ -4,12 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { HookSessions } from "../src/hooks/registry.js";
+import { LocalAgentScanner } from "../src/local-agents/index.js";
 import {
+  annotateExecLineage,
   annotateLineage,
   headlessArgs,
   hookLineageHeaders,
   lineageMarkers,
   markerParent,
+  parseLsofCwds,
   parseProcessTable,
   ProcessLineage
 } from "../src/local-agents/lineage.js";
@@ -284,4 +287,137 @@ test("hook lineage makes a shell-launched session a worker; the scanner's proven
     await registry.resolveLineage(self.key, null, at);
     assert.equal(registry.merge([], at).find((item) => item.session === CLAUDE_ID).parent, null);
   });
+});
+
+const CODEX_ID = "01a0e0b5-39b5-7672-b16d-de8cf6c4f752";
+// 2026-09-26T03:48:14Z, the fake processes' START.
+const START_SECONDS = Date.parse(`${START} GMT`) / 1000;
+
+/** fakePs plus a fake `lsof -a -d cwd -p <pids> -Fn`: `cwd` per process. */
+function fakePsLsof(processes) {
+  const ps = fakePs(processes);
+  const lsofCalls = [];
+  const run = async (command, args) => {
+    if (command !== "lsof") return ps.run(command, args);
+    lsofCalls.push(args.join(" "));
+    assert.deepEqual(args.slice(0, 4), ["-a", "-d", "cwd", "-p"]);
+    return args[4].split(",")
+      .filter((pid) => processes[pid]?.cwd)
+      .map((pid) => `p${pid}\nfcwd\nn${processes[pid].cwd}`).join("\n");
+  };
+  return { run, calls: ps.calls, lsofCalls };
+}
+
+test("a codex exec thread is matched to its process by cwd and start time", async () => {
+  assert.deepEqual([...parseLsofCwds("p12\nfcwd\nn/w\np13\nfcwd\n")], [[12, "/w"]]);
+  await withTempDirectory(async (root) => {
+    const sessions = join(root, "sessions");
+    await claudePidFile(sessions, 16964, CLAUDE_ID);
+    const { run, lsofCalls } = fakePsLsof({
+      16964: { ppid: 1, comm: "claude", args: "claude" },
+      4860: { ppid: 16964, comm: "/bin/zsh", args: "zsh -c codex exec x" },
+      4870: { ppid: 4860, comm: "codex", args: "codex exec x", env: `CLAUDE_CODE_SESSION_ID=${CLAUDE_ID}`, cwd: "/w" },
+      // Interactive codex elsewhere, same second: another cwd is no match.
+      5000: { ppid: 1, comm: "codex", args: "codex", cwd: "/other" },
+      // Same cwd, but started long before the thread.
+      5100: { ppid: 1, comm: "codex", args: "codex exec y", cwd: "/w", start: "Sat Sep 26 03:40:00 2026" }
+    });
+    const lineage = new ProcessLineage({ claudeSessionsDir: sessions, run });
+    const cursor = { session: CODEX_ID, exec: { createdAt: START_SECONDS + 2, cwd: "/w" } };
+    const cursors = new Map([["rollout", cursor]]);
+    await annotateExecLineage(cursors, lineage, START_SECONDS + 3);
+    assert.deepEqual(cursor.exec.parent, { provider: "claude", session: CLAUDE_ID });
+    assert.equal(cursor.exec.done, true);
+    assert.deepEqual(lsofCalls, ["-a -d cwd -p 4870,5000 -Fn"], "only codex processes started near the thread are looked at");
+    await annotateExecLineage(cursors, lineage, START_SECONDS + 4);
+    assert.equal(lsofCalls.length, 1, "a resolved thread is not matched again");
+
+    // Two exec runs in one folder at once: ambiguous, no parent.
+    const twin = new ProcessLineage({ claudeSessionsDir: sessions, run: fakePsLsof({
+      4870: { ppid: 1, comm: "codex", args: "codex exec x", env: `CLAUDE_CODE_SESSION_ID=${CLAUDE_ID}`, cwd: "/w" },
+      4871: { ppid: 1, comm: "codex", args: "codex exec y", env: `CLAUDE_CODE_SESSION_ID=${CLAUDE_ID}`, cwd: "/w" }
+    }).run });
+    await twin.refresh(START_SECONDS + 3);
+    assert.deepEqual(await twin.codexExecPid({ cwd: "/w", createdAt: START_SECONDS }), { pid: null, final: true });
+
+    // An interactive codex is not a `codex exec` run, whatever it matches.
+    const interactive = { session: "i", exec: { createdAt: START_SECONDS, cwd: "/w" } };
+    await annotateExecLineage(new Map([["r", interactive]]), new ProcessLineage({ claudeSessionsDir: sessions, run: fakePsLsof({
+      4870: { ppid: 1, comm: "codex", args: "codex", env: `CLAUDE_CODE_SESSION_ID=${CLAUDE_ID}`, cwd: "/w" }
+    }).run }), START_SECONDS + 3);
+    assert.equal(interactive.exec.parent, undefined);
+
+    // No process yet within the window: asked again; after it: given up.
+    const gone = new ProcessLineage({ claudeSessionsDir: sessions, run: fakePsLsof({ 1: { ppid: 0, comm: "launchd", args: "launchd" } }).run });
+    await gone.refresh(START_SECONDS + 5);
+    assert.deepEqual(await gone.codexExecPid({ cwd: "/w", createdAt: START_SECONDS }), { pid: null, final: false });
+    await gone.refresh(START_SECONDS + 60, { force: true });
+    assert.deepEqual(await gone.codexExecPid({ cwd: "/w", createdAt: START_SECONDS }), { pid: null, final: true });
+  });
+});
+
+test("the scanner keeps a codex exec thread's lineage parent after the process exits", async () => {
+  await withTempDirectory(async (root) => {
+    const codexSessions = join(root, "codex-sessions");
+    const rollout = join(codexSessions, "2026", `rollout-2026-09-26T03-48-16-${CODEX_ID}.jsonl`);
+    await mkdir(join(codexSessions, "2026"), { recursive: true });
+    await writeFile(rollout, `{"type":"session_meta","payload":{"id":"${CODEX_ID}"}}\n{"type":"event_msg","payload":{"type":"task_started"}}\n`);
+    const database = join(root, "state_5.sqlite");
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(database);
+    db.exec("CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT)");
+    db.exec("CREATE TABLE threads (id TEXT, rollout_path TEXT, created_at INTEGER, updated_at INTEGER, source TEXT, model TEXT, model_provider TEXT, cwd TEXT, thread_source TEXT)");
+    const now = START_SECONDS + 3;
+    db.prepare("INSERT INTO threads VALUES (?, ?, ?, ?, 'exec', 'gpt', 'openai', '/w', 'user')").run(CODEX_ID, rollout, START_SECONDS + 2, now);
+    db.close();
+
+    const claudeSessions = join(root, "claude-sessions");
+    await claudePidFile(claudeSessions, 16964, CLAUDE_ID);
+    const processes = {
+      16964: { ppid: 1, comm: "claude", args: "claude" },
+      4860: { ppid: 16964, comm: "/bin/zsh", args: "zsh -c codex exec x" },
+      4870: { ppid: 4860, comm: "codex", args: "codex exec x", env: `CLAUDE_CODE_SESSION_ID=${CLAUDE_ID}`, cwd: "/w" }
+    };
+    const scanner = new LocalAgentScanner({
+      sessionsRoot: codexSessions,
+      database,
+      claudeRoot: join(root, "projects"),
+      grokRoot: join(root, "grok"),
+      orcaAccounts: null,
+      orcaStatus: join(root, "orca.json"),
+      lineage: new ProcessLineage({ claudeSessionsDir: claudeSessions, run: fakePsLsof(processes).run })
+    });
+    // Keep the real process scan (grok) out of this test.
+    scanner.lastProcessScan = Number.POSITIVE_INFINITY;
+    const [first] = await scanner.scan(now);
+    assert.equal(first.session, CODEX_ID);
+    assert.equal(first.parent, CLAUDE_ID);
+    assert.equal(first.parent_provider, "claude");
+    assert.equal(first.parent_source, "lineage");
+    assert.equal(first.headless, true);
+    const projected = projectLocalSnapshot({ sessions: [first] }).sessions[0];
+    assert.equal(projected.role, "worker");
+    assert.equal(projected.parentSessionId, `local:claude:${CLAUDE_ID}`);
+    assert.equal(projected.parentProof, "lineage");
+
+    delete processes[4870];
+    delete processes[4860];
+    const [later] = await scanner.scan(now + 30);
+    assert.equal(later.parent, CLAUDE_ID, "the parent outlives the process");
+  });
+});
+
+test("a proven codex parent beats a codex exec lineage parent", async () => {
+  const { snapshotSessions } = await import("../src/local-agents/snapshot.js");
+  const [item] = await snapshotSessions({
+    x: { provider: "codex", session: "x", state: "running", time: 1, pid: null, lineage_parent: { provider: "claude", session: "c" } }
+  });
+  assert.equal(item.parent, "c");
+  assert.equal(item.parent_source, "lineage");
+  assert.equal(item.lineage_parent, undefined);
+  const [proven] = await snapshotSessions({
+    x: { provider: "codex", session: "x", state: "running", time: 1, pid: null, parent: "mcp", lineage_parent: { provider: "claude", session: "c" } }
+  });
+  assert.equal(proven.parent, "mcp");
+  assert.equal(proven.parent_source, undefined);
 });

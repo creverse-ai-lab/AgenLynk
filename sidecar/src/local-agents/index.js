@@ -13,7 +13,7 @@ import { detectClaudeSessions } from "./claude.js";
 import { discover, poll, prune } from "./codex.js";
 import { detectCliProcesses, recordGrokAcpLinks } from "./grok.js";
 import { detectOrcaSessions } from "./orca.js";
-import { annotateLineage, ProcessLineage } from "./lineage.js";
+import { annotateExecLineage, annotateLineage, ProcessLineage } from "./lineage.js";
 import { externalParent, pruneExternalParents } from "./parent-links.js";
 import { snapshotSessions } from "./snapshot.js";
 
@@ -106,7 +106,18 @@ export class LocalAgentScanner {
       now
     });
     pruneExternalParents(this.parents, this.detectedStates, this.staleAfter, now);
-    return snapshotSessions({ ...this.codexStates, ...this.detectedStates }, this.database);
+    return snapshotSessions({ ...this.#codexStatesWithLineage(), ...this.detectedStates }, this.database);
+  }
+
+  /** Codex states with the lineage parent their cursor holds, as copies. */
+  #codexStatesWithLineage() {
+    const states = { ...this.codexStates };
+    for (const cursor of this.cursors.values()) {
+      const parent = cursor.exec?.parent;
+      const state = parent ? states[cursor.session] : null;
+      if (state) states[cursor.session] = { ...state, lineage_parent: parent };
+    }
+    return states;
   }
 
   async #discover(now) {
@@ -133,6 +144,14 @@ export class LocalAgentScanner {
         conversationWindowMs: this.conversationWindowMs,
         maxConversationRecords: this.maxConversationRecords
       });
+    }
+
+    // `codex exec` does not hold its rollout open, so its pid is found from
+    // the thread's cwd and start time instead.
+    try {
+      await annotateExecLineage(this.cursors, this.lineage, now);
+    } catch {
+      // Lineage is a refinement; the scan stands without it.
     }
 
     if (now - this.lastProcessScan >= (this.processScanIntervalSeconds ?? PROCESS_SCAN_INTERVAL_SECONDS)) {

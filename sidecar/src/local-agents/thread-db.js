@@ -89,13 +89,29 @@ export async function readThreadFacts(databasePath, threadIds) {
  * precisely when the machine was idle.
  */
 export async function readRecentThreads(databasePath, { since = 0, limit = 200 } = {}) {
-  return withReadOnlyDatabase(databasePath, (database) => selectAll(
-    database,
-    `SELECT id, rollout_path, COALESCE(model, model_provider) AS engine, cwd, thread_source, updated_at
-       FROM threads
-      WHERE updated_at >= ?
-      ORDER BY updated_at DESC
-      LIMIT ?`,
-    [Math.floor(since), limit]
-  ).filter((row) => typeof row?.id === "string" && typeof row?.rollout_path === "string"), null);
+  return withReadOnlyDatabase(databasePath, (database) => {
+    const rows = selectAll(
+      database,
+      `SELECT id, rollout_path, COALESCE(model, model_provider) AS engine, cwd, thread_source, updated_at
+         FROM threads
+        WHERE updated_at >= ?
+        ORDER BY updated_at DESC
+        LIMIT ?`,
+      [Math.floor(since), limit]
+    ).filter((row) => typeof row?.id === "string" && typeof row?.rollout_path === "string");
+    if (!rows.length) return rows;
+    // `codex exec` threads and when they started (for process lineage). A
+    // separate query: older databases lack `source`/`created_at`, and must
+    // not lose discovery itself.
+    const exec = new Map(selectAll(
+      database,
+      `SELECT id, created_at FROM threads WHERE source = 'exec' AND updated_at >= ?`,
+      [Math.floor(since)]
+    ).map((row) => [row?.id, Number(row?.created_at)]));
+    for (const row of rows) {
+      const createdAt = exec.get(row.id);
+      if (Number.isFinite(createdAt) && createdAt > 0) row.exec_created_at = createdAt;
+    }
+    return rows;
+  }, null);
 }

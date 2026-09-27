@@ -78,6 +78,15 @@ export async function snapshotSessions(states, database = null) {
   for (const item of sessions) {
     if (item.provider !== "codex") continue;
     item.parent = item.parent || spawnParents.get(item.session) || null;
+    // Process lineage (a `codex exec` from another agent's shell) only
+    // fills in when nothing proven names a parent.
+    const lineage = item.lineage_parent;
+    delete item.lineage_parent;
+    if (!item.parent && lineage?.session) {
+      item.parent = !known.has(lineage.session) && byLink.has(lineage.session) ? byLink.get(lineage.session) : lineage.session;
+      item.parent_provider = lineage.provider;
+      item.parent_source = "lineage";
+    }
     item.engine = engines.get(item.session) || item.engine;
     if (headless.has(item.session)) item.headless = true;
     const cwd = workdirs.get(item.session);

@@ -15,7 +15,7 @@
 // it is stored or logged.
 
 import { execFile } from "node:child_process";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
@@ -26,6 +26,11 @@ const MAX_HOPS = 64;
 /** Process table and Claude pid files are re-read at most this often. */
 const TABLE_TTL_SECONDS = 5;
 const MAX_CACHED = 2_000;
+/**
+ * A `codex exec` process starts its thread within this many seconds of its
+ * own start (both are whole seconds).
+ */
+export const EXEC_MATCH_WINDOW_SECONDS = 15;
 
 /** The only shape an id taken from an environment or a header may have. */
 export const LINEAGE_ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -123,6 +128,26 @@ export function parseProcessTable(stdout) {
   return table;
 }
 
+/** `lsof -a -d cwd -p <pids> -Fn` -> Map(pid -> cwd). */
+export function parseLsofCwds(stdout) {
+  const cwds = new Map();
+  let pid = null;
+  for (const line of String(stdout ?? "").split("\n")) {
+    if (line.startsWith("p")) {
+      const parsed = Number.parseInt(line.slice(1), 10);
+      pid = Number.isInteger(parsed) ? parsed : null;
+    } else if (pid != null && line.startsWith("n") && line.length > 1 && !cwds.has(pid)) {
+      cwds.set(pid, line.slice(1));
+    }
+  }
+  return cwds;
+}
+
+/** Epoch seconds of a process table `start` (UTC lstart), or NaN. */
+function startSeconds(start) {
+  return Date.parse(`${start} GMT`) / 1000;
+}
+
 /**
  * The one non-launcher candidate among `markers`, excluding the session's own
  * id; null when there is none or more than one (then only the process tree
@@ -166,6 +191,8 @@ export class ProcessLineage {
     this.loadedAt = -Infinity;
     // `${pid}@${start}` -> resolved lineage, so pid reuse is a new entry.
     this.cache = new Map();
+    // `${pid}@${start}` -> working directory of a codex process (or null).
+    this.cwds = new Map();
   }
 
   /** Refreshes the process table and Claude's pid files, at most every TTL. */
@@ -178,6 +205,48 @@ export class ProcessLineage {
       const [pid, start] = key.split("@");
       if (this.table.get(Number(pid))?.start !== start) this.cache.delete(key);
     }
+    for (const key of [...this.cwds.keys()]) {
+      const [pid, start] = key.split("@");
+      if (this.table.get(Number(pid))?.start !== start) this.cwds.delete(key);
+    }
+  }
+
+  /**
+   * The running codex process that started a thread: the same working
+   * directory and a start within EXEC_MATCH_WINDOW_SECONDS of the thread's
+   * created_at. `codex exec` does not keep its rollout open, so this is the
+   * only way from the thread to its pid. Only a unique match counts.
+   * `final` says asking again cannot change the answer (ambiguous, or the
+   * process table was read after the window closed without a candidate).
+   * @returns {Promise<{ pid: number|null, final: boolean }>}
+   */
+  async codexExecPid({ cwd, createdAt }) {
+    if (typeof cwd !== "string" || !cwd || !Number.isFinite(createdAt)) return { pid: null, final: true };
+    // No process table (ps failed) says nothing yet.
+    if (!this.table.size) return { pid: null, final: false };
+    const candidates = [];
+    for (const [pid, entry] of this.table) {
+      if (agentKind(entry.comm) !== "codex") continue;
+      if (Math.abs(startSeconds(entry.start) - createdAt) <= EXEC_MATCH_WINDOW_SECONDS) candidates.push(pid);
+    }
+    const closed = this.loadedAt > createdAt + EXEC_MATCH_WINDOW_SECONDS;
+    if (!candidates.length) return { pid: null, final: closed };
+    const key = (pid) => `${pid}@${this.table.get(pid).start}`;
+    const unknown = candidates.filter((pid) => !this.cwds.has(key(pid)));
+    if (unknown.length) {
+      const found = parseLsofCwds(await this.run("lsof", ["-a", "-d", "cwd", "-p", unknown.join(","), "-Fn"]));
+      for (const pid of unknown) this.cwds.set(key(pid), found.get(pid) ?? null);
+      while (this.cwds.size > MAX_CACHED) this.cwds.delete(this.cwds.keys().next().value);
+    }
+    const targets = new Set([cwd]);
+    try {
+      targets.add(await realpath(cwd));
+    } catch {
+      // A removed directory still matches by its recorded path.
+    }
+    const matches = candidates.filter((pid) => targets.has(this.cwds.get(key(pid))));
+    if (matches.length === 1) return { pid: matches[0], final: true };
+    return { pid: null, final: matches.length > 1 || closed };
   }
 
   /** Claude session id -> live pid, from ~/.claude/sessions. */
@@ -323,5 +392,29 @@ export async function annotateLineage(items, lineage, now = Date.now() / 1000) {
     item.parent = parent.session;
     item.parent_provider = parent.provider;
     item.parent_source = "lineage";
+  }
+}
+
+/**
+ * Parents from process lineage for Codex threads started by `codex exec`
+ * (thread source "exec") that carry no proven link. The result is kept on the
+ * transcript cursor (`cursor.exec.parent`), so it outlives the process; each
+ * cursor is resolved at most once.
+ */
+export async function annotateExecLineage(cursors, lineage, now = Date.now() / 1000) {
+  if (!lineage) return;
+  const pending = [...cursors.values()].filter((cursor) => cursor?.exec && !cursor.exec.done);
+  if (!pending.length) return;
+  await lineage.refresh(now);
+  for (const cursor of pending) {
+    const match = await lineage.codexExecPid(cursor.exec);
+    if (match.pid == null) {
+      if (match.final) cursor.exec.done = true;
+      continue;
+    }
+    cursor.exec.done = true;
+    const { parent, headless } = await lineage.resolve(match.pid, { provider: "codex", session: cursor.session });
+    // The matched process must really be a one-shot `codex exec` run.
+    if (headless && parent) cursor.exec.parent = parent;
   }
 }

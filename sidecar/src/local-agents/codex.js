@@ -156,7 +156,7 @@ export async function discover({
   // knownModified: recency already known from the thread database, so those
   // candidates cost zero syscalls to consider — discovery runs every 2s, and
   // a stat per candidate was pure duplication of what the DB just reported.
-  const consider = async (path, knownModified = null, knownId = null) => {
+  const consider = async (path, knownModified = null, knownId = null, exec = null) => {
     // A rollout_path comes from another program's database. Never let a
     // malformed or tampered row turn the monitor into an arbitrary file
     // reader outside the agent-owned transcript directory.
@@ -182,10 +182,13 @@ export async function discover({
       retired.delete(path);
       // The thread id from the database (or the filename) is authoritative up
       // front: a transcript adopted from its tail never reads session_meta.
-      cursors.set(path, newCursor(knownId ?? transcriptSessionId(path), modified, database, {
+      const cursor = newCursor(knownId ?? transcriptSessionId(path), modified, database, {
         conversationWindowMs,
         maxConversationRecords
-      }));
+      });
+      // A `codex exec` thread: its parent may come from process lineage.
+      if (exec) cursor.exec = exec;
+      cursors.set(path, cursor);
     }
   };
 
@@ -198,7 +201,10 @@ export async function discover({
     // The database answered — possibly "nothing recent", which is complete
     // information, not a reason to fall back to walking the whole tree.
     for (const thread of threads) {
-      await consider(thread.rollout_path, Number(thread.updated_at) || null, thread.id);
+      const exec = thread.exec_created_at && typeof thread.cwd === "string" && thread.cwd
+        ? { createdAt: thread.exec_created_at, cwd: thread.cwd }
+        : null;
+      await consider(thread.rollout_path, Number(thread.updated_at) || null, thread.id, exec);
     }
     return;
   }
