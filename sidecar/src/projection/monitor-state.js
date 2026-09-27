@@ -160,6 +160,9 @@ export class MonitorState {
         && typeof session.sessionId === "string" && session.sessionId
         && !this.closedSessionIds.has(session.sessionId))
       .map((session) => [session.sessionId, this.#keepKnownParent(session)]));
+    for (const [sessionId, session] of nextSessions) {
+      nextSessions.set(sessionId, this.#openerFromAncestors(session, nextSessions));
+    }
     const removedSessionIds = [...this.sessions.keys()].filter((sessionId) => !nextSessions.has(sessionId));
     for (const sessionId of removedSessionIds) this.removeSession(sessionId);
     let changed = removedSessionIds.length > 0;
@@ -199,6 +202,25 @@ export class MonitorState {
       parentLocalSessionId: previous.parentLocalSessionId ?? session.parentLocalSessionId ?? null,
       ...(previous.parentProof ? { parentProof: previous.parentProof } : {})
     };
+  }
+
+  /**
+   * A local Worker's opener is its topmost known ancestor's: the scan only
+   * sees the parents still running, so a sub-agent of a finished `claude -p`
+   * would otherwise name that `claude -p` as its Frontdoor.
+   */
+  #openerFromAncestors(session, live) {
+    if (session.source !== "local" || !session.parentSessionId) return session;
+    let top = session;
+    const seen = new Set([session.sessionId]);
+    while (top.parentSessionId && !seen.has(top.parentSessionId)) {
+      seen.add(top.parentSessionId);
+      const parent = live.get(top.parentSessionId) ?? this.historySessions.get(top.parentSessionId);
+      if (!parent) break;
+      top = parent;
+    }
+    if (top === session || !top.openerInstanceId || top.openerInstanceId === session.openerInstanceId) return session;
+    return { ...session, opener: top.opener ?? session.opener, openerInstanceId: top.openerInstanceId };
   }
 
   setGatewaySourceSessions(list) {

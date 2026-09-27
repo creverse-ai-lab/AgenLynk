@@ -370,3 +370,17 @@ test("a local session keeps a parent it once had when a later scan lacks it", ()
   assert.equal(kept.parentProof, "lineage");
   assert.equal(kept.status, "idle", "everything else follows the new scan");
 });
+
+test("a sub-agent of a finished worker takes its topmost ancestor's opener", () => {
+  const state = new MonitorState();
+  const main = { sessionId: "local:claude:main", source: "local", provider: "claude", status: "running", role: "frontdoor", opener: "claude", openerInstanceId: "main" };
+  const runner = { sessionId: "local:claude:p", source: "local", provider: "claude", status: "idle", role: "worker",
+    opener: "claude", openerInstanceId: "main", parentSessionId: "local:claude:main" };
+  state.setSessions([main, runner]);
+  state.setSessions([main]); // the finished `claude -p` moves to history
+  const sub = { sessionId: "local:claude:sub", source: "local", provider: "claude", status: "idle", role: "worker",
+    opener: "claude", openerInstanceId: "p", parentSessionId: "local:claude:p" };
+  state.setSessions([main, sub]);
+  const kept = state.snapshot().sessions.find((session) => session.sessionId === "local:claude:sub");
+  assert.equal(kept.openerInstanceId, "main");
+});
