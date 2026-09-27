@@ -22,7 +22,7 @@ const factsCache = new Map();
  */
 export async function readThreadFacts(databasePath, threadIds) {
   const ids = [...new Set(threadIds)].filter((id) => typeof id === "string" && id.length > 0);
-  const empty = { engines: new Map(), workdirs: new Map(), subagents: new Set(), parents: new Map() };
+  const empty = { engines: new Map(), workdirs: new Map(), subagents: new Set(), parents: new Map(), headless: new Set() };
   if (!ids.length) return empty;
 
   const cacheKey = `${databasePath}\u0000${[...ids].sort().join(",")}`;
@@ -45,6 +45,13 @@ export async function readThreadFacts(databasePath, threadIds) {
     const workdirs = new Map();
     const subagents = new Set();
     const parents = new Map();
+    // `codex exec` threads: a separate query, since older databases have no
+    // `source` column and must not lose the facts above.
+    const headless = new Set(selectAll(
+      database,
+      `SELECT id FROM threads WHERE source = 'exec' AND id IN (${placeholders})`,
+      ids
+    ).map((row) => row?.id).filter(Boolean));
     for (const row of edges) {
       if (row?.child_thread_id) parents.set(row.child_thread_id, row.parent_thread_id ?? null);
     }
@@ -54,7 +61,7 @@ export async function readThreadFacts(databasePath, threadIds) {
       if (row.cwd != null) workdirs.set(row.id, row.cwd);
       if (row.thread_source === "subagent") subagents.add(row.id);
     }
-    return { engines, workdirs, subagents, parents };
+    return { engines, workdirs, subagents, parents, headless };
   }, empty);
 
   // Cache misses as well as hits: a missing database costs a stat per call too.

@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { reversedRecords } from "./jsonl.js";
+import { headlessArgs } from "./lineage.js";
 import { claudeAcpLinks, externalParent, linkKey } from "./parent-links.js";
 
 const execFileAsync = promisify(execFile);
@@ -318,7 +319,8 @@ export async function cliProcessStates(processes, eventPaths, now, previous = {}
         engine: "grok-cli",
         cwd: decodeURIComponent(basename(dirname(sessionDirectory))),
         link_session: session,
-        transcript: sessionDirectory
+        transcript: sessionDirectory,
+        ...(headlessArgs("grok", args) ? { headless: true } : {})
       };
     }
   }

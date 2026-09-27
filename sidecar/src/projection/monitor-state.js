@@ -397,9 +397,13 @@ export class MonitorState {
     for (const session of this.persistence.readSessions({ since: now - this.historyRetentionMs })) {
       if (!session?.sessionId || this.sessions.has(session.sessionId)) continue;
       if (session.source !== "local") this.#rememberWorker(session);
+      const events = this.persistence.readEvents(session.sessionId, { limit: this.maxEventsPerSession });
+      // Rows written before empty hook-only sessions were held back (a usage
+      // probe's bare SessionStart/SessionEnd) must not come back as Frontdoors.
+      if (isEmptyHookOnlySession(session, events)) continue;
       this.historySessions.set(session.sessionId, session);
       this.historyExpiresAt.set(session.sessionId, now + this.historyRetentionMs);
-      this.store.load(session.sessionId, this.persistence.readEvents(session.sessionId, { limit: this.maxEventsPerSession }));
+      this.store.load(session.sessionId, events);
       restored += 1;
     }
     if (restored) this.revision += 1;
@@ -570,4 +574,12 @@ export function queuedSingleFlight(operation) {
   };
 
   return run;
+}
+
+const LIFECYCLE_KINDS = new Set(["session_start", "session_end"]);
+
+/** A local session nothing but its own start/end ever reached. */
+export function isEmptyHookOnlySession(session, events) {
+  if (session?.source !== "local" || session.title) return false;
+  return (events ?? []).every((event) => LIFECYCLE_KINDS.has(event?.kind));
 }

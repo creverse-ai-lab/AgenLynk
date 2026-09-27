@@ -8,11 +8,12 @@
 
 import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { detectClaudeSessions } from "./claude.js";
 import { discover, poll, prune } from "./codex.js";
 import { detectCliProcesses, recordGrokAcpLinks } from "./grok.js";
 import { detectOrcaSessions } from "./orca.js";
+import { annotateLineage, ProcessLineage } from "./lineage.js";
 import { externalParent, pruneExternalParents } from "./parent-links.js";
 import { snapshotSessions } from "./snapshot.js";
 
@@ -68,6 +69,12 @@ export class LocalAgentScanner {
     // snapshot file; here a monitor restart simply rediscovers them from the
     // transcripts on the next scan.
     this.parents = new Map();
+    // Parent from the process tree for agents launched from another agent's
+    // shell tool. Claude's pid files sit next to its projects folder, so a
+    // test's temporary claudeRoot never reads the real ~/.claude.
+    this.lineage = paths.lineage !== undefined
+      ? paths.lineage
+      : new ProcessLineage({ claudeSessionsDir: paths.claudeSessionsDir ?? join(dirname(this.claudeRoot), "sessions") });
     this.lastDiscovery = 0;
   }
 
@@ -158,6 +165,13 @@ export class LocalAgentScanner {
           item.parent = externalParent(this.parents, item.provider, item.link_session ?? item.session);
         }
       }
+    }
+    // Lineage comes after every proven link: a Gateway/MCP-proven parent is
+    // never replaced by what the process tree suggests.
+    try {
+      await annotateLineage(Object.values(detected), this.lineage, now);
+    } catch {
+      // Lineage is a refinement; the scan stands without it.
     }
     this.detectedStates = detected;
   }

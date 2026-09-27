@@ -52,12 +52,14 @@ export async function snapshotSessions(states, database = null) {
   const workdirs = new Map();
   const subagents = new Set();
   const spawnParents = new Map();
+  const headless = new Set();
   for (const [databasePath, ids] of idsByDatabase) {
     const facts = await readThreadFacts(databasePath, ids);
     for (const [id, value] of facts.engines) engines.set(id, value);
     for (const [id, value] of facts.workdirs) workdirs.set(id, value);
     for (const id of facts.subagents) subagents.add(id);
     for (const [id, value] of facts.parents) spawnParents.set(id, value);
+    for (const id of facts.headless ?? []) headless.add(id);
   }
 
   // Codex's auto-review threads are machinery, not work someone started, so
@@ -77,6 +79,7 @@ export async function snapshotSessions(states, database = null) {
     if (item.provider !== "codex") continue;
     item.parent = item.parent || spawnParents.get(item.session) || null;
     item.engine = engines.get(item.session) || item.engine;
+    if (headless.has(item.session)) item.headless = true;
     const cwd = workdirs.get(item.session);
     if (cwd) item.cwd = cwd;
   }

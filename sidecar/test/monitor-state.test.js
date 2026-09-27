@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { monitorEvent } from "../src/normalize/model.js";
-import { MonitorState } from "../src/projection/monitor-state.js";
+import { MonitorState, isEmptyHookOnlySession } from "../src/projection/monitor-state.js";
 import { isIgnoredMonitorEvent } from "../src/server/monitor.js";
 import { SqliteMonitorStore } from "../src/store/sqlite-store.js";
 
@@ -326,4 +326,13 @@ test("history prune caps events per session and drops events without a session r
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("history restore skips local sessions nothing but start/end reached", () => {
+  const probe = { sessionId: "local:claude:p", source: "local", title: null };
+  assert.equal(isEmptyHookOnlySession(probe, [{ kind: "session_end" }]), true);
+  assert.equal(isEmptyHookOnlySession(probe, []), true);
+  assert.equal(isEmptyHookOnlySession(probe, [{ kind: "session_end" }, { kind: "user_message" }]), false);
+  assert.equal(isEmptyHookOnlySession({ ...probe, title: "작업" }, []), false);
+  assert.equal(isEmptyHookOnlySession({ ...probe, source: "gateway" }, []), false);
 });

@@ -235,11 +235,14 @@ async function runHook(args, { env, stdin }) {
 test("the hook script forwards to the sidecar, stays silent, and never blocks the agent", async () => {
   await withTempDirectory(async (root) => {
     const received = [];
+    const lineageHeaders = [];
     const server = createServer((request, response) => {
       let body = "";
       request.on("data", (chunk) => { body += chunk; });
       request.on("end", () => {
         received.push({ url: request.url, token: request.headers["x-agenlynk-hook-token"], body });
+        lineageHeaders.push(Object.fromEntries(Object.entries(request.headers)
+          .filter(([name]) => name.startsWith("x-agenlynk-") && name !== "x-agenlynk-hook-token")));
         response.writeHead(204).end();
       });
     });
@@ -254,14 +257,50 @@ test("the hook script forwards to the sidecar, stays silent, and never blocks th
       assert.deepEqual(sent, { code: 0, stdout: "" }, "no output: the agent must never read a decision from it");
       assert.deepEqual(received, [{ url: "/api/hooks/claude", token: "tok_123", body: payload }]);
 
-      await runHook(["claude"], { env: { ...env, GROK_SESSION_ID: "g" }, stdin: payload });
-      assert.equal(received.length, 1, "the Claude registration stays quiet inside Grok");
-      await runHook(["grok"], { env: { ...env, GROK_SESSION_ID: "g" }, stdin: payload });
+      assert.deepEqual(Object.keys(lineageHeaders[0]), ["x-agenlynk-hook-ppid"], "no markers without a launcher");
+
+      await runHook(["claude"], { env: { ...env, GROK_SESSION_ID: "g", GROK_HOOK_EVENT: "stop" }, stdin: payload });
+      assert.equal(received.length, 1, "the Claude registration stays quiet when Grok runs it");
+      await runHook(["grok"], { env: { ...env, GROK_SESSION_ID: "g", GROK_HOOK_EVENT: "stop" }, stdin: payload });
       assert.equal(received.at(-1).url, "/api/hooks/grok");
+      assert.equal(lineageHeaders.at(-1)["x-agenlynk-parent-grok"], undefined, "Grok's own id is not a launcher");
+
+      // A Codex run from a Claude Code Bash tool inside a Grok shell.
+      await runHook(["codex"], {
+        env: {
+          ...env,
+          GROK_SESSION_ID: "grok-1",
+          CLAUDE_CODE_SESSION_ID: "625cbd07-50b1-4ffa-b0bd-368891bb5085",
+          CLAUDE_CODE_ENTRYPOINT: "cli",
+          CODEX_THREAD_ID: "own-thread",
+          ANTHROPIC_API_KEY: "sk-secret",
+          CLAUDE_PID: "16964"
+        },
+        stdin: payload
+      });
+      assert.equal(received.at(-1).url, "/api/hooks/codex", "a CLI merely running inside Grok still reports");
+      const forwarded = lineageHeaders.at(-1);
+      assert.equal(forwarded["x-agenlynk-parent-claude"], "625cbd07-50b1-4ffa-b0bd-368891bb5085");
+      assert.equal(forwarded["x-agenlynk-parent-grok"], "grok-1");
+      assert.equal(forwarded["x-agenlynk-entrypoint"], "cli");
+      assert.equal(forwarded["x-agenlynk-parent-codex"], undefined, "Codex's own thread is not a launcher");
+      assert.match(forwarded["x-agenlynk-hook-ppid"], /^\d+$/);
+      assert.deepEqual(Object.keys(forwarded).sort(), [
+        "x-agenlynk-entrypoint", "x-agenlynk-hook-ppid", "x-agenlynk-parent-claude", "x-agenlynk-parent-grok"
+      ], "no other environment is forwarded");
+      assert.ok(!JSON.stringify(received.at(-1)).includes("sk-secret"));
+
+      const before = received.length;
+      await runHook(["grok"], {
+        env: { ...env, CLAUDE_CODE_SESSION_ID: "x\r\nX-Injected: 1", CLAUDE_CODE_ENTRYPOINT: `a${"b".repeat(200)}` },
+        stdin: payload
+      });
+      assert.equal(received.length, before + 1);
+      assert.deepEqual(Object.keys(lineageHeaders.at(-1)), ["x-agenlynk-hook-ppid"], "malformed or oversized markers are dropped");
 
       await writeFile(endpoint, "AGENLYNK_HOOK_PORT=1; rm -rf /\nAGENLYNK_HOOK_TOKEN=x\n");
       assert.equal((await runHook(["codex"], { env, stdin: payload })).code, 0, "a tampered endpoint file is ignored");
-      assert.equal(received.length, 2);
+      assert.equal(received.length, before + 1);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }

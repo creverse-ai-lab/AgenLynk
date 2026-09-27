@@ -75,16 +75,21 @@ function resolvedStatus(raw, timeline) {
   return Number.isFinite(hintedAt) && hintedAt > scannedAt ? hinted : scanned;
 }
 
-function rootSessionId(session, byRawId) {
+/**
+ * The top of a session's parent chain. A chain that leaves the snapshot ends
+ * at the missing parent's id; its provider is known only when the link came
+ * with one (process lineage names it).
+ */
+function rootOf(session, byRawId) {
   let current = session;
   const visited = new Set([session.session]);
   while (current?.parent && !visited.has(current.parent)) {
     visited.add(current.parent);
     const parent = byRawId.get(current.parent);
-    if (!parent) return current.parent;
+    if (!parent) return { id: current.parent, provider: current.parent_provider ?? null };
     current = parent;
   }
-  return current?.session ?? session.session;
+  return { id: current?.session ?? session.session, provider: current?.provider ?? null };
 }
 
 /**
@@ -104,7 +109,8 @@ export function projectLocalSnapshot(snapshot, timelines = new Map()) {
   const events = {};
 
   for (const raw of allRawSessions) {
-    const rootId = rootSessionId(raw, byRawId);
+    const rootLink = rootOf(raw, byRawId);
+    const rootId = rootLink.id;
     const root = byRawId.get(rootId);
     const provider = raw.provider ?? "local";
     const sessionId = `local:${provider}:${raw.session}`;
@@ -126,7 +132,7 @@ export function projectLocalSnapshot(snapshot, timelines = new Map()) {
       model: realModel(facts.model) ?? realModel(raw.engine),
       status,
       title: sessionTitle(facts, timeline?.events, raw),
-      opener: root?.provider ?? raw.provider ?? "local",
+      opener: root?.provider ?? rootLink.provider ?? raw.provider ?? "local",
       openerInstanceId: rootId,
       cwd: raw.cwd ?? facts.cwd ?? root?.cwd ?? "",
       turnId: active ? facts.turnId ?? `local-turn:${raw.session}` : null,
@@ -141,13 +147,18 @@ export function projectLocalSnapshot(snapshot, timelines = new Map()) {
       source: "local",
       role: raw.session === rootId ? "frontdoor" : "worker",
       parentLocalSessionId: raw.parent ?? null,
-      // Only name a local parent this snapshot can see. Guessing its provider
-      // from the child's minted ids like local:codex:<claude id> that point at
+      // Only name a local parent this snapshot can see, or one whose provider
+      // the link itself proved (process lineage). Guessing it from the
+      // child's minted ids like local:codex:<claude id> that point at
       // nothing; a Gateway-owned parent is resolved from parentLocalSessionId
       // by mergeMonitorSessions instead.
       parentSessionId: byRawId.has(raw.parent)
         ? `local:${byRawId.get(raw.parent).provider ?? "local"}:${raw.parent}`
-        : null
+        : raw.parent && raw.parent_provider ? `local:${raw.parent_provider}:${raw.parent}` : null,
+      ...(raw.parent && raw.parent_source === "lineage" ? { parentProof: "lineage" } : {}),
+      // A one-shot run (`claude -p`, `grok -p`, `codex exec`), so the app can
+      // tell it from an interactive session.
+      ...(raw.headless ? { headless: true } : {})
     });
     if (timeline?.events?.length) events[sessionId] = timeline.events;
   }
@@ -234,8 +245,12 @@ export function mergeMonitorSessions(gatewaySessions, localSessions, workerTopol
   const enrichedGateway = gateway.map((session) => {
     const localMatch = localByProviderId.get(session?.acpSessionId)
       ?? localByProviderId.get(session?.sessionId);
+    // Process lineage is not proof for a Gateway worker: the daemon may carry
+    // whichever session's environment first started it. Only transcript
+    // (MCP response) links attribute a Gateway session.
     const proven = localMatch?.openerInstanceId
       && localMatch.openerInstanceId !== localMatch.localSessionId
+      && localMatch.parentProof !== "lineage"
       ? {
         opener: localMatch.opener ?? null,
         openerInstanceId: localMatch.openerInstanceId,

@@ -40,6 +40,7 @@ import { MONITOR_API_VERSION, MONITOR_SCHEMA_VERSION, MonitorState, queuedSingle
 import { SIDECAR_BUILD_ID, SIDECAR_VERSION } from "../version.js";
 import { LocalEventDelivery, mergeMonitorSessions, projectLocalSnapshot } from "../local-monitor.js";
 import { LocalAgentScanner } from "../local-agents/index.js";
+import { hookLineageHeaders, ProcessLineage } from "../local-agents/lineage.js";
 import { LocalTimeline } from "../normalize/local-timeline.js";
 import {
   SqliteMonitorStore,
@@ -80,6 +81,8 @@ let localTimeline = null;
 // Live facts from agent hooks, overlaid on every local scan. Replaced in
 // main() once the retention setting is known.
 let hookSessions = new HookSessions();
+// Lineage resolver for hooks when the local scanner (which owns one) is off.
+let hookLineage = null;
 
 // Token accounting is not timeline content, and a session accumulates one of
 // these per turn. Gateway 1.3.2+ already drops them at ingestion, but a
@@ -151,6 +154,7 @@ async function main() {
   }) : null;
   // One retention rule for every provider, whether hooks are on or not.
   hookSessions = new HookSessions({ staleAfterMs: monitorSettings.localSessionRetentionMs });
+  hookLineage = localScanner ? null : new ProcessLineage();
   localTimeline = localScanner
     ? new LocalTimeline({
       codexRecords: (sessionId) => localScanner.conversationRecords(sessionId),
@@ -593,13 +597,19 @@ async function main() {
     }
     // Answered before any work: the agent is waiting on this hook.
     response.writeHead(204).end();
-    const recorded = hookSessions.record(provider, payload);
+    const recorded = hookSessions.record(provider, payload, Date.now(), hookLineageHeaders(request.headers));
     if (!recorded) return;
     // A Gateway worker's own CLI runs the same hooks; its timeline is the
     // Gateway's, and these events would sit in a bucket nothing ever lists.
     if (state.formerWorkerIds.has(recorded.localSessionId)) return;
-    const changed = state.setExternalEvents({ [recorded.sessionId]: recorded.events });
-    for (const [sessionId, events] of Object.entries(changed)) queueEvents(sessionId, events);
+    // Which session launched this one (a shell-launched agent is a worker).
+    await hookSessions.resolveLineage(recorded.key, localScanner?.lineage ?? hookLineage);
+    // A held-back session (no activity, no transcript) is not listed, so its
+    // events would sit in a bucket nothing ever shows.
+    if (!recorded.heldBack) {
+      const changed = state.setExternalEvents({ [recorded.sessionId]: recorded.events });
+      for (const [sessionId, events] of Object.entries(changed)) queueEvents(sessionId, events);
+    }
     nudgeLocalRefresh();
   }
 
