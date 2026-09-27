@@ -159,7 +159,7 @@ export class MonitorState {
       .filter((session) => session && typeof session === "object"
         && typeof session.sessionId === "string" && session.sessionId
         && !this.closedSessionIds.has(session.sessionId))
-      .map((session) => [session.sessionId, session]));
+      .map((session) => [session.sessionId, this.#keepKnownParent(session)]));
     const removedSessionIds = [...this.sessions.keys()].filter((sessionId) => !nextSessions.has(sessionId));
     for (const sessionId of removedSessionIds) this.removeSession(sessionId);
     let changed = removedSessionIds.length > 0;
@@ -178,6 +178,24 @@ export class MonitorState {
     this.sessionSignatures = nextSignatures;
     if (changed) this.revision += 1;
     return removedSessionIds;
+  }
+
+  /**
+   * A local session's parent, once seen, is never dropped: the proof comes
+   * and goes with processes and hook sessions (a finished `grok -p` parent
+   * leaves the scan), and losing it turned a Worker back into a Frontdoor.
+   */
+  #keepKnownParent(session) {
+    if (session.source !== "local" || session.parentSessionId) return session;
+    const previous = this.sessions.get(session.sessionId) ?? this.historySessions.get(session.sessionId);
+    if (!previous?.parentSessionId) return session;
+    return {
+      ...session,
+      role: "worker",
+      parentSessionId: previous.parentSessionId,
+      parentLocalSessionId: previous.parentLocalSessionId ?? session.parentLocalSessionId ?? null,
+      ...(previous.parentProof ? { parentProof: previous.parentProof } : {})
+    };
   }
 
   setGatewaySourceSessions(list) {

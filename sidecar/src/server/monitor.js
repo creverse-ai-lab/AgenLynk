@@ -71,6 +71,8 @@ const HISTORY_ENABLED = booleanEnv("ACP_GATEWAY_MONITOR_HISTORY", true);
 // never take over the app's hook endpoint or edit the user's agent configs.
 const HOOKS_ENABLED = booleanEnv("ACP_GATEWAY_MONITOR_HOOKS", false);
 const MAX_HOOK_BODY_BYTES = 1024 * 1024;
+// How long a hook answer may wait for its process tree to be read.
+const HOOK_LINEAGE_BUDGET_MS = 250;
 const HOOK_PROVIDERS = new Set(["claude", "codex", "grok"]);
 const GATEWAY_RUNTIME_ROOT = process.env.ACP_GATEWAY_ACTIVE_ROOT ?? null;
 const EXPECTED_GATEWAY_BUILD_ID = expectedGatewayBuildId(GATEWAY_RUNTIME_ROOT);
@@ -595,15 +597,24 @@ async function main() {
       response.writeHead(400).end();
       return;
     }
-    // Answered before any work: the agent is waiting on this hook.
-    response.writeHead(204).end();
     const recorded = hookSessions.record(provider, payload, Date.now(), hookLineageHeaders(request.headers));
+    // Which session launched this one (a shell-launched agent is a worker)
+    // is read from the process tree while the hook's shell is still alive,
+    // i.e. before answering: a short `claude -p` is often gone by the time
+    // a deferred `ps` runs, and then only its own id is left to go on. It is
+    // bounded and runs only until a session's lineage is known.
+    if (recorded && !state.formerWorkerIds.has(recorded.localSessionId)) {
+      await Promise.race([
+        hookSessions.resolveLineage(recorded.key, localScanner?.lineage ?? hookLineage),
+        new Promise((resolve) => setTimeout(resolve, HOOK_LINEAGE_BUDGET_MS).unref?.())
+      ]);
+    }
+    // The agent is waiting on this hook; everything else happens after.
+    response.writeHead(204).end();
     if (!recorded) return;
     // A Gateway worker's own CLI runs the same hooks; its timeline is the
     // Gateway's, and these events would sit in a bucket nothing ever lists.
     if (state.formerWorkerIds.has(recorded.localSessionId)) return;
-    // Which session launched this one (a shell-launched agent is a worker).
-    await hookSessions.resolveLineage(recorded.key, localScanner?.lineage ?? hookLineage);
     // A held-back session (no activity, no transcript) is not listed, so its
     // events would sit in a bucket nothing ever shows.
     if (!recorded.heldBack) {

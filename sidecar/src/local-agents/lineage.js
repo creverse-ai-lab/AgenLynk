@@ -246,7 +246,10 @@ export class ProcessLineage {
     }
     const matches = candidates.filter((pid) => targets.has(this.cwds.get(key(pid))));
     if (matches.length === 1) return { pid: matches[0], final: true };
-    return { pid: null, final: matches.length > 1 || closed };
+    // Several runs in one folder at once: which is this thread is unknown,
+    // but the caller can still use a launcher they all share.
+    if (matches.length > 1) return { pid: null, final: true, ambiguous: matches };
+    return { pid: null, final: closed };
   }
 
   /** Claude session id -> live pid, from ~/.claude/sessions. */
@@ -408,6 +411,12 @@ export async function annotateExecLineage(cursors, lineage, now = Date.now() / 1
   await lineage.refresh(now);
   for (const cursor of pending) {
     const match = await lineage.codexExecPid(cursor.exec);
+    if (match.pid == null && match.ambiguous) {
+      cursor.exec.done = true;
+      const shared = await sharedExecParent(lineage, match.ambiguous, cursor.session);
+      if (shared) cursor.exec.parent = shared;
+      continue;
+    }
     if (match.pid == null) {
       if (match.final) cursor.exec.done = true;
       continue;
@@ -417,4 +426,16 @@ export async function annotateExecLineage(cursors, lineage, now = Date.now() / 1
     // The matched process must really be a one-shot `codex exec` run.
     if (headless && parent) cursor.exec.parent = parent;
   }
+}
+
+/** The launcher every one of these `codex exec` runs shares, else null. */
+async function sharedExecParent(lineage, pids, session) {
+  let shared = null;
+  for (const pid of pids) {
+    const { parent, headless } = await lineage.resolve(pid, { provider: "codex", session });
+    if (!headless || !parent) return null;
+    if (shared && (shared.provider !== parent.provider || shared.session !== parent.session)) return null;
+    shared = parent;
+  }
+  return shared;
 }

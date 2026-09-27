@@ -24,6 +24,7 @@ import { HookNormalizer, readHookPayload } from "../normalize/hook.js";
 const DEFAULT_STALE_AFTER_MS = 10 * 60 * 1000;
 const HELD_BACK_TTL_MS = 2 * 60 * 1000;
 const MAX_SESSIONS = 500;
+const MAX_LINEAGE_ATTEMPTS = 3;
 
 // Hook events that prove someone is using the session.
 const ACTIVITY_EVENTS = new Set([
@@ -59,6 +60,7 @@ export class HookSessions {
     this.grokRoot = grokRoot;
     this.claudeRoot = claudeRoot;
     this.sessions = new Map();
+    this.parents = new Map();
     // provider -> ms of the last hook received, so settings can tell
     // "registered" from "actually arriving".
     this.lastReceived = new Map();
@@ -134,7 +136,10 @@ export class HookSessions {
   async resolveLineage(key, lineage, nowMs = Date.now()) {
     const entry = this.sessions.get(key);
     if (!entry || entry.lineageResolved) return;
-    entry.lineageResolved = true;
+    // Retried on the next hooks until the process tree answers: a first
+    // attempt can miss a process the table has not caught up with.
+    entry.lineageAttempts = (entry.lineageAttempts ?? 0) + 1;
+    if (entry.lineageAttempts >= MAX_LINEAGE_ATTEMPTS) entry.lineageResolved = true;
     const self = { provider: entry.provider, session: entry.session };
     let agentPid = null;
     if (lineage && entry.ppid) {
@@ -147,6 +152,7 @@ export class HookSessions {
           const resolved = await lineage.resolve(agentPid, self);
           if (resolved.parent) entry.parent = resolved.parent;
           if (resolved.headless) entry.headless = true;
+          entry.lineageResolved = true;
         }
       } catch {
         agentPid = null;
@@ -155,6 +161,21 @@ export class HookSessions {
     // The process tree is the better witness; the forwarded markers only
     // stand in when the agent's process could not be found.
     if (!agentPid && !entry.parent) entry.parent = markerParent(entry.markers, self);
+    if (entry.parent) this.#rememberParent(key, entry.parent);
+  }
+
+  // A launcher learned from hooks outlives the hook session: a short
+  // `grok -p` often ends (SessionEnd drops the entry) before the scanner
+  // has seen its process, and the scanner's record must still get it.
+  #rememberParent(key, parent) {
+    this.parents.delete(key);
+    this.parents.set(key, parent);
+    while (this.parents.size > MAX_SESSIONS) this.parents.delete(this.parents.keys().next().value);
+  }
+
+  /** The hook-learned launcher of a session, if any. */
+  parentOf(provider, session) {
+    return this.parents.get(`${provider}:${session}`) ?? null;
   }
 
   /**
@@ -215,6 +236,14 @@ export class HookSessions {
         ...(entry.parent ? { parent: entry.parent.session, parent_provider: entry.parent.provider, parent_source: "lineage" } : {}),
         ...(entry.headless ? { headless: true } : {})
       });
+    }
+    for (const raw of merged) {
+      if (raw.parent) continue;
+      const parent = this.parentOf(raw.provider, raw.session);
+      if (!parent) continue;
+      raw.parent = parent.session;
+      raw.parent_provider = parent.provider;
+      raw.parent_source = "lineage";
     }
     return merged;
   }

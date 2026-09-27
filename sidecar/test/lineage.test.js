@@ -332,13 +332,25 @@ test("a codex exec thread is matched to its process by cwd and start time", asyn
     await annotateExecLineage(cursors, lineage, START_SECONDS + 4);
     assert.equal(lsofCalls.length, 1, "a resolved thread is not matched again");
 
-    // Two exec runs in one folder at once: ambiguous, no parent.
+    // Two exec runs in one folder at once: which is which is unknown, but a
+    // launcher they share is still their parent; different launchers are not.
     const twin = new ProcessLineage({ claudeSessionsDir: sessions, run: fakePsLsof({
       4870: { ppid: 1, comm: "codex", args: "codex exec x", env: `CLAUDE_CODE_SESSION_ID=${CLAUDE_ID}`, cwd: "/w" },
       4871: { ppid: 1, comm: "codex", args: "codex exec y", env: `CLAUDE_CODE_SESSION_ID=${CLAUDE_ID}`, cwd: "/w" }
     }).run });
     await twin.refresh(START_SECONDS + 3);
-    assert.deepEqual(await twin.codexExecPid({ cwd: "/w", createdAt: START_SECONDS }), { pid: null, final: true });
+    assert.deepEqual(await twin.codexExecPid({ cwd: "/w", createdAt: START_SECONDS }), { pid: null, final: true, ambiguous: [4870, 4871] });
+    const twinCursor = { session: "t", exec: { createdAt: START_SECONDS, cwd: "/w" } };
+    await annotateExecLineage(new Map([["t", twinCursor]]), twin, START_SECONDS + 3);
+    assert.deepEqual(twinCursor.exec.parent, { provider: "claude", session: CLAUDE_ID }, "a shared launcher is the parent");
+    const split = new ProcessLineage({ claudeSessionsDir: sessions, run: fakePsLsof({
+      4870: { ppid: 1, comm: "codex", args: "codex exec x", env: `CLAUDE_CODE_SESSION_ID=${CLAUDE_ID}`, cwd: "/w" },
+      4871: { ppid: 1, comm: "codex", args: "codex exec y", env: "GROK_SESSION_ID=other-grok", cwd: "/w" }
+    }).run });
+    await split.refresh(START_SECONDS + 3);
+    const splitCursor = { session: "s", exec: { createdAt: START_SECONDS, cwd: "/w" } };
+    await annotateExecLineage(new Map([["s", splitCursor]]), split, START_SECONDS + 3);
+    assert.equal(splitCursor.exec.parent, undefined, "different launchers stay unattributed");
 
     // An interactive codex is not a `codex exec` run, whatever it matches.
     const interactive = { session: "i", exec: { createdAt: START_SECONDS, cwd: "/w" } };
