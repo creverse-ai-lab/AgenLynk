@@ -1,6 +1,6 @@
 {
   "name": "@creverse-ai-lab/agenlynk-sidecar",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "AgenLynk Monitor API sidecar and local agent projection.",
   "license": "Apache-2.0",
   "type": "module",
