@@ -1,107 +1,136 @@
 import SwiftUI
 
+/// What the sequence says when it has no rows, chosen by the caller (a
+/// history session still loading, a source without a timeline, …).
+struct SequenceEmptyState {
+    var title = "표시할 이벤트가 없습니다"
+    var symbol = "timeline.selection"
+    var description = "세션 이벤트가 수신되면 호출 관계와 함께 표시됩니다."
+    var loading = false
+    /// "다시 시도" and what it does, for a failed load.
+    var retry: (() -> Void)? = nil
+}
+
 struct EventSequenceView: View {
+    @Environment(\.openWindow) private var openWindow
+    @State private var renamingSession: GatewaySession?
     let sessions: [GatewaySession]
     let events: [MonitorEvent]
     @Binding var selectedSessionId: String?
     @Binding var selectedEventId: String?
+    /// True while the view sits at the newest event and follows new ones. It
+    /// is driven by the scroll position: scrolling up stops following,
+    /// scrolling back to the bottom (or "최신으로") resumes.
     @Binding var followLatestEvent: Bool
-    @State private var page = 0
-    // Keyboard scrolling: the diagram is a 2-D canvas, so arrow keys step
-    // through anchor points (one per event row / per lane) and scroll to them.
-    // Focus the diagram (click it) and the arrows move the view.
-    @State private var keyRow = 0
+    /// Whether resting Worker lanes are shown. Folded (false) hides every
+    /// lane `MenuBarPipeline.restingLaneIds` names, with its rows, behind one
+    /// "대기 중 Worker N개 · 펼치기" box; held per launch by the caller.
+    @Binding var showRestingLanes: Bool
+    /// Some session in view may have events older than the loaded ones.
+    var canLoadOlder = false
+    var loadingOlder = false
+    /// Older events exist but the in-memory window is full.
+    var olderCapped = false
+    /// Pages in older events; returns whether any arrived.
+    var loadOlder: (() async -> Bool)?
+    var emptyState = SequenceEmptyState()
+    /// The model's `eventsRevision`: with the events' count and ends it keys
+    /// the derived rows/lanes, so a body pass that changed none of them (a
+    /// selection, a follow toggle) reuses them.
+    var eventsRevision = 0
+    @State private var expandedGroups: Set<String> = []
+    @State private var laneCache = SequenceDerivedCache<SequenceLaneKey, SequenceLaneBase>()
+    @State private var derivedCache = SequenceDerivedCache<SequenceDerivedKey, SequenceDerived>()
+    // Keyboard selection: up/down step through the rows and select each
+    // row's event (a tool group's representative call), so the inspector
+    // follows; left/right scroll the lanes. Focus the diagram (click it)
+    // first. The row is kept by id, not index, so rows paged in above do
+    // not shift it.
+    @State private var keyRowId: String?
     @State private var keyLane = 0
     @FocusState private var diagramFocused: Bool
+    /// Set once the initial jump to the bottom has happened, so the top
+    /// sentinel laid out on the first pass does not page older events in.
+    @State private var settled = false
+    @State private var topVisible = false
+    @State private var olderRequestInFlight = false
+    /// An automatic scroll to the bottom briefly hides the bottom sentinel;
+    /// that must not read as the user scrolling away.
+    @State private var lastAutoScroll = Date.distantPast
 
-    private let pageSize = 20
     private let timeWidth = 76.0
     private let laneWidth = 220.0
     private let headerHeight = 82.0
     private let eventRowHeight = 44.0
-    private let bodyTopInset = 10.0
+    private let childRowHeight = 34.0
+    private let sentinelHeight = 24.0
+    /// The lifeline dash: `lifelineDash` on, `lifelineDash` off.
+    private let lifelineDash = 5.0
+    /// Where the header's lifeline stub starts, as the origin of the one
+    /// dash pattern every slice below continues.
+    private let lifelineStubLength = 8.0
     private let relationNodeSpacing = 8.0
+    private static let bottomId = "sequence-bottom"
 
     var body: some View {
-        // Derived once per body pass. The computed-property forms re-ran
-        // collapseSequenceEvents up to four times (totalPages, pageEvents,
-        // pageRangeLabel, onChange) and firstEventId filtered+sorted the full
-        // event array once per edge — measurable milliseconds at 10 passes/s
-        // during a busy turn.
-        let diagram = collapseSequenceEvents(events)
-        // A page is a self-contained slice of the sequence. Deriving headers
-        // from the full history left unrelated lanes (for example an older
-        // Grok worker) pinned ahead of the Frontdoor even when that provider
-        // had no event on the page currently being viewed.
-        let pageEntries = SequencePageLayout.entries(in: diagram, page: page, pageSize: pageSize)
-        let pageEventValues = pageEntries.map(\.event)
-        let marks = sessionEventMarks()
-        let lanes = makeSequenceLanes(sessions: sessions, events: pageEventValues)
-        let laneIndex = lanes.enumerated().reduce(into: [String: Int]()) { result, item in
-            result[item.element.session.sessionId] = item.offset
+        timeline.sheet(item: $renamingSession) { session in
+            SessionRenameSheet(session: session)
         }
-        let edges = lanes.compactMap { lane -> SequenceCallEdge? in
-            guard let parentId = lane.parentSessionId,
-                  let parentIndex = laneIndex[parentId],
-                  let childIndex = laneIndex[lane.session.sessionId] else { return nil }
-            let turnEndId = marks.lastTurnEndId[lane.session.sessionId]
-            return SequenceCallEdge(
-                parentIndex: parentIndex,
-                childIndex: childIndex,
-                child: lane.session,
-                childDepth: lane.depth,
-                eventId: marks.firstEventId[lane.session.sessionId],
-                returnEventId: turnEndId,
-                returned: hasReturned(lane.session, turnEndEventId: turnEndId)
-            )
-        }
-        let nodes = pageEntries.compactMap { entry -> SequenceDiagramNode? in
-            guard let index = laneIndex[entry.event.sessionId] else { return nil }
-            return SequenceDiagramNode(laneIndex: index, event: entry.event, collapsedCount: entry.count)
-        }
-        // The whole point of a sequence diagram: a call/응답 arrow is drawn on
-        // the row of the event that triggered it — a call on the child's first
-        // visible event, a 응답 on its turn_end — so the line sits at the moment
-        // it happened on the shared time axis, next to that event, instead of
-        // floating in a separate band that read as unrelated to the timeline.
-        let callAnchors = Dictionary(edges.compactMap { edge in edge.eventId.map { ($0, edge) } },
-                                     uniquingKeysWith: { first, _ in first })
-        let responseAnchors = Dictionary(edges.compactMap { edge in
-            edge.returned ? edge.returnEventId.map { ($0, edge) } : nil
-        }, uniquingKeysWith: { first, _ in first })
-        let rowY = Dictionary(uniqueKeysWithValues: nodes.enumerated().map { row, node in
-            (node.event.id, bodyTopInset + Double(row) * eventRowHeight + eventRowHeight / 2)
-        })
-        let width = max(timeWidth + Double(max(lanes.count, 1)) * laneWidth, 620)
-        let bodyHeight = max(bodyTopInset + Double(max(nodes.count, 1)) * eventRowHeight + 16, 240)
-        let pages = max(1, (diagram.count + pageSize - 1) / pageSize)
+    }
 
-        VStack(spacing: 0) {
+    @ViewBuilder private var timeline: some View {
+        let base = laneCache.value(for: SequenceLaneKey(
+            revision: eventsRevision,
+            count: events.count,
+            firstId: events.first?.id,
+            lastId: events.last?.id,
+            sessions: sessions
+        )) { deriveLanes() }
+        let hidden = hiddenLaneIds(base)
+        let derived = derivedCache.value(for: SequenceDerivedKey(
+            revision: eventsRevision,
+            count: events.count,
+            firstId: events.first?.id,
+            lastId: events.last?.id,
+            expanded: expandedGroups,
+            sessions: sessions,
+            hidden: hidden
+        )) { derive(base: base, hidden: hidden) }
+        let rows = derived.rows
+        let lanes = derived.lanes
+        let laneIndex = derived.laneIndex
+        let callAnchors = derived.callAnchors
+        let responseAnchors = derived.responseAnchors
+        let width = max(timeWidth + Double(max(lanes.count, 1)) * laneWidth, 620)
+
+        ScrollViewReader { proxy in
+            VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Text(pageRangeLabel(for: diagram))
+                Text("이벤트 \(events.count.formatted())개")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
-                Text("화살표: 호출 관계 · 노드: 이벤트 · 클릭 후 방향키로 이동")
+                if !hidden.isEmpty || (showRestingLanes && !base.resting.isEmpty) {
+                    restingLanesToggle(count: showRestingLanes ? base.resting.count : hidden.count)
+                }
+                if loadingOlder {
+                    ProgressView().controlSize(.mini)
+                    Text("이전 이벤트 불러오는 중").font(.caption2).foregroundStyle(.secondary)
+                }
+                Text("화살표: 호출 관계 · 노드: 이벤트 · 클릭 후 방향키로 이벤트를 고릅니다")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+                    .lineLimit(1)
                 Spacer()
-                Button {
-                    followLatestEvent.toggle()
-                    if followLatestEvent { page = 0 }
-                } label: {
-                    Label(
-                        followLatestEvent ? "최신 따라가는 중" : "최신 따라가기",
-                        systemImage: followLatestEvent ? "pause.circle.fill" : "play.circle"
-                    )
+                if followLatestEvent {
+                    Label("최신 따라가는 중", systemImage: "arrow.down.to.line")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                } else {
+                    Button("최신으로", systemImage: "arrow.down.to.line") {
+                        scrollToBottom(proxy, animated: true)
+                    }
+                    .help("가장 최근 이벤트로 이동하고 새 이벤트를 따라갑니다")
                 }
-                .foregroundStyle(followLatestEvent ? .green : .secondary)
-                Button("이전 로그", systemImage: "chevron.left") {
-                    followLatestEvent = false
-                    page += 1
-                }
-                    .disabled(page + 1 >= pages)
-                Button("최신 로그", systemImage: "chevron.right") { page = 0 }
-                    .disabled(page == 0)
             }
             .buttonStyle(.borderless)
             .padding(.horizontal, 12)
@@ -114,7 +143,6 @@ struct EventSequenceView: View {
             // on the row of the event that triggered them. The single outer
             // horizontal scroll moves the headers with the body, so each header
             // stays over its own lifeline however far the diagram is panned.
-            ScrollViewReader { proxy in
             ScrollView(.horizontal) {
                 VStack(spacing: 0) {
                     ZStack(alignment: .topLeading) {
@@ -132,12 +160,12 @@ struct EventSequenceView: View {
                             for (index, lane) in lanes.enumerated() {
                                 let x = laneX(index)
                                 var lifeline = Path()
-                                lifeline.move(to: CGPoint(x: x, y: headerHeight - 8))
+                                lifeline.move(to: CGPoint(x: x, y: headerHeight - lifelineStubLength))
                                 lifeline.addLine(to: CGPoint(x: x, y: headerHeight))
                                 context.stroke(
                                     lifeline,
                                     with: .color(providerColor(lane.session.provider).opacity(0.34)),
-                                    style: StrokeStyle(lineWidth: 1.5, dash: [5, 5])
+                                    style: lifelineStyle(phase: 0)
                                 )
                             }
                         }
@@ -145,9 +173,8 @@ struct EventSequenceView: View {
 
                         ForEach(Array(lanes.enumerated()), id: \.element.id) { index, lane in
                             Button {
-                                followLatestEvent = false
+                                // Selecting a lane keeps the selected event.
                                 selectedSessionId = lane.session.sessionId
-                                selectedEventId = nil
                             } label: {
                                 SequenceLaneHeader(
                                     lane: lane,
@@ -157,7 +184,11 @@ struct EventSequenceView: View {
                                 .buttonStyle(.plain)
                                 .frame(width: laneWidth - 24, height: 64)
                                 .position(x: laneX(index), y: 35)
-                                .help("\(lane.session.provider) \(lane.session.model ?? "default") 세션 상세")
+                                .help("클릭해 이 세션 선택 · 우클릭으로 이름 바꾸기")
+                                .contextMenu {
+                                    Button("세션 상세 열기") { openWindow(id: "session-detail", value: lane.session.sessionId) }
+                                    Button("이름 바꾸기…") { renamingSession = lane.session }
+                                }
                         }
                     }
                     .frame(width: width, height: headerHeight)
@@ -165,124 +196,92 @@ struct EventSequenceView: View {
                     .padding(.top, 10)
                     .background(Color(nsColor: .controlBackgroundColor))
 
-                    // One scrolling time axis: lifelines, event nodes, and the
-                    // call/응답 arrows that connect them all share it, so an
-                    // arrow lands on the same row as the event that caused it.
+                    // One continuous, lazily built time axis, newest at the
+                    // bottom. Each row draws its own slice of the lifelines and
+                    // the arrows anchored on it, so a long timeline only lays
+                    // out the rows on screen.
                     ScrollView(.vertical) {
-                        ZStack(alignment: .topLeading) {
-                            Canvas { context, _ in
-                                for (index, lane) in lanes.enumerated() {
-                                    let x = laneX(index)
-                                    var lifeline = Path()
-                                    lifeline.move(to: CGPoint(x: x, y: 0))
-                                    lifeline.addLine(to: CGPoint(x: x, y: bodyHeight))
-                                    context.stroke(
-                                        lifeline,
-                                        with: .color(providerColor(lane.session.provider).opacity(0.34)),
-                                        style: StrokeStyle(lineWidth: 1.5, dash: [5, 5])
-                                    )
+                        LazyVStack(spacing: 0) {
+                            olderSentinel(rows: rows, hidden: hidden, proxy: proxy)
+                                .frame(width: width, height: sentinelHeight)
+                                .background(alignment: .topLeading) {
+                                    lifelines(lanes, height: sentinelHeight, offset: lifelineStubLength)
                                 }
 
-                                // A call travels parent→child; a 응답 travels
-                                // back, so its head lands on the parent lane and
-                                // its stroke is dashed. Both are drawn at the y
-                                // of their anchoring event.
-                                func drawArrow(_ edge: SequenceCallEdge, y: Double, response: Bool) {
-                                    let parentX = laneX(edge.parentIndex)
-                                    let childX = laneX(edge.childIndex)
-                                    let from = response ? childX : parentX
-                                    let to = response ? parentX : childX
-                                    let color = providerColor(edge.child.provider)
-                                    var line = Path()
-                                    line.move(to: CGPoint(x: from, y: y))
-                                    line.addLine(to: CGPoint(x: to, y: y))
-                                    context.stroke(
-                                        line,
-                                        with: .color(color.opacity(response ? 0.6 : 0.72)),
-                                        style: response
-                                            ? StrokeStyle(lineWidth: 1.4, dash: [4, 3])
-                                            : StrokeStyle(lineWidth: 1.6)
-                                    )
-                                    context.stroke(
-                                        arrowHead(at: CGPoint(x: to, y: y), pointingRight: to >= from),
-                                        with: .color(color),
-                                        lineWidth: 1.6
-                                    )
-                                }
-                                for node in nodes {
-                                    guard let y = rowY[node.event.id] else { continue }
-                                    if let edge = callAnchors[node.event.id] { drawArrow(edge, y: y, response: false) }
-                                    if let edge = responseAnchors[node.event.id] { drawArrow(edge, y: y, response: true) }
-                                }
-                            }
-                            .accessibilityHidden(true)
-
-                            // One invisible anchor per event row, pinned to the
-                            // left edge, so an up/down key scrolls vertically
-                            // without shifting the lane the view is centred on.
-                            ForEach(Array(nodes.enumerated()), id: \.offset) { row, _ in
-                                Color.clear.frame(width: 1, height: 1)
-                                    .id("row-\(row)")
-                                    .position(x: 6, y: bodyTopInset + Double(row) * eventRowHeight + eventRowHeight / 2)
-                            }
-
-                            ForEach(Array(nodes.enumerated()), id: \.element.id) { row, node in
-                                let y = bodyTopInset + Double(row) * eventRowHeight + eventRowHeight / 2
-                                Text(shortTime(node.event.timestamp))
-                                    .font(.caption2.monospacedDigit())
-                                    .foregroundStyle(.tertiary)
-                                    .frame(width: timeWidth - 12, alignment: .trailing)
-                                    .position(x: (timeWidth - 12) / 2, y: y)
-                                if let edge = callAnchors[node.event.id] {
-                                    relationCapsule(edge, response: false, y: y)
-                                }
-                                if let edge = responseAnchors[node.event.id] {
-                                    relationCapsule(edge, response: true, y: y)
-                                }
-                                Button {
-                                    followLatestEvent = false
-                                    selectedEventId = node.event.id
-                                } label: {
-                                    SequenceEventNode(
-                                        event: node.event,
-                                        collapsedCount: node.collapsedCount,
-                                        selected: selectedEventId == node.event.id
-                                    )
-                                }
-                                .buttonStyle(.plain)
-                                .frame(width: eventNodeWidth, height: eventRowHeight - 12)
-                                .position(x: laneX(node.laneIndex), y: y)
-                            }
-
-                            if nodes.isEmpty {
-                                ContentUnavailableView(
-                                    "표시할 이벤트가 없습니다",
-                                    systemImage: "timeline.selection",
-                                    description: Text("세션 이벤트가 수신되면 호출 관계와 함께 표시됩니다.")
+                            ForEach(rows) { row in
+                                sequenceRow(
+                                    row,
+                                    lanes: lanes,
+                                    laneIndex: laneIndex,
+                                    callEdge: row.coveredEventIds.lazy.compactMap { callAnchors[$0] }.first,
+                                    responseEdge: row.coveredEventIds.lazy.compactMap { responseAnchors[$0] }.first,
+                                    width: width,
+                                    lifelineOffset: derived.rowOffsets[row.id] ?? 0
                                 )
-                                .frame(width: width, height: bodyHeight)
+                                .id(row.id)
                             }
+
+                            if rows.isEmpty {
+                                Group {
+                                    if emptyState.loading {
+                                        ProgressView(emptyState.title)
+                                    } else {
+                                        ContentUnavailableView {
+                                            Label(emptyState.title, systemImage: emptyState.symbol)
+                                        } description: {
+                                            Text(emptyState.description)
+                                        } actions: {
+                                            if let retry = emptyState.retry {
+                                                Button("다시 시도", action: retry)
+                                            }
+                                        }
+                                    }
+                                }
+                                .frame(width: width, height: 240)
+                            }
+
+                            Color.clear
+                                .frame(width: width, height: 12)
+                                .background(alignment: .topLeading) {
+                                    if !rows.isEmpty {
+                                        lifelines(lanes, height: 12, offset: derived.rowsEndOffset)
+                                    }
+                                }
+                                .id(Self.bottomId)
+                                .onAppear { followLatestEvent = true }
+                                .onDisappear {
+                                    guard settled, Date().timeIntervalSince(lastAutoScroll) > 0.6 else { return }
+                                    followLatestEvent = false
+                                }
                         }
-                        .frame(width: width, height: bodyHeight)
                         .padding(.horizontal, 10)
-                        .padding(.bottom, 10)
                     }
+                    .defaultScrollAnchor(.bottom)
                     .frame(maxHeight: .infinity)
                 }
             }
-            // Click to focus, then arrow keys scroll the diagram. onMoveCommand
+            // Click to focus, then arrow keys select events. onMoveCommand
             // fires on arrow presses only while this view holds focus, so it
             // never steals arrows from a focused list elsewhere.
             .focusable()
             .focused($diagramFocused)
             .onMoveCommand { direction in
+                let last = max(0, rows.count - 1)
+                let current = keyRowId.flatMap { id in rows.firstIndex { $0.id == id } }
+                    ?? rows.firstIndex { $0.coveredEventIds.contains(selectedEventId ?? "") }
+                    ?? last
                 switch direction {
-                case .up:
-                    keyRow = max(0, keyRow - 1)
-                    withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo("row-\(keyRow)", anchor: .center) }
-                case .down:
-                    keyRow = min(max(0, nodes.count - 1), keyRow + 1)
-                    withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo("row-\(keyRow)", anchor: .center) }
+                case .up, .down:
+                    let next = direction == .up ? max(0, current - 1) : min(last, current + 1)
+                    if rows.indices.contains(next) {
+                        let row = rows[next]
+                        keyRowId = row.id
+                        switch row.content {
+                        case let .event(event): select(event)
+                        case let .group(group, _): select(group.representative)
+                        }
+                        withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(row.id, anchor: .center) }
+                    }
                 case .left:
                     keyLane = max(0, keyLane - 1)
                     withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo("col-\(keyLane)", anchor: .center) }
@@ -293,17 +292,265 @@ struct EventSequenceView: View {
                     break
                 }
             }
+            // The newest event, not the newest row: a call joining the last tool
+            // group keeps the row id but must still be followed.
+            .onChange(of: events.last?.id) { _, _ in
+                if followLatestEvent { scrollToBottom(proxy, animated: false) }
+            }
+            .onChange(of: events.count) { _, _ in
+                if followLatestEvent { scrollToBottom(proxy, animated: false) }
+            }
+            .task {
+                // Let the default bottom anchor land before the top sentinel
+                // may page anything in; a short timeline whose top is visible
+                // from the start then fills itself once.
+                try? await Task.sleep(nanoseconds: 700_000_000)
+                settled = true
+                if topVisible { requestOlder(rows: rows, hidden: hidden, proxy: proxy) }
+            }
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))
-        .accessibilityLabel("Frontdoor Agent Subagent 이벤트 시퀀스 다이어그램")
-        .onChange(of: diagram.count) { _, _ in
-            if followLatestEvent {
-                page = 0
-            } else {
-                page = min(page, max(pages - 1, 0))
+        .accessibilityLabel("이벤트 시퀀스. Frontdoor와 Worker의 호출·응답")
+    }
+
+    /// The lanes to hide now: the resting ones while folded, less the
+    /// selected session's lane and its parents (a selection is never hidden).
+    private func hiddenLaneIds(_ base: SequenceLaneBase) -> Set<String> {
+        guard !showRestingLanes, !base.resting.isEmpty else { return [] }
+        if let selected = selectedSessionId, base.resting.contains(selected) {
+            return MenuBarPipeline.restingLaneIds(base.nodes, selectedSessionId: selected)
+        }
+        return base.resting
+    }
+
+    private func visibleEvents(_ hidden: Set<String>) -> [MonitorEvent] {
+        hidden.isEmpty ? events : events.filter { !hidden.contains($0.sessionId) }
+    }
+
+    /// The one box standing for the hidden lanes, over the lane headers.
+    private func restingLanesToggle(count: Int) -> some View {
+        let label = showRestingLanes ? "대기 중 Worker \(count)개 · 접기" : "대기 중 Worker \(count)개 · 펼치기"
+        return Button {
+            showRestingLanes.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: showRestingLanes ? "chevron.down" : "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                Image(systemName: "moon.zzz").font(.caption2)
+                Text(label).font(.caption2)
+            }
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .restingBox(cornerRadius: 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(showRestingLanes
+            ? "대기(idle)·종료 Worker의 레인과 이벤트를 다시 숨깁니다"
+            : "대기(idle)·종료 Worker \(count)개의 레인과 이벤트를 숨겼습니다 · 클릭해 펼치기")
+        .accessibilityLabel(label)
+    }
+
+    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
+        lastAutoScroll = Date()
+        followLatestEvent = true
+        keyRowId = nil
+        if animated {
+            withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+        } else {
+            proxy.scrollTo(Self.bottomId, anchor: .bottom)
+        }
+    }
+
+    /// The row above the first event: reaching it pages older events in.
+    @ViewBuilder private func olderSentinel(rows: [TimelineRow], hidden: Set<String>, proxy: ScrollViewProxy) -> some View {
+        HStack(spacing: 6) {
+            if canLoadOlder {
+                if loadingOlder || olderRequestInFlight {
+                    ProgressView().controlSize(.mini)
+                    Text("이전 이벤트 불러오는 중").font(.caption2).foregroundStyle(.secondary)
+                } else {
+                    Button("이전 이벤트 더 보기", systemImage: "arrow.up") { requestOlder(rows: rows, hidden: hidden, proxy: proxy, force: true) }
+                        .buttonStyle(.borderless)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            } else if olderCapped {
+                Text("이전 이벤트는 세션당 5,000개까지 보관합니다").font(.caption2).foregroundStyle(.tertiary)
+            } else if !rows.isEmpty {
+                Text("처음 이벤트").font(.caption2).foregroundStyle(.tertiary)
             }
         }
+        .frame(maxWidth: .infinity)
+        .onAppear {
+            topVisible = true
+            requestOlder(rows: rows, hidden: hidden, proxy: proxy)
+        }
+        .onDisappear { topVisible = false }
+    }
+
+    /// Loads the next older page and keeps the row that was on top in place,
+    /// so the prepended events appear above it instead of shoving the view.
+    private func requestOlder(rows: [TimelineRow], hidden: Set<String>, proxy: ScrollViewProxy, force: Bool = false) {
+        guard force || settled, canLoadOlder, !olderRequestInFlight, let loadOlder else { return }
+        // Anchor on an event, not a row: a tool group's row id changes when
+        // older calls join it, and a vanished anchor would jump the view. An
+        // expanded header covers no event, so its first call anchors.
+        let anchorEventId = EventTimeline.anchorEventId(in: rows)
+        olderRequestInFlight = true
+        Task { @MainActor in
+            let arrived = await loadOlder()
+            olderRequestInFlight = false
+            guard arrived, let anchorEventId else { return }
+            await Task.yield()
+            let refreshed = EventTimeline.rows(EventTimeline.group(visibleEvents(hidden)), expanded: expandedGroups)
+            guard let rowId = EventTimeline.rowId(showing: anchorEventId, in: refreshed) else { return }
+            proxy.scrollTo(rowId, anchor: .top)
+        }
+    }
+
+    /// Every row draws its own slice of the lifelines. The dash continues from
+    /// the slice above (`offset` is this slice's distance from the header
+    /// stub's top) — restarting it per row left uneven breaks wherever a row
+    /// height is not a whole number of dashes.
+    private func lifelineStyle(phase offset: Double) -> StrokeStyle {
+        StrokeStyle(
+            lineWidth: 1.5,
+            dash: [lifelineDash, lifelineDash],
+            dashPhase: offset.truncatingRemainder(dividingBy: lifelineDash * 2)
+        )
+    }
+
+    private func lifelines(_ lanes: [SequenceLane], height: Double, offset: Double) -> some View {
+        Canvas { context, _ in
+            for (index, lane) in lanes.enumerated() {
+                let x = laneX(index)
+                var lifeline = Path()
+                lifeline.move(to: CGPoint(x: x, y: 0))
+                lifeline.addLine(to: CGPoint(x: x, y: height))
+                context.stroke(
+                    lifeline,
+                    with: .color(providerColor(lane.session.provider).opacity(0.34)),
+                    style: lifelineStyle(phase: offset)
+                )
+            }
+        }
+        .frame(height: height)
+        .accessibilityHidden(true)
+    }
+
+    private func rowHeight(_ row: TimelineRow) -> Double {
+        row.parentGroupId == nil ? eventRowHeight : childRowHeight
+    }
+
+    /// One row of the time axis: its slice of every lifeline, the arrows
+    /// anchored on it, the time, and the node on its session's lane.
+    @ViewBuilder private func sequenceRow(
+        _ row: TimelineRow,
+        lanes: [SequenceLane],
+        laneIndex: [String: Int],
+        callEdge: SequenceCallEdge?,
+        responseEdge: SequenceCallEdge?,
+        width: Double,
+        lifelineOffset: Double
+    ) -> some View {
+        let height = rowHeight(row)
+        let y = height / 2
+        ZStack(alignment: .topLeading) {
+            lifelines(lanes, height: height, offset: lifelineOffset)
+            Canvas { context, _ in
+                // A call travels parent→child; a 응답 travels back, so its
+                // head lands on the parent lane and its stroke is dashed.
+                func drawArrow(_ edge: SequenceCallEdge, response: Bool) {
+                    let parentX = laneX(edge.parentIndex)
+                    let childX = laneX(edge.childIndex)
+                    let from = response ? childX : parentX
+                    let to = response ? parentX : childX
+                    let color = providerColor(edge.child.provider)
+                    var line = Path()
+                    line.move(to: CGPoint(x: from, y: y))
+                    line.addLine(to: CGPoint(x: to, y: y))
+                    context.stroke(
+                        line,
+                        with: .color(color.opacity(response ? 0.6 : 0.72)),
+                        style: response
+                            ? StrokeStyle(lineWidth: 1.4, dash: [4, 3])
+                            : StrokeStyle(lineWidth: 1.6)
+                    )
+                    context.stroke(
+                        arrowHead(at: CGPoint(x: to, y: y), pointingRight: to >= from),
+                        with: .color(color),
+                        lineWidth: 1.6
+                    )
+                }
+                if let callEdge { drawArrow(callEdge, response: false) }
+                if let responseEdge { drawArrow(responseEdge, response: true) }
+            }
+            .accessibilityHidden(true)
+
+            if row.parentGroupId == nil {
+                Text(shortTime(row.timestamp))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+                    .frame(width: timeWidth - 12, alignment: .trailing)
+                    .position(x: (timeWidth - 12) / 2, y: y)
+            }
+            if let callEdge { relationCapsule(callEdge, response: false, y: y) }
+            if let responseEdge { relationCapsule(responseEdge, response: true, y: y) }
+
+            if let index = laneIndex[row.sessionId] {
+                switch row.content {
+                case let .event(event):
+                    Button {
+                        select(event)
+                    } label: {
+                        SequenceEventNode(
+                            event: event,
+                            selected: selectedEventId == event.id,
+                            nested: row.parentGroupId != nil
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .frame(width: row.parentGroupId == nil ? eventNodeWidth : eventNodeWidth - 16, height: height - 12)
+                    .position(x: laneX(index) + (row.parentGroupId == nil ? 0 : 8), y: y)
+                case let .group(group, expanded):
+                    Button {
+                        toggle(group)
+                    } label: {
+                        SequenceToolGroupNode(
+                            group: group,
+                            expanded: expanded,
+                            selected: group.events.contains { $0.id == selectedEventId }
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .frame(width: eventNodeWidth, height: height - 12)
+                    .position(x: laneX(index), y: y)
+                }
+            }
+        }
+        .frame(width: width, height: height)
+    }
+
+    /// Expands or collapses a tool run; opening one also selects its
+    /// representative call so the inspector shows what it is doing.
+    private func toggle(_ group: ToolCallGroup) {
+        if expandedGroups.contains(group.id) {
+            expandedGroups.remove(group.id)
+        } else {
+            expandedGroups.insert(group.id)
+            select(group.representative)
+        }
+    }
+
+    /// Selecting an event also selects its session, so the selection strip
+    /// and the inspector describe the same thing. The event goes first: the
+    /// session change must find it already selected and keep it.
+    private func select(_ event: MonitorEvent) {
+        selectedEventId = event.id
+        if selectedSessionId != event.sessionId { selectedSessionId = event.sessionId }
     }
 
     private func laneX(_ index: Int) -> Double {
@@ -331,8 +578,12 @@ struct EventSequenceView: View {
         )
         let eventId = response ? edge.returnEventId : edge.eventId
         Button {
-            followLatestEvent = false
-            if let eventId { selectedEventId = eventId }
+            guard let eventId else { return }
+            if let event = events.first(where: { $0.id == eventId }) {
+                select(event)
+            } else {
+                selectedEventId = eventId
+            }
         } label: {
             Label(response ? "응답" : edge.childDepthLabel, systemImage: response ? "arrow.uturn.left" : "arrow.right")
                 .font(.caption2.weight(.medium))
@@ -352,9 +603,10 @@ struct EventSequenceView: View {
         .position(x: capsuleX, y: y)
         .help(
             response
-                ? "\(edge.child.provider) \(edge.child.model ?? "default") 응답 반환"
-                : "\(edge.child.provider) \(edge.child.model ?? "default") 호출"
+                ? "\(edge.child.withModel(edge.child.providerLabel, separator: " ")) 응답"
+                : "\(edge.child.withModel(edge.child.providerLabel, separator: " ")) \(edge.childDepthLabel)"
         )
+        .accessibilityLabel(response ? "응답" : edge.childDepthLabel)
     }
 
     /// A worker counts as returned once it is no longer working *and* a turn
@@ -371,20 +623,86 @@ struct EventSequenceView: View {
         return session.stopReason?.isEmpty == false
     }
 
+    /// Everything the timeline derives from its events, sessions and expanded
+    /// groups. Events arrive whole (one message per stream, one node per tool
+    /// call); runs of tool calls in one turn collapse into one representative row.
+    private func derive(base: SequenceLaneBase, hidden: Set<String>) -> SequenceDerived {
+        // A hidden lane takes its rows with it. Its subtree is hidden too, so
+        // every lane left keeps its parent; a call or 응답 arrow into a
+        // hidden lane has no child index and is simply not drawn.
+        let shown = visibleEvents(hidden)
+        let rows = EventTimeline.rows(EventTimeline.group(shown), expanded: expandedGroups)
+        let marks = sessionEventMarks(shown)
+        let lanes = base.nodes.compactMap { node -> SequenceLane? in
+            hidden.contains(node.session.sessionId) ? nil
+                : SequenceLane(session: node.session, parentSessionId: node.parentSessionId, depth: node.depth)
+        }
+        let laneIndex = lanes.enumerated().reduce(into: [String: Int]()) { result, item in
+            result[item.element.session.sessionId] = item.offset
+        }
+        let edges = lanes.compactMap { lane -> SequenceCallEdge? in
+            guard let parentId = lane.parentSessionId,
+                  let parentIndex = laneIndex[parentId],
+                  let childIndex = laneIndex[lane.session.sessionId] else { return nil }
+            let turnEndId = marks.lastTurnEndId[lane.session.sessionId]
+            return SequenceCallEdge(
+                parentIndex: parentIndex,
+                childIndex: childIndex,
+                child: lane.session,
+                childDepth: lane.depth,
+                eventId: marks.firstEventId[lane.session.sessionId],
+                returnEventId: turnEndId,
+                returned: hasReturned(lane.session, turnEndEventId: turnEndId)
+            )
+        }
+        // The whole point of a sequence diagram: a call/응답 arrow is drawn on
+        // the row of the event that triggered it — a call on the child's first
+        // event, a 응답 on its turn_end — so the line sits at the moment it
+        // happened on the shared time axis. A collapsed tool group carries the
+        // arrows of the calls it stands for.
+        let callAnchors = Dictionary(edges.compactMap { edge in edge.eventId.map { ($0, edge) } },
+                                     uniquingKeysWith: { first, _ in first })
+        let responseAnchors = Dictionary(edges.compactMap { edge in
+            edge.returned ? edge.returnEventId.map { ($0, edge) } : nil
+        }, uniquingKeysWith: { first, _ in first })
+        var rowOffsets: [String: Double] = [:]
+        rowOffsets.reserveCapacity(rows.count)
+        var offset = lifelineStubLength + sentinelHeight
+        for row in rows {
+            rowOffsets[row.id] = offset
+            offset += rowHeight(row)
+        }
+        return SequenceDerived(
+            rows: rows, lanes: lanes, laneIndex: laneIndex,
+            callAnchors: callAnchors, responseAnchors: responseAnchors,
+            rowOffsets: rowOffsets, rowsEndOffset: offset
+        )
+    }
+
+    /// One continuous timeline: every loaded row is in the same scroll, so
+    /// the lanes come from the loaded events themselves — a lane appears for
+    /// exactly the sessions that have a row somewhere in this scroll (plus
+    /// their parents), never for an unrelated older session. Keyed without
+    /// the selection or the fold, so neither re-walks the events.
+    private func deriveLanes() -> SequenceLaneBase {
+        let nodes = makeSequenceLanes(sessions: sessions, events: events)
+        return SequenceLaneBase(nodes: nodes, resting: MenuBarPipeline.restingLaneIds(nodes, selectedSessionId: nil))
+    }
+
     /// Earliest event id and newest `turn_end` id per session, in one grouping
     /// pass instead of a filter+sort of every event per edge.
-    private func sessionEventMarks() -> SequenceEventMarks {
+    private func sessionEventMarks(_ events: [MonitorEvent]) -> SequenceEventMarks {
         var earliest: [String: MonitorEvent] = [:]
         var latestTurnEnd: [String: MonitorEvent] = [:]
         for event in events {
             if let current = earliest[event.sessionId] {
-                if sequenceEventSort(event, current) { earliest[event.sessionId] = event }
+                if withinSessionEventOrder(event, current) { earliest[event.sessionId] = event }
             } else {
                 earliest[event.sessionId] = event
             }
-            guard event.type == "turn_end" else { continue }
+            guard event.kind == "turn_end" else { continue }
             if let current = latestTurnEnd[event.sessionId] {
-                if sequenceEventSort(current, event) { latestTurnEnd[event.sessionId] = event }
+                if withinSessionEventOrder(current, event) { latestTurnEnd[event.sessionId] = event }
             } else {
                 latestTurnEnd[event.sessionId] = event
             }
@@ -393,12 +711,6 @@ struct EventSequenceView: View {
             firstEventId: earliest.mapValues(\.id),
             lastTurnEndId: latestTurnEnd.mapValues(\.id)
         )
-    }
-
-    private func pageRangeLabel(for values: [SequenceEventEntry]) -> String {
-        guard !values.isEmpty else { return "0 / 0" }
-        let range = SequencePageLayout.range(totalCount: values.count, page: page, pageSize: pageSize)
-        return "\(range.lowerBound + 1)–\(range.upperBound) / \(values.count)"
     }
 }
 
@@ -420,12 +732,63 @@ private struct SequenceCallEdge: Identifiable {
     let returned: Bool
 
     var id: String { "call:\(child.sessionId)" }
-    var childDepthLabel: String { childDepth <= 1 ? "Agent 호출" : "Subagent 호출" }
+    /// Every lane below the Frontdoor is a Worker; depth only qualifies it.
+    var childDepthLabel: String { "Worker 호출" }
 }
 
 private struct SequenceEventMarks {
     let firstEventId: [String: String]
     let lastTurnEndId: [String: String]
+}
+
+private struct SequenceDerivedKey: Equatable {
+    let revision: Int
+    let count: Int
+    let firstId: String?
+    let lastId: String?
+    let expanded: Set<String>
+    let sessions: [GatewaySession]
+    let hidden: Set<String>
+}
+
+private struct SequenceLaneKey: Equatable {
+    let revision: Int
+    let count: Int
+    let firstId: String?
+    let lastId: String?
+    let sessions: [GatewaySession]
+}
+
+/// Every lane the loaded events call for, and the resting ones among them.
+private struct SequenceLaneBase {
+    let nodes: [SessionTree.Node]
+    let resting: Set<String>
+}
+
+private struct SequenceDerived {
+    let rows: [TimelineRow]
+    let lanes: [SequenceLane]
+    let laneIndex: [String: Int]
+    let callAnchors: [String: SequenceCallEdge]
+    let responseAnchors: [String: SequenceCallEdge]
+    /// Each row's distance from the header's lifeline stub, for the dash phase.
+    let rowOffsets: [String: Double]
+    let rowsEndOffset: Double
+}
+
+/// Holds the last derivation across body passes. A reference type in
+/// `@State`, so filling it during `body` publishes nothing.
+private final class SequenceDerivedCache<Key: Equatable, Value> {
+    private var key: Key?
+    private var cached: Value?
+
+    func value(for key: Key, make: () -> Value) -> Value {
+        if let cached, self.key == key { return cached }
+        let value = make()
+        self.key = key
+        cached = value
+        return value
+    }
 }
 
 /// Two-stroke arrowhead landing on `point`; `pointingRight` follows the travel
@@ -440,14 +803,6 @@ private func arrowHead(at point: CGPoint, pointingRight: Bool) -> Path {
     return arrow
 }
 
-private struct SequenceDiagramNode: Identifiable {
-    let laneIndex: Int
-    let event: MonitorEvent
-    let collapsedCount: Int
-
-    var id: String { event.id }
-}
-
 private struct SequenceLaneHeader: View {
     @EnvironmentObject private var settings: AppSettings
     let lane: SequenceLane
@@ -456,18 +811,37 @@ private struct SequenceLaneHeader: View {
     var body: some View {
         VStack(spacing: 3) {
             HStack(spacing: 5) {
-                Circle().fill(providerColor(lane.session.provider)).frame(width: 7, height: 7)
+                ProviderIcon(provider: lane.session.provider, size: 14)
                 Text(roleLabel)
                     .font(.caption.weight(.semibold))
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            Text(lane.session.provider.capitalized)
-                .font(.caption2.weight(.medium))
-            Text(lane.session.model ?? "default")
-                .font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            HStack(spacing: 4) {
+                // The session's own status, so a Worker waiting on a
+                // permission shows on its lane, not only in the sidebar.
+                Circle().fill(statusColor(lane.session.status)).frame(width: 6, height: 6)
+                Text(laneName)
+                    .font(.caption2.weight(.medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 120)
+                if lane.session.isWaitingForUser {
+                    Text(sessionStatusLabel(lane.session.status))
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(statusColor(lane.session.status))
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(laneName), \(sessionStatusLabel(lane.session.status))")
+            if let model = lane.session.model {
+                Text(model)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
         }
         .padding(7)
         .background(selected ? Color.accentColor.opacity(0.14) : Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 9))
@@ -477,140 +851,100 @@ private struct SequenceLaneHeader: View {
         )
     }
 
+    /// The role, like every lane: "Frontdoor", "Worker", "Worker · 2단".
     private var roleLabel: String {
-        if lane.session.isFrontdoorRecord { return frontdoorLabel }
-        if lane.depth <= 1 { return "Agent" }
-        return "Subagent L\(lane.depth)"
+        if lane.session.isFrontdoorRecord { return "Frontdoor" }
+        if lane.depth <= 1 { return "Worker" }
+        return "Worker · \(lane.depth)단"
     }
 
-    /// The user's chosen name when set, otherwise the working folder — stable
-    /// and meaningful — falling back to a designated title only when there is
-    /// no folder, and never to the transient tool-call text a local session
-    /// parks in its title.
-    private var frontdoorLabel: String {
-        settings.frontdoorName(id: lane.session.openerInstanceId ?? "", auto: autoFrontdoorLabel)
-    }
-
-    private var autoFrontdoorLabel: String {
-        let folder = (lane.session.cwd as NSString).lastPathComponent
-        if !folder.isEmpty, folder != "/" { return folder }
-        if let title = lane.session.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
-            let lower = title.lowercased()
-            if !lower.contains("tool_call"), !lower.contains("function_call"), !title.contains("/") { return title }
+    /// The user's name for the session, else for its Frontdoor, else the
+    /// automatic session name (which skips tool-call titles).
+    private var laneName: String {
+        if let name = settings.sessionNickname(id: lane.session.sessionId) { return name }
+        if lane.session.isFrontdoorRecord, let opener = lane.session.openerInstanceId,
+           settings.hasFrontdoorNickname(id: opener) {
+            return settings.frontdoorName(id: opener, auto: lane.session.displayName)
         }
-        return "Frontdoor"
+        return lane.session.displayName
     }
 }
 
 private struct SequenceEventNode: View {
     let event: MonitorEvent
-    let collapsedCount: Int
     let selected: Bool
+    /// A call shown under its expanded tool group.
+    var nested = false
 
     var body: some View {
         HStack(spacing: 7) {
-            Image(systemName: eventSymbol(event.type))
-                .foregroundStyle(eventColor(event.type))
-                .frame(width: 15)
-            Text(event.type == "agent_message_chunk" ? "agent response" : event.type.replacingOccurrences(of: "_", with: " "))
-                .font(.caption.weight(.semibold))
+            // A tool call is a compact header — status glyph plus name and
+            // the head of its argument; its output stays in the inspector.
+            if event.kind == "tool_call", event.isInFlight {
+                ProgressView().controlSize(.mini).frame(width: 15)
+            } else {
+                Image(systemName: eventSymbol(event))
+                    .foregroundStyle(eventColor(event))
+                    .frame(width: 15)
+            }
+            if event.kind == "tool_call", event.isHookObserved {
+                HookMarker()
+            }
+            Text(event.headline)
+                .font(nested ? .caption2 : .caption.weight(.semibold))
+                .foregroundStyle(event.kind == "permission_request" ? eventColor(event) : .primary)
                 .lineLimit(1)
-            if collapsedCount > 1 {
-                Text("×\(collapsedCount)")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                .truncationMode(.tail)
+            if event.kind != "tool_call", event.isInFlight {
+                // A request still waiting on its answer.
+                ProgressView().controlSize(.mini)
             }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 5)
+        .padding(.vertical, nested ? 3 : 5)
         .background(selected ? Color.accentColor.opacity(0.16) : Color(nsColor: .windowBackgroundColor), in: Capsule())
-        .overlay(Capsule().stroke(selected ? Color.accentColor : Color.secondary.opacity(0.2)))
-        .help(event.summary)
+        .overlay(Capsule().stroke(selected ? Color.accentColor : Color.secondary.opacity(nested ? 0.12 : 0.2)))
+        .help(event.kind == "tool_call" ? (event.title ?? event.summary) : event.summary)
     }
 }
 
-private struct SequenceEventEntry {
-    var event: MonitorEvent
-    var count: Int
-}
+/// A run of tool calls as one node: count, the representative call (the
+/// running one, else the latest), failures, and a chevron to expand.
+private struct SequenceToolGroupNode: View {
+    let group: ToolCallGroup
+    let expanded: Bool
+    let selected: Bool
 
-private func collapseSequenceEvents(_ events: [MonitorEvent]) -> [SequenceEventEntry] {
-    var result: [SequenceEventEntry] = []
-    result.reserveCapacity(events.count)
-    for event in events {
-        // Thought chunks stream in runs exactly like message chunks now that
-        // delegated workers request thinking output.
-        if event.type == "agent_message_chunk" || event.type == "agent_thought_chunk",
-           let last = result.last,
-           last.event.type == event.type,
-           last.event.sessionId == event.sessionId,
-           last.event.turnId == event.turnId {
-            result[result.count - 1] = SequenceEventEntry(event: event, count: last.count + 1)
-        } else {
-            result.append(SequenceEventEntry(event: event, count: 1))
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 9)
+            if group.isRunning {
+                ProgressView().controlSize(.mini)
+            } else {
+                Image(systemName: "wrench.and.screwdriver")
+                    .foregroundStyle(group.failedCount > 0 ? .red : .cyan)
+            }
+            if group.isHookObserved { HookMarker() }
+            Text(group.summary(titleLimit: 18))
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 0)
         }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(selected ? Color.accentColor.opacity(0.12) : Color(nsColor: .windowBackgroundColor), in: Capsule())
+        .overlay(Capsule().stroke(selected ? Color.accentColor : Color.cyan.opacity(0.35)))
+        .help(group.summary(titleLimit: 60) + (expanded ? " · 도구 호출 \(group.events.count)개 접기" : " · 도구 호출 \(group.events.count)개 펼치기"))
     }
-    return result
 }
 
-private func makeSequenceLanes(sessions: [GatewaySession], events: [MonitorEvent]) -> [SequenceLane] {
-    let byId = sessions.reduce(into: [String: GatewaySession]()) { result, session in
-        result[session.sessionId] = session
-    }
-    let rootsByOpener = sessions.filter(\.isFrontdoorRecord).reduce(into: [String: GatewaySession]()) { result, session in
-        guard let opener = session.openerInstanceId else { return }
-        result[opener] = session
-    }
-
-    func parentId(for session: GatewaySession) -> String? {
-        if let explicit = session.parentSessionId, byId[explicit] != nil { return explicit }
-        guard !session.isFrontdoorRecord,
-              let opener = session.openerInstanceId,
-              let root = rootsByOpener[opener],
-              root.sessionId != session.sessionId else { return nil }
-        return root.sessionId
-    }
-
-    var included = Set(events.map(\.sessionId))
-    var pending = Array(included)
-    while let id = pending.popLast(), let session = byId[id], let parent = parentId(for: session) {
-        if included.insert(parent).inserted { pending.append(parent) }
-    }
-
-    let members = included.compactMap { byId[$0] }
-    let memberIds = Set(members.map(\.sessionId))
-    var children: [String: [GatewaySession]] = [:]
-    var roots: [GatewaySession] = []
-    for session in members {
-        if let parent = parentId(for: session), memberIds.contains(parent) {
-            children[parent, default: []].append(session)
-        } else {
-            roots.append(session)
-        }
-    }
-
-    let sessionOrder: (GatewaySession, GatewaySession) -> Bool = {
-        ($0.createdAt ?? "") < ($1.createdAt ?? "")
-    }
-    var lanes: [SequenceLane] = []
-    var visited = Set<String>()
-    func append(_ session: GatewaySession, depth: Int, parent: String?) {
-        guard visited.insert(session.sessionId).inserted else { return }
-        lanes.append(SequenceLane(session: session, parentSessionId: parent, depth: depth))
-        for child in (children[session.sessionId] ?? []).sorted(by: sessionOrder) {
-            append(child, depth: depth + 1, parent: session.sessionId)
-        }
-    }
-    for root in roots.sorted(by: sessionOrder) { append(root, depth: 0, parent: nil) }
-    for session in members.sorted(by: sessionOrder) where !visited.contains(session.sessionId) {
-        append(session, depth: 0, parent: nil)
-    }
-    return lanes
-}
-
-// Delegates to the canonical within-session ordering in Models.swift; the
-// call sites here compare events of one session at a time.
-private func sequenceEventSort(_ left: MonitorEvent, _ right: MonitorEvent) -> Bool {
-    withinSessionEventOrder(left, right)
+/// Lanes for the sessions that have an event in view, plus their parents,
+/// in `SessionTree` order — the same tree the menu bar pipeline draws.
+private func makeSequenceLanes(sessions: [GatewaySession], events: [MonitorEvent]) -> [SessionTree.Node] {
+    SessionTree.order(SessionTree.withAncestors(of: Set(events.map(\.sessionId)), in: sessions))
 }

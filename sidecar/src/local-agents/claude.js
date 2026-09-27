@@ -12,6 +12,10 @@ import { reversedRecords } from "./jsonl.js";
 import { externalParent, gatewayResponseLinks, linkKey } from "./parent-links.js";
 
 const MAX_SCANNED_RECORDS = 120;
+// The link-recovery pass reads at most this much of a transcript's tail. A
+// worker opened further back than that is still known from the worker
+// ledger (MonitorState.formerWorkerIds), which survives restarts.
+const LINK_SCAN_BYTES = 16 * 1024 * 1024;
 /** A running Claude turn goes stale fast; a finished one lingers briefly. */
 const RUNNING_LIFETIME_SECONDS = 30;
 
@@ -26,6 +30,8 @@ export function claudeSignal(record) {
   if (kind === "system" && record?.subtype === "turn_duration") return ["ready", "turn_duration"];
   if (kind === "assistant") {
     if (message?.stop_reason === "end_turn") return ["ready", "end_turn"];
+    // Distinguished so the scanner can keep a long-running tool call alive.
+    if (contentTypes.has("tool_use")) return ["running", "tool_use"];
     if (contentTypes.has("thinking") || contentTypes.has("text") || contentTypes.has("tool_use")) {
       return ["running", "assistant"];
     }
@@ -50,17 +56,18 @@ export function claudeTimestamp(record, fallback) {
  * by `isSidechain`/`agentId`. Keying their signal by `agentId` (with the
  * parent recorded) keeps them from overwriting the parent session's state.
  *
- * `collectAllLinks` scans the whole file for gateway links instead of stopping
- * at the recent-record budget. The in-memory parents map dies with the
- * process, and on the first read of a transcript the link records may sit far
- * behind a long turn — without a full pass, every worker opened before a
- * monitor restart would come back as a parentless false Frontdoor.
+ * `collectAllLinks` scans far past the recent-record budget for gateway
+ * links. The in-memory parents map dies with the process, and on the first
+ * read of a transcript the link records may sit far behind a long turn —
+ * without this pass, every worker opened before a monitor restart would come
+ * back as a parentless false Frontdoor. The pass stops after LINK_SCAN_BYTES
+ * of the file's tail so a restart does not parse every large transcript.
  */
 export async function claudeTranscriptSignal(path, modified, stem, { collectAllLinks = false } = {}) {
   let signal = null;
   const links = [];
   let scanned = 0;
-  for await (const record of reversedRecords(path)) {
+  for await (const record of reversedRecords(path, collectAllLinks ? { maxBytes: LINK_SCAN_BYTES } : {})) {
     scanned += 1;
     const structured = record?.mcpMeta?.structuredContent;
     if (structured && typeof structured === "object" && !Array.isArray(structured)) {
@@ -208,7 +215,7 @@ export async function detectClaudeSessions(root, now, readyAfter, staleAfter, pa
     }
   }
 
-  for (const [, entry] of scanned) {
+  for (const [path, entry] of scanned) {
     const signal = entry.signal;
     if (!signal) continue;
     if (parents) {
@@ -219,19 +226,35 @@ export async function detectClaudeSessions(root, now, readyAfter, staleAfter, pa
         if (parents.get(key)?.[0] !== signal.session) parents.set(key, [signal.session, signal.time]);
       }
     }
-    const lifetime = signal.state === "ready" ? readyAfter : Math.min(staleAfter, RUNNING_LIFETIME_SECONDS);
+    // A tool still running (a build, a test run, a pending permission prompt)
+    // writes nothing until it returns; that silence is not the session ending.
+    // A turn that went silent without an end marker (a crash, a closed
+    // terminal) is not still running; it is kept as idle like a finished one.
+    let state = signal.state;
+    let event = signal.event;
+    if (state === "running" && event !== "tool_use" && now - signal.time > RUNNING_LIFETIME_SECONDS) {
+      state = "ready";
+      event = "silent";
+    }
+    const lifetime = state === "ready" ? readyAfter : staleAfter;
     if (now - signal.time <= lifetime) {
       states[signal.session] = {
         provider: "claude",
         session: signal.session,
-        state: signal.state,
-        event: signal.event,
+        state,
+        event,
         time: signal.time,
         pid: null,
         parent: signal.parent ?? externalParent(parents ?? new Map(), "claude", signal.session),
+        // A Task sub-agent lives in its parent's own transcript, so the
+        // parent's provider is proven even when the parent (a finished
+        // `claude -p`) has already left the scan.
+        ...(signal.parent ? { parent_provider: "claude" } : {}),
         engine: "claude-cli",
         cwd: signal.cwd,
-        link_session: signal.session
+        link_session: signal.session,
+        transcript: path,
+        agent_id: signal.parent ? signal.session : null
       };
     }
   }

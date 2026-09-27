@@ -28,6 +28,11 @@ final class PetController {
     private var logHandle: FileHandle?
     /// Monotonic for the app process's lifetime; never reset by start/stop.
     private var sequence = 0
+    /// Every contract write goes through this one serial queue, so a
+    /// background update can never land after (and roll back) a newer one.
+    private let writeQueue = DispatchQueue(label: "agenlynk.pet.contract-writes", qos: .utility)
+    /// `pet.log` is rotated to `pet.log.1` at start once it passes this.
+    static let logRotationBytes = 5 * 1_024 * 1_024
 
     /// `stateDirectory` is injectable so boundary tests can observe the real
     /// files and the real child process without touching Application Support.
@@ -66,6 +71,7 @@ final class PetController {
 
         try write(projection)
         let logURL = stateDirectory.appendingPathComponent("pet.log")
+        Self.rotateLogIfNeeded(logURL, fileManager: fileManager)
         if !fileManager.fileExists(atPath: logURL.path) {
             fileManager.createFile(atPath: logURL.path, contents: nil)
         }
@@ -107,6 +113,41 @@ final class PetController {
         try write(projection)
     }
 
+    /// `update` without blocking the main actor: the envelopes are encoded
+    /// and written on the serial write queue; `completion` reports the
+    /// outcome back on the main actor (nil on success).
+    func scheduleUpdate(_ projection: PetActivityProjection, completion: @escaping @MainActor (Error?) -> Void) {
+        let job = nextWriteJob(projection)
+        writeQueue.async {
+            let failure: Error?
+            do {
+                try job.run()
+                failure = nil
+            } catch {
+                failure = error
+            }
+            Task { @MainActor in completion(failure) }
+        }
+    }
+
+    /// Waits until every scheduled write has landed (tests, shutdown).
+    func waitForPendingWrites() {
+        writeQueue.sync {}
+    }
+
+    /// Keeps the renderer's log bounded: past `logRotationBytes` the current
+    /// log becomes `pet.log.1` (replacing an older backup) and a new one starts.
+    static func rotateLogIfNeeded(_ logURL: URL, fileManager: FileManager = .default) {
+        guard let size = (try? fileManager.attributesOfItem(atPath: logURL.path)[.size] as? NSNumber)?.intValue,
+              size > logRotationBytes else { return }
+        let backup = logURL.appendingPathExtension("1")
+        try? fileManager.removeItem(at: backup)
+        if (try? fileManager.moveItem(at: logURL, to: backup)) == nil {
+            // Could not move it aside: start over rather than grow forever.
+            try? fileManager.removeItem(at: logURL)
+        }
+    }
+
     func stop() {
         guard let process else {
             try? logHandle?.close()
@@ -130,23 +171,56 @@ final class PetController {
 
     /// Both files are derived from one projection/update so they always
     /// describe the same moment, and share the same monotonic sequence.
+    /// Synchronous, but still through the write queue to keep the order.
     private func write(_ projection: PetActivityProjection) throws {
-        try fileManager.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
-        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: stateDirectory.path)
-        sequence += 1
-        let generatedAt = Date()
-        try writeAtomically(PetStateEnvelope.make(projection: projection, sequence: sequence, generatedAt: generatedAt), to: stateFileURL)
-        try writeAtomically(PetActionsEnvelope.make(projection: projection, sequence: sequence, generatedAt: generatedAt), to: actionsFileURL)
+        let job = nextWriteJob(projection)
+        var failure: Error?
+        writeQueue.sync {
+            do { try job.run() } catch { failure = error }
+        }
+        if let failure { throw failure }
     }
 
-    private func writeAtomically(_ value: some Encodable, to url: URL) throws {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        try encoder.encode(value).write(to: url, options: .atomic)
-        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    /// Claims the next sequence number on the main actor; the job itself
+    /// touches no actor state.
+    private func nextWriteJob(_ projection: PetActivityProjection) -> PetContractWrite {
+        sequence += 1
+        return PetContractWrite(
+            projection: projection,
+            sequence: sequence,
+            generatedAt: Date(),
+            directory: stateDirectory,
+            stateFileURL: stateFileURL,
+            actionsFileURL: actionsFileURL
+        )
     }
 
     deinit {
         if let process, process.isRunning { process.terminate() }
+    }
+}
+
+/// One update of the two contract files, runnable on any thread.
+private struct PetContractWrite: Sendable {
+    let projection: PetActivityProjection
+    let sequence: Int
+    let generatedAt: Date
+    let directory: URL
+    let stateFileURL: URL
+    let actionsFileURL: URL
+
+    func run() throws {
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        try write(PetStateEnvelope.make(projection: projection, sequence: sequence, generatedAt: generatedAt), to: stateFileURL)
+        try write(PetActionsEnvelope.make(projection: projection, sequence: sequence, generatedAt: generatedAt), to: actionsFileURL)
+    }
+
+    private func write(_ value: some Encodable, to url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(value).write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 }

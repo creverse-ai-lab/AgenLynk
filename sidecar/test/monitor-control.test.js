@@ -15,7 +15,7 @@ test("restartBlockers matches the shared blocker contract the Settings UI also i
 });
 
 test("restartBlockedError reports the stable monitor_restart_blocked code and blocker detail", () => {
-  const error = restartBlockedError(["진행 중 세션 1개", "미응답 Inbox 1개"]);
+  const error = restartBlockedError(["진행 중 세션 1개", "미응답 요청 1개"]);
   assert.equal(error.statusCode, 409);
   assert.equal(error.code, "monitor_restart_blocked");
   assert.match(error.message, /진행 중 세션 1개/);

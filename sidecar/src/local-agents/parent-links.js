@@ -15,11 +15,6 @@ export function linkKey(provider, session) {
   return `${provider}\u0000${session}`;
 }
 
-export function splitLinkKey(key) {
-  const [provider, session] = key.split("\u0000");
-  return { provider, session };
-}
-
 /**
  * (provider, acpSessionId) pairs from an unescaped record dump. A match only
  * counts when a provider and an `"ok":true` marker sit within the same window,

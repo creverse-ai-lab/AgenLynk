@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -28,6 +28,8 @@ const token = "package-smoke-control-token-123456789";
 const rootId = "package-smoke-root";
 await writeFile(installState, JSON.stringify({ version: 1, identity: { token, rootId }, managedMcp: {} }));
 
+const pinnedGateway = JSON.parse(await readFile(new URL("../gateway.lock.json", import.meta.url), "utf8")).version;
+
 const common = {
   ...process.env,
   ACP_GATEWAY_SOCKET: socketPath,
@@ -39,7 +41,10 @@ const common = {
   ACP_GATEWAY_NODE: node,
   ACP_GATEWAY_CLIENT_ENTRYPOINT: join(gateway, "gateway-client/index.js"),
   ACP_GATEWAY_ACTIVE_ROOT: gateway,
-  ACP_GATEWAY_DISABLE_DYNAMIC_PROVIDERS: "1"
+  ACP_GATEWAY_DISABLE_DYNAMIC_PROVIDERS: "1",
+  // The packaged sidecar must not write the user's monitor history.
+  ACP_GATEWAY_MONITOR_DB: join(temporary, "monitor.db"),
+  AGENLYNK_HOME: join(temporary, "agenlynk")
 };
 
 let daemon;
@@ -59,14 +64,14 @@ try {
   });
   const ready = await waitForReady(monitor);
   assert.equal(ready.kind, "monitor_ready");
-  assert.equal(ready.sidecarVersion, "0.4.1");
+  assert.equal(ready.sidecarVersion, "0.5.0");
   const headers = { authorization: `Bearer ${ready.apiToken}` };
   const meta = await waitFor(async () => {
     const response = await fetch(`${ready.url}/api/meta`, { headers });
     const value = await response.json();
     return value.capabilities?.gatewayCompatibility?.status === "supported" ? value : false;
-  }, "sidecar did not decode the Gateway 1.4.0 setup contract");
-  assert.equal(meta.gatewayIdentity.gatewayVersion, "1.4.0");
+  }, `sidecar did not decode the Gateway ${pinnedGateway} setup contract`);
+  assert.equal(meta.gatewayIdentity.gatewayVersion, pinnedGateway);
 
   const firstSnapshot = await fetch(`${ready.url}/api/snapshot`, { headers });
   assert.equal(firstSnapshot.status, 200);
@@ -86,7 +91,7 @@ try {
   assert.equal(stream.status, 200);
   assert.match(stream.headers.get("content-type") ?? "", /^text\/event-stream/);
   streamAbort.abort();
-  process.stdout.write(`package smoke: Gateway 1.4.0 setup/snapshot/SSE and sidecar isolated roots verified (${gateway}, ${sidecar})\n`);
+  process.stdout.write(`package smoke: Gateway ${pinnedGateway} setup/snapshot/SSE and sidecar isolated roots verified (${gateway}, ${sidecar})\n`);
 } finally {
   for (const child of [monitor, daemon]) {
     if (!child || child.exitCode != null) continue;

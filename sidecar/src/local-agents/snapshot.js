@@ -52,12 +52,16 @@ export async function snapshotSessions(states, database = null) {
   const workdirs = new Map();
   const subagents = new Set();
   const spawnParents = new Map();
+  const headless = new Set();
+  const titles = new Map();
   for (const [databasePath, ids] of idsByDatabase) {
     const facts = await readThreadFacts(databasePath, ids);
     for (const [id, value] of facts.engines) engines.set(id, value);
     for (const [id, value] of facts.workdirs) workdirs.set(id, value);
     for (const id of facts.subagents) subagents.add(id);
     for (const [id, value] of facts.parents) spawnParents.set(id, value);
+    for (const id of facts.headless ?? []) headless.add(id);
+    for (const [id, value] of facts.titles ?? []) titles.set(id, value);
   }
 
   // Codex's auto-review threads are machinery, not work someone started, so
@@ -65,7 +69,7 @@ export async function snapshotSessions(states, database = null) {
   const activeByCwd = new Map();
   for (const item of sessions) {
     if (item.provider !== "codex") continue;
-    if (item.state !== "running" && item.state !== "needs_input") continue;
+    if (item.state !== "running" && item.state !== "needs_input" && item.state !== "needs_permission") continue;
     if (engines.get(item.session) === "codex-auto-review") continue;
     const cwd = workdirs.get(item.session);
     if (!cwd) continue;
@@ -75,8 +79,23 @@ export async function snapshotSessions(states, database = null) {
 
   for (const item of sessions) {
     if (item.provider !== "codex") continue;
-    item.parent = item.parent || spawnParents.get(item.session) || null;
+    const spawnParent = spawnParents.get(item.session);
+    item.parent = item.parent || spawnParent || null;
+    // A spawn edge in Codex's own thread DB proves the parent is a Codex thread.
+    if (spawnParent && item.parent === spawnParent && !item.parent_provider) item.parent_provider = "codex";
+    // Process lineage (a `codex exec` from another agent's shell) only
+    // fills in when nothing proven names a parent.
+    const lineage = item.lineage_parent;
+    delete item.lineage_parent;
+    if (!item.parent && lineage?.session) {
+      item.parent = !known.has(lineage.session) && byLink.has(lineage.session) ? byLink.get(lineage.session) : lineage.session;
+      item.parent_provider = lineage.provider;
+      item.parent_source = "lineage";
+    }
     item.engine = engines.get(item.session) || item.engine;
+    if (headless.has(item.session)) item.headless = true;
+    // A spawned thread's task label (its transcript carries no readable prompt).
+    if (!item.task && titles.has(item.session)) item.task = titles.get(item.session);
     const cwd = workdirs.get(item.session);
     if (cwd) item.cwd = cwd;
   }

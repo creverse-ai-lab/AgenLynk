@@ -22,7 +22,9 @@ test("Gateway settings expose every safe runtime option without secrets", async 
       agentUpdates: { autoUpdate: true, notifications: true }
     }));
     const snapshot = gatewaySettingsSnapshot({ statePath, env: {} });
-    assert.equal(snapshot.options.length, 25);
+    assert.equal(snapshot.options.length, 27);
+    assert.equal(snapshot.options.find((item) => item.id === "localSessionRetentionMs").currentValue, 30 * 60_000,
+      "idle local sessions stay listed for the Gateway's idle-unload window by default");
     assert.equal(snapshot.options.length, GATEWAY_SETTING_DEFINITIONS.length);
     assert.equal(snapshot.options.find((item) => item.id === "maxInlineResultBytes").currentValue, 65_536);
     // Workers stay thought-visible unless an operator turns it off: the adapter
@@ -156,6 +158,43 @@ test("Gateway settings cannot create an install state before bootstrap", async (
       /must be installed/
     );
     await assert.rejects(readFile(statePath, "utf8"), { code: "ENOENT" });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Korean setting text never shows a raw status word", () => {
+  for (const definition of GATEWAY_SETTING_DEFINITIONS) {
+    assert.doesNotMatch(definition.descriptionKo, /\((idle|running|waiting|ready|ended|failed)\)/i,
+      `${definition.id} must use the Korean status name alone`);
+  }
+});
+
+test("Korean setting text uses the policy terms, not Inbox or Task", () => {
+  for (const definition of GATEWAY_SETTING_DEFINITIONS) {
+    assert.doesNotMatch(definition.labelKo + definition.descriptionKo, /Inbox|Task/,
+      `${definition.id} must say 미응답 요청 / 태스크 in Korean`);
+  }
+  const byId = Object.fromEntries(GATEWAY_SETTING_DEFINITIONS.map((definition) => [definition.id, definition]));
+  assert.equal(byId.inboxRetentionMs.labelKo, "미응답 요청 보존 기간");
+  assert.equal(byId.inboxRetentionMs.descriptionKo, "응답이 끝난 미응답 요청을 보관하는 기간입니다.");
+  assert.match(byId.workerSubagentTranscript.descriptionKo,
+    /^Claude Worker가 내부에서 실행한 서브에이전트의 전체 기록\(메시지·도구 호출·사고 과정\)을 수집합니다\./);
+  // Gateway session retention and the monitor's own history are separate stores.
+  assert.match(byId.sessionRetentionMs.descriptionKo,
+    /^Gateway가 완료된 세션을 보관하는 기간입니다\. 모니터 타임라인\(monitor\.db\)과는 별개입니다\./);
+});
+
+test("a monitor setting is not pending when the running sidecar booted with it", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-gateway-settings-active-"));
+  const statePath = join(directory, "install.json");
+  try {
+    await writeFile(statePath, JSON.stringify({ version: 1, managedMcp: {}, gatewayConfig: { monitor: { localSessionRetentionMs: 5 * 60_000 } } }));
+    const booted = resolveGatewaySettings({ statePath, env: {} });
+    const snapshot = gatewaySettingsSnapshot({ statePath, env: {}, activeValues: { localSessionRetentionMs: booted.localSessionRetentionMs } });
+    const option = snapshot.options.find((item) => item.id === "localSessionRetentionMs");
+    assert.equal(option.pending, false);
+    assert.equal(option.currentValue, 5 * 60_000);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

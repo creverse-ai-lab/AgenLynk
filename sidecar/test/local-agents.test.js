@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { detectClaudeSessions } from "../src/local-agents/claude.js";
 import { discover, poll, prune } from "../src/local-agents/codex.js";
@@ -25,6 +25,8 @@ import {
 import { signalFor, signalWithApprovals } from "../src/local-agents/signals.js";
 import { snapshotSessions, stateRecord } from "../src/local-agents/snapshot.js";
 import { withReadOnlyDatabase } from "../src/local-agents/sqlite.js";
+import { subagentLabel } from "../src/local-agents/thread-db.js";
+import { projectLocalSnapshot } from "../src/local-monitor.js";
 
 // These mirror the Python watcher's self_test so the port can be checked
 // against the behaviour it replaces rather than against itself.
@@ -81,7 +83,7 @@ test("an unresolved approval overrides the transcript state until it is answered
         input: 'sandbox_permissions: "require_escalated"'
       }
     }, pending),
-    ["needs_input", "approval/pending"]
+    ["needs_permission", "approval/pending"]
   );
   assert.deepEqual(
     signalWithApprovals({
@@ -98,7 +100,7 @@ test("an unresolved approval overrides the transcript state until it is answered
       type: "event_msg",
       payload: { result: { events: [{ type: "permission_request", requestId: 7 }] } }
     }, pending),
-    ["needs_input", "approval/pending"]
+    ["needs_permission", "approval/pending"]
   );
   assert.deepEqual(
     signalWithApprovals({
@@ -214,7 +216,7 @@ test("a grok CLI session adopts the gateway workers its own log proves it opened
   });
 });
 
-test("a grok process is only reported while its transcript shows an open turn", async () => {
+test("an interactive grok is running during a turn and ready between turns", async () => {
   await withTempDirectory(async (root) => {
     const active = join(root, "%2Fwork", "grok-session", "events.jsonl");
     await mkdir(join(root, "%2Fwork", "grok-session"), { recursive: true });
@@ -233,7 +235,11 @@ test("a grok process is only reported while its transcript shows an open turn", 
     const parents = new Map([[linkKey("grok", "grok-session"), ["one", 100]]]);
 
     const states = await cliProcessStates(processes, eventPaths, 100, {}, parents);
-    assert.deepEqual(Object.keys(states), ["grok:grok-session"]);
+    const endedKey = `grok:${basename(dirname(ended))}`;
+    assert.deepEqual(Object.keys(states).sort(), ["grok:grok-session", endedKey].sort());
+    assert.equal(states["grok:grok-session"].state, "running");
+    assert.equal(states[endedKey].state, "ready", "a live interactive grok between turns waits for its user");
+    assert.equal(states["grok:grok-session"].transcript, dirname(active));
     assert.equal(states["grok:grok-session"].session, "grok-session");
     assert.equal(states["grok:grok-session"].parent, "one");
     assert.equal(states["grok:grok-session"].cwd, "/work", "the session directory encodes the cwd");
@@ -464,6 +470,9 @@ test("claude subagent records project as child sessions instead of overwriting t
     assert.equal(detected["main-session"].state, "running");
     assert.equal(detected["main-session"].parent, null, "the parent stays a root");
     assert.equal(detected.abc.parent, "main-session", "the subagent hangs under its parent session");
+    assert.equal(detected.abc.parent_provider, "claude",
+      "its parent's provider is proven, so the link holds after a finished parent leaves the scan");
+    assert.equal(detected["main-session"].parent_provider, undefined);
   });
 });
 
@@ -650,6 +659,48 @@ test("codex thread database supplies engine, cwd, spawn edges and sub-agent pare
   });
 });
 
+test("a codex sub-agent is titled from its spawn task, not left nameless", async () => {
+  await withTempDirectory(async (root) => {
+    const database = join(root, "state.sqlite");
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(database);
+    // The columns Codex 0.157's state_5.sqlite really has for this.
+    db.exec("CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT)");
+    db.exec(`CREATE TABLE threads (id TEXT, model TEXT, model_provider TEXT, cwd TEXT, thread_source TEXT,
+      source TEXT, title TEXT NOT NULL DEFAULT '', first_user_message TEXT NOT NULL DEFAULT '',
+      agent_nickname TEXT, agent_role TEXT, agent_path TEXT, name TEXT)`);
+    db.prepare("INSERT INTO thread_spawn_edges VALUES (?, ?)").run("parent", "child");
+    const insert = db.prepare(`INSERT INTO threads (id, model, cwd, thread_source, source, title, first_user_message,
+      agent_nickname, agent_role, agent_path, name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    insert.run("parent", "gpt", "/work", "user", "exec", "spawn a sub-agent to read a.txt", "spawn a sub-agent to read a.txt", null, null, null, null);
+    insert.run("child", "gpt", "/work", "subagent", '{"subagent":{}}', "", "", "Kepler", null, "/root/read_a", null);
+    insert.run("named", "gpt", "/work", "subagent", '{"subagent":{}}', "", "", "Ada", "explorer", "/root/scan", "Scan the\nrepo");
+    db.close();
+
+    const now = Date.now() / 1000;
+    const raw = await snapshotSessions({
+      parent: stateRecord("parent", "running", "task_started", now),
+      child: stateRecord("child", "running", "task_started", now),
+      named: stateRecord("named", "ready", "task_complete", now)
+    }, database);
+    const find = (id) => raw.find((item) => item.session === id);
+    assert.equal(find("child").parent, "parent");
+    assert.equal(find("child").task, "read_a (Kepler)");
+    assert.equal(find("parent").task, undefined, "only spawned threads take a label from the database");
+
+    const { sessions } = projectLocalSnapshot({ sessions: raw });
+    const titled = (id) => sessions.find((session) => session.localSessionId === id).title;
+    assert.equal(titled("child"), "read_a (Kepler)");
+    assert.equal(titled("named"), "Scan the repo", "a thread's own name wins, cut to one line");
+  });
+  assert.equal(subagentLabel({ agent_path: "/root/a/b", agent_nickname: "N", agent_role: "worker" }), "b (N, worker)");
+  assert.equal(subagentLabel({ agent_nickname: "N" }), "N");
+  assert.equal(subagentLabel({ first_user_message: "  " }), null);
+  const long = subagentLabel({ title: "x".repeat(200) });
+  const [projected] = projectLocalSnapshot({ sessions: [{ provider: "codex", session: "s", state: "idle", time: 1, task: long }] }).sessions;
+  assert.equal(projected.title.length, 60, "a database title is bounded like any other");
+});
+
 test("the same-cwd fallback never re-parents an orchestrator under its own worker", async () => {
   await withTempDirectory(async (root) => {
     const database = join(root, "state.sqlite");
@@ -717,6 +768,44 @@ test("reversed reading survives multibyte characters straddling chunk boundaries
     for await (const record of reversedRecords(path)) seen.push(record.index);
     assert.equal(seen.length, 200, "no record may be dropped by a boundary-corrupted decode");
     assert.deepEqual(seen, [...Array(200).keys()].reverse(), "records arrive newest-first, all intact");
+  });
+});
+
+test("a tail-adopted codex transcript keeps the real thread id without session_meta", async () => {
+  await withTempDirectory(async (root) => {
+    const sessions = join(root, "sessions");
+    await mkdir(sessions, { recursive: true });
+    const threadId = "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001";
+    const fromDatabase = join(sessions, "rollout-2026-09-26T10-00-00-from-db.jsonl");
+    const fromName = join(sessions, `rollout-2026-09-26T10-00-00-${threadId}.jsonl`);
+    // > 12MB so adoption starts from the tail and never sees session_meta.
+    const filler = JSON.stringify({ type: "response_item", payload: { type: "message", text: "x".repeat(1024) } });
+    const body = [
+      '{"type":"session_meta","payload":{"id":"meta-id-unreachable"}}',
+      ...Array.from({ length: 13 * 1024 }, () => filler),
+      '{"type":"event_msg","payload":{"type":"task_started"}}'
+    ].join("\n") + "\n";
+    await writeFile(fromDatabase, body);
+    await writeFile(fromName, body);
+    const now = Date.now() / 1000;
+
+    const database = join(root, "state_5.sqlite");
+    await createCodexDatabase(database, {
+      threads: [{ id: "db-thread", model: "gpt-5", cwd: root, rolloutPath: fromDatabase, updatedAt: Math.floor(now) }]
+    });
+    const cursors = new Map();
+    const states = {};
+    await discover({ root: sessions, cursors, retired: new Map(), staleAfter: 600, now, database });
+    await poll({ cursors, states, parents: new Map(), now });
+    assert.equal(states["db-thread"]?.state, "running", "the database thread id names the session");
+
+    const byName = new Map();
+    const nameStates = {};
+    await discover({
+      root: sessions, explicitPaths: [fromName], cursors: byName, retired: new Map(), staleAfter: 600, now, database: null
+    });
+    await poll({ cursors: byName, states: nameStates, parents: new Map(), now });
+    assert.deepEqual(Object.keys(nameStates), [threadId], "the filename's thread uuid names the session");
   });
 });
 
@@ -822,5 +911,87 @@ test("watcher-fed claude scanning reuses unchanged transcripts without touching 
     // The next full walk reconciles with the real directory contents.
     const fourth = await detectClaudeSessions(claude, now, 5, 600, parents, cache);
     assert.deepEqual(Object.keys(fourth), ["session-b-updated"]);
+  });
+});
+
+test("finished and silent Claude sessions stay listed as idle for the retention window", async () => {
+  await withTempDirectory(async (root) => {
+    const project = join(root, "project");
+    await mkdir(project, { recursive: true });
+    const now = Date.now() / 1000;
+    const at = (seconds) => new Date((now - seconds) * 1000).toISOString();
+    const done = join(project, "done.jsonl");
+    await writeFile(done, `${JSON.stringify({ type: "assistant", sessionId: "done", timestamp: at(300), message: { stop_reason: "end_turn", content: [{ type: "text", text: "ok" }] } })}\n`);
+    const silent = join(project, "silent.jsonl");
+    await writeFile(silent, `${JSON.stringify({ type: "assistant", sessionId: "silent", timestamp: at(120), message: { content: [{ type: "text", text: "working" }] } })}\n`);
+    for (const path of [done, silent]) await utimes(path, now - 100, now - 100);
+
+    const states = await detectClaudeSessions(project, now, 1800, 1800);
+    assert.equal(states.done?.state, "ready", "a finished session is kept for reuse, not dropped after seconds");
+    assert.equal(states.silent?.state, "ready", "a turn that went silent without an end marker is idle, not running");
+    assert.equal(Object.keys(await detectClaudeSessions(project, now + 2000, 1800, 1800)).length, 0,
+      "past the retention window they leave the live list");
+  });
+});
+
+test("grok parent links are rescanned only when the session's logs change", async () => {
+  await withTempDirectory(async (root) => {
+    const grokRoot = join(root, "grok-sessions");
+    const sessionDirectory = join(grokRoot, "%2Fwork", "grok-session");
+    await mkdir(sessionDirectory, { recursive: true });
+    const linkRecord = (worker) => JSON.stringify({
+      update: {
+        rawOutput: {
+          tool_name: "agent_acp_session_open",
+          server_name: "agent-acp",
+          output: { OkayOutput: JSON.stringify({ ok: true, acpSessionId: worker, provider: "claude" }) }
+        }
+      }
+    });
+    const updates = join(sessionDirectory, "updates.jsonl");
+    await writeFile(updates, `${linkRecord("worker-1")}\n`);
+    const states = { g: { provider: "grok", session: "grok-cli-10", state: "running", link_session: "grok-session" } };
+    const cache = new Map();
+    const parents = new Map();
+    assert.equal(await recordGrokAcpLinks(states, parents, 100, grokRoot, cache), true);
+    assert.deepEqual(cache.get("grok-session").links, [["claude", "worker-1"]]);
+
+    // Unchanged logs: the cached links are reused as they are.
+    const cachedLinks = cache.get("grok-session").links;
+    parents.clear();
+    assert.equal(await recordGrokAcpLinks(states, parents, 101, grokRoot, cache), true, "cached links still apply");
+    assert.equal(cache.get("grok-session").links, cachedLinks);
+
+    // A grown log is read again.
+    await writeFile(updates, `${linkRecord("worker-1")}\n${linkRecord("worker-2")}\n`);
+    await utimes(updates, new Date(), new Date(Date.now() + 5_000));
+    await recordGrokAcpLinks(states, parents, 102, grokRoot, cache);
+    assert.equal(externalParent(parents, "claude", "worker-2"), "grok-session");
+
+    // A session that left the scan leaves the cache.
+    await recordGrokAcpLinks({}, parents, 103, grokRoot, cache);
+    assert.equal(cache.size, 0);
+  });
+});
+
+test("codex window records are slimmed and bookkeeping payloads trimmed", async () => {
+  await withTempDirectory(async (root) => {
+    const path = join(root, "rollout-2026-08-07T00-00-00-11111111-2222-3333-4444-555555555555.jsonl");
+    const now = Date.parse("2026-08-07T00:01:00.000Z") / 1000;
+    const huge = "x".repeat(200_000);
+    await writeFile(path, [
+      { timestamp: "2026-08-07T00:00:00.000Z", type: "session_meta", payload: { id: "s", cwd: "/work", base_instructions: { text: huge } } },
+      { timestamp: "2026-08-07T00:00:01.000Z", type: "response_item", payload: { type: "function_call_output", call_id: "c1", output: huge } },
+      { timestamp: "2026-08-07T00:00:02.000Z", type: "response_item", payload: { type: "function_call", call_id: "c2", name: "shell", arguments: JSON.stringify({ cmd: ["cat"], stdin: huge }) } }
+    ].map((record) => JSON.stringify(record)).join("\n") + "\n");
+    const cursors = new Map();
+    await discover({ root, explicitPaths: [path], cursors, retired: new Map(), staleAfter: 3600, now });
+    await poll({ cursors, states: {}, parents: new Map(), now });
+    const [cursor] = cursors.values();
+    const [meta, output, call] = cursor.conversation;
+    assert.deepEqual(meta.payload, { id: "s", cwd: "/work" });
+    assert.ok(output.payload.output.length <= 16_000, "a tool output is cut to the record limit");
+    assert.equal(JSON.parse(call.payload.arguments).cmd[0], "cat", "JSON arguments still parse after slimming");
+    assert.ok(cursor.conversationChars < 50_000);
   });
 });

@@ -11,12 +11,11 @@
 // use separate short-lived control connections.
 
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, rm } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
-import { spawn } from "node:child_process";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GatewayRpcClient } from "../gateway/client.js";
 import {
@@ -30,6 +29,7 @@ import { pathIsMissing } from "../app/fs-paths.js";
 import { gatewaySocketPath } from "../app/config.js";
 import { defaultInstallStatePath } from "../app/install-state.js";
 import {
+  GATEWAY_SETTING_DEFINITIONS,
   defaultGatewaySettings,
   gatewaySettingsSnapshot,
   resolveGatewaySettings,
@@ -38,9 +38,20 @@ import {
 import { installOfficialAgent, officialAgentCatalog, setOfficialAgentEnabled } from "../app/agent-catalog.js";
 import { MONITOR_API_VERSION, MONITOR_SCHEMA_VERSION, MonitorState, queuedSingleFlight } from "../projection/monitor-state.js";
 import { SIDECAR_BUILD_ID, SIDECAR_VERSION } from "../version.js";
-import { mergeMonitorSessions, projectLocalSnapshot } from "../local-monitor.js";
-import { currentProjectedTurnId, projectCodexTranscript } from "../local-transcript.js";
+import { LocalEventDelivery, mergeMonitorSessions, projectLocalSnapshot } from "../local-monitor.js";
 import { LocalAgentScanner } from "../local-agents/index.js";
+import { hookLineageHeaders, ProcessLineage } from "../local-agents/lineage.js";
+import { LocalTimeline } from "../normalize/local-timeline.js";
+import {
+  SqliteMonitorStore,
+  databaseFileBytes,
+  defaultMonitorDatabasePath,
+  removeDatabaseFiles
+} from "../store/sqlite-store.js";
+import { HookSessions } from "../hooks/registry.js";
+import { defaultWorkerLedgerPath, readWorkerLedger, workerLedgerWriter } from "../store/worker-ledger.js";
+import { defaultHookEndpointPath, newHookToken, removeHookEndpoint, writeHookEndpoint } from "../hooks/endpoint.js";
+import { HOOK_PROVIDERS as INSTALLABLE_HOOK_PROVIDERS, ensureHooks, hookStatus, installHooks, uninstallHooks } from "../hooks/installer.js";
 /*
  * Gateway code above comes only from the release artifact's public client.
  */
@@ -51,11 +62,29 @@ const MAX_EVENTS_PER_SESSION = numberEnv("ACP_GATEWAY_MONITOR_MAX_EVENTS", 2000,
 const AUTO_START_GATEWAY = booleanEnv("ACP_GATEWAY_MONITOR_AUTOSTART", true);
 const EXPECTED_PARENT_PID = optionalPositiveIntegerEnv("ACP_GATEWAY_MONITOR_PARENT_PID");
 const REFRESH_INTERVAL_MS = 3_000;
+// Streamed Gateway chunks are coalesced into one SSE frame per window so a
+// growing message is re-sent at most this often, not once per token.
+const EVENT_BROADCAST_MS = 100;
+const HISTORY_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+const HISTORY_ENABLED = booleanEnv("ACP_GATEWAY_MONITOR_HISTORY", true);
+// Off unless the app turns it on: a sidecar started by tests or by hand must
+// never take over the app's hook endpoint or edit the user's agent configs.
+const HOOKS_ENABLED = booleanEnv("ACP_GATEWAY_MONITOR_HOOKS", false);
+const MAX_HOOK_BODY_BYTES = 1024 * 1024;
+// How long a hook answer may wait for its process tree to be read.
+const HOOK_LINEAGE_BUDGET_MS = 250;
+const HOOK_PROVIDERS = new Set(["claude", "codex", "grok"]);
 const GATEWAY_RUNTIME_ROOT = process.env.ACP_GATEWAY_ACTIVE_ROOT ?? null;
 const EXPECTED_GATEWAY_BUILD_ID = expectedGatewayBuildId(GATEWAY_RUNTIME_ROOT);
 // Initialized inside main() so corrupt settings are reported through its
 // guarded startup path instead of throwing while this module is imported.
 let localScanner = null;
+let localTimeline = null;
+// Live facts from agent hooks, overlaid on every local scan. Replaced in
+// main() once the retention setting is known.
+let hookSessions = new HookSessions();
+// Lineage resolver for hooks when the local scanner (which owns one) is off.
+let hookLineage = null;
 
 // Token accounting is not timeline content, and a session accumulates one of
 // these per turn. Gateway 1.3.2+ already drops them at ingestion, but a
@@ -122,20 +151,106 @@ async function main() {
   localScanner = monitorSettings.localScannerEnabled ? new LocalAgentScanner({
     discoveryIntervalSeconds: monitorSettings.localDiscoveryIntervalMs / 1_000,
     conversationWindowMs: monitorSettings.localTranscriptWindowMs,
-    maxConversationRecords: monitorSettings.localTranscriptRecordLimit
+    maxConversationRecords: monitorSettings.localTranscriptRecordLimit,
+    readyAfter: monitorSettings.localSessionRetentionMs / 1_000
   }) : null;
+  // One retention rule for every provider, whether hooks are on or not.
+  hookSessions = new HookSessions({ staleAfterMs: monitorSettings.localSessionRetentionMs });
+  hookLineage = localScanner ? null : new ProcessLineage();
+  localTimeline = localScanner
+    ? new LocalTimeline({
+      codexRecords: (sessionId) => localScanner.conversationRecords(sessionId),
+      // Claude and Grok windows follow the same user setting as Codex's.
+      windowMs: monitorSettings.localTranscriptWindowMs,
+      maxRecords: monitorSettings.localTranscriptRecordLimit
+    })
+    : null;
   // A pre-config-API daemon reports most active values through setup, but not
   // every newly introduced setting. Defaults/environment represent what that
   // old process actually booted with; persisted values may only be staged.
   const legacyActiveGatewayValues = defaultGatewaySettings();
+  // What this process booted with. The monitor group is the sidecar's own and
+  // takes effect only at its start, so these are its active values; Worker
+  // settings are passed to a Gateway started with the same snapshot, which
+  // is the best record of them when the Gateway does not report its own.
+  const bootValues = (group) => Object.fromEntries(GATEWAY_SETTING_DEFINITIONS
+    .filter((definition) => definition.group === group)
+    .map((definition) => [definition.id, monitorSettings[definition.id]]));
+  const bootMonitorValues = bootValues("monitor");
+  const bootFallbackValues = { ...legacyActiveGatewayValues, ...bootValues("workers") };
+  const activeConfigValues = () => ({
+    ...activeGatewaySettings(state.gateway, bootFallbackValues),
+    ...bootMonitorValues
+  });
   const rpc = new GatewayRpcClient({
     token: identity.token,
     rootId: identity.rootId,
     access: "observer",
     autoStart: AUTO_START_GATEWAY
   });
-  const state = new MonitorState({ maxEventsPerSession: MAX_EVENTS_PER_SESSION });
+  const historyRetentionMs = monitorSettings.monitorHistoryRetentionMs;
+  const persistence = HISTORY_ENABLED && historyRetentionMs > 0
+    ? await SqliteMonitorStore.open(defaultMonitorDatabasePath(), { retentionDays: historyRetentionMs / 86_400_000 })
+    : null;
+  // Stats when no store is open: retention 0 (or history disabled) may still
+  // leave a monitor.db from before, which the app offers to delete.
+  const diskHistoryWithoutStore = () => {
+    const path = defaultMonitorDatabasePath();
+    const file = databaseFileBytes(path);
+    return {
+      available: false,
+      retentionDays: historyRetentionMs / 86_400_000,
+      ...(file.exists ? { path, bytes: file.bytes, fileExists: true } : { fileExists: false })
+    };
+  };
+  // A session that leaves the live list stays in the in-memory log as long as
+  // an idle one stays live, so every provider disappears on the same clock;
+  // older history is browsed from the database.
+  const workerLedgerPath = defaultWorkerLedgerPath();
+  const saveWorkerLedger = HISTORY_ENABLED ? workerLedgerWriter(workerLedgerPath) : null;
+  const state = new MonitorState({
+    maxEventsPerSession: MAX_EVENTS_PER_SESSION,
+    persistence,
+    historyRetentionMs: monitorSettings.localSessionRetentionMs,
+    formerWorkerIds: HISTORY_ENABLED ? readWorkerLedger(workerLedgerPath) : [],
+    onWorkerRemembered: saveWorkerLedger
+  });
+  state.restoreHistory();
+  persistence?.prune();
+  const historyPrune = setInterval(() => {
+    // Sessions still in memory are kept too: Gateway events can be persisted
+    // before the session list names them.
+    persistence?.prune({ keep: new Set([...state.sessions.keys(), ...state.store.sessionIds()]) });
+  }, HISTORY_PRUNE_INTERVAL_MS);
+  historyPrune.unref();
+
+  // Changed canonical events waiting for the next coalesced `events` frame.
+  let pendingEvents = new Map();
+  let eventFlushTimer = null;
+  const queueEvents = (sessionId, events) => {
+    if (!events.length) return;
+    let bucket = pendingEvents.get(sessionId);
+    if (!bucket) {
+      bucket = new Map();
+      pendingEvents.set(sessionId, bucket);
+    }
+    for (const event of events) bucket.set(event.id, event);
+    if (eventFlushTimer) return;
+    eventFlushTimer = setTimeout(flushEvents, EVENT_BROADCAST_MS);
+    eventFlushTimer.unref?.();
+  };
+  const flushEvents = () => {
+    eventFlushTimer = null;
+    if (!pendingEvents.size) return;
+    const events = Object.fromEntries([...pendingEvents].map(([sessionId, bucket]) => [sessionId, [...bucket.values()]]));
+    pendingEvents = new Map();
+    state.broadcast({ kind: "events", events });
+  };
   const apiToken = randomBytes(32).toString("base64url");
+  // Hooks authenticate with their own token: the API token never leaves the
+  // app process, while this one is written to a 0600 file for hook scripts.
+  const hookToken = newHookToken();
+  const hookEndpointPath = defaultHookEndpointPath();
   let agentMutationActive = false;
   const owner = new GatewaySubscriptionOwner({
     rpc,
@@ -191,9 +306,11 @@ async function main() {
       return;
     }
     if (isIgnoredMonitorEvent(event)) return;
-    if (!state.pushEvent(event)) return;
-    state.broadcast({ kind: "event", event });
+    const changed = state.pushEvent(event);
+    if (!changed.length && event.type !== "session_closed") return;
+    queueEvents(event.sessionId, changed);
     if (event.type === "session_closed") {
+      flushEvents();
       state.setGatewaySourceSessions(
         state.gatewaySourceSessions.filter((session) => session.sessionId !== event.sessionId)
       );
@@ -276,23 +393,20 @@ async function main() {
   // cursors/caches, so two overlapping passes corrupt offsets (both advance the
   // same cursor) and duplicate cached transcript records. Overlapping callers
   // share the in-flight pass; a queued re-run follows for the latecomer.
+  const localDelivery = new LocalEventDelivery();
   const applySessionSources = queuedSingleFlight(async () => {
     const beforeRevision = state.revision;
     const local = await readLocalProjection();
-    const merged = mergeMonitorSessions(state.gatewaySourceSessions, local.sessions, state.workerTopology);
+    const merged = mergeMonitorSessions(state.gatewaySourceSessions, local.sessions, state.workerTopology, state.formerWorkerIds);
     const acceptedLocalIds = new Set(merged.filter((session) => session.source === "local").map((session) => session.sessionId));
-    const events = Object.fromEntries(Object.entries(local.events).filter(([sessionId]) => acceptedLocalIds.has(sessionId)));
+    // Only timelines that changed since they were last handed over: an idle
+    // session's window is otherwise re-merged event by event every second.
+    const events = localDelivery.select(local.events, local.changedSessionIds, acceptedLocalIds);
     const removedSessionIds = state.setSessions(merged);
-    const changedEventSessionIds = state.setExternalEvents(events);
-    // Local transcripts have no per-event push channel: the scanner only
-    // rewrites whole buckets here, so a state broadcast has to carry them or
-    // the app keeps whatever /api/snapshot returned when its stream connected.
-    // Captured inside the single-flight pass so the payload is the bucket that
-    // the change detection above actually saw.
-    const localEvents = changedEventSessionIds.length
-      ? Object.fromEntries(changedEventSessionIds
-        .map((sessionId) => [sessionId, state.eventsBySession.get(sessionId) ?? []]))
-      : null;
+    // Only the events that changed travel with the state frame; the app
+    // upserts them by id (an event outside a transcript window is kept).
+    const changedEvents = state.setExternalEvents(events);
+    const localEvents = Object.keys(changedEvents).length ? changedEvents : null;
     return { removedSessionIds, changed: state.revision !== beforeRevision, localEvents };
   });
 
@@ -334,7 +448,15 @@ async function main() {
     }
   }
 
+  // Gap markers can arrive in bursts; the owner coalesces them into one
+  // running and at most one queued reconciliation, and a failure keeps a
+  // single retry timer, not one per marker.
+  let reconcileRetry = null;
   async function reconcileSubscription() {
+    if (reconcileRetry) {
+      clearTimeout(reconcileRetry);
+      reconcileRetry = null;
+    }
     try {
       await owner.reconcile();
       const snapshot = state.snapshot();
@@ -356,8 +478,13 @@ async function main() {
         error: error?.message ?? String(error),
         health: "degraded"
       });
-      const retry = setTimeout(() => { void reconcileSubscription(); }, 500);
-      retry.unref?.();
+      if (!reconcileRetry) {
+        reconcileRetry = setTimeout(() => {
+          reconcileRetry = null;
+          void reconcileSubscription();
+        }, 500);
+        reconcileRetry.unref?.();
+      }
     }
   }
 
@@ -386,6 +513,23 @@ async function main() {
   });
   const address = server.address();
   const port = typeof address === "object" && address ? address.port : MONITOR_PORT;
+  if (HOOKS_ENABLED) {
+    try {
+      writeHookEndpoint(hookEndpointPath, { port, token: hookToken });
+    } catch (error) {
+      console.error(`Hook endpoint unavailable: ${error.message}`);
+    }
+    // Install and update time: a new build refreshes the hooks it ships,
+    // unless the user turned them off in settings.
+    try {
+      const result = ensureHooks();
+      if (result.errors && Object.keys(result.errors).length) {
+        console.error(`Hook install incomplete: ${Object.values(result.errors).join("; ")}`);
+      }
+    } catch (error) {
+      console.error(`Hook install failed: ${error.message}`);
+    }
+  }
   console.log(JSON.stringify({
     kind: "monitor_ready",
     schemaVersion: MONITOR_SCHEMA_VERSION,
@@ -410,8 +554,8 @@ async function main() {
     void refreshGatewayInfo();
   }, REFRESH_INTERVAL_MS);
   interval.unref();
-  const localInterval = setInterval(() => {
-    void (async () => {
+  async function broadcastLocalChanges() {
+    try {
       const { removedSessionIds, changed, localEvents } = await applySessionSources();
       if (!changed) return;
       state.broadcast({
@@ -422,16 +566,75 @@ async function main() {
         removedSessionIds,
         ...(localEvents ? { events: localEvents } : {})
       });
-    })().catch((error) => {
+    } catch (error) {
       // Local scanning is a nicety; a fault here must never take the Gateway
       // view down. Without this catch an unhandled rejection kills the process.
       console.error(`Local session refresh failed: ${error.message}`);
-    });
+    }
+  }
+  const localInterval = setInterval(() => {
+    void broadcastLocalChanges();
   }, localScanIntervalMs);
   localInterval.unref();
 
+  // A hook arrived: its events go straight to the store, and the local scan
+  // runs now instead of on its next tick so the status change is immediate.
+  let hookRefreshTimer = null;
+  const nudgeLocalRefresh = () => {
+    if (hookRefreshTimer) return;
+    hookRefreshTimer = setTimeout(() => {
+      hookRefreshTimer = null;
+      void broadcastLocalChanges();
+    }, 50);
+    hookRefreshTimer.unref?.();
+  };
+
+  async function handleHook(provider, request, response) {
+    let payload;
+    try {
+      payload = await readJsonBody(request, MAX_HOOK_BODY_BYTES);
+    } catch {
+      response.writeHead(400).end();
+      return;
+    }
+    const recorded = hookSessions.record(provider, payload, Date.now(), hookLineageHeaders(request.headers));
+    // Which session launched this one (a shell-launched agent is a worker)
+    // is read from the process tree while the hook's shell is still alive,
+    // i.e. before answering: a short `claude -p` is often gone by the time
+    // a deferred `ps` runs, and then only its own id is left to go on. It is
+    // bounded and runs only until a session's lineage is known.
+    if (recorded && !state.formerWorkerIds.has(recorded.localSessionId)) {
+      await Promise.race([
+        hookSessions.resolveLineage(recorded.key, localScanner?.lineage ?? hookLineage),
+        new Promise((resolve) => setTimeout(resolve, HOOK_LINEAGE_BUDGET_MS).unref?.())
+      ]);
+    }
+    // The agent is waiting on this hook; everything else happens after.
+    response.writeHead(204).end();
+    if (!recorded) return;
+    // A Gateway worker's own CLI runs the same hooks; its timeline is the
+    // Gateway's, and these events would sit in a bucket nothing ever lists.
+    if (state.formerWorkerIds.has(recorded.localSessionId)) return;
+    // A held-back session (no activity, no transcript) is not listed, so its
+    // events would sit in a bucket nothing ever shows.
+    if (!recorded.heldBack) {
+      const changed = state.setExternalEvents({ [recorded.sessionId]: recorded.events });
+      for (const [sessionId, events] of Object.entries(changed)) queueEvents(sessionId, events);
+    }
+    nudgeLocalRefresh();
+  }
+
   async function handleRequest(request, response) {
     const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
+    const hookRoute = url.pathname.match(/^\/api\/hooks\/([a-z]+)$/);
+    if (hookRoute && request.method === "POST") {
+      if (!HOOKS_ENABLED || request.headers["x-agenlynk-hook-token"] !== hookToken || !HOOK_PROVIDERS.has(hookRoute[1])) {
+        response.writeHead(401).end();
+        return;
+      }
+      await handleHook(hookRoute[1], request, response);
+      return;
+    }
     if (request.headers.authorization !== `Bearer ${apiToken}`) {
       response.writeHead(401, { "content-type": "application/json; charset=utf-8" });
       response.end('{"error":"unauthorized","code":"monitor_unauthorized"}');
@@ -463,7 +666,7 @@ async function main() {
         "cache-control": "no-store",
         etag: tag
       });
-      response.end(JSON.stringify(state.snapshot(now)));
+      response.end(state.snapshotJson(now));
       return;
     }
     if (url.pathname === "/api/stream") {
@@ -475,6 +678,72 @@ async function main() {
       response.write("retry: 2000\n\n");
       state.addSseClient(response);
       request.on("close", () => state.removeSseClient(response));
+      return;
+    }
+    const eventsRoute = url.pathname.match(/^\/api\/sessions\/([^/]+)\/events$/);
+    if (eventsRoute && request.method === "GET") {
+      // Older events than the snapshot carries, newest page first; served
+      // from memory and then from persisted history.
+      const sessionId = decodeURIComponent(eventsRoute[1]);
+      const before = Number(url.searchParams.get("before"));
+      const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 200, 1), 1_000);
+      sendJson(response, {
+        sessionId,
+        events: state.store.page(sessionId, { before: Number.isFinite(before) && before > 0 ? before : Infinity, limit })
+      });
+      return;
+    }
+    if (url.pathname === "/api/hooks" && request.method === "GET") {
+      sendJson(response, { receiving: HOOKS_ENABLED, lastReceivedAt: hookSessions.lastReceivedAt(), ...hookStatus() });
+      return;
+    }
+    if (url.pathname === "/api/hooks" && request.method === "POST") {
+      const body = await readJsonBody(request);
+      const providers = Array.isArray(body.providers)
+        ? body.providers.filter((provider) => INSTALLABLE_HOOK_PROVIDERS.includes(provider))
+        : null;
+      if (body.action !== "install" && body.action !== "uninstall") {
+        response.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+        response.end('{"error":"action must be install or uninstall","code":"monitor_bad_request"}');
+        return;
+      }
+      const only = providers?.length ? providers : null;
+      const result = body.action === "install"
+        ? installHooks({ only, consent: body.consent === true })
+        : uninstallHooks({ only, decline: body.decline === true });
+      sendJson(response, { receiving: HOOKS_ENABLED, lastReceivedAt: hookSessions.lastReceivedAt(), ...result });
+      return;
+    }
+    if (url.pathname === "/api/history" && request.method === "GET") {
+      // Newest first; pass the oldest updatedAt received as `before` to page.
+      const since = Number(url.searchParams.get("since")) || 0;
+      const before = Date.parse(url.searchParams.get("before") ?? "") || Number(url.searchParams.get("before")) || Number.MAX_SAFE_INTEGER;
+      // (updatedAt, sessionId) is the cursor, so sessions sharing a timestamp
+      // across a page boundary are not skipped.
+      const beforeId = url.searchParams.get("beforeId") ?? null;
+      const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 50, 1), 500);
+      const sessions = persistence ? persistence.readSessions({ since, before, beforeId, limit }) : [];
+      sendJson(response, { sessions, hasMore: sessions.length === limit });
+      return;
+    }
+    if (url.pathname === "/api/history/stats" && request.method === "GET") {
+      sendJson(response, persistence ? persistence.stats() : diskHistoryWithoutStore());
+      return;
+    }
+    if (url.pathname === "/api/history" && request.method === "POST") {
+      const body = await readJsonBody(request);
+      if (body.action !== "clear") {
+        response.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+        response.end('{"error":"action must be clear","code":"monitor_bad_request"}');
+        return;
+      }
+      const live = new Set(state.sessions.keys());
+      // With disk history off there is no store, but a file left from when it
+      // was on is still the user's data: clearing removes the file itself.
+      const deleted = persistence ? persistence.clear({ keep: live }) : removeDiskHistoryFiles();
+      state.clearHistory();
+      state.broadcast({ kind: "state", connected: state.connected, streaming: state.streaming, historyCleared: true });
+      sendJson(response, { deleted, ...(persistence ? persistence.stats() : diskHistoryWithoutStore()) });
       return;
     }
     if (url.pathname === "/api/agents" && request.method === "GET") {
@@ -577,7 +846,7 @@ async function main() {
     if (url.pathname === "/api/gateway-config" && request.method === "GET") {
       sendJson(response, gatewaySettingsSnapshot({
         statePath: identity.statePath,
-        activeValues: activeGatewaySettings(state.gateway, legacyActiveGatewayValues)
+        activeValues: activeConfigValues()
       }));
       return;
     }
@@ -594,7 +863,7 @@ async function main() {
       });
       const result = gatewaySettingsSnapshot({
         statePath: identity.statePath,
-        activeValues: activeGatewaySettings(state.gateway, legacyActiveGatewayValues)
+        activeValues: activeConfigValues()
       });
       sendJson(response, result);
       return;
@@ -666,6 +935,11 @@ async function main() {
     shuttingDown = true;
     clearInterval(interval);
     clearInterval(localInterval);
+    clearInterval(historyPrune);
+    flushEvents();
+    persistence?.close();
+    saveWorkerLedger?.flush();
+    removeHookEndpoint(hookEndpointPath, hookToken);
     if (parentWatch) clearInterval(parentWatch);
     state.closeSseClients();
     rpc.close();
@@ -683,32 +957,24 @@ async function main() {
 }
 
 async function readLocalProjection() {
-  const sessions = await collectLocalSessions();
-  if (!sessions.length) return { sessions: [], events: {} };
+  const sessions = hookSessions.merge(await collectLocalSessions());
+  // A Grok sub-agent only a hook reported carries the hook's lineage parent
+  // (its parent's launcher); Grok's own record of the parent replaces it.
+  await localScanner?.annotateGrokSubagents(sessions);
+  if (!sessions.length) return { sessions: [], events: {}, changedSessionIds: new Set() };
   try {
-    const projection = projectLocalSnapshot({ sessions });
-    // Events come from the conversation window the codex tailer already
-    // retained during its state pass — the same single read serves both
-    // consumers, instead of a second reader re-tailing the same files.
-    for (const session of projection.sessions) {
-      if (session.provider !== "codex" || !session.localSessionId) continue;
-      const records = localScanner.conversationRecords(session.localSessionId);
-      if (!records.length) continue;
-      const events = projectCodexTranscript(records, {
-        sessionId: session.sessionId,
-        rawSessionId: session.localSessionId,
-        now: Date.now()
-      });
-      if (!events.length) continue;
-      projection.events[session.sessionId] = events;
-      // Only while the session is actually mid-turn: a record with turnId
-      // null is not running, and must not be given one.
-      if (session.turnId) session.turnId = currentProjectedTurnId(events) ?? session.turnId;
-    }
-    return projection;
+    // One pipeline for every provider: the scanner found the sessions and
+    // their transcripts, the timeline tails and normalizes them.
+    const { results, changed } = localTimeline
+      ? await localTimeline.update(sessions)
+      : { results: new Map(), changed: new Set() };
+    return {
+      ...projectLocalSnapshot({ sessions }, results),
+      changedSessionIds: new Set([...changed].map((key) => `local:${key}`))
+    };
   } catch (error) {
     console.error(`Local session projection ignored: ${error.message}`);
-    return { sessions: [], events: {} };
+    return { sessions: [], events: {}, changedSessionIds: new Set() };
   }
 }
 
@@ -741,21 +1007,23 @@ async function collectLocalSessions() {
 const FRONT_DOOR_AGENTS = new Set(["codex", "claude", "grok"]);
 // Matches the control section but not agent-acp-guide (next char is `-`).
 const CONTROL_MCP_TOML = /^\[mcp_servers\.agent-acp[\].]/m;
+const GUIDE_MCP_TOML = /^\[mcp_servers\.agent-acp-guide[\].]/m;
 
-async function tomlHasControlMcp(path) {
+async function tomlMcp(path) {
   try {
-    return CONTROL_MCP_TOML.test(await readFile(path, "utf8"));
+    const text = await readFile(path, "utf8");
+    return { control: CONTROL_MCP_TOML.test(text), guide: GUIDE_MCP_TOML.test(text) };
   } catch {
-    return false;
+    return { control: false, guide: false };
   }
 }
 
-async function claudeJsonHasControlMcp(path) {
+async function claudeJsonMcp(path) {
   try {
-    const raw = JSON.parse(await readFile(path, "utf8"));
-    return Boolean(raw?.mcpServers && raw.mcpServers["agent-acp"]);
+    const servers = JSON.parse(await readFile(path, "utf8"))?.mcpServers ?? {};
+    return { control: Boolean(servers["agent-acp"]), guide: Boolean(servers["agent-acp-guide"]) };
   } catch {
-    return false;
+    return { control: false, guide: false };
   }
 }
 
@@ -763,16 +1031,16 @@ async function readInstalledFrontdoors() {
   const home = homedir();
   const codexHome = process.env.CODEX_HOME || join(home, ".codex");
   const grokHome = process.env.GROK_HOME || join(home, ".grok");
-  const [codex, grok, claude] = await Promise.all([
-    tomlHasControlMcp(join(codexHome, "config.toml")),
-    tomlHasControlMcp(join(grokHome, "config.toml")),
-    claudeJsonHasControlMcp(join(home, ".claude.json"))
+  const [codex, claude, grok] = await Promise.all([
+    tomlMcp(join(codexHome, "config.toml")),
+    claudeJsonMcp(join(home, ".claude.json")),
+    tomlMcp(join(grokHome, "config.toml"))
   ]);
-  const installed = [
-    ...(codex ? ["codex"] : []),
-    ...(claude ? ["claude"] : []),
-    ...(grok ? ["grok"] : [])
-  ];
+  const agents = { codex, claude, grok };
+  const installed = Object.keys(agents).filter((agent) => agents[agent].control);
+  // Only the guide MCP: the agent can read how to delegate but is not a
+  // Frontdoor, so Settings must not show it as installed nor as untouched.
+  const guideOnly = Object.keys(agents).filter((agent) => agents[agent].guide && !agents[agent].control);
   // The exclusive primary is still whatever install.json recorded; it is only
   // a label, and a missing/invalid file just means "no primary".
   let primary = null;
@@ -782,7 +1050,7 @@ async function readInstalledFrontdoors() {
   } catch {
     // no install.json → no primary
   }
-  return { primary, installed };
+  return { primary, installed, guideOnly };
 }
 
 function gatewayIdentity(state, identity) {
@@ -885,12 +1153,18 @@ function activeGatewaySettings(gateway, fallback = {}) {
   return Object.fromEntries(Object.entries(values).filter(([, value]) => value != null));
 }
 
-async function readJsonBody(request) {
+/** Deletes a monitor.db this process does not have open (disk history off). */
+function removeDiskHistoryFiles(path = defaultMonitorDatabasePath()) {
+  removeDatabaseFiles(path);
+  return 0;
+}
+
+async function readJsonBody(request, limit = 64 * 1024) {
   const chunks = [];
   let bytes = 0;
   for await (const chunk of request) {
     bytes += chunk.length;
-    if (bytes > 64 * 1024) throw new Error("request body is too large");
+    if (bytes > limit) throw new Error("request body is too large");
     chunks.push(chunk);
   }
   if (!chunks.length) return {};

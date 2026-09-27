@@ -1,0 +1,340 @@
+{
+  "_comment": "Shared Monitor API v2 characterization fixture. sidecar/test/monitor-state.test.js constructs this snapshot through MonitorState from _input; MonitorModelTests.swift decodes the same wire payload.",
+  "_input": {
+    "gateway": {
+      "gatewayVersion": "1.4.0",
+      "gatewayApiVersion": 1,
+      "gatewayBuildId": "fixture-build"
+    },
+    "initialSessions": [
+      {
+        "sessionId": "s1",
+        "provider": "codex",
+        "status": "running",
+        "cwd": "/tmp/project",
+        "eventCount": 1
+      },
+      {
+        "sessionId": "old",
+        "provider": "claude",
+        "status": "idle",
+        "cwd": "/tmp/project",
+        "opener": "codex",
+        "openerInstanceId": "main-old"
+      }
+    ],
+    "finalSessions": [
+      {
+        "sessionId": "s1",
+        "provider": "codex",
+        "status": "running",
+        "cwd": "/tmp/project",
+        "eventCount": 1,
+        "model": "gpt-5.6",
+        "usage": {
+          "inputTokens": 1200,
+          "outputTokens": 80,
+          "cacheReadTokens": 1000,
+          "cacheWriteTokens": null,
+          "reasoningTokens": 20,
+          "totalTokens": 1280,
+          "contextUsed": 1200,
+          "contextWindow": 258400,
+          "costUsd": null
+        },
+        "capabilities": [
+          "status",
+          "timeline",
+          "tools",
+          "thinking",
+          "permission",
+          "usage"
+        ]
+      }
+    ],
+    "events": [
+      {
+        "sessionId": "old",
+        "sequence": 1,
+        "type": "turn_completed",
+        "ts": "2026-08-06T23:59:00.000Z",
+        "turnId": "old-turn",
+        "stopReason": "end_turn"
+      },
+      {
+        "sessionId": "s1",
+        "sequence": 0,
+        "type": "turn_start",
+        "ts": "2026-08-07T00:00:00.000Z",
+        "turnId": "turn-1",
+        "text": "work"
+      },
+      {
+        "sessionId": "s1",
+        "sequence": 1,
+        "type": "agent_message_chunk",
+        "ts": "2026-08-07T00:00:01.000Z",
+        "turnId": "turn-1",
+        "text": "checking "
+      },
+      {
+        "sessionId": "s1",
+        "sequence": 2,
+        "type": "agent_message_chunk",
+        "ts": "2026-08-07T00:00:01.100Z",
+        "turnId": "turn-1",
+        "text": "now"
+      },
+      {
+        "sessionId": "s1",
+        "sequence": 3,
+        "type": "tool_call",
+        "ts": "2026-08-07T00:00:02.000Z",
+        "turnId": "turn-1",
+        "data": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call-1",
+          "title": "Read",
+          "rawInput": {
+            "path": "README.md"
+          },
+          "status": "pending"
+        }
+      },
+      {
+        "sessionId": "s1",
+        "sequence": 4,
+        "type": "tool_call_update",
+        "ts": "2026-08-07T00:00:03.000Z",
+        "turnId": "turn-1",
+        "data": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call-1",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "# Project"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "s1",
+        "sequence": 5,
+        "type": "permission_request",
+        "ts": "2026-08-07T00:00:04.000Z",
+        "turnId": "turn-1",
+        "requestId": "r1",
+        "toolCall": {
+          "toolCallId": "call-2",
+          "title": "Write README.md"
+        },
+        "options": [
+          {
+            "kind": "allow_once",
+            "name": "Allow"
+          }
+        ]
+      }
+    ],
+    "tasks": [
+      {
+        "taskId": "t1",
+        "status": "working",
+        "statusMessage": "running"
+      }
+    ],
+    "inbox": [
+      {
+        "inboxId": "i1",
+        "status": "pending",
+        "type": "permission_request",
+        "sessionId": "s1"
+      }
+    ]
+  },
+  "schemaVersion": 2,
+  "monitorApiVersion": "2.0",
+  "revision": 13,
+  "connected": true,
+  "streaming": true,
+  "streamHealth": "healthy",
+  "diagnostics": {
+    "subscriptionGaps": 0,
+    "replayedEvents": 0,
+    "reconciliationRuns": 0,
+    "overflowDroppedEvents": 0,
+    "replayTruncations": 0
+  },
+  "error": null,
+  "gateway": {
+    "gatewayVersion": "1.4.0",
+    "gatewayApiVersion": 1,
+    "gatewayBuildId": "fixture-build"
+  },
+  "sessions": [
+    {
+      "sessionId": "s1",
+      "provider": "codex",
+      "status": "running",
+      "cwd": "/tmp/project",
+      "eventCount": 1,
+      "model": "gpt-5.6",
+      "usage": {
+        "inputTokens": 1200,
+        "outputTokens": 80,
+        "cacheReadTokens": 1000,
+        "cacheWriteTokens": null,
+        "reasoningTokens": 20,
+        "totalTokens": 1280,
+        "contextUsed": 1200,
+        "contextWindow": 258400,
+        "costUsd": null
+      },
+      "capabilities": [
+        "status",
+        "timeline",
+        "tools",
+        "thinking",
+        "permission",
+        "usage"
+      ]
+    }
+  ],
+  "events": {
+    "s1": [
+      {
+        "key": "turn:turn-1",
+        "kind": "turn_start",
+        "ts": "2026-08-07T00:00:00.000Z",
+        "turnId": "turn-1",
+        "toolCallId": null,
+        "title": "work",
+        "body": "work",
+        "status": null,
+        "endedAt": null,
+        "sources": [
+          "gateway"
+        ],
+        "sessionId": "s1",
+        "sequence": 1,
+        "id": "s1#turn:turn-1"
+      },
+      {
+        "key": "msg:turn-1:1",
+        "kind": "agent_message",
+        "ts": "2026-08-07T00:00:01.000Z",
+        "turnId": "turn-1",
+        "toolCallId": null,
+        "title": null,
+        "body": "checking now",
+        "status": null,
+        "endedAt": null,
+        "sources": [
+          "gateway"
+        ],
+        "sessionId": "s1",
+        "sequence": 2,
+        "id": "s1#msg:turn-1:1"
+      },
+      {
+        "key": "tool:call-1",
+        "kind": "tool_call",
+        "ts": "2026-08-07T00:00:02.000Z",
+        "turnId": "turn-1",
+        "toolCallId": "call-1",
+        "title": "Read: README.md",
+        "body": "# Project",
+        "status": "completed",
+        "endedAt": "2026-08-07T00:00:03.000Z",
+        "sources": [
+          "gateway"
+        ],
+        "detail": {
+          "input": "{\"path\":\"README.md\"}"
+        },
+        "sessionId": "s1",
+        "sequence": 3,
+        "id": "s1#tool:call-1"
+      },
+      {
+        "key": "perm:r1",
+        "kind": "permission_request",
+        "ts": "2026-08-07T00:00:04.000Z",
+        "turnId": "turn-1",
+        "toolCallId": "call-2",
+        "title": "Write README.md",
+        "body": null,
+        "status": "pending",
+        "endedAt": null,
+        "sources": [
+          "gateway"
+        ],
+        "detail": {
+          "requestId": "r1",
+          "options": [
+            "Allow"
+          ]
+        },
+        "sessionId": "s1",
+        "sequence": 4,
+        "id": "s1#perm:r1"
+      }
+    ]
+  },
+  "historySessions": [
+    {
+      "sessionId": "old",
+      "provider": "claude",
+      "status": "idle",
+      "cwd": "/tmp/project",
+      "opener": "codex",
+      "openerInstanceId": "main-old"
+    }
+  ],
+  "historyEvents": {
+    "old": [
+      {
+        "key": "turn:old-turn:end",
+        "kind": "turn_end",
+        "ts": "2026-08-06T23:59:00.000Z",
+        "turnId": "old-turn",
+        "toolCallId": null,
+        "title": null,
+        "body": null,
+        "status": "completed",
+        "endedAt": null,
+        "sources": [
+          "gateway"
+        ],
+        "detail": {
+          "stopReason": "end_turn"
+        },
+        "sessionId": "old",
+        "sequence": 1,
+        "id": "old#turn:old-turn:end"
+      }
+    ]
+  },
+  "eventLimit": 2000,
+  "snapshotEventLimit": 200,
+  "tasks": [
+    {
+      "taskId": "t1",
+      "status": "working",
+      "statusMessage": "running"
+    }
+  ],
+  "inbox": [
+    {
+      "inboxId": "i1",
+      "status": "pending",
+      "type": "permission_request",
+      "sessionId": "s1"
+    }
+  ]
+}

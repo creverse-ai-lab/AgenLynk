@@ -34,7 +34,7 @@ function decodeLine(buffer) {
  * skipped, matching the scanner's tolerance for transcripts another process
  * is still appending to.
  */
-export async function* reversedRecords(path) {
+export async function* reversedRecords(path, { maxBytes = Infinity } = {}) {
   let handle;
   try {
     handle = await open(path, "r");
@@ -70,6 +70,8 @@ export async function* reversedRecords(path) {
         end = newline;
         newline = end > 0 ? window.lastIndexOf(NEWLINE, end - 1) : -1;
       }
+      // Budget reached: the older rest of the file is not read.
+      if (position > 0 && stat.size - position >= maxBytes) return;
       if (position > 0) {
         remainder = Buffer.from(window.subarray(0, end));
         // A single "line" spanning many chunks is not a transcript record this
@@ -87,4 +89,65 @@ export async function* reversedRecords(path) {
   } finally {
     await handle.close().catch(() => {});
   }
+}
+
+// Longest string a retained window record keeps. Twice the normalizers' body
+// limit, so every event built from a slimmed record is identical to one
+// built from the original: a record window only feeds those normalizers,
+// and a multi-megabyte tool output would otherwise be held in full for as
+// long as the window lasts.
+export const RECORD_STRING_LIMIT = 16_000;
+const MAX_SLIM_DEPTH = 32;
+
+/**
+ * `record` with every string longer than `limit` cut to it (the same "…" cut
+ * the normalizers use). A string that holds JSON (Codex tool arguments) is
+ * slimmed inside and re-serialized, so it still parses. Returns the record
+ * itself when nothing was cut.
+ */
+export function slimRecord(record, limit = RECORD_STRING_LIMIT) {
+  return slimValue(record, limit, 0);
+}
+
+function slimValue(value, limit, depth) {
+  if (typeof value === "string") return value.length > limit ? slimString(value, limit, depth) : value;
+  if (!value || typeof value !== "object" || depth >= MAX_SLIM_DEPTH) return value;
+  if (Array.isArray(value)) {
+    let copy = null;
+    for (let index = 0; index < value.length; index += 1) {
+      const next = slimValue(value[index], limit, depth + 1);
+      if (next !== value[index]) {
+        copy ??= value.slice();
+        copy[index] = next;
+      }
+    }
+    return copy ?? value;
+  }
+  let copy = null;
+  for (const [key, item] of Object.entries(value)) {
+    const next = slimValue(item, limit, depth + 1);
+    if (next !== item) {
+      copy ??= { ...value };
+      copy[key] = next;
+    }
+  }
+  return copy ?? value;
+}
+
+function slimString(text, limit, depth) {
+  const first = text.trimStart()[0];
+  if (first === "{" || first === "[") {
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === "object") return JSON.stringify(slimValue(parsed, limit, depth + 1));
+    } catch {
+      // Not JSON after all: cut as text.
+    }
+  }
+  return `${text.slice(0, limit - 1)}…`;
+}
+
+/** Approximate retained size of a record: its line, or its slimmed JSON. */
+export function recordSize(line, original, slimmed) {
+  return slimmed === original ? line.length : JSON.stringify(slimmed).length;
 }

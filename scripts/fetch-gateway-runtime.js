@@ -22,8 +22,10 @@ export async function sha256File(path) {
 export async function readGatewayLock(path = defaultLockPath) {
   const lock = JSON.parse(await readFile(path, "utf8"));
   if (lock?.schemaVersion !== 1) throw new Error("gateway lock schemaVersion must be 1");
-  if (lock.version !== "1.4.0" || lock.tag !== "v1.4.0" || lock.apiMajor !== 1) {
-    throw new Error("gateway lock must pin Gateway v1.4.0 API major 1");
+  // The pinned release is data (gateway.lock.json); what the app requires of
+  // it is the API major it speaks and a tag that names that exact version.
+  if (!/^\d+\.\d+\.\d+$/.test(lock.version ?? "") || lock.tag !== `v${lock.version}` || lock.apiMajor !== 1) {
+    throw new Error("gateway lock must pin an exact Gateway release (vX.Y.Z) with API major 1");
   }
   if (!/^[a-f0-9]{40}$/.test(lock.sourceCommit ?? "")) throw new Error("gateway lock sourceCommit is invalid");
   if (!lock.asset?.name || !/^https:\/\//.test(lock.asset?.url ?? "")) throw new Error("gateway lock asset is incomplete");

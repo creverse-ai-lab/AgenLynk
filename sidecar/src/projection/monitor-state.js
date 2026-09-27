@@ -1,21 +1,67 @@
+import { GatewayEventNormalizer } from "../normalize/acp.js";
+import { EventStore } from "../store/event-store.js";
+
 // Wire contract for the native Monitor app's HTTP/SSE API, independent of
 // GATEWAY_API_VERSION (the Gateway daemon's own setup/subscribe handshake).
 // Bump MONITOR_SCHEMA_VERSION only when a field is removed, renamed, or
 // changes meaning; additive fields do not require a bump.
-export const MONITOR_SCHEMA_VERSION = 1;
-export const MONITOR_API_VERSION = "1.0";
+//
+// v2: events are canonical (contracts/monitor/v2): `kind` instead of the
+// source's `type`, a store-assigned `sequence`, a stable `id`, and the same
+// shape whether the Gateway, a transcript, or a hook produced them.
+export const MONITOR_SCHEMA_VERSION = 2;
+
+const LOCAL_ACTIVE_STATUSES = new Set(["running", "waiting_permission", "waiting_input"]);
+
+/**
+ * A local session leaves the live list only once it is over: its SessionEnd
+ * hook came, its process exited, or it went stale. Whatever turn it last
+ * showed is over too, so history keeps it as idle rather than frozen mid-turn
+ * (a SessionEnd can beat the transcript's own turn end to the scan).
+ */
+function settledLocalSession(session) {
+  if (session.source !== "local" || !LOCAL_ACTIVE_STATUSES.has(session.status)) return session;
+  return {
+    ...session,
+    status: "idle",
+    turnId: null,
+    stopReason: "completed",
+    turnUsage: Array.isArray(session.turnUsage)
+      ? session.turnUsage.map((turn) => (turn?.running
+        ? { ...turn, running: false, endedAt: turn.endedAt ?? session.updatedAt ?? null }
+        : turn))
+      : session.turnUsage
+  };
+}
+
+export const MONITOR_API_VERSION = "2.0";
 const MAX_PENDING_SSE_FRAMES = 512;
 const MAX_PENDING_SSE_BYTES = 4 * 1024 * 1024;
+// Remembered Gateway event identities per session, for replay dedupe only
+// (a replay starts at the session's cursor, so recent identities suffice).
+const MAX_GATEWAY_IDENTITIES = 4_000;
+// Newest events per session a snapshot (and a reconcile frame) carries; older
+// ones are paged from /api/sessions/:id/events.
+const DEFAULT_SNAPSHOT_EVENT_LIMIT = 200;
 
 export class MonitorState {
   constructor({
     maxEventsPerSession = 2000,
+    snapshotEventLimit = DEFAULT_SNAPSHOT_EVENT_LIMIT,
     historyRetentionMs = 65 * 60 * 1000,
-    sseBackpressureTimeoutMs = 10_000
+    sseBackpressureTimeoutMs = 10_000,
+    persistence = null,
+    formerWorkerIds = [],
+    onWorkerRemembered = null
   } = {}) {
     this.maxEventsPerSession = maxEventsPerSession;
+    this.snapshotEventLimit = Math.min(snapshotEventLimit, maxEventsPerSession);
+    this.snapshotCache = null;
     this.historyRetentionMs = historyRetentionMs;
+    this.persistence = persistence;
+    this.store = new EventStore({ maxEventsPerSession, persistence });
     this.sessions = new Map();
+    this.sessionSignatures = new Map();
     // Raw Gateway session source retained inside the canonical state owner so
     // transport callbacks do not maintain a competing module-level copy.
     this.gatewaySourceSessions = [];
@@ -24,13 +70,24 @@ export class MonitorState {
     // the merge keeps the last proven attribution here for the session's
     // lifetime (see mergeMonitorSessions).
     this.workerTopology = new Map();
-    this.eventsBySession = new Map();
-    this.eventSequencesBySession = new Map();
+    // Every provider-side id the Gateway has ever reported. A worker's own
+    // transcript outlives its Gateway session (idle sessions stay listed for
+    // the retention window), and without this it would come back as a
+    // parentless local session — a false Frontdoor.
+    // Kept on disk apart from history (onWorkerRemembered), so neither a
+    // restart nor a zero history retention forgets a worker.
+    this.formerWorkerIds = new Set(formerWorkerIds);
+    this.onWorkerRemembered = onWorkerRemembered;
+    // Gateway subscription bookkeeping: one stateful normalizer per session
+    // (chunks stream one at a time), the highest daemon sequence seen (the
+    // resubscribe cursor), and the identities already applied. The identity
+    // includes ts, so a restarted daemon that renumbers from 0 is not
+    // mistaken for a replay of what the monitor already holds.
+    this.gatewayNormalizers = new Map();
+    this.gatewayCursors = new Map();
+    this.gatewaySeen = new Map();
     this.historySessions = new Map();
-    this.historyEventsBySession = new Map();
     this.historyExpiresAt = new Map();
-    this.externalEventSessionIds = new Set();
-    this.externalEventSignatures = new Map();
     this.closedSessionIds = new Set();
     this.closedSessionOrder = [];
     this.tasks = [];
@@ -102,28 +159,106 @@ export class MonitorState {
       .filter((session) => session && typeof session === "object"
         && typeof session.sessionId === "string" && session.sessionId
         && !this.closedSessionIds.has(session.sessionId))
-      .map((session) => [session.sessionId, session]));
-    const removedSessionIds = [...new Set([...this.sessions.keys(), ...this.eventsBySession.keys()])]
-      .filter((sessionId) => !nextSessions.has(sessionId));
+      .map((session) => [session.sessionId, this.#keepKnownParent(session)]));
+    for (const [sessionId, session] of nextSessions) {
+      nextSessions.set(sessionId, this.#openerFromAncestors(session, nextSessions));
+    }
+    const removedSessionIds = [...this.sessions.keys()].filter((sessionId) => !nextSessions.has(sessionId));
     for (const sessionId of removedSessionIds) this.removeSession(sessionId);
-    const changed = sessionMapSignature(this.sessions) !== sessionMapSignature(nextSessions);
+    let changed = removedSessionIds.length > 0;
+    const nextSignatures = new Map();
+    for (const [sessionId, session] of nextSessions) {
+      const signature = JSON.stringify(session);
+      nextSignatures.set(sessionId, signature);
+      if (this.sessionSignatures.get(sessionId) === signature) continue;
+      changed = true;
+      this.persistence?.writeSession(session);
+      // A session that came back is live again, not history.
+      this.historySessions.delete(sessionId);
+      this.historyExpiresAt.delete(sessionId);
+    }
     this.sessions = nextSessions;
+    this.sessionSignatures = nextSignatures;
     if (changed) this.revision += 1;
     return removedSessionIds;
   }
 
-  setGatewaySourceSessions(list) {
-    this.gatewaySourceSessions = Array.isArray(list) ? list : [];
+  /**
+   * A local session's parent, once seen, is never dropped: the proof comes
+   * and goes with processes and hook sessions (a finished `grok -p` parent
+   * leaves the scan), and losing it turned a Worker back into a Frontdoor.
+   */
+  #keepKnownParent(session) {
+    if (session.source !== "local" || session.parentSessionId) return session;
+    const previous = this.sessions.get(session.sessionId) ?? this.historySessions.get(session.sessionId);
+    if (!previous?.parentSessionId) return session;
+    return {
+      ...session,
+      role: "worker",
+      // The group it belongs to follows the parent (the app groups by opener).
+      opener: previous.opener ?? session.opener,
+      openerInstanceId: previous.openerInstanceId ?? session.openerInstanceId,
+      parentSessionId: previous.parentSessionId,
+      parentLocalSessionId: previous.parentLocalSessionId ?? session.parentLocalSessionId ?? null,
+      ...(previous.parentProof ? { parentProof: previous.parentProof } : {})
+    };
   }
 
+  /**
+   * A local Worker's opener is its topmost known ancestor's: the scan only
+   * sees the parents still running, so a sub-agent of a finished `claude -p`
+   * would otherwise name that `claude -p` as its Frontdoor.
+   */
+  #openerFromAncestors(session, live) {
+    if (session.source !== "local" || !session.parentSessionId) return session;
+    let top = session;
+    const seen = new Set([session.sessionId]);
+    while (top.parentSessionId && !seen.has(top.parentSessionId)) {
+      seen.add(top.parentSessionId);
+      const parent = live.get(top.parentSessionId) ?? this.historySessions.get(top.parentSessionId);
+      if (!parent) break;
+      top = parent;
+    }
+    if (top === session || !top.openerInstanceId || top.openerInstanceId === session.openerInstanceId) return session;
+    return { ...session, opener: top.opener ?? session.opener, openerInstanceId: top.openerInstanceId };
+  }
+
+  setGatewaySourceSessions(list) {
+    this.gatewaySourceSessions = Array.isArray(list) ? list : [];
+    for (const session of this.gatewaySourceSessions) this.#rememberWorker(session);
+  }
+
+  #rememberWorker(session) {
+    for (const id of [session?.sessionId, session?.acpSessionId]) {
+      if (typeof id !== "string" || !id || this.formerWorkerIds.has(id)) continue;
+      this.formerWorkerIds.add(id);
+      if (this.formerWorkerIds.size > 10_000) this.formerWorkerIds.delete(this.formerWorkerIds.values().next().value);
+      this.onWorkerRemembered?.(this.formerWorkerIds);
+    }
+  }
+
+  /**
+   * Moves a live session to history. Its events stay in the store (and in the
+   * persisted history), so nothing has to be copied.
+   */
   removeSession(sessionId, { closed = false } = {}) {
-    const existed = this.sessions.has(sessionId) || this.eventsBySession.has(sessionId);
-    this.archiveSession(sessionId);
+    const session = this.sessions.get(sessionId);
+    const existed = Boolean(session) || this.store.has(sessionId);
+    if (session) {
+      const archived = closed ? { ...session, status: "closed" } : settledLocalSession(session);
+      this.historySessions.set(sessionId, archived);
+      this.historyExpiresAt.set(sessionId, Date.now() + this.historyRetentionMs);
+      this.persistence?.writeSession(archived);
+    } else if (!this.historySessions.has(sessionId)) {
+      // Never listed (events that beat the session list, then its close):
+      // no history row would ever expire these, so they go now. Whatever was
+      // persisted stays on disk.
+      this.#forgetEvents(sessionId);
+    }
     this.sessions.delete(sessionId);
-    this.eventsBySession.delete(sessionId);
-    this.eventSequencesBySession.delete(sessionId);
-    this.externalEventSignatures.delete(sessionId);
+    this.sessionSignatures.delete(sessionId);
     this.workerTopology.delete(sessionId);
+    this.gatewayNormalizers.delete(sessionId);
     if (closed && !this.closedSessionIds.has(sessionId)) {
       this.closedSessionIds.add(sessionId);
       this.closedSessionOrder.push(sessionId);
@@ -141,37 +276,50 @@ export class MonitorState {
     return changed;
   }
 
+  /**
+   * One Gateway subscription event. Returns the canonical events it changed
+   * (empty when it was a duplicate or carried nothing to show).
+   */
   pushEvent(event, { replay = false } = {}) {
     // Gap/truncation markers are subscription control records, never timeline content.
     if (!event?.sessionId || event.type === "subscription_gap" || event.type === "subscription_replay_truncated") {
-      return false;
+      return [];
     }
-    const events = this.eventsBySession.get(event.sessionId) ?? [];
-    const sequences = this.eventSequencesBySession.get(event.sessionId) ?? new Set();
-    if (Number.isFinite(event.sequence) && sequences.has(event.sequence)) return false;
-
-    events.push(event);
-    if (Number.isFinite(event.sequence)) sequences.add(event.sequence);
-    if (events.length > 1 && eventOrder(events.at(-1), events.at(-2)) < 0) events.sort(eventOrder);
-    if (events.length > this.maxEventsPerSession) {
-      const removed = events.splice(0, events.length - this.maxEventsPerSession);
-      for (const item of removed) {
-        if (Number.isFinite(item.sequence)) sequences.delete(item.sequence);
-      }
-      this.diagnostics.overflowDroppedEvents += removed.length;
+    const sessionId = event.sessionId;
+    // The daemon stamps every event; sequence + ts tells a replay (same pair)
+    // from a restarted daemon's renumbered event (same sequence, later ts).
+    const identity = `${event.sequence ?? ""}:${event.ts ?? ""}`;
+    let seen = this.gatewaySeen.get(sessionId);
+    if (!seen) {
+      seen = new Set();
+      this.gatewaySeen.set(sessionId, seen);
     }
-    this.eventsBySession.set(event.sessionId, events);
-    this.eventSequencesBySession.set(event.sessionId, sequences);
-    if (event.type === "session_closed" && this.sessions.has(event.sessionId)) {
-      this.sessions.set(event.sessionId, {
-        ...this.sessions.get(event.sessionId),
+    if (Number.isFinite(event.sequence) && seen.has(identity)) return [];
+    if (Number.isFinite(event.sequence)) {
+      seen.add(identity);
+      if (seen.size > MAX_GATEWAY_IDENTITIES) seen.delete(seen.values().next().value);
+      this.gatewayCursors.set(sessionId, Math.max(this.gatewayCursors.get(sessionId) ?? -1, event.sequence));
+    }
+    let normalizer = this.gatewayNormalizers.get(sessionId);
+    if (!normalizer) {
+      normalizer = new GatewayEventNormalizer();
+      this.gatewayNormalizers.set(sessionId, normalizer);
+    }
+    const before = this.store.overflowDropped;
+    const changed = this.store.upsert(sessionId, normalizer.ingest(event));
+    this.diagnostics.overflowDroppedEvents += this.store.overflowDropped - before;
+    if (event.type === "session_closed" && this.sessions.has(sessionId)) {
+      this.sessions.set(sessionId, {
+        ...this.sessions.get(sessionId),
         status: "closed",
-        updatedAt: event.ts ?? this.sessions.get(event.sessionId).updatedAt
+        updatedAt: event.ts ?? this.sessions.get(sessionId).updatedAt
       });
     }
     if (replay) this.diagnostics.replayedEvents += 1;
-    this.revision += 1;
-    return true;
+    if (changed.length) this.revision += 1;
+    // A closed status can move without a revision bump.
+    else if (event.type === "session_closed") this.snapshotCache = null;
+    return changed;
   }
 
   beginSubscriptionGap(event) {
@@ -221,11 +369,10 @@ export class MonitorState {
   }
 
   subscriptionCursors(floors = {}) {
-    const sessionIds = new Set([...this.eventsBySession.keys(), ...Object.keys(floors)]);
+    const sessionIds = new Set([...this.gatewayCursors.keys(), ...Object.keys(floors)]);
     return Object.fromEntries([...sessionIds].map((sessionId) => {
-      const sequences = (this.eventsBySession.get(sessionId) ?? [])
-        .map((event) => event.sequence).filter(Number.isFinite);
-      const next = sequences.length ? Math.max(...sequences) + 1 : 0;
+      const highest = this.gatewayCursors.get(sessionId);
+      const next = Number.isFinite(highest) ? highest + 1 : 0;
       const floor = Number.isFinite(floors[sessionId]) ? floors[sessionId] : next;
       return [sessionId, Math.min(next, floor)];
     }));
@@ -236,38 +383,50 @@ export class MonitorState {
     return `\"monitor-${this.revision}\"`;
   }
 
-  // Returns the sessionIds whose bucket actually changed (an emptied/dropped
-  // bucket included), so a caller can stream just those buckets instead of
-  // re-sending every local transcript on each scan.
+  /**
+   * Canonical events from local timelines, grouped by session. Upserted, never
+   * replaced: an event that slides out of a transcript window stays. Returns
+   * only what changed, grouped the same way, for the SSE `events` frame.
+   */
   setExternalEvents(groups = {}) {
-    const nextIds = new Set(Object.keys(groups));
-    const changedSessionIds = [];
-    for (const sessionId of this.externalEventSessionIds) {
-      if (nextIds.has(sessionId)) continue;
-      this.eventsBySession.delete(sessionId);
-      this.eventSequencesBySession.delete(sessionId);
-      this.externalEventSignatures.delete(sessionId);
-      changedSessionIds.push(sessionId);
-    }
+    const changed = {};
     for (const [sessionId, values] of Object.entries(groups)) {
-      const events = (Array.isArray(values) ? values : []).slice(-this.maxEventsPerSession);
-      const signature = externalEventsSignature(events);
-      if (this.externalEventSignatures.get(sessionId) === signature) continue;
-      if (this.eventsBySession.has(sessionId)) this.archiveSession(sessionId);
-      this.eventsBySession.set(sessionId, events);
-      this.eventSequencesBySession.set(sessionId, new Set(
-        events.map((event) => event.sequence).filter(Number.isFinite)
-      ));
-      this.externalEventSignatures.set(sessionId, signature);
-      changedSessionIds.push(sessionId);
+      const before = this.store.overflowDropped;
+      const updated = this.store.upsert(sessionId, Array.isArray(values) ? values : []);
+      this.diagnostics.overflowDroppedEvents += this.store.overflowDropped - before;
+      if (updated.length) changed[sessionId] = updated;
     }
-    this.externalEventSessionIds = nextIds;
-    if (changedSessionIds.length) this.revision += 1;
-    return changedSessionIds;
+    if (Object.keys(changed).length) this.revision += 1;
+    return changed;
+  }
+
+  /** Events for one session, oldest first. */
+  eventsFor(sessionId, options) {
+    return this.store.list(sessionId, options);
+  }
+
+  /**
+   * The snapshot serialized, cached per revision: the app polls it and every
+   * reconnect fetches it, and nothing in it changes without a revision bump.
+   */
+  snapshotJson(now = Date.now()) {
+    this.pruneHistory(now);
+    // Diagnostics counters may move without a revision bump; they are tiny.
+    const key = `${this.revision}:${JSON.stringify(this.diagnostics)}`;
+    if (this.snapshotCache?.key !== key) {
+      this.snapshotCache = { key, json: JSON.stringify(this.snapshot(now)) };
+    }
+    return this.snapshotCache.json;
   }
 
   snapshot(now = Date.now()) {
     this.pruneHistory(now);
+    // Only each session's newest events: the full memory window per session
+    // made every poll megabytes. Older ones page from the events endpoint.
+    const limit = this.snapshotEventLimit;
+    const eventsOf = (ids) => Object.fromEntries(ids
+      .map((sessionId) => [sessionId, this.store.list(sessionId, { limit })])
+      .filter(([, events]) => events.length));
     return {
       schemaVersion: MONITOR_SCHEMA_VERSION,
       monitorApiVersion: MONITOR_API_VERSION,
@@ -281,26 +440,58 @@ export class MonitorState {
       error: this.lastError,
       gateway: this.gateway,
       sessions: [...this.sessions.values()],
-      events: Object.fromEntries(this.eventsBySession),
+      // Gateway events can land before the session list that names them.
+      events: eventsOf(this.store.sessionIds().filter((sessionId) => !this.historySessions.has(sessionId))),
       historySessions: [...this.historySessions.values()],
-      historyEvents: Object.fromEntries(this.historyEventsBySession),
+      historyEvents: eventsOf([...this.historySessions.keys()]),
       eventLimit: this.maxEventsPerSession,
+      // Additive: how many newest events per session `events` and
+      // `historyEvents` carry at most.
+      snapshotEventLimit: limit,
       tasks: this.tasks,
       inbox: this.inbox
     };
   }
 
-  archiveSession(sessionId) {
-    const session = this.sessions.get(sessionId) ?? this.historySessions.get(sessionId);
-    const currentEvents = this.eventsBySession.get(sessionId) ?? [];
-    if (!session || !currentEvents.length) return;
-    this.historySessions.set(sessionId, session);
-    const merged = [...(this.historyEventsBySession.get(sessionId) ?? []), ...currentEvents];
-    const unique = new Map(merged.map((event) => [eventIdentity(event), event]));
-    this.historyEventsBySession.set(sessionId, [...unique.values()]
-      .sort(eventOrder)
-      .slice(-this.maxEventsPerSession));
-    this.historyExpiresAt.set(sessionId, Date.now() + this.historyRetentionMs);
+  /**
+   * Loads recently active sessions from persisted history, so a sidecar
+   * restart does not blank the log. Restored sessions are history until a
+   * source reports them live again.
+   */
+  restoreHistory(now = Date.now()) {
+    if (!this.persistence) return 0;
+    let restored = 0;
+    for (const session of this.persistence.readSessions({ since: now - this.historyRetentionMs })) {
+      if (!session?.sessionId || this.sessions.has(session.sessionId)) continue;
+      if (session.source !== "local") this.#rememberWorker(session);
+      const events = this.persistence.readEvents(session.sessionId, { limit: this.maxEventsPerSession });
+      // Rows written before empty hook-only sessions were held back (a usage
+      // probe's bare SessionStart/SessionEnd) must not come back as Frontdoors.
+      if (isEmptyHookOnlySession(session, events)) continue;
+      this.historySessions.set(session.sessionId, session);
+      this.historyExpiresAt.set(session.sessionId, now + this.historyRetentionMs);
+      this.store.load(session.sessionId, events);
+      restored += 1;
+    }
+    if (restored) this.revision += 1;
+    return restored;
+  }
+
+  #forgetEvents(sessionId) {
+    this.store.evict(sessionId);
+    this.gatewaySeen.delete(sessionId);
+    this.gatewayCursors.delete(sessionId);
+  }
+
+  /** Forgets every history session (the user cleared the history). */
+  clearHistory() {
+    for (const sessionId of this.historySessions.keys()) {
+      if (this.sessions.has(sessionId)) continue;
+      this.#forgetEvents(sessionId);
+    }
+    this.historySessions.clear();
+    this.historyExpiresAt.clear();
+    this.revision += 1;
   }
 
   pruneHistory(now = Date.now()) {
@@ -308,9 +499,25 @@ export class MonitorState {
     for (const [sessionId, expiresAt] of this.historyExpiresAt) {
       if (expiresAt > now) continue;
       this.historySessions.delete(sessionId);
-      this.historyEventsBySession.delete(sessionId);
       this.historyExpiresAt.delete(sessionId);
+      // Memory only: the persisted history keeps the session for its own,
+      // longer retention.
+      if (!this.sessions.has(sessionId)) this.#forgetEvents(sessionId);
       pruned = true;
+    }
+    // Orphans: events for a session that is neither live nor history (Gateway
+    // events that beat a session list which never named them). They get the
+    // same clock as history, counted from their last event.
+    for (const sessionId of this.store.sessionIds()) {
+      if (this.sessions.has(sessionId) || this.historySessions.has(sessionId)) continue;
+      if ((this.store.idleMs(sessionId, now) ?? 0) <= this.historyRetentionMs) continue;
+      this.#forgetEvents(sessionId);
+      pruned = true;
+    }
+    for (const sessionId of new Set([...this.gatewaySeen.keys(), ...this.gatewayCursors.keys()])) {
+      if (this.sessions.has(sessionId) || this.historySessions.has(sessionId) || this.store.sessions.has(sessionId)) continue;
+      this.gatewaySeen.delete(sessionId);
+      this.gatewayCursors.delete(sessionId);
     }
     if (pruned) this.revision += 1;
     return pruned;
@@ -324,8 +531,8 @@ export class MonitorState {
     const pendingInbox = this.inbox.filter((item) => item.status === "pending").length;
     return [
       ...(activeSessions ? [`진행 중 세션 ${activeSessions}개`] : []),
-      ...(activeTasks ? [`진행 중 Task ${activeTasks}개`] : []),
-      ...(pendingInbox ? [`미응답 Inbox ${pendingInbox}개`] : [])
+      ...(activeTasks ? [`진행 중 태스크 ${activeTasks}개`] : []),
+      ...(pendingInbox ? [`미응답 요청 ${pendingInbox}개`] : [])
     ];
   }
 
@@ -410,32 +617,6 @@ export class MonitorState {
   }
 }
 
-function eventIdentity(event) {
-  if (Number.isFinite(event?.sequence)) return `sequence:${event.sequence}`;
-  return `${event?.ts ?? ""}:${event?.type ?? ""}:${event?.turnId ?? ""}:${event?.text ?? ""}`;
-}
-
-function sessionMapSignature(map) {
-  return JSON.stringify([...map.entries()]);
-}
-
-function externalEventsSignature(events) {
-  const first = events[0];
-  const last = events.at(-1);
-  return JSON.stringify([
-    events.length,
-    first?.sequence, first?.type, first?.turnId, first?.text,
-    last?.sequence, last?.type, last?.turnId, last?.text, last?.stopReason
-  ]);
-}
-
-function eventOrder(left, right) {
-  const leftSequence = Number.isFinite(left?.sequence) ? left.sequence : Infinity;
-  const rightSequence = Number.isFinite(right?.sequence) ? right.sequence : Infinity;
-  if (leftSequence !== rightSequence) return leftSequence - rightSequence;
-  return String(left?.ts ?? "").localeCompare(String(right?.ts ?? ""));
-}
-
 export function queuedSingleFlight(operation) {
   let active = null;
   let queued = false;
@@ -460,4 +641,12 @@ export function queuedSingleFlight(operation) {
   };
 
   return run;
+}
+
+const LIFECYCLE_KINDS = new Set(["session_start", "session_end"]);
+
+/** A local session nothing but its own start/end ever reached. */
+export function isEmptyHookOnlySession(session, events) {
+  if (session?.source !== "local" || session.title) return false;
+  return (events ?? []).every((event) => LIFECYCLE_KINDS.has(event?.kind));
 }

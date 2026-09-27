@@ -58,9 +58,26 @@ struct ACPMonitorApp: App {
                 .environmentObject(model)
                 .environmentObject(model.settings)
         } label: {
-            Image(nsImage: ACPMenuBarIcon.image)
-                .accessibilityLabel("AgenLynk")
+            MenuBarLabel(model: model)
         }
         .menuBarExtraStyle(.window)
+    }
+}
+
+/// The status item: the mark, then "main | sub" — how many Frontdoors are
+/// working and how many of their Workers are — as bare numbers, with the
+/// steps that wait for the user called out after them.
+struct MenuBarLabel: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        let counts = MenuBarCounts(model.menuBarPipeline)
+        HStack(spacing: 3) {
+            Image(nsImage: ACPMenuBarIcon.image)
+            if let text = counts.text { Text(text).monospacedDigit() }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(counts.accessibility)
+        .help(counts.accessibility)
     }
 }

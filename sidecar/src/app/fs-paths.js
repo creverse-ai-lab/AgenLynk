@@ -4,6 +4,7 @@
 // Rethrowing is the behaviour kept here — only "not there" answers false.
 
 import { access } from "node:fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 
 export async function pathExists(path) {
   try {
@@ -17,4 +18,11 @@ export async function pathExists(path) {
 
 export async function pathIsMissing(path) {
   return !(await pathExists(path));
+}
+
+/** `path` is absolute and strictly inside `root` (never `root` itself). */
+export function isWithin(root, path) {
+  if (typeof root !== "string" || !root || typeof path !== "string" || !isAbsolute(path)) return false;
+  const child = relative(resolve(root), resolve(path));
+  return child !== "" && child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child);
 }

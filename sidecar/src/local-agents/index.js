@@ -6,12 +6,14 @@
 // holds those live over socket RPC, and the old watcher only produced them for
 // `mergeMonitorSessions` to throw away again.
 
+import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { detectClaudeSessions } from "./claude.js";
 import { discover, poll, prune } from "./codex.js";
-import { detectCliProcesses, recordGrokAcpLinks } from "./grok.js";
+import { detectCliProcesses, GrokSubagentParents, recordGrokAcpLinks } from "./grok.js";
 import { detectOrcaSessions } from "./orca.js";
+import { annotateExecLineage, annotateLineage, ProcessLineage } from "./lineage.js";
 import { externalParent, pruneExternalParents } from "./parent-links.js";
 import { snapshotSessions } from "./snapshot.js";
 
@@ -20,8 +22,10 @@ const DISCOVERY_INTERVAL_SECONDS = 2;
 // session appearing a few seconds late is fine, so the process scan runs on
 // its own slower cadence than file-based discovery.
 const PROCESS_SCAN_INTERVAL_SECONDS = 5;
-const DEFAULT_READY_AFTER = 3;
-const DEFAULT_STALE_AFTER = 600;
+// A session that finished its turn stays listed as idle this long (the app
+// setting localSessionRetentionMs); files older than it are not considered.
+const DEFAULT_READY_AFTER = 30 * 60;
+const DEFAULT_STALE_AFTER = 30 * 60;
 
 function defaultPaths() {
   const home = homedir();
@@ -45,7 +49,8 @@ export class LocalAgentScanner {
     this.orcaAccounts = paths.orcaAccounts;
     this.orcaStatus = paths.orcaStatus;
     this.readyAfter = paths.readyAfter ?? DEFAULT_READY_AFTER;
-    this.staleAfter = paths.staleAfter ?? DEFAULT_STALE_AFTER;
+    // Discovery must look back at least as far as idle sessions are kept.
+    this.staleAfter = Math.max(paths.staleAfter ?? DEFAULT_STALE_AFTER, this.readyAfter);
     this.discoveryIntervalSeconds = paths.discoveryIntervalSeconds ?? DISCOVERY_INTERVAL_SECONDS;
     this.conversationWindowMs = paths.conversationWindowMs;
     this.maxConversationRecords = paths.maxConversationRecords;
@@ -58,11 +63,19 @@ export class LocalAgentScanner {
     // Grok process facts, refreshed on their own slower cadence.
     this.processStates = {};
     this.grokEventPathCache = new Map();
+    this.grokLinkCache = new Map();
+    this.grokSubagents = new GrokSubagentParents();
     this.lastProcessScan = 0;
     // Parent links are in-memory now. The old watcher reloaded them from its
     // snapshot file; here a monitor restart simply rediscovers them from the
     // transcripts on the next scan.
     this.parents = new Map();
+    // Parent from the process tree for agents launched from another agent's
+    // shell tool. Claude's pid files sit next to its projects folder, so a
+    // test's temporary claudeRoot never reads the real ~/.claude.
+    this.lineage = paths.lineage !== undefined
+      ? paths.lineage
+      : new ProcessLineage({ claudeSessionsDir: paths.claudeSessionsDir ?? join(dirname(this.claudeRoot), "sessions") });
     this.lastDiscovery = 0;
   }
 
@@ -76,6 +89,20 @@ export class LocalAgentScanner {
       if (cursor.session === sessionId) return cursor.conversation;
     }
     return [];
+  }
+
+  /**
+   * Parents Grok itself recorded for its sub-agents. Also applied by the
+   * monitor to sessions only a hook reported, after the hook overlay, so the
+   * proven parent replaces the hook's process-lineage guess.
+   */
+  async annotateGrokSubagents(items) {
+    try {
+      await this.grokSubagents.annotate(items);
+    } catch {
+      // A refinement; the listing stands without it.
+    }
+    return items;
   }
 
   /** Every known local session, shaped like the old watcher's snapshot entries. */
@@ -94,7 +121,18 @@ export class LocalAgentScanner {
       now
     });
     pruneExternalParents(this.parents, this.detectedStates, this.staleAfter, now);
-    return snapshotSessions({ ...this.codexStates, ...this.detectedStates }, this.database);
+    return snapshotSessions({ ...this.#codexStatesWithLineage(), ...this.detectedStates }, this.database);
+  }
+
+  /** Codex states with the lineage parent their cursor holds, as copies. */
+  #codexStatesWithLineage() {
+    const states = { ...this.codexStates };
+    for (const cursor of this.cursors.values()) {
+      const parent = cursor.exec?.parent;
+      const state = parent ? states[cursor.session] : null;
+      if (state) states[cursor.session] = { ...state, lineage_parent: parent };
+    }
+    return states;
   }
 
   async #discover(now) {
@@ -123,6 +161,14 @@ export class LocalAgentScanner {
       });
     }
 
+    // `codex exec` does not hold its rollout open, so its pid is found from
+    // the thread's cwd and start time instead.
+    try {
+      await annotateExecLineage(this.cursors, this.lineage, now);
+    } catch {
+      // Lineage is a refinement; the scan stands without it.
+    }
+
     if (now - this.lastProcessScan >= (this.processScanIntervalSeconds ?? PROCESS_SCAN_INTERVAL_SECONDS)) {
       this.processStates = await detectCliProcesses(
         now, this.processStates, this.parents, this.grokEventPathCache, this.grokRoot, this.staleAfter
@@ -147,19 +193,28 @@ export class LocalAgentScanner {
     );
     Object.assign(detected, orcaStates);
 
-    if (await recordGrokAcpLinks(detected, this.parents, now, this.grokRoot)) {
+    if (await recordGrokAcpLinks(detected, this.parents, now, this.grokRoot, this.grokLinkCache)) {
       for (const item of Object.values(detected)) {
         if (["claude", "grok", "codex"].includes(item.provider) && !item.parent) {
           item.parent = externalParent(this.parents, item.provider, item.link_session ?? item.session);
         }
       }
     }
+    // A Grok sub-agent runs inside its parent's process, so the process tree
+    // would name the parent's launcher; Grok's own subagents/ record decides.
+    await this.annotateGrokSubagents(Object.values(detected));
+    // Lineage comes after every proven link: a Gateway/MCP-proven parent is
+    // never replaced by what the process tree suggests.
+    try {
+      await annotateLineage(Object.values(detected), this.lineage, now);
+    } catch {
+      // Lineage is a refinement; the scan stands without it.
+    }
     this.detectedStates = detected;
   }
 
   async #orcaHomes() {
     if (!this.orcaAccounts) return [];
-    const { readdir } = await import("node:fs/promises");
     try {
       const entries = await readdir(this.orcaAccounts, { withFileTypes: true });
       return entries.filter((entry) => entry.isDirectory()).map((entry) => join(this.orcaAccounts, entry.name, "home"));

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
-import { MonitorState } from "../src/projection/monitor-state.js";
+import { MONITOR_API_VERSION, MONITOR_SCHEMA_VERSION, MonitorState } from "../src/projection/monitor-state.js";
 import { isIgnoredMonitorEvent } from "../src/server/monitor.js";
 
 const traceDirectory = new URL("./fixtures/monitor-traces/", import.meta.url);
@@ -33,7 +33,7 @@ async function loadTrace(url) {
   const meta = records[0];
   const expected = records.at(-1);
   assert.equal(meta?.kind, "meta");
-  assert.equal(meta.traceVersion, 1);
+  assert.equal(meta.traceVersion, 2);
   assert.equal(expected?.kind, "expected");
   return { meta, steps: records.slice(1, -1), expected };
 }
@@ -80,8 +80,8 @@ function normalizedProjection(expected = {}) {
 
 function derivedMonitorMeta(state, rootId = null) {
   return {
-    schemaVersion: 1,
-    monitorApiVersion: "1.0",
+    schemaVersion: MONITOR_SCHEMA_VERSION,
+    monitorApiVersion: MONITOR_API_VERSION,
     gatewayIdentity: {
       rootId: rootId ?? null,
       gatewayApiVersion: state.gateway?.gatewayApiVersion ?? null,

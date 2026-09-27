@@ -61,6 +61,90 @@ actor MonitorClient {
         return try ACPAgentCatalogSnapshot.decode(data)
     }
 
+    func fetchHookStatus(endpoint: MonitorEndpoint) async throws -> MonitoringHookStatus {
+        let (data, response) = try await URLSession.shared.data(for: endpoint.request(path: "api/hooks"))
+        try validate(response: response, data: data)
+        return try MonitoringHookStatus.decode(data)
+    }
+
+    /// `action` is "install" or "uninstall"; `providers` limits it to some CLIs.
+    /// `consent` records the user's agreement with an install; `decline`
+    /// records a "no" so the app does not ask again until the scope changes.
+    func mutateHooks(
+        endpoint: MonitorEndpoint,
+        action: String,
+        providers: [String],
+        consent: Bool = false,
+        decline: Bool = false
+    ) async throws -> MonitoringHookStatus {
+        var request = endpoint.request(path: "api/hooks", method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "action": action, "providers": providers, "consent": consent, "decline": decline
+        ] as [String: Any])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response: response, data: data)
+        return try MonitoringHookStatus.decode(data)
+    }
+
+    /// One page of a session's events older than sequence `before` (all of
+    /// its newest when nil), oldest first.
+    func fetchSessionEvents(
+        endpoint: MonitorEndpoint,
+        sessionId: String,
+        before: Int?,
+        limit: Int = 200
+    ) async throws -> SessionEventsPage {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/")
+        let encodedId = sessionId.addingPercentEncoding(withAllowedCharacters: allowed) ?? sessionId
+        var components = URLComponents(url: endpoint.baseURL, resolvingAgainstBaseURL: false)!
+        let basePath = components.percentEncodedPath.hasSuffix("/")
+            ? String(components.percentEncodedPath.dropLast())
+            : components.percentEncodedPath
+        components.percentEncodedPath = "\(basePath)/api/sessions/\(encodedId)/events"
+        var items = [URLQueryItem(name: "limit", value: String(limit))]
+        if let before { items.append(URLQueryItem(name: "before", value: String(before))) }
+        components.queryItems = items
+        var request = endpoint.request(path: "api/sessions")
+        request.url = components.url
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response: response, data: data)
+        return try SessionEventsPage.decode(data, sessionId: sessionId)
+    }
+
+    /// Persisted session records updated before `before` (an ISO timestamp),
+    /// newest first.
+    /// `beforeId` breaks ties between sessions with the same `updatedAt`.
+    func fetchHistory(endpoint: MonitorEndpoint, before: String?, beforeId: String? = nil, limit: Int = 50) async throws -> MonitorHistoryPage {
+        var components = URLComponents(url: endpoint.baseURL.appendingPathComponent("api/history"), resolvingAgainstBaseURL: false)!
+        var items = [URLQueryItem(name: "limit", value: String(limit))]
+        if let before { items.append(URLQueryItem(name: "before", value: before)) }
+        if let beforeId { items.append(URLQueryItem(name: "beforeId", value: beforeId)) }
+        components.queryItems = items
+        var request = endpoint.request(path: "api/history")
+        request.url = components.url
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response: response, data: data)
+        return try MonitorHistoryPage.decode(data)
+    }
+
+    func fetchHistoryStats(endpoint: MonitorEndpoint) async throws -> MonitorHistoryStats {
+        let (data, response) = try await URLSession.shared.data(for: endpoint.request(path: "api/history/stats"))
+        try validate(response: response, data: data)
+        return try MonitorHistoryStats.decode(data)
+    }
+
+    /// Deletes all history except live sessions; returns the new stats.
+    func clearHistory(endpoint: MonitorEndpoint) async throws -> MonitorHistoryStats {
+        var request = endpoint.request(path: "api/history", method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["action": "clear"])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response: response, data: data)
+        return try MonitorHistoryStats.decode(data)
+    }
+
     func fetchGatewayConfig(endpoint: MonitorEndpoint) async throws -> GatewayConfigSnapshot {
         let (data, response) = try await URLSession.shared.data(for: endpoint.request(path: "api/gateway-config"))
         try validate(response: response, data: data)

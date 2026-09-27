@@ -14,7 +14,8 @@
       "state": "waiting",
       "task": "Review pull request #482",
       "updatedAt": "2026-08-10T12:34:55.000Z",
-      "source": "gateway"
+      "source": "gateway",
+      "name": "AgenLynk"
     },
     {
       "id": "gateway-session-7",
@@ -25,7 +26,9 @@
       "state": "waiting",
       "task": "Apply the requested review permission",
       "updatedAt": "2026-08-10T12:34:55.000Z",
-      "source": "gateway"
+      "source": "gateway",
+      "name": "Review permission fix",
+      "waitingReason": "permission"
     },
     {
       "id": "gateway-session-8",
@@ -36,7 +39,8 @@
       "state": "completed",
       "task": "Run test suite",
       "updatedAt": "2026-08-10T12:30:12.000Z",
-      "source": "local"
+      "source": "local",
+      "name": "Run test suite"
     }
   ]
 }

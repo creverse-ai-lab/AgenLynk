@@ -13,6 +13,14 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+// Gateway sequences the monitor has applied for a session. Event sequences
+// in v2 are the monitor store's own; the daemon's live in its dedupe ledger.
+function appliedSequences(state, sessionId) {
+  return [...(state.gatewaySeen.get(sessionId) ?? [])]
+    .map((identity) => Number(identity.split(":")[0]))
+    .sort((left, right) => left - right);
+}
+
 function seedSession(state, { sessionId = "s1", sequences = [0, 3] } = {}) {
   state.setConnection({ connected: true, streaming: true, error: null });
   state.setSessions([{ sessionId, status: "running" }]);
@@ -90,7 +98,7 @@ test("gap reconciliation keeps the old subscription live until rewind promote", 
   assert.equal(owner.activeSubscriptionId, "sub-old");
   owner.onEvent({ sessionId: "s1", sequence: 4, type: "agent_message_chunk", text: "old-live" });
   candidateOnEvent({ sessionId: "s1", sequence: 5, type: "agent_message_chunk", text: "candidate-live" });
-  assert.equal(state.eventsBySession.get("s1").some((event) => event.sequence === 5), false);
+  assert.equal(appliedSequences(state, "s1").includes(5), false);
   candidateGate.resolve();
   await reconcile;
 
@@ -99,8 +107,8 @@ test("gap reconciliation keeps the old subscription live until rewind promote", 
   assert.equal(calls[1][1], "sub-old");
   assert.equal(owner.activeSubscriptionId, "sub-new");
   assert.equal(owner.subscriptionActive, true);
-  assert.deepEqual(state.snapshot().events.s1.map((event) => event.sequence), [0, 1, 2, 3, 4, 5]);
-  assert.equal(state.snapshot().events.s1.some((event) => event.type === "subscription_gap"), false);
+  assert.deepEqual(appliedSequences(state, "s1"), [0, 1, 2, 3, 4, 5]);
+  assert.equal(state.snapshot().events.s1.some((event) => event.kind === "subscription_gap"), false);
   assert.deepEqual(state.snapshot().diagnostics, {
     subscriptionGaps: 1,
     replayedEvents: 2,
@@ -211,7 +219,7 @@ test("cursorTruncated after rewind degrades health and stays out of the timeline
   assert.match(snapshot.error ?? "", /truncated/);
   assert.equal(snapshot.streaming, true);
   assert.equal(snapshot.diagnostics.replayTruncations, 1);
-  assert.equal(snapshot.events.s1.some((event) => event.type === "subscription_replay_truncated"), false);
+  assert.equal(snapshot.events.s1.some((event) => event.kind === "subscription_replay_truncated"), false);
 });
 
 test("initial open unsubscribes a candidate if post-subscribe work fails", async () => {
@@ -238,4 +246,74 @@ test("initial open unsubscribes a candidate if post-subscribe work fails", async
   assert.deepEqual(unsubscribed, ["sub-leak"]);
   assert.equal(owner.subscriptionActive, false);
   assert.equal(owner.activeSubscriptionId, null);
+});
+
+test("a burst of gap reconciliations runs once plus at most one follow-up", async () => {
+  const state = new MonitorState();
+  seedSession(state);
+  let subscribes = 0;
+  const gate = deferred();
+  const rpc = {
+    async unsubscribe() {},
+    async subscribe() {
+      subscribes += 1;
+      if (subscribes === 1) await gate.promise;
+      return { subscriptionId: `sub-${subscribes}`, sessions: [{ sessionId: "s1", status: "running" }], events: [] };
+    }
+  };
+  const owner = createOwner({ rpc, state });
+  owner.activeSubscriptionId = "sub-0";
+  owner.subscriptionActive = true;
+  const first = owner.reconcile();
+  for (let attempt = 0; subscribes === 0 && attempt < 20; attempt += 1) await Promise.resolve();
+  // Ten more gap markers while the first run is in flight.
+  const burst = Array.from({ length: 10 }, () => owner.reconcile());
+  assert.equal(new Set(burst).size, 1, "every queued caller shares one follow-up run");
+  gate.resolve();
+  await Promise.all([first, ...burst]);
+  assert.equal(subscribes, 2);
+});
+
+test("an overflowing candidate buffer is dropped and replayed from a gap floor", async () => {
+  const state = new MonitorState();
+  // Applied through 30 (e.g. via the old subscription), so the plain cursor
+  // would resume past the dropped 10..15; only the floor brings them back.
+  seedSession(state, { sequences: [0, 30] });
+  const cursors = [];
+  let candidateOnEvent = null;
+  const gate = deferred();
+  const rpc = {
+    async unsubscribe() {},
+    async subscribe(args, onEvent) {
+      cursors.push(args.cursors);
+      if (cursors.length === 1) {
+        candidateOnEvent = onEvent;
+        await gate.promise;
+      }
+      return { subscriptionId: `sub-${cursors.length}`, sessions: [{ sessionId: "s1", status: "running" }], events: [] };
+    }
+  };
+  const owner = new GatewaySubscriptionOwner({
+    rpc,
+    state,
+    maxCandidateBuffer: 3,
+    onEvent: (event) => state.pushEvent(event),
+    async applySessionSources() { state.setSessions(state.gatewaySourceSessions); },
+    async refresh() {}
+  });
+  owner.activeSubscriptionId = "sub-0";
+  owner.subscriptionActive = true;
+  owner.activeGeneration = 1;
+  owner.nextGeneration = 1;
+  const run = owner.reconcile();
+  for (let attempt = 0; candidateOnEvent == null && attempt < 20; attempt += 1) await Promise.resolve();
+  for (let sequence = 10; sequence < 16; sequence += 1) {
+    candidateOnEvent({ sessionId: "s1", sequence, type: "agent_message_chunk", text: String(sequence) });
+  }
+  gate.resolve();
+  await run;
+  for (let attempt = 0; cursors.length < 2 && attempt < 50; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(cursors.length, 2, "the overflow schedules a follow-up reconciliation");
+  assert.equal(owner.status().candidateId, null, "nothing stays buffered");
+  assert.equal(cursors[1].s1, 10, "which replays from the lowest dropped sequence");
 });

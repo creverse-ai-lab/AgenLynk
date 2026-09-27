@@ -4,29 +4,103 @@ function isoTimestamp(value) {
   return new Date(seconds * 1_000).toISOString();
 }
 
+// Scanner states -> the canonical (Gateway) status vocabulary.
 function monitorStatus(value) {
   switch (value) {
     case "running": return "running";
     case "needs_input": return "waiting_input";
-    case "ready": return "ready";
+    case "needs_permission": return "waiting_permission";
+    case "ready":
     case "idle": return "idle";
     default: return "disconnected";
   }
 }
 
-function rootSessionId(session, byRawId) {
+const TITLE_FROM_PROMPT_LIMIT = 60;
+
+/** One line, bounded: every title source goes through the same cut. */
+function titleLabel(value) {
+  if (typeof value !== "string") return null;
+  const line = value.replace(/\s+/g, " ").trim();
+  if (!line) return null;
+  return line.length > TITLE_FROM_PROMPT_LIMIT ? `${line.slice(0, TITLE_FROM_PROMPT_LIMIT - 1)}…` : line;
+}
+
+/**
+ * One naming rule for every provider: the CLI's own title when it has one
+ * (Claude's ai-title), else the task a sub-agent was spawned with (Codex's
+ * thread database), else the latest prompt, cut to a label. Never a raw id
+ * or a scanner event name — the app falls back to "<provider> · <folder>".
+ */
+function sessionTitle(facts, events, raw) {
+  const own = titleLabel(facts.title) ?? titleLabel(raw.task);
+  if (own) return own;
+  for (let index = (events?.length ?? 0) - 1; index >= 0; index -= 1) {
+    if (events[index].kind === "turn_start" && events[index].title) return titleLabel(events[index].title);
+  }
+  return null;
+}
+
+/**
+ * Warnings the app must show on a session. Codex edits inside its session
+ * roots through its own tools without asking, so a read_only/ask Gateway
+ * session is not edit-proof (Gateway 1.5.1 management contract); the same
+ * holds for 1.4.0 daemons, which do not say so themselves.
+ */
+export function sessionAlerts(session) {
+  const policy = session?.permissionPolicy;
+  if (session?.provider !== "codex" || !policy || policy === "auto_approve") return [];
+  return [{
+    level: "warning",
+    code: "permission_policy_partial",
+    message: `${policy} 정책이 부분적으로만 적용됩니다. Codex는 세션 폴더 안의 파일을 권한 요청 없이 고칠 수 있습니다.`
+  }];
+}
+
+// Placeholders the scanners use when they cannot see the real model.
+const PLACEHOLDER_MODELS = new Set(["claude-cli", "grok-cli", "codex-cli"]);
+
+function realModel(value) {
+  return typeof value === "string" && value && !PLACEHOLDER_MODELS.has(value) ? value : null;
+}
+
+/**
+ * The newer of the scanner's state and the timeline's. The scanner owns
+ * liveness and approvals (a pending escalated exec); the timeline sees turn
+ * boundaries the scanner cannot, e.g. a Grok turn that just ended.
+ */
+function resolvedStatus(raw, timeline) {
+  const scanned = monitorStatus(raw.state);
+  const hinted = timeline?.status;
+  if (!hinted || scanned === "waiting_input" || scanned === "waiting_permission") return scanned;
+  const scannedAt = Number(raw.time || 0) * 1_000;
+  const hintedAt = Date.parse(timeline.statusAt ?? "");
+  return Number.isFinite(hintedAt) && hintedAt > scannedAt ? hinted : scanned;
+}
+
+/**
+ * The top of a session's parent chain. A chain that leaves the snapshot ends
+ * at the missing parent's id; its provider is known only when the link came
+ * with one (process lineage names it).
+ */
+function rootOf(session, byRawId) {
   let current = session;
   const visited = new Set([session.session]);
   while (current?.parent && !visited.has(current.parent)) {
     visited.add(current.parent);
     const parent = byRawId.get(current.parent);
-    if (!parent) return current.parent;
+    if (!parent) return { id: current.parent, provider: current.parent_provider ?? null };
     current = parent;
   }
-  return current?.session ?? session.session;
+  return { id: current?.session ?? session.session, provider: current?.provider ?? null };
 }
 
-export function projectLocalSnapshot(snapshot) {
+/**
+ * Scanner snapshot (+ per-session timelines from ./normalize/local-timeline.js)
+ * -> canonical sessions and their events, keyed by monitor session id.
+ * `timelines` maps `${provider}:${rawSessionId}` to `{ events, session }`.
+ */
+export function projectLocalSnapshot(snapshot, timelines = new Map()) {
   const allRawSessions = Array.isArray(snapshot?.sessions)
     ? snapshot.sessions.filter((session) => session?.session)
     : [];
@@ -34,71 +108,115 @@ export function projectLocalSnapshot(snapshot) {
   // through an intermediate the Gateway owns, and losing that link would
   // split the grandchild off as a false Frontdoor.
   const byRawId = new Map(allRawSessions.map((session) => [session.session, session]));
-  const rawSessions = allRawSessions;
   const sessions = [];
   const events = {};
 
-  for (const raw of rawSessions) {
-    const rootId = rootSessionId(raw, byRawId);
+  for (const raw of allRawSessions) {
+    const rootLink = rootOf(raw, byRawId);
+    const rootId = rootLink.id;
     const root = byRawId.get(rootId);
     const provider = raw.provider ?? "local";
     const sessionId = `local:${provider}:${raw.session}`;
-    const timestamp = isoTimestamp(raw.time);
-    const role = raw.session === rootId ? "frontdoor" : "worker";
-    const turnId = `local-turn:${raw.session}`;
-    const title = raw.task || raw.event || `${raw.provider ?? "local"} local session`;
-    const status = monitorStatus(raw.state);
+    const timeline = timelines.get(`${provider}:${raw.session}`) ?? null;
+    const facts = timeline?.session ?? {};
+    const scannedAt = isoTimestamp(raw.time);
+    const status = resolvedStatus(raw, facts);
+    const firstEventAt = timeline?.events?.[0]?.ts ?? null;
+    const updatedAt = [scannedAt, facts.statusAt, timeline?.events?.at(-1)?.ts]
+      .filter(Boolean)
+      .reduce((latest, value) => (value > latest ? value : latest), scannedAt);
+    const active = status === "running" || status === "waiting_input" || status === "waiting_permission";
+    // A one-shot run (`claude -p`, `grok -p`, `codex exec`) is automation,
+    // not a session a person opened: without a known launcher it is an
+    // unattributed Worker, never a Frontdoor of its own.
+    const headless = Boolean(raw.headless || facts.headless === true);
+    const orphanRun = headless && raw.session === rootId && !raw.parent;
 
     sessions.push({
       sessionId,
       acpSessionId: raw.session,
       localSessionId: raw.session,
       provider,
-      model: raw.engine ?? null,
+      model: realModel(facts.model) ?? realModel(raw.engine),
       status,
-      title,
-      opener: root?.provider ?? raw.provider ?? "local",
-      openerInstanceId: rootId,
-      cwd: raw.cwd ?? root?.cwd ?? "",
-      turnId: ["running", "waiting_input"].includes(status) ? turnId : null,
-      stopReason: status === "ready" ? "completed" : null,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      eventCount: status === "ready" ? 2 : 1,
+      title: sessionTitle(facts, timeline?.events, raw),
+      opener: root?.provider ?? rootLink.provider ?? raw.provider ?? "local",
+      openerInstanceId: orphanRun ? null : rootId,
+      cwd: raw.cwd ?? facts.cwd ?? root?.cwd ?? "",
+      turnId: active ? facts.turnId ?? `local-turn:${raw.session}` : null,
+      stopReason: status === "idle" ? "completed" : null,
+      createdAt: firstEventAt && firstEventAt < scannedAt ? firstEventAt : scannedAt,
+      updatedAt,
+      eventCount: timeline?.events?.length ?? 0,
+      usage: facts.usage ?? null,
+      turnUsage: facts.turns ?? [],
+      ...(facts.usagePartial ? { usagePartial: true } : {}),
+      capabilities: localCapabilities(provider, timeline, raw.hooked === true),
       source: "local",
-      role,
+      role: raw.session === rootId && !orphanRun ? "frontdoor" : "worker",
       parentLocalSessionId: raw.parent ?? null,
-      parentSessionId: raw.parent ? `local:${byRawId.get(raw.parent)?.provider ?? provider}:${raw.parent}` : null
+      // Only name a local parent this snapshot can see, or one whose provider
+      // the link itself proved (process lineage). Guessing it from the
+      // child's minted ids like local:codex:<claude id> that point at
+      // nothing; a Gateway-owned parent is resolved from parentLocalSessionId
+      // by mergeMonitorSessions instead.
+      parentSessionId: byRawId.has(raw.parent)
+        ? `local:${byRawId.get(raw.parent).provider ?? "local"}:${raw.parent}`
+        : raw.parent && raw.parent_provider ? `local:${raw.parent_provider}:${raw.parent}` : null,
+      ...(raw.parent && raw.parent_source === "lineage" ? { parentProof: "lineage" } : {}),
+      // A one-shot run (`claude -p`, `grok -p`, `codex exec`), so the app can
+      // tell it from an interactive session.
+      ...(headless ? { headless: true } : {})
     });
-
-    const baseSequence = Math.max(0, Math.floor(Number(raw.time || 0) * 1_000) * 2);
-    const projected = [{
-      sessionId,
-      sequence: baseSequence,
-      type: "turn_start",
-      ts: timestamp,
-      turnId,
-      text: title,
-      source: "local"
-    }];
-    if (status === "ready" || status === "idle" || status === "disconnected") {
-      projected.push({
-        sessionId,
-        sequence: baseSequence + 1,
-        type: status === "disconnected" ? "error" : "turn_end",
-        ts: timestamp,
-        turnId,
-        stopReason: status,
-        source: "local"
-      });
-    }
-    events[sessionId] = projected;
+    if (timeline?.events?.length) events[sessionId] = timeline.events;
   }
 
   return { sessions, events };
 }
 
-export function mergeMonitorSessions(gatewaySessions, localSessions, workerTopology = null) {
+/**
+ * What this monitor can actually show for a local session, so the app can
+ * tell "nothing happened" from "this source cannot see it".
+ */
+function localCapabilities(provider, timeline, hooked) {
+  const capabilities = ["status"];
+  if (timeline) capabilities.push("timeline", "tools", "usage", "thinking");
+  // Codex writes approval waits into its rollout; Claude and Grok only
+  // expose them through hooks.
+  if (hooked || provider === "codex") capabilities.push("permission");
+  if (hooked) capabilities.push("live");
+  return capabilities;
+}
+
+/**
+ * Which local timelines to hand to the event store on this pass: the ones
+ * whose window changed, plus any accepted session not handed over since it
+ * (re)appeared. Everything else is the same window the store already merged.
+ */
+export class LocalEventDelivery {
+  constructor() {
+    this.delivered = new Set();
+  }
+
+  /**
+   * @param {Record<string, object[]>} events monitor session id -> window
+   * @param {Set<string>} changedSessionIds sessions whose window changed
+   * @param {Set<string>} acceptedIds local sessions the merge kept
+   */
+  select(events, changedSessionIds, acceptedIds) {
+    const selected = {};
+    for (const [sessionId, values] of Object.entries(events ?? {})) {
+      if (!acceptedIds.has(sessionId)) continue;
+      if (changedSessionIds.has(sessionId) || !this.delivered.has(sessionId)) selected[sessionId] = values;
+    }
+    // A session that leaves the local view is handed over again in full
+    // when it returns (its store bucket may have expired meanwhile).
+    this.delivered = new Set(Object.keys(events ?? {}).filter((sessionId) => acceptedIds.has(sessionId)));
+    return selected;
+  }
+}
+
+export function mergeMonitorSessions(gatewaySessions, localSessions, workerTopology = null, formerWorkerIds = null) {
   // ownedWorkerIds is LOAD-BEARING even though the scanner no longer produces
   // Gateway sessions itself: an ACP claude worker writes a transcript under
   // ~/.claude/projects like any other claude session, so the local scanner
@@ -135,8 +253,12 @@ export function mergeMonitorSessions(gatewaySessions, localSessions, workerTopol
   const enrichedGateway = gateway.map((session) => {
     const localMatch = localByProviderId.get(session?.acpSessionId)
       ?? localByProviderId.get(session?.sessionId);
+    // Process lineage is not proof for a Gateway worker: the daemon may carry
+    // whichever session's environment first started it. Only transcript
+    // (MCP response) links attribute a Gateway session.
     const proven = localMatch?.openerInstanceId
       && localMatch.openerInstanceId !== localMatch.localSessionId
+      && localMatch.parentProof !== "lineage"
       ? {
         opener: localMatch.opener ?? null,
         openerInstanceId: localMatch.openerInstanceId,
@@ -148,6 +270,13 @@ export function mergeMonitorSessions(gatewaySessions, localSessions, workerTopol
     return {
       ...session,
       role: session.role ?? "worker",
+      // The Gateway keeps usage off its event stream; the worker's own
+      // transcript (scanned locally) is where the tokens are.
+      usage: session.usage ?? localMatch?.usage ?? null,
+      turnUsage: session.turnUsage ?? localMatch?.turnUsage ?? [],
+      model: session.model ?? localMatch?.model ?? null,
+      capabilities: ["status", "timeline", "tools", "thinking", "permission", "live", ...(localMatch?.usage ? ["usage"] : [])],
+      alerts: sessionAlerts(session),
       ...(topology ? {
         opener: session.opener ?? topology.opener,
         openerInstanceId: session.openerInstanceId ?? topology.openerInstanceId,
@@ -159,8 +288,9 @@ export function mergeMonitorSessions(gatewaySessions, localSessions, workerTopol
     session?.sessionId,
     session?.acpSessionId
   ]).filter(Boolean));
+  // A worker the Gateway already closed is history, not a new local root.
   const local = (Array.isArray(localSessions) ? localSessions : [])
-    .filter((session) => !ownedWorkerIds.has(session.localSessionId))
+    .filter((session) => !ownedWorkerIds.has(session.localSessionId) && !formerWorkerIds?.has(session.localSessionId))
     .map((session) => ({
       ...session,
       parentSessionId: resolvedParentSessionId(session)

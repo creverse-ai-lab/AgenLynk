@@ -7,12 +7,15 @@
 // detection and the scanner does not walk the whole transcript tree.
 
 import { open, readdir, stat } from "node:fs/promises";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { isConversationRecord } from "../local-transcript.js";
-import { readRecord } from "./jsonl.js";
+import { basename, join } from "node:path";
+import { isWithin } from "../app/fs-paths.js";
+import { isCodexTimelineRecord } from "../normalize/codex.js";
+import { epochMs } from "../normalize/model.js";
+import { readRecord, recordSize, slimRecord } from "./jsonl.js";
 import { recordExternalParent } from "./parent-links.js";
 import { signalWithApprovals } from "./signals.js";
 import { stateRecord } from "./snapshot.js";
+import { DEFAULT_MAX_WINDOW_CHARS, MAX_READ_BYTES } from "./tail.js";
 import { readRecentThreads } from "./thread-db.js";
 
 // The tail is read once and feeds TWO consumers: the state reducer (signals/
@@ -44,6 +47,9 @@ function newCursor(session, modified, database, {
     // Conversation-shaped records from the tail, bounded by time and count,
     // consumed by the event projection.
     conversation: [],
+    // Retained size per conversation record (parallel) and their sum.
+    conversationSizes: [],
+    conversationChars: 0,
     conversationWindowMs,
     maxConversationRecords
   };
@@ -53,18 +59,58 @@ function pruneConversation(cursor, nowMs) {
   const cutoff = nowMs - cursor.conversationWindowMs;
   let drop = 0;
   while (drop < cursor.conversation.length) {
-    const at = Date.parse(cursor.conversation[drop].timestamp ?? "");
-    if (Number.isFinite(at) && at >= cutoff) break;
+    const at = epochMs(cursor.conversation[drop].timestamp);
+    if (at != null && at >= cutoff) break;
     drop += 1;
   }
   if (cursor.conversation.length - drop > cursor.maxConversationRecords) {
     drop = cursor.conversation.length - cursor.maxConversationRecords;
   }
-  if (drop > 0) cursor.conversation.splice(0, drop);
+  let chars = cursor.conversationChars;
+  for (let index = 0; index < drop; index += 1) chars -= cursor.conversationSizes[index];
+  while (chars > DEFAULT_MAX_WINDOW_CHARS && drop < cursor.conversation.length - 1) {
+    chars -= cursor.conversationSizes[drop];
+    drop += 1;
+  }
+  if (drop > 0) {
+    cursor.conversation.splice(0, drop);
+    cursor.conversationSizes.splice(0, drop);
+    cursor.conversationChars = chars;
+  }
+}
+
+function resetConversation(cursor) {
+  cursor.conversation = [];
+  cursor.conversationSizes = [];
+  cursor.conversationChars = 0;
+}
+
+// Bookkeeping records carry large payloads (base instructions, the whole
+// compacted history) the normalizer never reads; only these fields remain.
+const BOOKKEEPING_FIELDS = {
+  session_meta: ["id", "cwd"],
+  turn_context: ["model", "cwd", "turn_id"],
+  compacted: []
+};
+
+function windowRecord(record) {
+  const fields = BOOKKEEPING_FIELDS[record.type];
+  if (!fields) return slimRecord(record);
+  const payload = record.payload ?? {};
+  return { ...record, payload: Object.fromEntries(fields.filter((field) => payload[field] != null).map((field) => [field, payload[field]])) };
 }
 
 function transcriptStem(path) {
   return path.split("/").pop().replace(/\.jsonl$/, "");
+}
+
+// rollout-<timestamp>-<thread uuid>.jsonl: the trailing uuid is the thread id.
+// Used when a tail-adopted read never sees the session_meta line at offset 0.
+const ROLLOUT_THREAD_ID = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+function transcriptSessionId(path) {
+  const stem = transcriptStem(path);
+  return stem.match(ROLLOUT_THREAD_ID)?.[1] ?? stem;
 }
 
 async function* rolloutPaths(root) {
@@ -85,11 +131,9 @@ async function* rolloutPaths(root) {
 }
 
 export function isAllowedRolloutPath(root, path) {
-  if (typeof root !== "string" || !root || typeof path !== "string" || !isAbsolute(path)) return false;
+  if (typeof path !== "string") return false;
   const name = basename(path);
-  if (!name.startsWith("rollout-") || !name.endsWith(".jsonl")) return false;
-  const child = relative(resolve(root), resolve(path));
-  return child !== "" && child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child);
+  return name.startsWith("rollout-") && name.endsWith(".jsonl") && isWithin(root, path);
 }
 
 /**
@@ -112,7 +156,7 @@ export async function discover({
   // knownModified: recency already known from the thread database, so those
   // candidates cost zero syscalls to consider — discovery runs every 2s, and
   // a stat per candidate was pure duplication of what the DB just reported.
-  const consider = async (path, knownModified = null) => {
+  const consider = async (path, knownModified = null, knownId = null, exec = null) => {
     // A rollout_path comes from another program's database. Never let a
     // malformed or tampered row turn the monitor into an arbitrary file
     // reader outside the agent-owned transcript directory.
@@ -136,10 +180,15 @@ export async function discover({
       // The DB's updated_at can lag the file slightly; poll() stats the real
       // file before reading, so a coarse recency signal is all that's needed.
       retired.delete(path);
-      cursors.set(path, newCursor(transcriptStem(path), modified, database, {
+      // The thread id from the database (or the filename) is authoritative up
+      // front: a transcript adopted from its tail never reads session_meta.
+      const cursor = newCursor(knownId ?? transcriptSessionId(path), modified, database, {
         conversationWindowMs,
         maxConversationRecords
-      }));
+      });
+      // A `codex exec` thread: its parent may come from process lineage.
+      if (exec) cursor.exec = exec;
+      cursors.set(path, cursor);
     }
   };
 
@@ -152,7 +201,10 @@ export async function discover({
     // The database answered — possibly "nothing recent", which is complete
     // information, not a reason to fall back to walking the whole tree.
     for (const thread of threads) {
-      await consider(thread.rollout_path, Number(thread.updated_at) || null);
+      const exec = thread.exec_created_at && typeof thread.cwd === "string" && thread.cwd
+        ? { createdAt: thread.exec_created_at, cwd: thread.cwd }
+        : null;
+      await consider(thread.rollout_path, Number(thread.updated_at) || null, thread.id, exec);
     }
     return;
   }
@@ -184,7 +236,7 @@ export async function poll({ cursors, states, parents, now }) {
       cursor.offset = 0;
       cursor.identified = false;
       cursor.pendingApprovals.clear();
-      cursor.conversation = [];
+      resetConversation(cursor);
     }
     if (metadata.size === cursor.offset) {
       cursor.seen = modified;
@@ -202,7 +254,8 @@ export async function poll({ cursors, states, parents, now }) {
     let handle;
     try {
       handle = await open(path, "r");
-      const length = metadata.size - cursor.offset;
+      // Bounded like RecordTail: a burst past one read finishes next poll.
+      const length = Math.min(metadata.size - cursor.offset, MAX_READ_BYTES);
       const buffer = Buffer.alloc(length);
       const { bytesRead } = await handle.read(buffer, 0, length, cursor.offset);
       // A tail-adopted read starts mid-line; drop everything up to (and
@@ -231,9 +284,15 @@ export async function poll({ cursors, states, parents, now }) {
           cursor.identified = true;
         }
         if (recordExternalParent(record, cursor.session, parents, now)) changed = true;
-        // Second consumer of the same read: conversation-shaped records feed
-        // the event projection so nothing re-reads this file for events.
-        if (isConversationRecord(record)) cursor.conversation.push(record);
+        // Second consumer of the same read: timeline records feed the Codex
+        // normalizer so nothing re-reads this file for events.
+        if (isCodexTimelineRecord(record)) {
+          const kept = windowRecord(record);
+          const size = recordSize(line, record, kept);
+          cursor.conversation.push(kept);
+          cursor.conversationSizes.push(size);
+          cursor.conversationChars += size;
+        }
         const signal = signalWithApprovals(record, cursor.pendingApprovals);
         if (signal) {
           latest = stateRecord(cursor.session, signal[0], signal[1], modified, cursor.database);
@@ -242,8 +301,10 @@ export async function poll({ cursors, states, parents, now }) {
         }
       }
       pruneConversation(cursor, now * 1000);
-      cursor.offset += skip + consumed;
-      cursor.lastMtimeMs = metadata.mtimeMs;
+      // A single line longer than one read would otherwise pin the cursor.
+      cursor.offset += consumed === 0 && length === MAX_READ_BYTES ? bytesRead : skip + consumed;
+      // Only a read that reached the end pins the rewrite-detection mtime.
+      if (cursor.offset >= metadata.size) cursor.lastMtimeMs = metadata.mtimeMs;
       cursor.seen = modified;
     } catch {
       cursors.delete(path);

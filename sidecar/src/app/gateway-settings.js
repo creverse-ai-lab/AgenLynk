@@ -29,17 +29,17 @@ export const GATEWAY_SETTING_DEFINITIONS = Object.freeze([
   }),
   numberSetting("resultRetentionMs", "lifecycle", "Result retention", "How long completed task results are retained.", "ACP_GATEWAY_RESULT_RETENTION_MS", 24 * 60 * 60_000, 0, "ms", {
     labelKo: "결과 보존 기간",
-    descriptionKo: "완료된 Task 결과를 보관하는 기간입니다.",
+    descriptionKo: "완료된 태스크 결과를 보관하는 기간입니다.",
     displayUnit: "hours" // default 24 h
   }),
   numberSetting("inboxRetentionMs", "lifecycle", "Inbox retention", "How long resolved inbox requests are retained.", "ACP_GATEWAY_INBOX_RETENTION_MS", 24 * 60 * 60_000, 0, "ms", {
-    labelKo: "Inbox 보존 기간",
-    descriptionKo: "응답이 끝난 Inbox 요청을 보관하는 기간입니다.",
+    labelKo: "미응답 요청 보존 기간",
+    descriptionKo: "응답이 끝난 미응답 요청을 보관하는 기간입니다.",
     displayUnit: "hours" // default 24 h
   }),
   numberSetting("sessionRetentionMs", "lifecycle", "Session retention", "How long completed session records are retained.", "ACP_GATEWAY_SESSION_RETENTION_MS", 7 * 24 * 60 * 60_000, 0, "ms", {
     labelKo: "세션 보존 기간",
-    descriptionKo: "완료된 세션 기록을 보관하는 기간입니다.",
+    descriptionKo: "Gateway가 완료된 세션을 보관하는 기간입니다. 모니터 타임라인(monitor.db)과는 별개입니다.",
     displayUnit: "days" // default 7 d
   }),
 
@@ -86,7 +86,7 @@ export const GATEWAY_SETTING_DEFINITIONS = Object.freeze([
   }),
   booleanSetting("workerSubagentTranscript", "workers", "Subagent transcripts", "Collect the full transcript (messages, tools, thinking) of Task subagents a Claude Worker spawns internally. Substantially increases event volume per delegation.", "ACP_GATEWAY_WORKER_SUBAGENT_TRANSCRIPT", false, {
     labelKo: "서브에이전트 대화 기록",
-    descriptionKo: "Claude Worker가 내부적으로 실행한 Task 서브에이전트의 전체 기록(메시지·도구 호출·사고 과정)을 수집합니다. 위임 한 건당 이벤트 양이 크게 늘어납니다."
+    descriptionKo: "Claude Worker가 내부에서 실행한 서브에이전트의 전체 기록(메시지·도구 호출·사고 과정)을 수집합니다. 위임 한 건당 이벤트 양이 크게 늘어납니다."
   }),
 
   booleanSetting("localScannerEnabled", "monitor", "Local scanner", "Detect locally started Codex, Claude, and Grok sessions.", "ACP_MONITOR_LOCAL_SCANNER", true, {
@@ -107,6 +107,18 @@ export const GATEWAY_SETTING_DEFINITIONS = Object.freeze([
     labelKo: "로컬 대화 기록 범위",
     descriptionKo: "타임라인에 유지할 최근 로컬 대화 기록의 시간 범위입니다. 값이 작을수록 메모리를 적게 사용합니다.",
     displayUnit: "minutes" // default 65 min
+  }),
+  // Same window as the Gateway's idle provider unload: a session that went
+  // quiet is still worth showing (and reusing) until it would cold-start.
+  numberSetting("localSessionRetentionMs", "monitor", "Idle local session retention", "How long a local session that finished its turn stays listed as idle before it is moved to history.", "ACP_MONITOR_LOCAL_SESSION_RETENTION_MS", 30 * 60_000, 60_000, "ms", {
+    labelKo: "대기 세션 유지 시간",
+    descriptionKo: "턴을 마친 로컬 세션을 ‘대기’ 상태로 목록에 남겨 두는 시간입니다. 지나면 기록으로 옮겨집니다. 종료가 확인된 세션(SessionEnd, 프로세스 종료)은 바로 옮겨집니다.",
+    displayUnit: "minutes" // default 30 min
+  }),
+  numberSetting("monitorHistoryRetentionMs", "monitor", "Monitor history retention", "How long AgenLynk keeps session timelines (prompts, tool input and output) in ~/.acp-gateway/agenlynk/monitor.db. 0 keeps no history on disk.", "ACP_MONITOR_HISTORY_RETENTION_MS", 14 * 24 * 60 * 60_000, 0, "ms", {
+    labelKo: "모니터 기록 보관 기간",
+    descriptionKo: "세션 타임라인(프롬프트, 도구 입력·출력 포함)을 ~/.acp-gateway/agenlynk/monitor.db에 보관하는 기간입니다. 0이면 디스크에 기록을 남기지 않습니다.",
+    displayUnit: "days" // default 14 days
   }),
   numberSetting("localTranscriptRecordLimit", "monitor", "Local transcript records", "Maximum retained local transcript records per session. Lower values reduce memory use.", "ACP_MONITOR_LOCAL_TRANSCRIPT_RECORD_LIMIT", 4_000, 100, "count", {
     labelKo: "로컬 대화 기록 수",

@@ -4,6 +4,11 @@
 // buffered and flushed only after promotion. A failed candidate is unsubscribed
 // and the previous subscription stays active.
 
+// Live events a candidate buffers before promotion. Past this the buffer is
+// dropped and the lowest dropped sequence per session becomes a gap floor, so
+// a follow-up reconciliation replays them instead of memory holding them.
+export const MAX_CANDIDATE_BUFFER = 5_000;
+
 export class GatewaySubscriptionOwner {
   constructor({
     rpc,
@@ -11,7 +16,8 @@ export class GatewaySubscriptionOwner {
     onEvent = () => {},
     applySessionSources,
     refresh,
-    isIgnoredEvent = () => false
+    isIgnoredEvent = () => false,
+    maxCandidateBuffer = MAX_CANDIDATE_BUFFER
   } = {}) {
     this.rpc = rpc;
     this.state = state;
@@ -19,6 +25,7 @@ export class GatewaySubscriptionOwner {
     this.applySessionSources = applySessionSources;
     this.refresh = refresh;
     this.isIgnoredEvent = isIgnoredEvent;
+    this.maxCandidateBuffer = maxCandidateBuffer;
     this.activeSubscriptionId = null;
     this.activeGeneration = 0;
     this.nextGeneration = 0;
@@ -27,10 +34,15 @@ export class GatewaySubscriptionOwner {
     this.gapFloors = {};
     this.#candidate = null;
     this.#queue = Promise.resolve();
+    this.#queuedReconcile = null;
   }
 
   #candidate;
   #queue;
+  // A reconciliation queued but not yet started. Gap floors are read when a
+  // run starts, so every gap noted before then is covered by that one run: a
+  // burst of gap markers costs one running and at most one queued run.
+  #queuedReconcile;
 
   status() {
     return {
@@ -64,7 +76,9 @@ export class GatewaySubscriptionOwner {
   }
 
   reconcile() {
-    return this.#runExclusive(async () => {
+    if (this.#queuedReconcile) return this.#queuedReconcile;
+    const run = this.#runExclusive(async () => {
+      if (this.#queuedReconcile === run) this.#queuedReconcile = null;
       if (this.reconciling) return this.status();
       this.reconciling = true;
       try {
@@ -73,6 +87,8 @@ export class GatewaySubscriptionOwner {
         this.reconciling = false;
       }
     });
+    this.#queuedReconcile = run;
+    return run;
   }
 
   #runExclusive(operation) {
@@ -87,14 +103,36 @@ export class GatewaySubscriptionOwner {
         this.onEvent(event);
         return;
       }
-      if (this.#candidate?.generation === generation) this.#candidate.buffer.push(event);
+      if (this.#candidate?.generation === generation) this.#buffer(this.#candidate, event);
     };
+  }
+
+  #buffer(candidate, event) {
+    if (!candidate.overflowed) {
+      candidate.buffer.push(event);
+      if (candidate.buffer.length <= this.maxCandidateBuffer) return;
+      candidate.overflowed = true;
+      const dropped = candidate.buffer;
+      candidate.buffer = [];
+      for (const item of dropped) floorFor(candidate, item);
+      return;
+    }
+    floorFor(candidate, event);
+  }
+
+  /** After an overflowed candidate: replay what it dropped, from its floors. */
+  #recoverOverflow(candidate) {
+    if (!candidate?.overflowed) return;
+    for (const [sessionId, floor] of Object.entries(candidate.floors)) {
+      this.gapFloors[sessionId] = Math.min(this.gapFloors[sessionId] ?? Infinity, floor);
+    }
+    void this.reconcile().catch(() => {});
   }
 
   async #openInitial() {
     const generation = this.nextGeneration + 1;
     let subscription = null;
-    this.#candidate = { generation, buffer: [], subscriptionId: null };
+    this.#candidate = { generation, buffer: [], subscriptionId: null, overflowed: false, floors: {} };
     try {
       subscription = await this.rpc.subscribe(
         { includeThoughts: true, includeToolEvents: true, cursors: {} },
@@ -104,8 +142,10 @@ export class GatewaySubscriptionOwner {
       await this.#applyReplay(subscription);
       const truncated = truncatedSessionIds(subscription);
       this.#promote(generation, subscription.subscriptionId);
+      const candidate = this.#candidate;
       this.#flushCandidate();
       this.#finishOpen({ truncated, reconciling: false });
+      this.#recoverOverflow(candidate);
       return { subscription, cursors: {} };
     } catch (error) {
       await this.#abandonCandidate();
@@ -119,7 +159,7 @@ export class GatewaySubscriptionOwner {
     const floors = { ...this.gapFloors };
     const cursors = this.state.subscriptionCursors(floors);
     let subscription = null;
-    this.#candidate = { generation, buffer: [], subscriptionId: null };
+    this.#candidate = { generation, buffer: [], subscriptionId: null, overflowed: false, floors: {} };
     try {
       subscription = await this.rpc.subscribe(
         { includeThoughts: true, includeToolEvents: true, cursors },
@@ -130,12 +170,14 @@ export class GatewaySubscriptionOwner {
       await this.refresh();
       const truncated = truncatedSessionIds(subscription);
       this.#promote(generation, subscription.subscriptionId);
+      const candidate = this.#candidate;
       this.#flushCandidate();
       this.#consumeFloors(floors);
       this.state.completeReconciliation({ truncated: truncated.length > 0 });
       if (previousSubscriptionId && previousSubscriptionId !== subscription.subscriptionId) {
         await this.#unsubscribeQuiet(previousSubscriptionId);
       }
+      this.#recoverOverflow(candidate);
       return { subscription, cursors };
     } catch (error) {
       await this.#abandonCandidate();
@@ -201,6 +243,11 @@ export class GatewaySubscriptionOwner {
       // The server may already have dropped it.
     }
   }
+}
+
+function floorFor(candidate, event) {
+  if (!event?.sessionId || !Number.isFinite(event.sequence)) return;
+  candidate.floors[event.sessionId] = Math.min(candidate.floors[event.sessionId] ?? Infinity, event.sequence);
 }
 
 export function truncatedSessionIds(subscription) {

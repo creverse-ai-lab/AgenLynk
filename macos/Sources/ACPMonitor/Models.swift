@@ -48,6 +48,11 @@ enum JSONValue: Equatable, Sendable {
         return Int(value)
     }
 
+    var doubleValue: Double? {
+        guard case let .number(value) = self, value.isFinite else { return nil }
+        return value
+    }
+
     var boolValue: Bool? {
         guard case let .bool(value) = self else { return nil }
         return value
@@ -90,6 +95,7 @@ enum JSONValue: Equatable, Sendable {
 extension Dictionary where Key == String, Value == JSONValue {
     func string(_ key: String) -> String? { self[key]?.stringValue }
     func int(_ key: String) -> Int? { self[key]?.intValue }
+    func double(_ key: String) -> Double? { self[key]?.doubleValue }
     func bool(_ key: String) -> Bool? { self[key]?.boolValue }
     func object(_ key: String) -> [String: JSONValue]? { self[key]?.objectValue }
     func array(_ key: String) -> [JSONValue]? { self[key]?.arrayValue }
@@ -99,7 +105,7 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
     let sessionId: String
     let provider: String
     let model: String?
-    let status: String
+    private(set) var status: String
     let title: String?
     let opener: String?
     let openerInstanceId: String?
@@ -112,9 +118,37 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
     let source: String
     let role: String
     let parentSessionId: String?
+    /// Token usage as the sidecar normalizes it for every provider; nil when
+    /// the source reports none.
+    let usage: SessionUsage?
+    /// The totals cover only the part of a long transcript that was read.
+    let usagePartial: Bool
+    /// What the monitor can actually observe for this session (`status`,
+    /// `timeline`, `tools`, `thinking`, `usage`, `permission`, `live`), so an
+    /// empty timeline can be told apart from a source that cannot see one.
+    let capabilities: Set<String>
+    /// Warnings the app must show, e.g. `permission_policy_partial`: a
+    /// read_only/ask Codex session can still edit inside its roots.
+    let alerts: [SessionAlert]
+    /// Recent turns' token use, newest last (contracts/monitor/v2 turnUsage).
+    let turnUsage: [TurnUsage]
 
     var id: String { sessionId }
-    var displayName: String { title?.isEmpty == false ? title! : sessionId }
+    /// Naming policy (docs/ux-policy.md): the sidecar's title (the CLI's own
+    /// title, else the latest prompt), else "<Provider> · <folder>". A raw
+    /// session id is never a name; it stays available in tooltips.
+    /// A title that is the CLI's current tool call / event path
+    /// ("custom_tool_call/exec") is skipped, like a Frontdoor's.
+    var displayName: String {
+        if let title = title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty,
+           !isToolishTitle(title) { return title }
+        // The provider is the icon beside the name, so it is not repeated in
+        // the text; the folder tells the session apart.
+        let folder = (cwd as NSString).lastPathComponent
+        if !cwd.isEmpty, !folder.isEmpty, folder != "/" { return folder }
+        return "새 세션"
+    }
+    var providerLabel: String { providerDisplayLabel(provider) }
     var isFrontdoorRecord: Bool { role == "frontdoor" }
     var isLocalSource: Bool { source == "local" }
     var sourceLabel: String { isLocalSource ? "LOCAL" : "ACP" }
@@ -129,6 +163,32 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
         openerInstanceId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
     }
     var isRealtimeVisible: Bool { isActive && hasFrontdoorIdentity }
+    /// Updates arrive as they happen (hooks or the Gateway stream), not only
+    /// from a transcript re-read.
+    /// A closed (or history) session is no longer updating, so it never
+    /// claims to be live.
+    var isLiveObserved: Bool { capabilities.contains("live") && status != "closed" }
+    /// The "실시간" badge: only for a session still in the live snapshot. A
+    /// history session (browsed from disk, or moved to history when its idle
+    /// hold ran out) keeps its `live` capability but is no longer updating.
+    func showsRealtimeBadge(inHistory: Bool) -> Bool { !inHistory && isLiveObserved }
+    /// "권한 대기 감지 불가 (hook 꺼짐)" explains a live session's empty
+    /// permission state; a finished or history session has none to explain.
+    func showsPermissionBlindNote(inHistory: Bool) -> Bool {
+        !inHistory && status != "closed" && cannotObservePermission
+    }
+    /// The source can see an event timeline at all. A record without
+    /// capabilities (older sidecar) is assumed to.
+    var canShowTimeline: Bool { capabilities.isEmpty || capabilities.contains("timeline") }
+    /// Waiting on the person: a permission prompt or a question.
+    var isWaitingForUser: Bool { status == "waiting_permission" || status == "waiting_input" }
+    /// The source cannot see a permission prompt, so "nothing is waiting" is
+    /// not something this session can tell. A record without capabilities
+    /// (older sidecar) and a Gateway session are never flagged.
+    var cannotObservePermission: Bool {
+        guard !capabilities.isEmpty, isLocalSource else { return false }
+        return !capabilities.contains("permission")
+    }
 
     init?(_ value: JSONValue) {
         guard let object = value.objectValue, let sessionId = object.string("sessionId") else { return nil }
@@ -148,7 +208,217 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
         source = object.string("source") ?? "gateway"
         role = object.string("role") ?? "worker"
         parentSessionId = object.string("parentSessionId")
+        usage = SessionUsage(object["usage"])
+        usagePartial = object.bool("usagePartial") ?? false
+        capabilities = Set((object.array("capabilities") ?? []).compactMap { item -> String? in
+            guard case let .string(name) = item else { return nil }
+            return name
+        })
+        alerts = (object.array("alerts") ?? []).compactMap(SessionAlert.init)
+        turnUsage = (object.array("turnUsage") ?? []).compactMap(TurnUsage.init)
     }
+
+    /// `base` followed by the model id when the session reports one. v2 sends
+    /// a real model id or nil — never a placeholder — so nil shows nothing
+    /// rather than a made-up "default".
+    func withModel(_ base: String, separator: String = " · ") -> String {
+        guard let model, !model.isEmpty else { return base }
+        return base + separator + model
+    }
+
+    /// The same record with another status — used when a stream frame says a
+    /// session closed before the next snapshot restates it.
+    func with(status: String) -> GatewaySession {
+        var copy = self
+        copy.status = status
+        return copy
+    }
+}
+
+struct TurnUsage: Hashable, Sendable {
+    let turnId: String
+    let startedAt: String?
+    let running: Bool
+    let totalTokens: Double?
+    let outputTokens: Double?
+    let contextUsed: Double?
+
+    init?(_ value: JSONValue) {
+        guard let object = value.objectValue, let turnId = object.string("turnId") else { return nil }
+        self.turnId = turnId
+        startedAt = object.string("startedAt")
+        running = object.bool("running") ?? false
+        totalTokens = object.double("totalTokens")
+        outputTokens = object.double("outputTokens")
+        contextUsed = object.double("contextUsed")
+    }
+}
+
+/// What a session (or a whole Frontdoor's work) has used and is likely to
+/// use. The estimate is the median of completed turns — shown only with at
+/// least two, so one odd turn does not pass for a pattern.
+struct UsageForecast: Equatable, Sendable {
+    /// The running turn's tokens so far; nil when the provider settles a turn
+    /// only at its end (Grok) or nothing is running.
+    let currentTurnTokens: Double?
+    let currentTurnRunning: Bool
+    let currentTurnStartedAt: String?
+    let typicalTurnTokens: Double?
+    let completedTurns: Int
+    /// Turns left before the context window fills at the recent growth rate.
+    let turnsUntilContextFull: Int?
+
+    init(session: GatewaySession) {
+        let turns = session.turnUsage
+        let running = turns.last(where: \.running)
+        currentTurnRunning = running != nil
+        currentTurnTokens = running?.totalTokens
+        currentTurnStartedAt = running?.startedAt
+        let completed = turns.filter { !$0.running }.compactMap(\.totalTokens)
+        completedTurns = completed.count
+        typicalTurnTokens = completed.count >= 2 ? Self.median(completed) : nil
+        let contexts = turns.compactMap(\.contextUsed)
+        let growth = zip(contexts, contexts.dropFirst()).map { $1 - $0 }.filter { $0 > 0 }
+        if let window = session.usage?.contextWindow, let used = session.usage?.contextUsed ?? contexts.last,
+           growth.count >= 2, let step = Self.median(growth), step > 0, window > used {
+            turnsUntilContextFull = Int(((window - used) / step).rounded(.down))
+        } else {
+            turnsUntilContextFull = nil
+        }
+    }
+
+    /// How far the running turn is against the typical one (may exceed 1).
+    var progress: Double? {
+        guard let current = currentTurnTokens, let typical = typicalTurnTokens, typical > 0 else { return nil }
+        return current / typical
+    }
+
+    /// "예상의 80%", "예상의 150%" — a share of the estimate, never an
+    /// ambiguous "초과 150%".
+    var progressText: String? {
+        progress.map { "예상의 \(Int(($0 * 100).rounded()))%" }
+    }
+
+    static func median(_ values: [Double]) -> Double? {
+        guard !values.isEmpty else { return nil }
+        let sorted = values.sorted()
+        let middle = sorted.count / 2
+        return sorted.count.isMultiple(of: 2) ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle]
+    }
+}
+
+/// One Frontdoor's work: its root and workers added up.
+struct WorkUsage: Equatable, Sendable {
+    let totalTokens: Double?
+    let currentTurnTokens: Double?
+    let runningSessions: Int
+    /// Running turns without tokens yet — their provider settles a turn only
+    /// at its end (Grok), so they are left out of `currentTurnTokens`.
+    let settlingSessions: Int
+
+    init(sessions: [GatewaySession]) {
+        let totals = sessions.compactMap { $0.usage?.total }
+        totalTokens = totals.isEmpty ? nil : totals.reduce(0, +)
+        let running = sessions.compactMap { session in session.turnUsage.last(where: \.running) }
+        runningSessions = running.count
+        let current = running.compactMap(\.totalTokens)
+        settlingSessions = running.count - current.count
+        currentTurnTokens = current.isEmpty ? nil : current.reduce(0, +)
+    }
+
+    /// The Frontdoor's "이번 턴" pill: the running turns' sum, or "이번 턴 집계
+    /// 중" while every running turn is still unsettled; nil when none runs.
+    var currentTurnText: String? {
+        if let currentTurnTokens { return "이번 턴 \(formatTokenCount(currentTurnTokens))" }
+        return runningSessions > 0 ? "이번 턴 집계 중" : nil
+    }
+
+    /// What the pill's number covers, naming the sessions left out of it.
+    var currentTurnHelp: String? {
+        guard runningSessions > 0 else { return nil }
+        if currentTurnTokens == nil { return "이 CLI는 턴이 끝날 때 토큰을 확정합니다." }
+        if settlingSessions > 0 { return "토큰이 턴 끝에 확정되는 세션 \(settlingSessions)개는 합계에서 빠져 있습니다." }
+        return "지금 실행 중인 턴 \(runningSessions)개가 지금까지 쓴 토큰입니다."
+    }
+}
+
+struct SessionAlert: Hashable, Sendable {
+    let level: String
+    let code: String
+    let message: String?
+
+    init?(_ value: JSONValue) {
+        guard let object = value.objectValue, let code = object.string("code") else { return nil }
+        self.code = code
+        level = object.string("level") ?? "warning"
+        message = object.string("message")
+    }
+
+    /// A short badge; the full message is the tooltip. An unknown code is
+    /// never shown raw.
+    var badge: String {
+        code == "permission_policy_partial" ? "읽기 전용 부분 적용" : "경고"
+    }
+
+    var tooltip: String {
+        if let message = message?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty { return message }
+        return "자세한 설명이 없는 경고입니다."
+    }
+}
+
+/// Session token usage (contracts/monitor/v2 `usage`). Same meaning for every
+/// provider: input includes cached input, total = input + output, reasoning
+/// is part of output, and `contextUsed` is the prompt size of the latest model
+/// call. A nil field means the provider did not say — never zero.
+struct SessionUsage: Hashable, Sendable {
+    let inputTokens: Double?
+    let outputTokens: Double?
+    let cacheReadTokens: Double?
+    let cacheWriteTokens: Double?
+    let reasoningTokens: Double?
+    let totalTokens: Double?
+    let contextUsed: Double?
+    let contextWindow: Double?
+    let costUsd: Double?
+
+    /// nil unless the value is an object carrying at least one known number.
+    init?(_ value: JSONValue?) {
+        guard let object = value?.objectValue else { return nil }
+        inputTokens = object.double("inputTokens")
+        outputTokens = object.double("outputTokens")
+        cacheReadTokens = object.double("cacheReadTokens")
+        cacheWriteTokens = object.double("cacheWriteTokens")
+        reasoningTokens = object.double("reasoningTokens")
+        totalTokens = object.double("totalTokens")
+        contextUsed = object.double("contextUsed")
+        contextWindow = object.double("contextWindow")
+        costUsd = object.double("costUsd")
+        let known: [Double?] = [
+            inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, reasoningTokens,
+            totalTokens, contextUsed, contextWindow, costUsd
+        ]
+        if known.allSatisfy({ $0 == nil }) { return nil }
+    }
+
+    /// Input + output when the provider left the total out.
+    var total: Double? {
+        totalTokens ?? inputTokens.flatMap { input in outputTokens.map { input + $0 } }
+    }
+
+    /// Share of the context window in use, 0...1, only when both are known.
+    var contextFraction: Double? {
+        guard let contextUsed, let contextWindow, contextWindow > 0 else { return nil }
+        return min(max(contextUsed / contextWindow, 0), 1)
+    }
+}
+
+/// Compact token count for small labels: 950, 12.3K, 1.2M.
+func formatTokenCount(_ value: Double) -> String {
+    let magnitude = abs(value)
+    if magnitude >= 1_000_000 { return String(format: "%.1fM", value / 1_000_000) }
+    if magnitude >= 10_000 { return String(format: "%.0fK", value / 1_000) }
+    if magnitude >= 1_000 { return String(format: "%.1fK", value / 1_000) }
+    return String(Int(value.rounded()))
 }
 
 struct FrontdoorSession: Identifiable, Hashable, Sendable {
@@ -156,6 +426,17 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
     let provider: String
     let root: GatewaySession?
     let workers: [GatewaySession]
+    /// The newest member update, computed once: sort comparators and card
+    /// ordering read it many times per pass.
+    let updatedAt: String?
+
+    init(id: String, provider: String, root: GatewaySession?, workers: [GatewaySession]) {
+        self.id = id
+        self.provider = provider
+        self.root = root
+        self.workers = workers
+        updatedAt = ((root.map { [$0] } ?? []) + workers).compactMap(\.updatedAt).max()
+    }
 
     /// The working folder names the Frontdoor — it is stable and meaningful,
     /// and it is what tells two concurrent Frontdoors apart. A designated title
@@ -163,16 +444,16 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
     /// a local CLI writes its *current tool call* into its title
     /// ("custom_tool_call/exec"), which as a name is worse than useless.
     var displayName: String {
+        if isUnattributed { return "연결 미확인 Worker" }
         if let folder = workingFolder { return folder }
         if let name = designatedName { return name }
-        return "\(provider.capitalized) Frontdoor"
+        return "이름 없는 작업"
     }
     /// The root's title, but only when it reads as a name rather than the
     /// transient event/tool text local sessions park there.
     private var designatedName: String? {
-        guard let title = root?.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else { return nil }
-        let lower = title.lowercased()
-        if lower.contains("tool_call") || lower.contains("function_call") || title.contains("/") { return nil }
+        guard let title = root?.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty,
+              !isToolishTitle(title) else { return nil }
         return title
     }
     /// Last path component of the Frontdoor's working directory, or nil when no
@@ -185,9 +466,47 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
     }
     var members: [GatewaySession] { (root.map { [$0] } ?? []) + workers }
     var isActive: Bool { members.contains(where: \.isActive) }
+    /// Members actually running — a session waiting on the person is not.
+    var runningCount: Int { members.filter { $0.isActive && !$0.isWaitingForUser }.count }
+    var waitingPermissionCount: Int { members.filter { $0.status == "waiting_permission" }.count }
+    var waitingInputCount: Int { members.filter { $0.status == "waiting_input" }.count }
+    /// Every member closed: the work is over, not just idle.
+    var isClosed: Bool { !members.isEmpty && members.allSatisfy { $0.status == "closed" } }
+    /// The member a selection of this Frontdoor should land on: one waiting
+    /// on the person first, else the root, else the first worker.
+    var preferredSession: GatewaySession? {
+        members.first(where: { $0.status == "waiting_permission" })
+            ?? members.first(where: { $0.status == "waiting_input" })
+            ?? root ?? workers.first
+    }
+    /// The status pill: waiting first (it needs the person), then running,
+    /// closed, idle.
+    var statusText: String {
+        let waits = [
+            waitingPermissionCount > 0 ? "권한 대기 \(waitingPermissionCount)" : nil,
+            waitingInputCount > 0 ? "입력 대기 \(waitingInputCount)" : nil
+        ].compactMap { $0 }
+        if !waits.isEmpty { return waits.joined(separator: " · ") }
+        if isActive { return "실행 중" }
+        if isClosed { return "종료" }
+        return "대기"
+    }
+    /// The status the pill's color follows (see statusColor).
+    var statusKey: String {
+        if waitingPermissionCount > 0 { return "waiting_permission" }
+        if waitingInputCount > 0 { return "waiting_input" }
+        if isActive { return "running" }
+        if isClosed { return "closed" }
+        return "idle"
+    }
+    /// The sidebar row's second line: "Worker 2 · 실행 중 2 · 작업 토큰 34K".
+    var countsLine: String {
+        var parts = ["Worker \(workers.count)", "실행 중 \(runningCount)"]
+        if let total = WorkUsage(sessions: members).totalTokens { parts.append("작업 토큰 \(formatTokenCount(total))") }
+        return parts.joined(separator: " · ")
+    }
     var activeWorkerCount: Int { workers.filter(\.isActive).count }
     var workspaceCount: Int { Set(members.map(\.cwd).filter { !$0.isEmpty }).count }
-    var updatedAt: String? { members.compactMap(\.updatedAt).max() }
     var latestTask: String? {
         members
             .sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
@@ -195,9 +514,51 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
             .first { !$0.isEmpty }
     }
 
+    /// Which Frontdoor group a session belongs to: that of its topmost
+    /// ancestor present in `sessions` (following `parentSessionId`), else its
+    /// own `openerInstanceId`. The parent chain wins because it is what the
+    /// monitor proved; an opener id can lag behind it (a Worker whose parent
+    /// was learned after its record was written) and would otherwise show a
+    /// Worker as a Frontdoor group of its own.
+    static func groupKeyResolver(_ sessions: [GatewaySession]) -> (GatewaySession) -> String? {
+        var byId: [String: GatewaySession] = [:]
+        for session in sessions where byId[session.sessionId] == nil { byId[session.sessionId] = session }
+        func opener(_ session: GatewaySession) -> String? {
+            guard session.hasFrontdoorIdentity else { return nil }
+            return session.openerInstanceId
+        }
+        return { session in
+            var top = session
+            var seen: Set<String> = [session.sessionId]
+            while !top.isFrontdoorRecord,
+                  let parentId = top.parentSessionId,
+                  let parent = byId[parentId],
+                  seen.insert(parentId).inserted {
+                top = parent
+            }
+            return opener(top) ?? opener(session)
+        }
+    }
+
+    /// Workers the Gateway reports without a known opener (an older daemon,
+    /// or a Main whose transcript this Mac cannot see). They are never promoted
+    /// to Frontdoors, but they must not vanish either: they share one group.
+    static let unattributedId = "unattributed"
+    var isUnattributed: Bool { id == Self.unattributedId }
+
     static func make(sessions: [GatewaySession]) -> [FrontdoorSession] {
-        let mapped = sessions.filter(\.hasFrontdoorIdentity)
-        return Dictionary(grouping: mapped, by: { $0.openerInstanceId! })
+        let groupKey = groupKeyResolver(sessions)
+        let keyed = sessions.compactMap { session in groupKey(session).map { (key: $0, session: session) } }
+        let mapped = keyed.map(\.session)
+        let keyById = Dictionary(keyed.map { ($0.session.sessionId, $0.key) }, uniquingKeysWith: { first, _ in first })
+        let orphans = sessions.filter { keyById[$0.sessionId] == nil && !$0.isFrontdoorRecord }
+        let unattributed = orphans.isEmpty ? [] : [FrontdoorSession(
+            id: unattributedId,
+            provider: orphans.first?.provider.lowercased() ?? "agent",
+            root: nil,
+            workers: orphans.sorted { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
+        )]
+        return Dictionary(grouping: mapped, by: { keyById[$0.sessionId]! })
             .map { instanceId, members in
                 let roots = members.filter(\.isFrontdoorRecord)
                 let root = roots.max { ($0.updatedAt ?? "") < ($1.updatedAt ?? "") }
@@ -211,6 +572,110 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
                 )
             }
             .sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
+            + unattributed
+    }
+
+    /// The same Frontdoor with more Workers appended (expired Workers browsed
+    /// back from disk history).
+    func addingWorkers(_ extra: [GatewaySession]) -> FrontdoorSession {
+        guard !extra.isEmpty else { return self }
+        let known = Set(members.map(\.sessionId))
+        let added = extra.filter { !known.contains($0.sessionId) }
+        guard !added.isEmpty else { return self }
+        return FrontdoorSession(
+            id: id, provider: provider, root: root,
+            workers: (workers + added).sorted { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
+        )
+    }
+}
+
+/// "지난 기록" as Frontdoor-level rows (docs/ux-policy.md §10): the sessions
+/// browsed from disk history, grouped the way the live list groups
+/// (`FrontdoorSession.groupKeyResolver`, parent chain first), so a Worker
+/// whose live retention ran out never comes back as a row of its own.
+struct HistoryGroups: Sendable {
+    /// One row per group, newest member update first. Workers with no
+    /// provable group share one "연결 미확인 Worker" row.
+    let rows: [FrontdoorSession]
+    /// Expired Workers whose group's Frontdoor is listed live, by that
+    /// Frontdoor's id: they join its views instead of making a row.
+    let expiredWorkers: [String: [GatewaySession]]
+
+    static let empty = HistoryGroups(rows: [], expiredWorkers: [:])
+
+    /// `listed` is what the Frontdoor list above already shows (live plus
+    /// retained sessions); it resolves parents and is never repeated here.
+    /// `listedFrontdoorIds` are that list's group ids.
+    static func make(
+        browsed: [GatewaySession],
+        listed: [GatewaySession],
+        listedFrontdoorIds: Set<String>
+    ) -> HistoryGroups {
+        let listedIds = Set(listed.map(\.sessionId))
+        var seen = listedIds
+        let candidates = browsed.filter { !$0.isInternalReview && seen.insert($0.sessionId).inserted }
+        guard !candidates.isEmpty else { return .empty }
+        // Listed sessions first: where both know a parent, the listed one wins.
+        let groupKey = FrontdoorSession.groupKeyResolver(listed + candidates)
+        var grouped: [String: [GatewaySession]] = [:]
+        var expired: [String: [GatewaySession]] = [:]
+        var loneRoots: [GatewaySession] = []
+        var orphans: [GatewaySession] = []
+        for session in candidates {
+            guard let key = groupKey(session), key != FrontdoorSession.unattributedId else {
+                // A Frontdoor record is a Frontdoor even without an opener id;
+                // a Worker without a group is unattributed.
+                if session.isFrontdoorRecord { loneRoots.append(session) } else { orphans.append(session) }
+                continue
+            }
+            if listedFrontdoorIds.contains(key) {
+                // The live list has this group's Frontdoor: an expired Worker
+                // joins it; an older Frontdoor record of the same instance is
+                // still a Frontdoor and keeps a row.
+                if session.isFrontdoorRecord { loneRoots.append(session) } else { expired[key, default: []].append(session) }
+            } else {
+                grouped[key, default: []].append(session)
+            }
+        }
+        var rows: [FrontdoorSession] = []
+        for (key, members) in grouped {
+            let roots = members.filter(\.isFrontdoorRecord)
+            let workers = members.filter { !$0.isFrontdoorRecord }
+            guard let root = roots.max(by: { ($0.updatedAt ?? "") < ($1.updatedAt ?? "") }) else {
+                // No Frontdoor record to stand for the group: showing it as a
+                // row named after its folder is exactly how a Worker would
+                // pass for a Frontdoor.
+                orphans.append(contentsOf: workers)
+                continue
+            }
+            rows.append(FrontdoorSession(
+                id: key, provider: (root.provider).lowercased(), root: root,
+                workers: workers.sorted { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
+            ))
+            // More Frontdoor records of one instance: each stays reachable.
+            loneRoots.append(contentsOf: roots.filter { $0.sessionId != root.sessionId })
+        }
+        for root in loneRoots {
+            rows.append(FrontdoorSession(
+                id: "session:\(root.sessionId)", provider: root.provider.lowercased(), root: root, workers: []
+            ))
+        }
+        if !orphans.isEmpty {
+            rows.append(FrontdoorSession(
+                id: FrontdoorSession.unattributedId,
+                provider: orphans.first?.provider.lowercased() ?? "agent",
+                root: nil,
+                workers: orphans.sorted { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
+            ))
+        }
+        rows.sort { lhs, rhs in
+            let left = lhs.updatedAt ?? "", right = rhs.updatedAt ?? ""
+            return left == right ? lhs.id < rhs.id : left > right
+        }
+        return HistoryGroups(
+            rows: rows,
+            expiredWorkers: expired.mapValues { $0.sorted { ($0.createdAt ?? "") < ($1.createdAt ?? "") } }
+        )
     }
 }
 
@@ -252,6 +717,20 @@ struct PetAgentActivity: Equatable, Sendable {
     /// contract state, so a legacy aggregation can be re-run without
     /// re-classifying raw Gateway statuses.
     let memberStates: [PetAgentState]
+    /// Why a waiting agent waits ("permission" or "input"): the Pet contract
+    /// folds both into `waiting`, the menu bar tells them apart.
+    var waitingReason: String? = nil
+    /// The app's name for this agent (docs/ux-policy.md §2): the user's
+    /// nickname when the caller resolves one, else the automatic name.
+    /// Bounded like `task`; nil only for hand-built projections.
+    var name: String? = nil
+}
+
+/// "permission" / "input" for a waiting status, else nil.
+func waitingReason(for statuses: [String]) -> String? {
+    if statuses.contains("waiting_permission") { return "permission" }
+    if statuses.contains("waiting_input") { return "input" }
+    return nil
 }
 
 /// The common activity projection both `pet-state.json`/`pet-actions.json`
@@ -260,10 +739,14 @@ struct PetAgentActivity: Equatable, Sendable {
 struct PetActivityProjection: Equatable, Sendable {
     let agents: [PetAgentActivity]
 
+    /// `nickname` resolves a user-chosen name for a projected agent id
+    /// (`role` is "frontdoor" or "worker", since the two are stored apart);
+    /// nil falls back to the automatic name.
     static func make(
         sessions: [GatewaySession],
         inbox: [MonitorRecord],
-        now: Date = Date()
+        now: Date = Date(),
+        nickname: (_ id: String, _ role: String) -> String? = { _, _ in nil }
     ) -> PetActivityProjection {
         let pendingBySession = Dictionary(grouping: inbox.filter {
             $0.status == "pending" && $0.payload.objectValue?.string("sessionId") != nil
@@ -271,11 +754,23 @@ struct PetActivityProjection: Equatable, Sendable {
             $0.payload.objectValue!.string("sessionId")!
         }).mapValues(\.count)
 
+        // The same groups as the dashboard and menu bar: a session joins the
+        // Frontdoor its proven parent chain leads to. A known group is one
+        // Frontdoor whatever folders its Workers run in; only sessions with no
+        // group fall back to the provider + folder key.
+        let groupKey = FrontdoorSession.groupKeyResolver(sessions)
+        // A known group's opener is its root's, so a Worker whose own opener
+        // field differs does not split it.
+        let openerByGroup = Dictionary(sessions.compactMap { session -> (String, String)? in
+            guard session.isFrontdoorRecord, let id = groupKey(session) else { return nil }
+            return (id, normalizedFrontdoor(session.opener ?? session.provider))
+        }, uniquingKeysWith: { first, _ in first })
         let groups = Dictionary(grouping: sessions) { gatewaySession in
-            FrontdoorKey(
-                provider: normalizedFrontdoor(gatewaySession.opener),
-                cwd: gatewaySession.cwd,
-                instanceId: gatewaySession.openerInstanceId
+            let instanceId = groupKey(gatewaySession)
+            return FrontdoorKey(
+                provider: instanceId.flatMap { openerByGroup[$0] } ?? normalizedFrontdoor(gatewaySession.opener),
+                cwd: instanceId == nil ? gatewaySession.cwd : "",
+                instanceId: instanceId
             )
         }
         var agents: [PetAgentActivity] = []
@@ -297,6 +792,8 @@ struct PetActivityProjection: Equatable, Sendable {
             }
             let frontdoorState = frontdoorContractState(memberStates)
             let frontdoorCwd = root?.cwd ?? key.cwd
+            let frontdoorName = nickname(frontdoorId, "frontdoor")
+                ?? FrontdoorSession(id: frontdoorId, provider: key.provider, root: root, workers: workers).displayName
             agents.append(PetAgentActivity(
                 id: frontdoorId,
                 parentId: nil,
@@ -310,7 +807,9 @@ struct PetActivityProjection: Equatable, Sendable {
                 source: root?.source ?? (group.allSatisfy(\.isLocalSource) ? "local" : "gateway"),
                 cwd: frontdoorCwd.isEmpty ? nil : frontdoorCwd,
                 inboxPending: 0,
-                memberStates: memberStates
+                memberStates: memberStates,
+                waitingReason: waitingReason(for: group.map(\.status)),
+                name: boundedName(frontdoorName)
             ))
             agents.append(contentsOf: workers.map { gatewaySession in
                 let pending = pendingBySession[gatewaySession.sessionId] ?? 0
@@ -328,7 +827,9 @@ struct PetActivityProjection: Equatable, Sendable {
                     source: gatewaySession.source,
                     cwd: gatewaySession.cwd.isEmpty ? nil : gatewaySession.cwd,
                     inboxPending: pending,
-                    memberStates: []
+                    memberStates: [],
+                    waitingReason: waitingReason(for: [gatewaySession.status]),
+                    name: boundedName(nickname(gatewaySession.sessionId, "worker") ?? gatewaySession.displayName)
                 )
             })
         }
@@ -379,6 +880,7 @@ private func petContractState(for status: String, hasPendingInbox: Bool) -> PetA
     case "restoring": return .starting
     case "waiting_permission", "waiting_input": return .waiting
     case "idle": return .idle
+    // Pre-v2 local sessions said "ready"; v2 sends the Gateway's "idle".
     case "ready": return .completed
     case "disconnected", "closed": return .offline
     case "cancelled", "error", "unavailable": return .failed
@@ -415,9 +917,25 @@ private func petContractAction(for state: PetAgentState) -> PetPresentationActio
 /// Pet renderer must never receive a full prompt or unbounded event text.
 private func boundedTaskText(_ text: String?) -> String? {
     guard let text else { return nil }
-    let collapsed = text.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !collapsed.isEmpty else { return nil }
-    return String(collapsed.prefix(200))
+    let collapsed = oneLineText(text, limit: 200, ellipsis: false)
+    return collapsed.isEmpty ? nil : collapsed
+}
+
+/// A display name bounded for the Pet contract (`name`, maxLength 80).
+private func boundedName(_ text: String) -> String? {
+    let line = oneLineText(text, limit: 80, ellipsis: false)
+    return line.isEmpty ? nil : line
+}
+
+/// The one line a label shows of any text: newlines become spaces, the ends
+/// are trimmed, and past `limit` characters it is cut (with "…" unless
+/// `ellipsis` is false). Every row, tooltip and contract field that shortens
+/// text goes through here.
+func oneLineText(_ text: String, limit: Int? = nil, ellipsis: Bool = true) -> String {
+    let line = text.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let limit, line.count > limit else { return line }
+    let cut = String(line.prefix(limit))
+    return ellipsis ? cut.trimmingCharacters(in: .whitespaces) + "…" : cut
 }
 
 /// The Agent Map's legacy state/graph projection. Unchanged in shape and
@@ -543,6 +1061,11 @@ struct PetStateEnvelope: Encodable, Equatable, Sendable {
         let task: String?
         let updatedAt: String
         let source: String
+        /// Optional, additive (renderers that predate it ignore it): the
+        /// app's display name. Omitted from the JSON when nil.
+        let name: String?
+        /// Optional, additive: "permission" or "input" for a waiting agent.
+        let waitingReason: String?
     }
 
     let contract: String
@@ -574,7 +1097,9 @@ struct PetStateEnvelope: Encodable, Equatable, Sendable {
                     state: agent.state,
                     task: agent.task,
                     updatedAt: monitorTimestamp(agent.updatedAt),
-                    source: agent.source
+                    source: agent.source,
+                    name: agent.name,
+                    waitingReason: agent.state == .waiting ? agent.waitingReason : nil
                 )
             }
         )
@@ -628,178 +1153,301 @@ enum PetChildEnvironment {
     }
 }
 
+/// One canonical timeline event (contracts/monitor/v2 `event`). The sidecar
+/// gives every source — Gateway, Claude/Codex/Grok transcripts, agent hooks —
+/// this one shape, and has already done the work the app used to guess at:
+/// streamed chunks arrive merged into one `agent_message`/`agent_thought`, a
+/// tool call and its updates are one `tool_call` whose `status` moves from
+/// pending/running to completed/failed, and `title`/`body` are the display
+/// text. Nothing here inspects a provider's raw payload.
 struct MonitorEvent: Identifiable, Equatable, Sendable {
+    /// `<sessionId>#<key>`: stable across re-reads and sidecar restarts, so an
+    /// SSE `events` frame replaces the event it names instead of adding one.
     let id: String
+    let key: String
     let sessionId: String
+    /// Monitor-assigned, monotonic per session in first-seen order.
     let sequence: Int?
-    let type: String
+    let kind: String
     let timestamp: String?
+    let endedAt: String?
     let turnId: String?
-    let text: String?
+    let toolCallId: String?
+    /// One-line summary (a tool's "Bash: ls -la", a prompt's first line).
+    let title: String?
+    /// Display text: the message, the thought, a tool's output.
+    let body: String?
+    /// pending, running, completed, failed, cancelled, or nil.
+    let status: String?
+    let sources: [String]
+    /// Kind-specific extras (tool name/input, durationMs, requestId, …).
+    let detail: [String: JSONValue]
     let payload: JSONValue
+
+    /// Identity and display fields only. `payload` is the raw JSON these were
+    /// read from; deep-comparing it on every upsert and state diff was the
+    /// dominant cost of a busy stream, and nothing on screen reads it except
+    /// the raw-JSON disclosure.
+    static func == (lhs: MonitorEvent, rhs: MonitorEvent) -> Bool {
+        lhs.id == rhs.id
+            && lhs.sequence == rhs.sequence
+            && lhs.kind == rhs.kind
+            && lhs.status == rhs.status
+            && lhs.timestamp == rhs.timestamp
+            && lhs.endedAt == rhs.endedAt
+            && lhs.turnId == rhs.turnId
+            && lhs.toolCallId == rhs.toolCallId
+            && lhs.title == rhs.title
+            && lhs.body == rhs.body
+            && lhs.sources == rhs.sources
+            && lhs.detail == rhs.detail
+    }
 
     init?(_ value: JSONValue) {
         guard let object = value.objectValue,
               let sessionId = object.string("sessionId"),
-              let type = object.string("type") else { return nil }
+              let kind = object.string("kind") else { return nil }
+        let key = object.string("key")
+        guard let id = object.string("id") ?? key.map({ "\(sessionId)#\($0)" }) else { return nil }
+        self.id = id
+        self.key = key ?? id
         self.sessionId = sessionId
+        self.kind = kind
         sequence = object.int("sequence")
-        self.type = type
         timestamp = object.string("ts")
+        endedAt = object.string("endedAt")
         turnId = object.string("turnId")
-        text = object.string("text")
+        toolCallId = object.string("toolCallId")
+        title = nonEmptyText(object.string("title"))
+        body = nonEmptyText(object.string("body"))
+        status = object.string("status")
+        sources = (object.array("sources") ?? []).compactMap(\.stringValue)
+        detail = object.object("detail") ?? [:]
         payload = value
-        id = sequence.map { "\(sessionId):\($0)" }
-            ?? "\(sessionId):\(timestamp ?? ""):\(type):\(UUID().uuidString)"
     }
 
-    var summary: String {
-        if let text, !text.isEmpty {
-            return String(text.replacingOccurrences(of: "\n", with: " ").prefix(140))
+    /// Short Korean label for the kind, as rows and nodes print it.
+    var kindLabel: String { eventKindLabel(kind) }
+
+    /// How the event stands, in one word: a request's outcome wins over the
+    /// generic status, so a denied permission never reads "완료".
+    var stateLabel: String? { requestStateLabel ?? eventStatusLabel(status) }
+
+    /// Arrived through a CLI hook as it happened, not only from a transcript.
+    var isHookObserved: Bool { sources.contains("hook") }
+
+    /// The one line a timeline row or sequence node leads with. A tool call
+    /// is named by its own compact header ("Bash: ls -la"), a permission or
+    /// input request by how it stands, anything else by its kind.
+    var headline: String {
+        switch kind {
+        case "tool_call": return compactToolTitle()
+        case "permission_request", "input_request": return requestStateLabel ?? kindLabel
+        default: return kindLabel
         }
-        guard let object = payload.objectValue else { return type }
-        if let data = object.object("data"), let title = data.string("title") { return title }
-        if let toolCall = object.object("toolCall"), let title = toolCall.string("title") { return title }
-        if let message = object.string("message") { return String(message.prefix(140)) }
-        if let reason = object.string("stopReason") { return reason }
-        return type.replacingOccurrences(of: "_", with: " ")
     }
 
-    /// What the event actually *said*, with the JSON envelope stripped — the
-    /// detail panes lead with this and keep the raw payload as a fallback.
-    ///
-    /// The payload's *shape* decides where that text lives, not its type.
-    /// `src/gateway-service.js` flattens only chunk/prompt events into a
-    /// top-level `text` (`capTextEvent`); every other update goes through the
-    /// generic tail that serializes the whole update into `text` and keeps the
-    /// real object in `data` — so on those, `text` is JSON and must not be
-    /// shown as a body. `sidecar/src/local-transcript.js` emits no `data` at all and
-    /// writes a human summary into `text`. Hence: `data` wins whenever it
-    /// exists, `text` is only trusted without it.
-    ///
-    /// nil means the payload carries nothing more readable than its own JSON.
-    var bodyText: String? {
-        let object = payload.objectValue ?? [:]
-        if type == "permission_request" {
-            // The tool call is capped separately (`capStructuredField`), so
-            // only its identity is guaranteed to survive here.
-            let title = object.object("toolCall")?.string("title")
-            return [title, "권한 요청"].compactMap(nonEmptyBody).joined(separator: " · ")
-        }
-        if let data = object.object("data") {
-            return structuredBodyText(data) ?? nonEmptyBody(data.string("message"))
-        }
-        // An update too large to deliver leaves only a truncated JSON head in
-        // `text`; the raw view renders that better than a half-parsed body.
-        if object.bool("dataTruncated") == true { return nil }
-        return nonEmptyBody(text) ?? nonEmptyBody(object.string("message"))
+    /// A tool call's name and the head of its argument, cut to `limit`
+    /// characters. The sidecar's title already reads "Bash: ls -la"; without
+    /// one the tool name from `detail` stands in.
+    func compactToolTitle(limit: Int = 30) -> String {
+        let raw = title
+            ?? detail["toolName"]?.stringValue
+            ?? detail["name"]?.stringValue
+            ?? kindLabel
+        return oneLineText(raw, limit: limit)
     }
-}
 
-/// The readable part of a gateway event's raw ACP update (`data`).
-private func structuredBodyText(_ data: [String: JSONValue]) -> String? {
-    let title = nonEmptyBody(data.string("title") ?? data.string("name"))
-    // A finished call is interesting for what it returned, a starting one for
-    // what it was asked to do — the same rule covers `tool_call` and
-    // `tool_call_update` without branching on a type the payload may not state.
-    let detail = toolResultText(data) ?? toolInputText(data)
-    let parts = [title, detail].compactMap { $0 }
-    if !parts.isEmpty { return parts.joined(separator: "\n\n") }
-    guard let status = nonEmptyBody(data.string("status")) else { return nil }
-    return "상태: \(status)"
-}
-
-/// Whatever the tool reported back. Field names come from the agent, not the
-/// Gateway — the Gateway forwards its update verbatim — so every shape ACP
-/// agents are seen to use is accepted rather than one canonical key.
-private func toolResultText(_ data: [String: JSONValue]) -> String? {
-    for key in ["content", "output", "result", "rawOutput"] {
-        if let text = nonEmptyBody(acpContentText(data[key])) { return text }
-    }
-    // A structured `rawOutput` has no text leaf to lift, but it is still the
-    // result and far shorter than the whole envelope.
-    if let raw = data["rawOutput"], raw.objectValue != nil || raw.arrayValue != nil {
-        return nonEmptyBody(raw.compactPrinted)
-    }
-    return nil
-}
-
-/// A tool call's arguments, summarized: the reader only needs to recognize
-/// *which* call this was, so a long argument blob is cut here instead of
-/// filling the pane.
-private func toolInputText(_ data: [String: JSONValue]) -> String? {
-    guard let raw = data["rawInput"] ?? data["input"] ?? data["arguments"] else { return nil }
-    let text = nonEmptyBody(acpContentText(raw)) ?? nonEmptyBody(raw.compactPrinted)
-    guard let text else { return nil }
-    return text.count > 400 ? String(text.prefix(400)) + "…" : text
-}
-
-/// Text leaves of an ACP content value: a bare string, an array of blocks, a
-/// plain `{type:"text", text}` block, or the tool-call wrapper that nests the
-/// real block under `content`.
-private func acpContentText(_ value: JSONValue?) -> String? {
-    switch value {
-    case let .string(text):
-        return text
-    case let .array(items):
-        let parts = items.compactMap { acpContentText($0) }.filter { !$0.isEmpty }
-        return parts.isEmpty ? nil : parts.joined(separator: "\n")
-    case let .object(object):
-        if let text = object.string("text") { return text }
-        return acpContentText(object["content"])
-    default:
-        return nil
-    }
-}
-
-private func nonEmptyBody(_ text: String?) -> String? {
-    guard let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
-    return trimmed
-}
-
-/// The full text a streamed chunk belongs to, rebuilt from its whole turn.
-///
-/// A response arrives as many `agent_message_chunk` fragments, and every
-/// surface that picks one event — the sequence diagram's collapsed ×N node,
-/// follow-latest selection, a list row — lands on a single fragment, so the
-/// pane showed the tail of the answer ("녕") instead of the answer ("안녕").
-///
-/// Joining depends on who produced the chunks: the Gateway streams token
-/// deltas, concatenated verbatim within a run and split into paragraphs at the
-/// same boundaries its own result logic uses (tool/permission/elicitation —
-/// see SEGMENT_BOUNDARY_TYPES in src/gateway-service.js); the local transcript
-/// projector emits one chunk per complete assistant message, so each is its
-/// own paragraph. Returns nil for a lone fragment — `bodyText` already shows
-/// it — and for non-chunk events.
-func mergedChunkBody(for event: MonitorEvent, in siblings: [MonitorEvent]) -> (text: String, fragments: Int)? {
-    guard event.type == "agent_message_chunk" || event.type == "agent_thought_chunk" else { return nil }
-    let boundaries: Set<String> = ["tool_call", "permission_request", "elicitation_request"]
-    let isLocal = event.payload.objectValue?.string("source") == "local-transcript"
-    let turnEvents = siblings
-        .filter { $0.sessionId == event.sessionId && $0.turnId == event.turnId }
-        .sorted(by: withinSessionEventOrder)
-
-    var segments: [String] = []
-    var run = ""
-    var fragments = 0
-    for item in turnEvents {
-        if item.type == event.type {
-            guard let text = item.text, !text.isEmpty else { continue }
-            fragments += 1
-            if isLocal {
-                segments.append(text)
-            } else {
-                run += text
+    /// How a permission / input request stands: waiting, approved, denied or
+    /// cancelled. `detail.outcome` is the sidecar's verdict; the status is the
+    /// fallback for a source that reports none. nil for other kinds.
+    var requestStateLabel: String? {
+        switch kind {
+        case "permission_request":
+            switch detail["outcome"]?.stringValue {
+            case "approved": return "승인됨"
+            case "denied": return "거부됨"
+            case "cancelled": return "취소됨"
+            default: break
             }
-        } else if boundaries.contains(item.type), !run.isEmpty {
-            segments.append(run)
-            run = ""
+            switch status {
+            case "pending", "running", nil: return "권한 요청 대기"
+            // A response without a known outcome (an older source) is only
+            // known to have been answered, not allowed.
+            case "completed": return detail["outcome"] == nil ? "응답됨" : "승인됨"
+            case "failed": return "거부됨"
+            case "cancelled": return "취소됨"
+            default: return "권한 요청"
+            }
+        case "input_request":
+            switch status {
+            case "pending", "running", nil: return "입력 요청 대기"
+            case "completed": return "응답됨"
+            case "failed": return "입력 실패"
+            case "cancelled": return "취소됨"
+            default: return "입력 요청"
+            }
+        default:
+            return nil
         }
     }
-    if !run.isEmpty { segments.append(run) }
-    guard fragments > 1 else { return nil }
-    let text = segments.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
-    return text.isEmpty ? nil : (text, fragments)
+
+    /// One line for a list row or tooltip: the sidecar's title, else the head
+    /// of the body, else the kind.
+    var summary: String {
+        if let title { return title }
+        if let body { return oneLineText(body, limit: 140, ellipsis: false) }
+        return kindLabel
+    }
+
+    /// Still in flight: a tool call or request that has not finished.
+    var isInFlight: Bool { status == "pending" || status == "running" }
+    var isFailed: Bool { status == "failed" }
+}
+
+/// Korean label for a canonical event kind; an unknown kind reads as words.
+func eventKindLabel(_ kind: String) -> String {
+    switch kind {
+    case "turn_start": "턴 시작"
+    case "turn_end": "턴 종료"
+    case "session_start": "세션 시작"
+    case "session_end": "세션 종료"
+    case "user_message": "사용자 입력"
+    case "agent_message": "응답"
+    case "agent_thought": "생각"
+    case "tool_call": "도구 호출"
+    case "permission_request": "권한 요청"
+    case "input_request": "입력 요청"
+    case "subagent": "서브에이전트"
+    case "plan": "계획"
+    case "compaction": "컨텍스트 압축"
+    case "error": "오류"
+    // An unlisted kind is not shown as raw text (docs/ux-policy.md §5).
+    default: "알 수 없는 이벤트"
+    }
+}
+
+/// Human word for an event (tool call, request) status, nil when the event
+/// carries none.
+func eventStatusLabel(_ status: String?) -> String? {
+    switch status {
+    case "pending": "시작 전"
+    case "running": "실행 중"
+    case "completed": "완료"
+    case "failed": "실패"
+    case "cancelled": "취소됨"
+    default: nil
+    }
+}
+
+/// A provider's display name; an unknown one never reads "Agent".
+func providerDisplayLabel(_ provider: String) -> String {
+    switch provider.lowercased() {
+    case "claude": "Claude"
+    case "codex": "Codex"
+    case "grok": "Grok"
+    case "", "unknown": "알 수 없는 CLI"
+    default: provider.capitalized
+    }
+}
+
+/// A CLI's product name where the user installs or configures it
+/// (onboarding, agent catalog, hook consent, monitoring settings): the one
+/// map every setup surface reads, so none spells a CLI differently.
+func cliProductName(_ provider: String) -> String {
+    switch provider.lowercased() {
+    case "claude": "Claude Code"
+    case "codex": "Codex"
+    case "grok": "Grok"
+    default: providerDisplayLabel(provider)
+    }
+}
+
+/// "세션 목록을", "인스펙터를": the object particle that fits the word's last
+/// syllable (a final consonant takes 을).
+func withObjectParticle(_ word: String) -> String {
+    guard let scalar = word.unicodeScalars.last else { return word }
+    let value = scalar.value
+    if (0xAC00...0xD7A3).contains(value) {
+        return word + ((value - 0xAC00) % 28 == 0 ? "를" : "을")
+    }
+    return word + "을(를)"
+}
+
+/// The headline of "what the selected session is doing" (docs/ux-policy.md
+/// §3): waiting first, then what the newest event of a running session is,
+/// then the resting state.
+func sessionActivityHeadline(status: String, isActive: Bool, latestKind: String?) -> String {
+    switch status {
+    case "waiting_permission": return "권한 대기 중"
+    case "waiting_input": return "입력 대기 중"
+    // Stopping, not working: never "실행 중".
+    case "cancelling": return "취소 중"
+    default: break
+    }
+    if isActive {
+        switch latestKind {
+        case "agent_thought": return "생각 중"
+        case "agent_message": return "응답 생성 중"
+        default: return "실행 중"
+        }
+    }
+    switch status {
+    case "idle", "ready", "end_turn", "completed": return "대기 · 다음 입력을 기다림"
+    case "closed": return "종료됨"
+    case "error", "failed": return "오류"
+    default: return sessionStatusLabel(status)
+    }
+}
+
+/// Whether a session is shown from history, not the live snapshot: the one
+/// opened from "지난 기록", or any session no longer in the snapshot.
+func isHistorySession(_ sessionId: String, liveSessionIds: Set<String>, openedHistoryId: String?) -> Bool {
+    sessionId == openedHistoryId || !liveSessionIds.contains(sessionId)
+}
+
+/// A title that is a CLI's transient tool call or event path rather than a
+/// name: "custom_tool_call/exec", "function_call", "hook/PreToolUse". A
+/// sentence that merely mentions a path ("fix src/a.swift") is still a name.
+func isToolishTitle(_ title: String) -> Bool {
+    let lower = title.lowercased()
+    if lower.contains("tool_call") || lower.contains("function_call") { return true }
+    return title.contains("/") && !title.contains(where: \.isWhitespace)
+}
+
+/// Korean word for a session (or record) status — the same wording the
+/// dashboard uses, so no header ever prints a raw `waiting_permission`.
+func sessionStatusLabel(_ status: String) -> String {
+    switch status {
+    case "running": "실행 중"
+    case "waiting_permission": "권한 대기"
+    case "waiting_input": "입력 대기"
+    // A finished turn is a resting session, not "완료" (docs/ux-policy.md §3).
+    case "idle", "ready", "end_turn", "completed": "대기"
+    case "closed": "종료"
+    case "error": "오류"
+    case "failed": "실패"
+    case "disconnected": "연결 끊김"
+    case "unavailable": "사용 불가"
+    case "cancelling": "취소 중"
+    case "cancelled": "취소됨"
+    case "restoring": "복원 중"
+    case "pending": "대기 중"
+    case "interrupted": "중단됨"
+    // An unlisted status is not shown as raw text (docs/ux-policy.md §3).
+    default: "알 수 없음"
+    }
+}
+
+/// A task / inbox record's status: like a session's, except that a finished
+/// record is done ("완료"), not resting.
+func recordStatusLabel(_ status: String) -> String {
+    status == "completed" ? "완료" : sessionStatusLabel(status)
+}
+
+private func nonEmptyText(_ text: String?) -> String? {
+    guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+    return text
 }
 
 /// One entry of the app's notice/error log: repeated identical errors fold
@@ -850,7 +1498,7 @@ struct MonitorRecord: Identifiable, Equatable, Sendable {
     }
 }
 
-/// A parsed `monitorApiVersion` string such as `"1.0"`. Minor is additive
+/// A parsed `monitorApiVersion` string such as `"2.0"`. Minor is additive
 /// (new optional capabilities); only a major mismatch is incompatible.
 struct MonitorApiVersion: Equatable, Sendable {
     let major: Int
@@ -872,8 +1520,8 @@ struct MonitorApiVersion: Equatable, Sendable {
 /// must reject up front rather than let callers partially decode a message
 /// they don't understand.
 enum MonitorCompatibility {
-    static let supportedSchemaVersion = 1
-    static let supportedApiMajor = 1
+    static let supportedSchemaVersion = 2
+    static let supportedApiMajor = 2
 
     /// A missing/malformed version field means the message isn't even a
     /// message this build understands the shape of (`monitor_api_incompatible`);
@@ -952,15 +1600,56 @@ struct MonitorMeta: Equatable, Sendable {
 struct InstalledFrontdoors: Equatable, Sendable {
     let primary: String?
     let installed: [String]
+    /// Agents with only the guide MCP: they can read how to delegate but are
+    /// not Frontdoors (the Gateway installs the guide into every agent).
+    var guideOnly: [String] = []
 
     static func decode(_ data: Data) throws -> InstalledFrontdoors {
         let raw = try JSONSerialization.jsonObject(with: data)
         guard let root = JSONValue(any: raw).objectValue else { throw MonitorDecodeError.invalidMessage }
         return InstalledFrontdoors(
             primary: root.string("primary"),
-            installed: (root.array("installed") ?? []).compactMap { $0.stringValue }
+            installed: (root.array("installed") ?? []).compactMap { $0.stringValue },
+            guideOnly: (root.array("guideOnly") ?? []).compactMap { $0.stringValue }
         )
     }
+}
+
+enum MonitorReducerDefaults {
+    /// Matches the sidecar's default `maxEventsPerSession`.
+    static let eventLimit = 2_000
+    /// Older events paged in per session. Past it the oldest paged events
+    /// fall off, so scrolling far up a long session stays bounded.
+    static let pagedEventLimit = 5_000
+    /// History sessions whose events stay loaded besides the open one.
+    static let browsedSessionLimit = 5
+    /// Rows of "지난 기록" kept in memory.
+    static let browsedHistoryLimit = 500
+}
+
+/// Recently used keys, oldest first, at most `capacity` besides the pinned
+/// one (the history session on screen, which never drops).
+struct RecentKeys: Equatable, Sendable {
+    let capacity: Int
+    private(set) var keys: [String] = []
+
+    init(capacity: Int) { self.capacity = max(0, capacity) }
+
+    /// Marks `key` as just used; returns the keys that fell off.
+    @discardableResult
+    mutating func touch(_ key: String, pinned: String?) -> [String] {
+        keys.removeAll { $0 == key }
+        keys.append(key)
+        var evicted: [String] = []
+        while keys.filter({ $0 != pinned }).count > capacity,
+              let oldest = keys.firstIndex(where: { $0 != pinned }) {
+            evicted.append(keys.remove(at: oldest))
+        }
+        return evicted
+    }
+
+    mutating func remove(_ key: String) { keys.removeAll { $0 == key } }
+    mutating func removeAll() { keys.removeAll() }
 }
 
 struct MonitorSnapshot: Sendable {
@@ -978,6 +1667,8 @@ struct MonitorSnapshot: Sendable {
     let eventsBySession: [String: [MonitorEvent]]
     let historySessions: [GatewaySession]
     let historyEventsBySession: [String: [MonitorEvent]]
+    /// The sidecar's per-session event cap; upserts trim to the same bound.
+    let eventLimit: Int
     let tasks: [MonitorRecord]
     let inbox: [MonitorRecord]
 
@@ -988,12 +1679,12 @@ struct MonitorSnapshot: Sendable {
         let sessions = (root.array("sessions") ?? []).compactMap(GatewaySession.init)
         var eventsBySession: [String: [MonitorEvent]] = [:]
         for (sessionId, value) in root.object("events") ?? [:] {
-            eventsBySession[sessionId] = (value.arrayValue ?? []).compactMap(MonitorEvent.init)
+            eventsBySession[sessionId] = (value.arrayValue ?? []).compactMap(MonitorEvent.init).sorted(by: withinSessionEventOrder)
         }
         let historySessions = (root.array("historySessions") ?? []).compactMap(GatewaySession.init)
         var historyEventsBySession: [String: [MonitorEvent]] = [:]
         for (sessionId, value) in root.object("historyEvents") ?? [:] {
-            historyEventsBySession[sessionId] = (value.arrayValue ?? []).compactMap(MonitorEvent.init)
+            historyEventsBySession[sessionId] = (value.arrayValue ?? []).compactMap(MonitorEvent.init).sorted(by: withinSessionEventOrder)
         }
         let tasks = (root.array("tasks") ?? []).enumerated().map { MonitorRecord($0.element, fallbackKind: "task", index: $0.offset) }
         let inbox = (root.array("inbox") ?? []).enumerated().map { MonitorRecord($0.element, fallbackKind: "inbox", index: $0.offset) }
@@ -1009,6 +1700,7 @@ struct MonitorSnapshot: Sendable {
             eventsBySession: eventsBySession,
             historySessions: historySessions,
             historyEventsBySession: historyEventsBySession,
+            eventLimit: max(root.int("eventLimit") ?? MonitorReducerDefaults.eventLimit, 1),
             tasks: tasks,
             inbox: inbox
         )
@@ -1086,6 +1778,146 @@ struct ACPAgentCatalogSnapshot: Sendable {
     }
 }
 
+/// One CLI's monitoring-hook registration, as GET /api/hooks reports it.
+struct MonitoringHookTarget: Identifiable, Equatable, Sendable {
+    let provider: String
+    let agentPresent: Bool
+    let disabled: Bool
+    let installed: Bool
+    let partial: Bool
+    let needsTrust: Bool
+    let error: String?
+    let file: String
+
+    var id: String { provider }
+
+    init?(provider: String, _ value: JSONValue) {
+        guard let object = value.objectValue else { return nil }
+        self.provider = provider
+        agentPresent = object.bool("agentPresent") ?? false
+        disabled = object.bool("disabled") ?? false
+        installed = object.bool("installed") ?? false
+        partial = object.bool("partial") ?? false
+        needsTrust = object.bool("needsTrust") ?? false
+        error = object.string("error")
+        file = object.string("file") ?? ""
+    }
+}
+
+/// The monitoring hooks AgenLynk registers in Claude Code, Codex and Grok.
+struct MonitoringHookStatus: Equatable, Sendable {
+    /// The running sidecar accepts hook events (only the app's own does).
+    let receiving: Bool
+    let enabled: Bool
+    /// Nothing has been installed yet because the user has not been asked.
+    let consentRequired: Bool
+    let targets: [MonitoringHookTarget]
+    let errors: [String]
+    /// provider → when this sidecar last received one of its hooks. Missing
+    /// means none has arrived since the sidecar started.
+    var lastReceivedAt: [String: Date] = [:]
+
+    /// The settings row's state text for one CLI.
+    func stateText(for target: MonitoringHookTarget, now: Date = Date()) -> String {
+        if !target.agentPresent { return "설치된 CLI 없음" }
+        if target.error != nil { return "설정 파일 오류" }
+        if target.needsTrust { return "승인 필요" }
+        if target.installed {
+            guard let last = lastReceivedAt[target.provider] else { return "등록됨 · 아직 수신 없음" }
+            return "등록됨 · 마지막 수신 \(relativeTimeText(from: last, to: now))"
+        }
+        if target.partial { return "일부만 등록됨" }
+        return "꺼짐"
+    }
+
+    static let providerOrder = ["claude", "codex", "grok"]
+
+    static func decode(_ data: Data) throws -> MonitoringHookStatus {
+        let raw = try JSONSerialization.jsonObject(with: data)
+        guard let root = JSONValue(any: raw).objectValue else { throw MonitorDecodeError.invalidMessage }
+        let targets = root.object("targets") ?? [:]
+        return MonitoringHookStatus(
+            receiving: root.bool("receiving") ?? false,
+            enabled: root.bool("enabled") ?? true,
+            consentRequired: root.bool("consentRequired") ?? false,
+            targets: providerOrder.compactMap { provider in targets[provider].flatMap { MonitoringHookTarget(provider: provider, $0) } },
+            errors: (root.object("errors") ?? [:]).values.compactMap(\.stringValue),
+            lastReceivedAt: (root.object("lastReceivedAt") ?? [:]).reduce(into: [String: Date]()) { result, item in
+                if let text = item.value.stringValue, let date = parseTimestamp(text) { result[item.key] = date }
+            }
+        )
+    }
+}
+
+/// GET /api/history/stats (and the body of POST /api/history clear): the
+/// on-disk monitor history. `available` is false when disk history is off
+/// (retention 0) or the database could not be opened.
+struct MonitorHistoryStats: Equatable, Sendable {
+    let available: Bool
+    let path: String?
+    let bytes: Double?
+    let sessions: Int?
+    let events: Int?
+    let retentionDays: Double?
+    /// Sessions a clear removed; only on the clear response.
+    let deleted: Int?
+
+    /// Retention 0 keeps nothing on disk.
+    var diskHistoryOff: Bool { (retentionDays ?? 1) <= 0 }
+
+    var retentionText: String? {
+        guard let retentionDays else { return nil }
+        if retentionDays <= 0 { return "보관 안 함" }
+        if retentionDays < 1 { return "\(max(1, Int((retentionDays * 24).rounded())))시간" }
+        return "\(Int(retentionDays.rounded()))일"
+    }
+
+    static func decode(_ data: Data) throws -> MonitorHistoryStats {
+        let raw = try JSONSerialization.jsonObject(with: data)
+        guard let root = JSONValue(any: raw).objectValue else { throw MonitorDecodeError.invalidMessage }
+        return MonitorHistoryStats(
+            available: root.bool("available") ?? false,
+            path: root.string("path"),
+            bytes: root.double("bytes"),
+            sessions: root.int("sessions"),
+            events: root.int("events"),
+            retentionDays: root.double("retentionDays"),
+            deleted: root.int("deleted")
+        )
+    }
+}
+
+/// GET /api/history: persisted session records, newest first.
+struct MonitorHistoryPage: Equatable, Sendable {
+    let sessions: [GatewaySession]
+    let hasMore: Bool
+
+    static func decode(_ data: Data) throws -> MonitorHistoryPage {
+        let raw = try JSONSerialization.jsonObject(with: data)
+        guard let root = JSONValue(any: raw).objectValue else { throw MonitorDecodeError.invalidMessage }
+        let sessions = (root.array("sessions") ?? []).compactMap(GatewaySession.init)
+        return MonitorHistoryPage(sessions: sessions, hasMore: root.bool("hasMore") ?? false)
+    }
+}
+
+/// GET /api/sessions/:id/events: one page of a session's older events,
+/// oldest first. Events naming another session are dropped.
+struct SessionEventsPage: Equatable, Sendable {
+    let sessionId: String
+    let events: [MonitorEvent]
+
+    static func decode(_ data: Data, sessionId: String) throws -> SessionEventsPage {
+        let raw = try JSONSerialization.jsonObject(with: data)
+        guard let root = JSONValue(any: raw).objectValue else { throw MonitorDecodeError.invalidMessage }
+        let id = root.string("sessionId") ?? sessionId
+        guard id == sessionId else { throw MonitorDecodeError.invalidMessage }
+        let events = (root.array("events") ?? []).compactMap(MonitorEvent.init)
+            .filter { $0.sessionId == sessionId }
+            .sorted(by: withinSessionEventOrder)
+        return SessionEventsPage(sessionId: sessionId, events: events)
+    }
+}
+
 /// One installed Gateway runtime, as `runtime-updater.js` reports it.
 struct RuntimeVersionSummary: Identifiable, Equatable, Sendable {
     let versionId: String
@@ -1135,7 +1967,7 @@ struct RuntimeInspection: Equatable, Sendable {
     var canRollback: Bool { previous != nil }
     var pinnedNotice: String? {
         guard currentPinned else { return nil }
-        return "이 버전으로 롤백해 고정되어 있습니다. 앱을 업데이트해도 런타임은 그대로 유지됩니다 — 버전을 직접 선택하면 고정이 풀립니다."
+        return "이 버전으로 되돌려 고정되어 있습니다. 앱을 업데이트해도 런타임은 바뀌지 않습니다. 아래 \"이 앱의 런타임 설치 및 적용\"으로 이 앱에 포함된 런타임을 설치하면 고정이 풀립니다."
     }
 
     init?(_ value: JSONValue) {
@@ -1494,26 +2326,80 @@ enum MonitorClientError: LocalizedError, Equatable, Sendable {
 }
 
 // ── Canonical MonitorEvent orderings ─────────────────────────────────────
-// Exactly two, because there are exactly two valid scopes. Four ad-hoc
-// comparators with two different rules had grown across the views; which one
-// you need depends only on scope, so the scope is in the name.
+// Both follow the contract's "ts, then sequence" order. `ts` is when the fact
+// was first observed, and a later observation of the same event (a tool call
+// finishing) keeps it, so an upserted event never jumps position. `sequence`
+// is the monitor's first-seen counter and only breaks timestamp ties.
 
-/// Order WITHIN one session: the gateway assigns `sequence` monotonically per
-/// session, so it is authoritative there — several events can share one
-/// millisecond timestamp. Sequence-less events sort last.
+/// Order WITHIN one session. The sidecar writes every `ts` in the same
+/// fixed-width ISO8601 form, so string order is time order.
 func withinSessionEventOrder(_ lhs: MonitorEvent, _ rhs: MonitorEvent) -> Bool {
-    if (lhs.sequence ?? Int.max) != (rhs.sequence ?? Int.max) {
-        return (lhs.sequence ?? Int.max) < (rhs.sequence ?? Int.max)
-    }
-    return (lhs.timestamp ?? "") < (rhs.timestamp ?? "")
+    if lhs.timestamp != rhs.timestamp { return (lhs.timestamp ?? "") < (rhs.timestamp ?? "") }
+    if lhs.sequence != rhs.sequence { return (lhs.sequence ?? Int.max) < (rhs.sequence ?? Int.max) }
+    return lhs.id < rhs.id
 }
 
-/// Order ACROSS sessions: sequences are per-session counters and comparing
-/// them between sessions is meaningless, so wall-clock order decides and
-/// sequence only breaks same-session timestamp ties.
+/// Order ACROSS sessions: sequences are per-session counters, so wall-clock
+/// order decides and the session id keeps equal timestamps deterministic.
 func crossSessionEventOrder(_ lhs: MonitorEvent, _ rhs: MonitorEvent) -> Bool {
     if lhs.timestamp != rhs.timestamp { return (lhs.timestamp ?? "") < (rhs.timestamp ?? "") }
-    return (lhs.sequence ?? 0) < (rhs.sequence ?? 0)
+    if lhs.sessionId != rhs.sessionId { return lhs.sessionId < rhs.sessionId }
+    return withinSessionEventOrder(lhs, rhs)
+}
+
+/// Upserts changed events into one session's bucket, the v2 rule for both SSE
+/// `events` frames and a `state` frame's `events`: an event whose `id` is
+/// already present replaces it in place, a new `id` is inserted, the bucket
+/// stays in `withinSessionEventOrder`, and only the oldest events fall off
+/// past `limit` (the sidecar's `eventLimit`). A later duplicate of one id in
+/// the same batch wins.
+func upsertMonitorEvents(_ changes: [MonitorEvent], into bucket: [MonitorEvent], limit: Int) -> [MonitorEvent] {
+    var result = bucket
+    upsertMonitorEvents(changes, into: &result, limit: limit)
+    return result
+}
+
+/// In-place form of the upsert above; returns whether the bucket changed, so
+/// callers never have to diff the whole bucket (or state) afterwards. The
+/// bucket must already be in `withinSessionEventOrder` (every producer keeps
+/// it so); only the neighbours of what changed are checked.
+@discardableResult
+func upsertMonitorEvents(_ changes: [MonitorEvent], into bucket: inout [MonitorEvent], limit: Int) -> Bool {
+    guard !changes.isEmpty else { return false }
+    var changed = false
+    var touched: [Int] = []
+    touched.reserveCapacity(changes.count)
+    // A frame names a few events, almost always the newest: a backwards scan
+    // finds them without hashing every id of the bucket. Large batches (a
+    // page, a merge) index the bucket once instead.
+    var indexById: [String: Int]?
+    if changes.count > 16 {
+        var index: [String: Int] = [:]
+        index.reserveCapacity(bucket.count + changes.count)
+        for (offset, event) in bucket.enumerated() { index[event.id] = offset }
+        indexById = index
+    }
+    for event in changes {
+        let existing = indexById.map { $0[event.id] } ?? bucket.lastIndex { $0.id == event.id }
+        if let existing {
+            guard bucket[existing] != event else { continue }
+            bucket[existing] = event
+            touched.append(existing)
+        } else {
+            indexById?[event.id] = bucket.count
+            touched.append(bucket.count)
+            bucket.append(event)
+        }
+        changed = true
+    }
+    guard changed else { return false }
+    let outOfOrder = touched.contains { index in
+        (index > 0 && withinSessionEventOrder(bucket[index], bucket[index - 1]))
+            || (index + 1 < bucket.count && withinSessionEventOrder(bucket[index + 1], bucket[index]))
+    }
+    if outOfOrder { bucket.sort(by: withinSessionEventOrder) }
+    if bucket.count > limit { bucket.removeFirst(bucket.count - limit) }
+    return true
 }
 
 /// A warning when the running Gateway daemon serves from a different runtime
@@ -1547,9 +2433,9 @@ func monitorFailureGuidance(code: String?) -> String? {
     case "monitor_update_required":
         "이 앱이 설치된 runtime보다 오래되었습니다. 새 버전의 Lynk로 업데이트하세요."
     case "monitor_unauthorized":
-        "Monitor 인증이 유효하지 않습니다. '다시 연결'을 눌러 세션을 새로 만드세요."
+        "Monitor 인증이 유효하지 않습니다. '모니터 다시 연결'을 눌러 세션을 새로 만드세요."
     case "monitor_restart_blocked":
-        "진행 중인 세션·Task·미응답 요청이 끝나면 다시 시도하세요."
+        "진행 중인 세션·태스크·미응답 요청이 끝나면 다시 시도하세요."
     default:
         nil
     }
@@ -1575,7 +2461,24 @@ enum MonitorSelection {
         var sessionsById: [String: GatewaySession] = [:]
         for session in historySessions { sessionsById[session.sessionId] = session }
         for session in liveSessions { sessionsById[session.sessionId] = session }
-        let available = FrontdoorSession.make(sessions: sessionsById.values.filter { !$0.isInternalReview })
+        return reconcile(
+            selectedFrontdoorId: selectedFrontdoorId,
+            selectedEventId: selectedEventId,
+            frontdoors: FrontdoorSession.make(sessions: sessionsById.values.filter { !$0.isInternalReview }),
+            liveEvents: liveEvents,
+            historyEvents: historyEvents
+        )
+    }
+
+    /// The same, against Frontdoors the caller already built (the app keeps
+    /// them cached per log revision).
+    static func reconcile(
+        selectedFrontdoorId: String?,
+        selectedEventId: String?,
+        frontdoors available: [FrontdoorSession],
+        liveEvents: [String: [MonitorEvent]],
+        historyEvents: [String: [MonitorEvent]]
+    ) -> Result {
         let frontdoorId: String?
         if let selectedFrontdoorId, available.contains(where: { $0.id == selectedFrontdoorId }) {
             frontdoorId = selectedFrontdoorId
@@ -1583,15 +2486,27 @@ enum MonitorSelection {
             frontdoorId = available.first(where: \.isActive)?.id ?? available.first?.id
         }
 
-        var eventsById: [String: MonitorEvent] = [:]
-        for events in historyEvents.values {
-            for event in events { eventsById[event.id] = event }
+        let eventId = selectedEventId.flatMap { id in
+            contains(id, in: historyEvents) || contains(id, in: liveEvents) ? id : nil
         }
-        for events in liveEvents.values {
-            for event in events { eventsById[event.id] = event }
-        }
-        let eventId = selectedEventId.flatMap { eventsById[$0] == nil ? nil : $0 }
         return Result(frontdoorId: frontdoorId, eventId: eventId)
+    }
+
+    /// Event ids are `<sessionId>#<key>`, so only the bucket of that session
+    /// is searched — not an index of every retained event for one id. An id
+    /// of another shape (no bucket matches a prefix) falls back to a scan.
+    static func contains(_ eventId: String, in buckets: [String: [MonitorEvent]]) -> Bool {
+        var matchedBucket = false
+        var cursor = eventId.startIndex
+        while let hash = eventId[cursor...].firstIndex(of: "#") {
+            if let bucket = buckets[String(eventId[..<hash])] {
+                matchedBucket = true
+                if bucket.contains(where: { $0.id == eventId }) { return true }
+            }
+            cursor = eventId.index(after: hash)
+        }
+        guard !matchedBucket else { return false }
+        return buckets.values.contains { bucket in bucket.contains { $0.id == eventId } }
     }
 }
 
@@ -1729,7 +2644,7 @@ func restartBlockerLabels(sessions: [GatewaySession], tasks: [MonitorRecord], in
     let pendingInbox = inbox.filter { $0.status == "pending" }.count
     return [
         activeSessions > 0 ? "진행 중 세션 \(activeSessions)개" : nil,
-        activeTasks > 0 ? "진행 중 Task \(activeTasks)개" : nil,
-        pendingInbox > 0 ? "미응답 Inbox \(pendingInbox)개" : nil
+        activeTasks > 0 ? "진행 중 태스크 \(activeTasks)개" : nil,
+        pendingInbox > 0 ? "미응답 요청 \(pendingInbox)개" : nil
     ].compactMap { $0 }
 }
