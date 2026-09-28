@@ -179,6 +179,17 @@ export function headlessArgs(provider, args) {
   return HEADLESS_FLAGS[provider]?.test(rest) ?? false;
 }
 
+/**
+ * True when a one-shot-looking command line is really a chat host driving the
+ * agent for a person: `--permission-prompt-tool stdio` hands every permission
+ * prompt back to the host to ask someone (Paseo, Conductor, IDE panels all
+ * run Claude as `sdk-cli` this way). Automation has no one to ask.
+ */
+export function interactiveHostArgs(provider, args) {
+  if (provider !== "claude" || typeof args !== "string") return false;
+  return /(?:^|\s)--permission-prompt-tool(?:\s+|=)stdio(?:\s|$)/.test(args.trim().replace(/^\S+/, ""));
+}
+
 export class ProcessLineage {
   constructor({
     claudeSessionsDir = join(homedir(), ".claude", "sessions"),
@@ -283,7 +294,7 @@ export class ProcessLineage {
 
   /**
    * The session that launched agent process `pid`, or null.
-   * @returns {Promise<{ parent: { provider, session }|null, headless: boolean }>}
+   * @returns {Promise<{ parent: { provider, session }|null, headless: boolean, interactive?: true }>}
    */
   async resolve(pid, self) {
     const entry = this.table.get(pid);
@@ -292,7 +303,11 @@ export class ProcessLineage {
     const cached = this.cache.get(key);
     if (cached && cached.self === `${self?.provider}:${self?.session}`) return cached.value;
     const { markers, args } = await this.#markers(pid);
-    const value = { parent: this.#walk(entry.ppid, markers, self), headless: headlessArgs(self?.provider, args) };
+    const value = {
+      parent: this.#walk(entry.ppid, markers, self),
+      headless: headlessArgs(self?.provider, args),
+      ...(interactiveHostArgs(self?.provider, args) ? { interactive: true } : {})
+    };
     this.cache.set(key, { self: `${self?.provider}:${self?.session}`, value });
     if (this.cache.size > MAX_CACHED) this.cache.delete(this.cache.keys().next().value);
     return value;
@@ -328,7 +343,8 @@ export class ProcessLineage {
       this.run("ps", ["eww", "-o", "command=", "-p", String(pid)]),
       this.run("ps", ["ww", "-o", "command=", "-p", String(pid)])
     ]);
-    // Only the flags are kept (for headlessArgs); the command line is not stored.
+    // Only the flags are kept (for headlessArgs / interactiveHostArgs); the
+    // command line is not stored.
     return { markers: lineageMarkers(withEnvironment, argsOnly), args: argsOnly.split("\n", 1)[0] };
   }
 
@@ -389,8 +405,9 @@ export async function annotateLineage(items, lineage, now = Date.now() / 1000) {
       if (headlessEntrypoint(record?.entrypoint)) item.headless = true;
     }
     if (item.parent || !pid) continue;
-    const { parent, headless } = await lineage.resolve(pid, { provider: item.provider, session });
+    const { parent, headless, interactive } = await lineage.resolve(pid, { provider: item.provider, session });
     if (headless) item.headless = true;
+    if (interactive) item.interactive = true;
     if (!parent) continue;
     item.parent = parent.session;
     item.parent_provider = parent.provider;

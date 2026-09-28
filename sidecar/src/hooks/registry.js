@@ -152,6 +152,7 @@ export class HookSessions {
           const resolved = await lineage.resolve(agentPid, self);
           if (resolved.parent) entry.parent = resolved.parent;
           if (resolved.headless) entry.headless = true;
+          if (resolved.interactive) entry.interactive = true;
           entry.lineageResolved = true;
         }
       } catch {
@@ -207,6 +208,7 @@ export class HookSessions {
           raw.parent_source = "lineage";
         }
         if (entry.headless) raw.headless = true;
+        if (entry.interactive) raw.interactive = true;
         if (state && entry.statusAt / 1000 >= Number(raw.time || 0)) {
           raw.state = state;
           raw.event = `hook/${entry.event}`;
@@ -234,7 +236,8 @@ export class HookSessions {
         transcript: entry.transcript ?? null,
         hooked: true,
         ...(entry.parent ? { parent: entry.parent.session, parent_provider: entry.parent.provider, parent_source: "lineage" } : {}),
-        ...(entry.headless ? { headless: true } : {})
+        ...(entry.headless ? { headless: true } : {}),
+        ...(entry.interactive ? { interactive: true } : {})
       });
     }
     for (const raw of merged) {

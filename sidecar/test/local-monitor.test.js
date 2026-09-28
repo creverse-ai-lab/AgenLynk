@@ -144,6 +144,49 @@ test("worker attribution is remembered after its transcript goes stale", () => {
   assert.equal(second[0].parentSessionId, "local:claude:frontdoor-uuid");
 });
 
+test("Gateway 1.6 openedBy attributes a worker without any transcript link", () => {
+  const local = projectLocalSnapshot({ sessions: [
+    { provider: "claude", session: "frontdoor-uuid", state: "running", time: 100, cwd: "/repo" },
+    { provider: "claude", session: "worker-uuid", state: "running", time: 101, cwd: "/repo" }
+  ] });
+  const openedBy = { provider: "claude", sessionId: "frontdoor-uuid", pid: 4242, instanceId: "mcp-a" };
+  const merged = mergeMonitorSessions([
+    { sessionId: "acp-1", acpSessionId: "worker-uuid", provider: "claude", status: "running", openedBy }
+  ], local.sessions, new Map());
+  const worker = merged.find((session) => session.sessionId === "acp-1");
+  assert.equal(worker.role, "worker");
+  assert.equal(worker.parentSessionId, "local:claude:frontdoor-uuid");
+  assert.equal(worker.openerInstanceId, "frontdoor-uuid", "the Main's own group, straight from the protocol");
+
+  // The Main's session is not in the scan (yet): the caller still names it.
+  const unseen = mergeMonitorSessions([
+    { sessionId: "acp-2", acpSessionId: "w2", provider: "grok", status: "running",
+      openedBy: { provider: "grok", sessionId: "g-main", pid: 7, instanceId: "mcp-g" } }
+  ], [], new Map());
+  assert.equal(unseen[0].parentSessionId, "local:grok:g-main");
+  assert.equal(unseen[0].openerInstanceId, "g-main");
+});
+
+test("one proven Codex worker attributes every worker its control instance opened", () => {
+  const workerTopology = new Map();
+  const codexCaller = { provider: "codex", sessionId: null, pid: 36864, instanceId: "mcp-codex-thread" };
+  const linked = projectLocalSnapshot({ sessions: [
+    { provider: "codex", session: "codex-thread", state: "running", time: 100, cwd: "/repo" },
+    { provider: "claude", session: "worker-a", parent: "codex-thread", parent_provider: "codex", state: "running", time: 101, cwd: "/repo" }
+  ] });
+  const first = mergeMonitorSessions([
+    { sessionId: "acp-a", acpSessionId: "worker-a", provider: "claude", status: "running", openedBy: codexCaller }
+  ], linked.sessions, workerTopology);
+  assert.equal(first[0].openerInstanceId, "codex-thread", "proven by the thread's own transcript");
+
+  // A second worker the same thread opened, whose link never reached a transcript.
+  const second = mergeMonitorSessions([
+    { sessionId: "acp-b", acpSessionId: "worker-b", provider: "claude", status: "running", openedBy: codexCaller }
+  ], [], workerTopology);
+  assert.equal(second[0].openerInstanceId, "codex-thread");
+  assert.equal(second[0].parentSessionId, "local:codex:codex-thread");
+});
+
 // Regression: idle local sessions now stay listed for the retention window,
 // and a Gateway worker's own transcript outlives its Gateway session. Without
 // remembering the worker, it came back as a parentless local session — a

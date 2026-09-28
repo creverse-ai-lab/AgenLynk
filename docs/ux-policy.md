@@ -8,12 +8,13 @@ Claude · Codex · Grok · Gateway 세션을 **같은 규칙으로** 보여 주�
 - 부모를 모르는 로컬 세션만 Frontdoor 후보가 된다. provider가 다른 부모도 그 provider 아이디로 연결한다.
 - **다른 에이전트의 셸 도구에서 띄운 에이전트는 그 세션의 Worker다** (예: Claude Code Bash에서 실행한 `grok -p`, `codex exec`, 중첩 `claude -p`). 부모는 프로세스 계보로 정한다: 띄운 CLI가 자식에게 넘기는 세션 id(`CLAUDE_CODE_SESSION_ID`, `GROK_SESSION_ID`, `CODEX_THREAD_ID`)와 부모 pid 사슬(`~/.claude/sessions/<pid>.json`). 자기 세션 id는 부모가 아니다. `codex exec`는 rollout 파일을 열어 두지 않으므로, thread DB의 `source = 'exec'` thread를 같은 작업 폴더에서 thread 생성 시각 ±15초 안에 시작한 codex 프로세스 하나(유일할 때만)에 맞춰 계보를 찾고, 찾은 부모는 프로세스가 끝나도 유지한다. 환경 변수는 이 세 id만 id 문자 규칙으로 읽고, 나머지는 저장·기록하지 않는다.
 - Grok 서브에이전트(`spawn_subagent`)는 자기 세션을 따로 갖지만 부모 `grok` 프로세스 안에서 돌아 부모의 환경을 물려받는다. 그래서 부모는 Grok 자신의 기록으로 정한다: 같은 작업 폴더 디렉터리에서 `<부모>/subagents/<자식>/`을 가진 세션(`meta.json`의 `parent_session_id`가 있으면 그 값). 이 연결은 프로세스 계보보다 우선하고, 서브에이전트에는 부모의 `-p`를 이유로 `headless`를 붙이지 않는다.
-- 부모 연결 우선순위: Gateway/MCP 응답으로 증명된 연결 > Grok `subagents/` 기록 > 프로세스 계보. 계보만으로는 Gateway worker의 opener를 정하지 않는다(데몬이 우연히 물려받은 환경일 수 있다).
+- 부모 연결 우선순위: Gateway 1.6 `openedBy`(Gateway가 기록한 호출자) > Gateway/MCP 응답으로 증명된 연결 > 같은 Control 인스턴스(`openedBy.instanceId`)로 증명된 연결 > Grok `subagents/` 기록 > 프로세스 계보. 계보만으로는 Gateway worker의 opener를 정하지 않는다(데몬이 우연히 물려받은 환경일 수 있다).
 - 부모 없는 일회성 실행(`claude -p`/SDK, `grok -p`, `codex exec`)은 실제 활동이 있으면 지금처럼 Frontdoor로 두되 세션에 `headless: true`를 붙인다(숨기지 않는다).
 - **hook으로만 보였고 활동(프롬프트·도구·서브에이전트·권한 요청)도 대화 기록 파일도 없는 세션은 목록에 올리지 않는다.** SessionEnd가 오면 바로, 끝이 안 오면 2분 뒤 잊는다. 사용량 측정 앱처럼 `claude`를 주기적으로 띄우는 도구가 빈 Frontdoor를 쌓지 않게 하려는 것이다. 첫 활동이 오면 그때부터 평소처럼 보인다.
 - Gateway가 본 worker id는 `~/.acp-gateway/agenlynk/workers.json`에 남겨, sidecar 재시작이나 기록 보관 0 이후에도 Frontdoor가 되지 않는다. (알려진 한계: 예전에 worker였던 Claude 세션을 터미널에서 `--resume`하면 로컬 Frontdoor로 보이지 않는다.)
 - opener를 모르는 Gateway worker는 Frontdoor로 올리지 않되 숨기지도 않고 **연결 미확인 Worker** 한 그룹에 둔다.
 - 부모를 끝내 모르는 1회성 실행(`claude -p`, `grok -p`, `codex exec`, headless)도 사람이 연 세션이 아니므로 Frontdoor로 올리지 않고 **연결 미확인 Worker**에 둔다.
+- SDK entrypoint(`sdk-*`)만으로는 1회성 실행이 아니다. 사람에게 권한을 묻는 채팅 호스트(`--permission-prompt-tool stdio`, 예: Paseo·Conductor·IDE 패널)나 프롬프트가 두 번 이상 온 대화는 사람이 모는 세션이므로 Frontdoor로 두고 `headless`를 붙이지 않는다.
 - 화면의 Frontdoor 묶음은 opener id보다 **증명된 부모 사슬**(`parentSessionId`)을 먼저 따른다. 부모가 목록에 있으면 그 최상위 조상의 묶음에 들어간다.
 - 레인 헤더 첫 줄은 역할(**Frontdoor** / Worker / "Worker · 2단"), 둘째 줄은 이름(사용자 지정, 없으면 자동 이름)이다.
 - 레인·배지 이름은 **Frontdoor / Worker**만 쓴다. 중첩(depth≥2)은 "Worker · 2단". "Agent"/"Subagent"로 부르지 않는다. 호출 화살표는 "Worker 호출", 돌아오는 화살표는 "응답".

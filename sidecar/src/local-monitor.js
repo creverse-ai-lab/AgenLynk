@@ -128,8 +128,11 @@ export function projectLocalSnapshot(snapshot, timelines = new Map()) {
     const active = status === "running" || status === "waiting_input" || status === "waiting_permission";
     // A one-shot run (`claude -p`, `grok -p`, `codex exec`) is automation,
     // not a session a person opened: without a known launcher it is an
-    // unattributed Worker, never a Frontdoor of its own.
-    const headless = Boolean(raw.headless || facts.headless === true);
+    // unattributed Worker, never a Frontdoor of its own. An SDK entrypoint
+    // alone does not make one: a chat host that asks a person for permission,
+    // or a conversation with more than one prompt, is someone talking to it.
+    const conversed = (timeline?.events ?? []).filter((event) => event.kind === "user_message").length > 1;
+    const headless = Boolean(raw.headless || facts.headless === true) && !raw.interactive && !conversed;
     const orphanRun = headless && raw.session === rootId && !raw.parent;
 
     sessions.push({
@@ -216,6 +219,14 @@ export class LocalEventDelivery {
   }
 }
 
+const MAX_CALLER_TOPOLOGY = 256;
+
+/** Instance entries have no session to be pruned with; keep the newest. */
+function pruneCallerTopology(workerTopology) {
+  const keys = [...workerTopology.keys()].filter((key) => key.startsWith("caller:"));
+  for (const key of keys.slice(0, Math.max(0, keys.length - MAX_CALLER_TOPOLOGY))) workerTopology.delete(key);
+}
+
 export function mergeMonitorSessions(gatewaySessions, localSessions, workerTopology = null, formerWorkerIds = null) {
   // ownedWorkerIds is LOAD-BEARING even though the scanner no longer produces
   // Gateway sessions itself: an ACP claude worker writes a transcript under
@@ -235,6 +246,23 @@ export function mergeMonitorSessions(gatewaySessions, localSessions, workerTopol
   const resolvedParentSessionId = (session) => gatewaySessionIdByProviderId.get(session?.parentLocalSessionId)
     ?? session?.parentSessionId
     ?? null;
+  const localByMonitorId = new Map((Array.isArray(localSessions) ? localSessions : [])
+    .filter((session) => session?.sessionId)
+    .map((session) => [session.sessionId, session]));
+  // Gateway 1.6 names the Main that opened a worker (`openedBy`). That is the
+  // protocol's own record, so it beats any transcript reading. A Main that
+  // exported its session id is its local session; the group is that
+  // session's own group when the scan sees it.
+  const callerTopology = (caller) => {
+    if (!caller?.provider || !caller?.sessionId) return null;
+    const parentSessionId = `local:${caller.provider}:${caller.sessionId}`;
+    const parent = localByMonitorId.get(parentSessionId);
+    return {
+      opener: caller.provider,
+      openerInstanceId: parent?.openerInstanceId ?? caller.sessionId,
+      parentSessionId
+    };
+  };
   // Gateway 1.4 session records do not carry the Frontdoor topology fields.
   // The same provider transcript is already present in the local scan and has
   // those fields; preserve its topology on the authoritative Gateway record
@@ -265,8 +293,20 @@ export function mergeMonitorSessions(gatewaySessions, localSessions, workerTopol
         parentSessionId: resolvedParentSessionId(localMatch)
       }
       : null;
-    if (proven && workerTopology && session?.sessionId) workerTopology.set(session.sessionId, proven);
-    const topology = proven ?? workerTopology?.get(session?.sessionId) ?? null;
+    // Codex exports no thread id, only its control-server instance: once one
+    // of that instance's workers is proven by transcript, the instance is
+    // known, and every other worker it opened belongs to the same Main.
+    const instanceKey = session?.openedBy?.instanceId ? `caller:${session.openedBy.instanceId}` : null;
+    if (proven && instanceKey && workerTopology) {
+      workerTopology.set(instanceKey, proven);
+      pruneCallerTopology(workerTopology);
+    }
+    const byCaller = callerTopology(session?.openedBy)
+      ?? proven
+      ?? (instanceKey ? workerTopology?.get(instanceKey) : null)
+      ?? null;
+    if (byCaller && workerTopology && session?.sessionId) workerTopology.set(session.sessionId, byCaller);
+    const topology = byCaller ?? workerTopology?.get(session?.sessionId) ?? null;
     return {
       ...session,
       role: session.role ?? "worker",

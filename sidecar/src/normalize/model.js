@@ -105,6 +105,10 @@ export function epochMs(value) {
  *
  * `bodyMode: "append"` marks a streamed chunk the store concatenates onto the
  * existing body instead of replacing it (Gateway message chunks).
+ *
+ * `from` / `to` name the other end of a message when a source proves it: a
+ * turn a Main started through the Gateway comes from that Main, and its end
+ * goes back to it (Gateway 1.6 `promptedBy`). Absent, not guessed, otherwise.
  */
 export function monitorEvent({
   key,
@@ -118,7 +122,9 @@ export function monitorEvent({
   status = null,
   endedAt = null,
   detail = null,
-  bodyMode = "replace"
+  bodyMode = "replace",
+  from = null,
+  to = null
 }) {
   if (typeof key !== "string" || !key) throw new TypeError("monitor event key is required");
   if (!KIND_SET.has(kind)) throw new TypeError(`unknown monitor event kind: ${kind}`);
@@ -138,6 +144,8 @@ export function monitorEvent({
   const compactDetail = compactObject(detail);
   if (compactDetail) event.detail = compactDetail;
   if (bodyMode === "append") event.bodyMode = "append";
+  if (typeof from === "string" && from) event.from = from;
+  if (typeof to === "string" && to) event.to = to;
   return event;
 }
 
@@ -258,7 +266,7 @@ export const APPEND_BODY_LIMIT = BODY_LIMIT * 4;
 export function mergeEvent(existing, incoming) {
   if (!existing) return { ...incoming };
   const merged = { ...existing };
-  for (const field of ["title", "turnId", "toolCallId", "endedAt"]) {
+  for (const field of ["title", "turnId", "toolCallId", "endedAt", "from", "to"]) {
     if (incoming[field] != null) merged[field] = incoming[field];
   }
   if (incoming.body != null) {

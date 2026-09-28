@@ -9,6 +9,7 @@ import {
   annotateExecLineage,
   annotateLineage,
   headlessArgs,
+  interactiveHostArgs,
   hookLineageHeaders,
   lineageMarkers,
   markerParent,
@@ -94,6 +95,12 @@ test("headless flags are read from the command line only", () => {
   assert.equal(headlessArgs("claude", "claude -p hi"), true);
   assert.equal(headlessArgs("claude", "claude --resume"), false);
   assert.equal(headlessArgs("codex", "codex exec -s read-only"), true);
+  const hosted = "/Users/x/.local/bin/claude --output-format stream-json --input-format stream-json --permission-prompt-tool stdio";
+  assert.equal(interactiveHostArgs("claude", hosted), true, "a chat host relays permission prompts to a person");
+  assert.equal(interactiveHostArgs("claude", "claude --permission-prompt-tool=stdio"), true);
+  assert.equal(interactiveHostArgs("claude", "claude -p hi --permission-prompt-tool mcp__auth__ok"), false, "an MCP tool answers, not a person");
+  assert.equal(interactiveHostArgs("claude", "claude -p hi"), false);
+  assert.equal(interactiveHostArgs("grok", "grok --permission-prompt-tool stdio"), false);
   assert.equal(parseProcessTable(`  16964 15448 ${START}     claude\n`).get(16964).comm, "claude");
 });
 

@@ -272,6 +272,26 @@ test("LocalTimeline tails Claude and Grok sessions and reuses the Codex window",
   });
 });
 
+test("a Gateway turn comes from the Main that prompted it and its end goes back", () => {
+  const normalizer = new GatewayEventNormalizer();
+  const promptedBy = { provider: "claude", sessionId: "main-uuid", pid: 4242, instanceId: "mcp-a" };
+  const [start] = normalizer.ingest({ type: "turn_start", turnId: "turn-1", ts: "2026-09-28T00:00:00Z", promptedBy });
+  assert.equal(start.from, "local:claude:main-uuid");
+  const [end] = normalizer.ingest({ type: "turn_end", turnId: "turn-1", ts: "2026-09-28T00:00:05Z", stopReason: "end_turn" });
+  assert.equal(end.to, "local:claude:main-uuid");
+
+  const codex = new GatewayEventNormalizer();
+  const [codexStart] = codex.ingest({
+    type: "turn_start", turnId: "turn-2", ts: "2026-09-28T00:01:00Z",
+    promptedBy: { provider: "codex", sessionId: null, pid: 36864, instanceId: "mcp-codex" }
+  });
+  assert.equal(codexStart.from, "caller:mcp-codex", "no thread id: the control instance");
+
+  const legacy = new GatewayEventNormalizer();
+  const [legacyStart] = legacy.ingest({ type: "turn_start", turnId: "turn-3", ts: "2026-09-28T00:02:00Z" });
+  assert.equal("from" in legacyStart, false, "a pre-1.6 Gateway proves nothing, so nothing is claimed");
+});
+
 test("a grok -p run is headless by Grok's own session summary", async () => {
   await withTempDirectory(async (root) => {
     const directory = join(root, "grok", "g1");
@@ -295,6 +315,27 @@ test("a grok -p run is headless by Grok's own session summary", async () => {
     assert.equal(interactive.results.get("grok:g1").session.headless, undefined);
     assert.equal(projectLocalSnapshot({ sessions: [raw] }, interactive.results).sessions[0].headless, undefined);
   });
+});
+
+test("an SDK-launched Claude is a Frontdoor when a person is driving it", () => {
+  const raw = { provider: "claude", session: "c1", state: "ready", time: 1, headless: true };
+  const prompt = (ts) => ({ kind: "user_message", ts });
+  const project = (session, events = [prompt("2026-09-28T00:00:00Z")]) =>
+    projectLocalSnapshot({ sessions: [session] }, new Map([["claude:c1", { events, session: {} }]])).sessions[0];
+
+  const oneShot = project(raw);
+  assert.equal(oneShot.role, "worker", "an unlaunched one-shot run is an unattributed Worker");
+  assert.equal(oneShot.openerInstanceId, null);
+  assert.equal(oneShot.headless, true);
+
+  const hosted = project({ ...raw, interactive: true });
+  assert.equal(hosted.role, "frontdoor", "a chat host that asks a person for permission");
+  assert.equal(hosted.openerInstanceId, "c1");
+  assert.equal(hosted.headless, undefined);
+
+  const conversed = project(raw, [prompt("2026-09-28T00:00:00Z"), prompt("2026-09-28T00:01:00Z")]);
+  assert.equal(conversed.role, "frontdoor", "more than one prompt is a conversation");
+  assert.equal(conversed.headless, undefined);
 });
 
 test("a turn that ends closes the tool calls it left open, for every source", () => {

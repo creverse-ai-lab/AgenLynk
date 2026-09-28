@@ -299,12 +299,24 @@ export function grokUsage(usageFile, signalsFile) {
  * Stateful (turn, segment, chunk parts) because Gateway chunks stream one at
  * a time; each chunk re-emits its message's whole body in daemon order.
  */
+/**
+ * A Gateway 1.6 caller as a monitor reference: the Main's local session when it
+ * exported one, else its control-server instance (Codex exports no thread id).
+ */
+export function callerRef(caller) {
+  if (!caller || typeof caller !== "object") return null;
+  if (caller.provider && caller.sessionId) return `local:${caller.provider}:${caller.sessionId}`;
+  return caller.instanceId ? `caller:${caller.instanceId}` : null;
+}
+
 export class GatewayEventNormalizer {
   constructor() {
     this.context = { turnId: null, segment: 0, lastKind: null, ts: null, source: "gateway", chunks: new Map(), openTools: new Set() };
     // requestId -> offered options, so a response's optionId says whether it
     // allowed or rejected (the response carries only the id).
     this.permissionOptions = new Map();
+    // turnId -> the Main that started it, so the turn's end is addressed back.
+    this.turnCallers = new Map();
   }
 
   ingest(event) {
@@ -322,17 +334,24 @@ export class GatewayEventNormalizer {
     const type = event.type;
 
     switch (type) {
-      case "turn_start":
+      case "turn_start": {
+        const from = callerRef(event.promptedBy);
+        if (from && turnId) {
+          this.turnCallers.set(turnId, from);
+          if (this.turnCallers.size > 200) this.turnCallers.delete(this.turnCallers.keys().next().value);
+        }
         collector.add(monitorEvent({
           key: `turn:${turnId ?? ts}`, kind: "turn_start", ts, source: "gateway", turnId,
-          title: event.text ?? null, body: event.text ?? null
+          title: event.text ?? null, body: event.text ?? null, from
         }));
         break;
+      }
       case "turn_completed":
       case "turn_end":
         collector.add(monitorEvent({
           key: `turn:${turnId ?? ts}:end`, kind: "turn_end", ts, source: "gateway", turnId,
-          status: stopStatus(event.stopReason), detail: { stopReason: event.stopReason }
+          status: stopStatus(event.stopReason), detail: { stopReason: event.stopReason },
+          to: turnId ? this.turnCallers.get(turnId) ?? null : null
         }));
         closeOpenTools(collector, context, ts, stopStatus(event.stopReason), turnId);
         context.lastKind = type;
