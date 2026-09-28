@@ -47,6 +47,26 @@ enum DashboardMode: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// Builds up to 0.5.0 beta 1 shipped as `ai.creverse.acp-monitor`. macOS 26
+/// remembers per bundle identifier whether an app may show in the menu bar,
+/// and that identifier ended up hidden, so the app now ships as
+/// `ai.creverse.agenlynk`.
+/// UserDefaults is keyed by bundle identifier; this carries the old domain's
+/// settings (nicknames, dashboard modes, window frames) over once.
+enum LegacyDefaultsImport {
+    static let legacyDomain = "ai.creverse.acp-monitor"
+    static let markerKey = "monitor.legacyDomainImportV1"
+
+    static func run(into defaults: UserDefaults = .standard, from legacy: [String: Any]? = nil) {
+        guard !defaults.bool(forKey: markerKey) else { return }
+        defer { defaults.set(true, forKey: markerKey) }
+        guard let legacy = legacy ?? defaults.persistentDomain(forName: legacyDomain) else { return }
+        for (key, value) in legacy where defaults.object(forKey: key) == nil {
+            defaults.set(value, forKey: key)
+        }
+    }
+}
+
 @MainActor
 final class AppSettings: ObservableObject {
     private enum Key {

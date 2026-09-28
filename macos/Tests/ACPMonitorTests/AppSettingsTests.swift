@@ -80,6 +80,7 @@ enum AppSettingsChecks {
         }
 
         try dashboardModeChecks()
+        try legacyDefaultsImportChecks()
         print("Swift settings checks passed")
     }
 }
@@ -147,6 +148,30 @@ private func dashboardModeChecks() throws {
     stale.reset()
     guard stale.enabledDashboardModes == DashboardMode.allCases, stale.defaultDashboardMode == .sequence else {
         throw SettingsCheckError.failed("reset restores every view and the sequence default")
+    }
+}
+
+/// The old bundle identifier's settings come over once, never over a value
+/// the new identifier already has.
+private func legacyDefaultsImportChecks() throws {
+    let suite = "ACPMonitor.AppSettingsTests.Legacy.\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suite) else {
+        throw SettingsCheckError.failed("could not create legacy import defaults")
+    }
+    defer { defaults.removePersistentDomain(forName: suite) }
+    defaults.set(false, forKey: "monitor.showThoughts")
+    LegacyDefaultsImport.run(into: defaults, from: [
+        "monitor.showThoughts": true,
+        "monitor.frontdoorNicknames": ["fd-1": "api"]
+    ])
+    guard defaults.bool(forKey: "monitor.showThoughts") == false,
+          defaults.dictionary(forKey: "monitor.frontdoorNicknames") as? [String: String] == ["fd-1": "api"],
+          defaults.bool(forKey: LegacyDefaultsImport.markerKey) else {
+        throw SettingsCheckError.failed("legacy settings fill only missing keys and mark the import done")
+    }
+    LegacyDefaultsImport.run(into: defaults, from: ["monitor.nodePath": "/tmp/node"])
+    guard defaults.object(forKey: "monitor.nodePath") == nil else {
+        throw SettingsCheckError.failed("the legacy import runs once")
     }
 }
 

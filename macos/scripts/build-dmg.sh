@@ -29,12 +29,17 @@ STAGING="$REPO_ROOT/build/dmg-staging"
 # and is rejected unless Developer ID + notarization + stapling all succeeded.
 if [ -z "${ACP_LYNK_APP_VERSION:-}" ]; then
   if [ "${ACP_LYNK_CODESIGN_IDENTITY:--}" = "-" ] || [ "${ACP_LYNK_NOTARIZE:-0}" != "1" ]; then
-    ACP_LYNK_APP_VERSION=${ACP_LYNK_PRERELEASE_VERSION:-0.5.0-beta.1}
+    ACP_LYNK_APP_VERSION=${ACP_LYNK_PRERELEASE_VERSION:-0.5.0-beta.2}
     export ACP_LYNK_APP_VERSION
   fi
 fi
 
+# The staging copy registers with Launch Services under the real bundle
+# identifier; drop that record with the copy (see verify-dmg.sh).
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 cleanup() {
+  "$LSREGISTER" -u "$STAGING/AgenLynk.app/Contents/Helpers/LynkPet.app" >/dev/null 2>&1 || true
+  "$LSREGISTER" -u "$STAGING/AgenLynk.app" >/dev/null 2>&1 || true
   rm -rf "$STAGING"
 }
 trap cleanup EXIT INT TERM

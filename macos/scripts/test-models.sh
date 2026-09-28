@@ -89,6 +89,16 @@ env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
 
 "$SETTINGS_OUT"
 
+LS_HYGIENE_OUT="$CHECK_ROOT/launch-services-hygiene"
+env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
+  swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/AppSettings.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/LaunchServicesHygiene.swift" \
+  "$REPO_ROOT/macos/Tests/ACPMonitorTests/LaunchServicesHygieneTests.swift" \
+  -o "$LS_HYGIENE_OUT"
+
+"$LS_HYGIENE_OUT"
+
 SEQUENCE_LAYOUT_OUT="$CHECK_ROOT/sequence-relation-layout"
 env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 \

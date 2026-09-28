@@ -2,8 +2,17 @@ import AppKit
 import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    var launchHandler: (@MainActor () -> Void)?
     var terminationHandler: (() async -> Void)?
     private var terminating = false
+
+    /// Connect to the Gateway at launch, not when a window first appears. The
+    /// dashboard and the popover also call startIfNeeded(), but neither is on
+    /// screen at launch unless macOS restores the dashboard, so without this
+    /// the app could sit unconnected with no sidecar until clicked.
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        MainActor.assumeIsolated { launchHandler?() }
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let terminationHandler, !terminating else { return terminating ? .terminateLater : .terminateNow }
@@ -22,8 +31,12 @@ struct ACPMonitorApp: App {
     @StateObject private var model: AppModel
 
     init() {
+        // Before AppModel reads any setting.
+        LegacyDefaultsImport.run()
+        LaunchServicesHygiene.runOncePerBuild()
         let model = AppModel()
         _model = StateObject(wrappedValue: model)
+        appDelegate.launchHandler = { [weak model] in model?.startIfNeeded() }
         appDelegate.terminationHandler = { [weak model] in await model?.stop() }
     }
 

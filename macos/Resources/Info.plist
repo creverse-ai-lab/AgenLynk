@@ -5,13 +5,13 @@
   <key>CFBundleDevelopmentRegion</key><string>ko</string>
   <key>CFBundleDisplayName</key><string>AgenLynk</string>
   <key>CFBundleExecutable</key><string>ACPMonitor</string>
-  <key>CFBundleIdentifier</key><string>ai.creverse.acp-monitor</string>
+  <key>CFBundleIdentifier</key><string>ai.creverse.agenlynk</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleName</key><string>AgenLynk</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.5.0</string>
-  <key>CFBundleVersion</key><string>13</string>
+  <key>CFBundleVersion</key><string>14</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSAppTransportSecurity</key>

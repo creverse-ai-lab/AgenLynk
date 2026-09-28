@@ -29,7 +29,15 @@ printf '%s\n' "hdiutil verify passed"
 # 2) Mount read-only/no-browse at a private mktemp mountpoint, with cleanup
 # guaranteed on any exit path. Never attach with write access.
 MOUNT_POINT=$(mktemp -d "${TMPDIR:-/tmp}/acp-lynk-dmg-verify.XXXXXX")
+# Every mount leaves a Launch Services record for the app inside it under the
+# real bundle identifier, and the record outlives the temp mountpoint. Dozens
+# of dead copies of one identifier is how the menu bar item went missing, so
+# unregister the copy (and the Pet helper inside it, a record of its own)
+# before it goes away.
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 cleanup() {
+  "$LSREGISTER" -u "$MOUNT_POINT/AgenLynk.app/Contents/Helpers/LynkPet.app" >/dev/null 2>&1 || true
+  "$LSREGISTER" -u "$MOUNT_POINT/AgenLynk.app" >/dev/null 2>&1 || true
   hdiutil detach "$MOUNT_POINT" -quiet -force >/dev/null 2>&1 || true
   rmdir "$MOUNT_POINT" 2>/dev/null || true
 }
@@ -123,6 +131,8 @@ fi
 
 # Cleanly unmount before touching sibling release artifacts on the host
 # filesystem — nothing below this line reads from $MOUNT_POINT.
+"$LSREGISTER" -u "$APP/Contents/Helpers/LynkPet.app" >/dev/null 2>&1 || true
+"$LSREGISTER" -u "$APP" >/dev/null 2>&1 || true
 hdiutil detach "$MOUNT_POINT" -quiet
 trap - EXIT INT TERM
 rmdir "$MOUNT_POINT" 2>/dev/null || true
