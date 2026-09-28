@@ -167,12 +167,13 @@ npm run test:quick    # 일상 개발용
 npm run macos:test    # Swift 모델·설정·Pet·온보딩
 ```
 
-앱 UI는 SwiftUI(`macos/Sources/`), Monitor sidecar는 Node(`sidecar/`)입니다. DMG는 `gateway.lock.json`에 고정된 Gateway 1.5.2 artifact와 Node를 `Contents/Resources/gateway-seed/`에, 앱과 함께 움직이는 sidecar를 `Contents/Resources/sidecar/`에 담습니다. 소스 트리에서 Gateway를 쓰려면 `npm run gateway:fetch` 또는 `ACP_LYNK_GATEWAY_DEVELOPMENT_ROOT`를 사용하세요.
+앱 UI는 SwiftUI(`macos/Sources/`), Monitor sidecar는 Node(`sidecar/`)입니다. DMG는 `gateway.lock.json`에 고정된 Gateway 1.6.0 artifact와 Node를 `Contents/Resources/gateway-seed/`에, 앱과 함께 움직이는 sidecar를 `Contents/Resources/sidecar/`에 담습니다. 소스 트리에서 Gateway를 쓰려면 `npm run gateway:fetch` 또는 `ACP_LYNK_GATEWAY_DEVELOPMENT_ROOT`를 사용하세요.
 
 ## 버전 및 수정 이력
 
 | 버전 | 주요 내용 |
 |---|---|
+| **0.5.0 beta 2** | Gateway 1.6.0 호출자 기록으로 Worker를 연 Main을 직접 연결 · 이벤트에 보낸 쪽·받는 쪽(`from`/`to`) 기록 · SDK로 띄운 채팅 호스트 세션을 Frontdoor로 표시 · macOS 26에서 메뉴바 아이콘이 안 보이던 문제 수정 · 앱 시작 즉시 Gateway 연결 |
 | **0.5.0 beta 1** | Claude · Codex · Grok 실시간 hook(동의 후 설치) · 세 CLI 공통 이벤트 형식과 SQLite 기록 보관 · 토큰 사용량과 작업 예상치 · 대시보드 현황/그래프/시퀀스 보기와 보기 설정 · 메뉴바 작업 파이프라인과 `메인 \| 서브` 개수 · 셸로 띄운 에이전트와 2~3단 서브에이전트를 Worker로 연결 · 대기 Worker 접기 · Gateway 1.5.2 |
 | **0.4.1 beta 2** | 진행 중인 Worker가 별도 Frontdoor로 중복 표시되던 문제 수정 · 턴이 끝나면 Worker가 Frontdoor 그룹에서 떨어지던 문제 수정 · 모니터 재시작 후에도 진행 중 위임 관계 복구 · Claude Task 서브에이전트가 부모 세션 상태를 덮어쓰던 문제 수정 |
 | **0.4.1 beta 1** | Codex · Claude · Grok 로컬 세션과 ACP 서브에이전트 감지 개선 · 페이지별 Frontdoor 표시 오류 수정 · 호출/이벤트 캡슐 겹침 수정 · 에이전트 기록 탐색 범위를 필요한 세션 파일로 제한 |
@@ -181,6 +182,23 @@ npm run macos:test    # Swift 모델·설정·Pet·온보딩
 | **0.3.4** | Frontdoor 설치 상태를 실제 에이전트 config로 감지 · 온보딩 다중 설치 |
 | **0.3.3** | Frontdoor 이름 지정 · 시퀀스 다이어그램 호출/응답 화살표 · 선택 에이전트 활동 |
 | **0.2.0** | AgenLynk로 리네임 · Pet Canvas 렌더 · DMG 경량화 |
+
+### 0.5.0 beta 2 변경 사항
+
+**Gateway 1.6.0과 호출자 기록**
+- 포함된 Gateway를 **1.6.0**으로 올렸습니다. API와 상태 형식은 1.5.2와 같습니다.
+- Gateway가 기록한 `openedBy`(세션을 연 Main)로 Worker의 Frontdoor를 정합니다. Main의 transcript를 읽어 추측하던 연결보다 우선합니다.
+- Codex는 thread id를 넘기지 않습니다. 같은 Codex thread가 연 Worker 하나가 transcript로 확인되면, 그 thread가 연 나머지 Worker도 같은 Frontdoor에 묶습니다.
+- Gateway 턴 이벤트에 보낸 쪽과 받는 쪽을 남깁니다. 턴 시작은 `from`, 턴 끝은 `to`에 그 턴을 시작한 Main이 들어가고, `monitor.db`에도 저장됩니다.
+- 1.6.0 이전 Gateway에서는 이전과 같은 transcript 연결을 씁니다.
+
+**Frontdoor / Worker 분류**
+- SDK entrypoint(`sdk-*`)로 떴어도 사람이 모는 세션은 Frontdoor로 둡니다. 사람에게 권한을 묻는 채팅 호스트(`--permission-prompt-tool stdio`, 예: Paseo·Conductor·IDE 패널)이거나 프롬프트가 두 번 이상 온 대화가 여기에 해당합니다. 예전에는 `연결 미확인 Worker`로 빠졌습니다.
+
+**앱**
+- macOS 26에서 메뉴바 아이콘이 보이지 않던 문제를 고쳤습니다. 시스템이 이전 bundle ID(`ai.creverse.acp-monitor`)를 메뉴바에서 막고 있어서, bundle ID를 `ai.creverse.agenlynk`로 바꿨습니다. 기존 설정은 첫 실행 때 한 번 옮겨 옵니다.
+- 새 버전이 처음 실행될 때 사라진 이전 사본(DMG 마운트, 임시 폴더)의 Launch Services 등록을 정리합니다. DMG 빌드·검증 스크립트도 임시 사본의 등록을 남기지 않습니다.
+- 대시보드 창이 없어도 앱이 켜지는 즉시 Gateway에 연결합니다.
 
 ### 0.5.0 beta 1 변경 사항
 
