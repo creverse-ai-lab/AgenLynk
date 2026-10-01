@@ -167,12 +167,13 @@ npm run test:quick    # 일상 개발용
 npm run macos:test    # Swift 모델·설정·Pet·온보딩
 ```
 
-앱 UI는 SwiftUI(`macos/Sources/`), Monitor sidecar는 Node(`sidecar/`)입니다. DMG는 `gateway.lock.json`에 고정된 Gateway 1.6.0 artifact와 Node를 `Contents/Resources/gateway-seed/`에, 앱과 함께 움직이는 sidecar를 `Contents/Resources/sidecar/`에 담습니다. 소스 트리에서 Gateway를 쓰려면 `npm run gateway:fetch` 또는 `ACP_LYNK_GATEWAY_DEVELOPMENT_ROOT`를 사용하세요.
+앱 UI는 SwiftUI(`macos/Sources/`), Monitor sidecar는 Node(`sidecar/`)입니다. DMG는 `gateway.lock.json`에 고정된 Gateway 1.7.2 npm 패키지(`acp-gateway-daemon`, sha512와 npm provenance로 검증)와 Node를 `Contents/Resources/gateway-seed/`에, 앱과 함께 움직이는 sidecar를 `Contents/Resources/sidecar/`에 담습니다. 소스 트리에서 Gateway를 쓰려면 `npm run gateway:fetch` 또는 `ACP_LYNK_GATEWAY_DEVELOPMENT_ROOT`를 사용하세요.
 
 ## 버전 및 수정 이력
 
 | 버전 | 주요 내용 |
 |---|---|
+| **0.5.0 beta 3** | Gateway 1.7.2를 npm 패키지로 받음(무결성·출처 검증, runtime 용량 약 418MB → 145MB) · 옛 Gateway에 고정된 MCP 항목 감지와 일괄 다시 연결 · 옛 runtime 정리 · 런타임 업데이트 뒤 옛 daemon 자동 재시작 · Grok Worker가 Codex로 표시되던 문제 등 Worker 연결 오류 수정 |
 | **0.5.0 beta 2** | Gateway 1.6.0 호출자 기록으로 Worker를 연 Main을 직접 연결 · 이벤트에 보낸 쪽·받는 쪽(`from`/`to`) 기록 · SDK로 띄운 채팅 호스트 세션을 Frontdoor로 표시 · macOS 26에서 메뉴바 아이콘이 안 보이던 문제 수정 · 앱 시작 즉시 Gateway 연결 |
 | **0.5.0 beta 1** | Claude · Codex · Grok 실시간 hook(동의 후 설치) · 세 CLI 공통 이벤트 형식과 SQLite 기록 보관 · 토큰 사용량과 작업 예상치 · 대시보드 현황/그래프/시퀀스 보기와 보기 설정 · 메뉴바 작업 파이프라인과 `메인 \| 서브` 개수 · 셸로 띄운 에이전트와 2~3단 서브에이전트를 Worker로 연결 · 대기 Worker 접기 · Gateway 1.5.2 |
 | **0.4.1 beta 2** | 진행 중인 Worker가 별도 Frontdoor로 중복 표시되던 문제 수정 · 턴이 끝나면 Worker가 Frontdoor 그룹에서 떨어지던 문제 수정 · 모니터 재시작 후에도 진행 중 위임 관계 복구 · Claude Task 서브에이전트가 부모 세션 상태를 덮어쓰던 문제 수정 |
@@ -182,6 +183,28 @@ npm run macos:test    # Swift 모델·설정·Pet·온보딩
 | **0.3.4** | Frontdoor 설치 상태를 실제 에이전트 config로 감지 · 온보딩 다중 설치 |
 | **0.3.3** | Frontdoor 이름 지정 · 시퀀스 다이어그램 호출/응답 화살표 · 선택 에이전트 활동 |
 | **0.2.0** | AgenLynk로 리네임 · Pet Canvas 렌더 · DMG 경량화 |
+
+### 0.5.0 beta 3 변경 사항
+
+**Gateway 1.7.2를 npm으로**
+- 포함된 Gateway를 **1.7.2**로 올리고, GitHub runtime 파일 대신 npm 패키지 `acp-gateway-daemon`으로 받습니다. 패키지는 sha512 무결성과 npm provenance(저장소·workflow·태그·commit)로 검증합니다. Node는 앱이 고정한 버전을 그대로 씁니다.
+- runtime 한 버전의 크기가 약 418MB에서 145MB로 줄었습니다. 1.7.2 패키지에는 별도 Claude 실행 파일이 들어 있지 않습니다.
+- 기존 MCP 설정이 쓰는 `runtime/current/gateway/...` 경로는 그대로 동작합니다. 1.6 runtime으로 되돌릴 수도 있습니다.
+- Gateway 1.7은 Codex가 호출할 때 thread id를 기록합니다. Codex Main이 연 Worker를 그 Codex 세션에 바로 연결합니다.
+
+**runtime과 daemon 관리**
+- 런타임을 업데이트한 뒤에도 옛 daemon이 계속 돌던 문제를 고쳤습니다. 진행 중인 작업이 없으면 `shutdown_if_idle`로 새 버전으로 재시작합니다. 1.5 미만 daemon은 자동으로 멈추지 않고, 안전 재시작을 안내합니다.
+- 설정 > 버전·업데이트에 **옛 런타임 정리**를 추가했습니다. 지울 버전과 확보할 용량을 먼저 보여 줍니다. 현재 버전, 되돌리기용 이전 버전, MCP 설정이나 실행 중인 프로세스가 아직 쓰는 버전은 남깁니다.
+
+**Frontdoor MCP 설치 점검**
+- 에이전트별 control·guide MCP 항목이 어느 runtime을 가리키는지 확인합니다. 옛 버전에 고정됐거나 파일이 없는 항목을 표시하고, **다시 연결** 한 번으로 모든 CLI의 항목을 현재 runtime으로 바꿉니다. Auggie guide도 확인합니다.
+- 다시 연결하면 그 항목에 직접 추가한 env 값은 지워집니다.
+- 설치 도구 PATH에 `~/.grok/bin`을 넣어 Grok MCP 설치가 `spawn grok ENOENT`로 실패하던 문제를 고쳤습니다.
+
+**Worker 연결 오류 수정**
+- 같은 폴더에서 돌던 Codex 밑에 Grok Worker가 붙어 Codex 것으로 표시되던 문제를 고쳤습니다. 폴더가 같다는 이유로 부모를 추정하는 규칙은 Codex 서브에이전트에만 쓰고, Gateway Worker의 근거로는 쓰지 않습니다.
+- Gateway 응답에서 Worker의 provider를 그 Worker 자신의 값으로 읽습니다. 목록 응답에서 옆 항목이나 Worker를 연 Main의 provider를 잘못 가져오던 문제를 고쳤습니다.
+- Grok 로그에서는 실제 `agent_acp` 도구 결과만 Worker 연결 근거로 씁니다. grep이나 파일 읽기 결과에 Gateway 응답이 인용돼 있어도 더는 Worker를 가져가지 않습니다.
 
 ### 0.5.0 beta 2 변경 사항
 
