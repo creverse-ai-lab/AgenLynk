@@ -187,3 +187,26 @@ test("invalid active runtime fails closed when active-work state is unknown", as
     assert.equal(await realpath(join(runtimeRoot, "current")), await realpath(first.runtimeRoot));
   } finally { await rm(workspace, { recursive: true, force: true }); }
 });
+
+test("app launch upgrades an installed 1.6 runtime tarball to the npm package seed", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "agenlynk-installer-"));
+  try {
+    const runtimeRoot = join(workspace, "runtime");
+    const legacySeed = join(workspace, "seed-1.6.0");
+    const npmSeed = join(workspace, "seed-1.7.2");
+    await seed(legacySeed, { layout: "tarball", marker: "legacy" }, "2026-01-01T00:00:00.000Z");
+    const npmManifest = await seed(npmSeed, { marker: "npm" }, "2026-09-01T00:00:00.000Z");
+    const legacy = await ensureRuntimeInstalled({ seedRoot: legacySeed, runtimeRoot, smokeCheck: async () => ({}) });
+    assert.equal(legacy.gatewayVersion, "1.6.0");
+
+    // The installed format 4 runtime still verifies, so it is the upgrade
+    // source (and previous.json) rather than a corrupt install to repair.
+    const upgraded = await ensureRuntimeInstalled({ seedRoot: npmSeed, runtimeRoot, smokeCheck: async () => ({}), blockers: [] });
+    assert.equal(upgraded.gatewayVersion, "1.7.2");
+    assert.equal(upgraded.gatewayBuildId, npmManifest.gatewayBuildId);
+    assert.equal(upgraded.recoveryNotice, undefined);
+    assert.equal(JSON.parse(await readFile(join(runtimeRoot, "previous.json"), "utf8")).gatewayVersion, "1.6.0");
+    assert.equal(await readlink(join(upgraded.runtimeRoot, "gateway")), "node_modules/acp-gateway-daemon");
+    assert.match(await readFile(join(runtimeRoot, "current/gateway/src/index.js"), "utf8"), /"npm"/);
+  } finally { await rm(workspace, { recursive: true, force: true }); }
+});

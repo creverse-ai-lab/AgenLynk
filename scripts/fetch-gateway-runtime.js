@@ -1,17 +1,45 @@
 #!/usr/bin/env node
 
-import { createHash } from "node:crypto";
+// Build-time fetch of the Gateway runtime pinned by gateway.lock.json: the npm
+// package acp-gateway-daemon, never a moving tag or a resolved dependency tree.
+//
+// 1. The registry tarball is downloaded (or read from --artifact) and must
+//    match the lock's sha512 `integrity` before anything reads it.
+// 2. Provenance: `npm audit signatures` verifies the registry signature and
+//    the Sigstore-signed attestations of that exact version, and the verified
+//    SLSA statement must name the lock's repository, workflow, tag, commit,
+//    and integrity, with the signing certificate issued to that workflow.
+// 3. The tarball (regular files under package/ only) is unpacked as-is into
+//    <output>/node_modules/acp-gateway-daemon. The package bundles its whole
+//    dependency tree, so no npm install runs and nothing is resolved.
+// 4. <output>/gateway becomes a relative symlink to that directory, and
+//    <output>/gateway-package.json records what was verified, including the
+//    tarball's file inventory runtime-manifest.js later checks against.
+//
+// The package ships no Node. The app provides it (gateway.lock.json `node`,
+// macos/scripts/prepare-node-runtime.sh).
+
 import { execFile } from "node:child_process";
-import { createReadStream } from "node:fs";
-import { access, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rename, rm } from "node:fs/promises";
+import { X509Certificate, createHash } from "node:crypto";
+import { createReadStream, realpathSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import {
+  GATEWAY_ALIAS_PATH,
+  GATEWAY_CLIENT_ENTRYPOINT,
+  GATEWAY_PACKAGE_PATH,
+  GATEWAY_PACKAGE_RECORD_FILE,
+  assertGatewayPackageLock,
+  collectGatewayInventory
+} from "../src/runtime-manifest.js";
 
 const execFileAsync = promisify(execFile);
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const defaultLockPath = join(repositoryRoot, "gateway.lock.json");
+const SLSA_PROVENANCE = "https://slsa.dev/provenance/v1";
 
 export async function sha256File(path) {
   const hash = createHash("sha256");
@@ -19,162 +47,234 @@ export async function sha256File(path) {
   return hash.digest("hex");
 }
 
+/** The npm `dist.integrity` form: `sha512-<base64 digest>`. */
+export async function integrityOfFile(path) {
+  const hash = createHash("sha512");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return `sha512-${hash.digest("base64")}`;
+}
+
 export async function readGatewayLock(path = defaultLockPath) {
-  const lock = JSON.parse(await readFile(path, "utf8"));
-  if (lock?.schemaVersion !== 1) throw new Error("gateway lock schemaVersion must be 1");
-  // The pinned release is data (gateway.lock.json); what the app requires of
-  // it is the API major it speaks and a tag that names that exact version.
-  if (!/^\d+\.\d+\.\d+$/.test(lock.version ?? "") || lock.tag !== `v${lock.version}` || lock.apiMajor !== 1) {
-    throw new Error("gateway lock must pin an exact Gateway release (vX.Y.Z) with API major 1");
-  }
-  if (!/^[a-f0-9]{40}$/.test(lock.sourceCommit ?? "")) throw new Error("gateway lock sourceCommit is invalid");
-  if (!lock.asset?.name || !/^https:\/\//.test(lock.asset?.url ?? "")) throw new Error("gateway lock asset is incomplete");
-  if (!/^[a-f0-9]{64}$/.test(lock.asset?.sha256 ?? "")) throw new Error("gateway lock asset SHA-256 is invalid");
-  if (lock.runtimeRoot !== "acp-gateway-runtime" || lock.publicEntrypoint !== "gateway-client/index.js") {
-    throw new Error("gateway lock runtime boundary is invalid");
-  }
-  if (lock.platform !== "darwin" || lock.arch !== "arm64") throw new Error("gateway lock platform must be darwin-arm64");
-  return lock;
+  return assertGatewayPackageLock(JSON.parse(await readFile(path, "utf8")));
+}
+
+function tarballFileName(lock) {
+  return `${lock.package.name}-${lock.version}.tgz`;
 }
 
 async function download(url, destination, fetchImpl) {
   const response = await fetchImpl(url, { redirect: "follow" });
-  if (!response.ok || !response.body) throw new Error(`Gateway artifact download failed: HTTP ${response.status}`);
+  if (!response.ok || !response.body) throw new Error(`Gateway package download failed: HTTP ${response.status}`);
   const bytes = new Uint8Array(await response.arrayBuffer());
-  const { writeFile } = await import("node:fs/promises");
   await writeFile(destination, bytes, { mode: 0o600 });
 }
 
-/** Download to a sibling tmp file, verify SHA-256, then atomically replace the cache. A partial or mismatched download never becomes `cachedArchive`. */
-export async function ensureCachedGatewayArchive({ lock, cacheRoot, fetchImpl }) {
+/** Download to a sibling tmp file, verify the sha512 integrity, then atomically replace the cache. A partial or mismatched download never becomes `cachedTarball`. */
+export async function ensureCachedGatewayTarball({ lock, cacheRoot, fetchImpl }) {
   await mkdir(cacheRoot, { recursive: true });
-  const cachedArchive = join(cacheRoot, lock.asset.name);
+  const cachedTarball = join(cacheRoot, tarballFileName(lock));
   try {
-    if (await sha256File(cachedArchive) === lock.asset.sha256) return cachedArchive;
+    if (await integrityOfFile(cachedTarball) === lock.package.integrity) return cachedTarball;
   } catch { /* missing or unreadable cache is a miss */ }
-  const temporaryCache = join(cacheRoot, `.${lock.asset.name}.${process.pid}.${Date.now()}.tmp`);
+  const temporaryCache = join(cacheRoot, `.${tarballFileName(lock)}.${process.pid}.${Date.now()}.tmp`);
   try {
-    await download(lock.asset.url, temporaryCache, fetchImpl);
-    const digest = await sha256File(temporaryCache);
-    if (digest !== lock.asset.sha256) {
-      throw new Error(`Gateway artifact SHA-256 mismatch (expected ${lock.asset.sha256}, found ${digest})`);
+    await download(lock.package.tarball, temporaryCache, fetchImpl);
+    const integrity = await integrityOfFile(temporaryCache);
+    if (integrity !== lock.package.integrity) {
+      throw new Error(`Gateway package integrity mismatch (expected ${lock.package.integrity}, found ${integrity})`);
     }
-    await rename(temporaryCache, cachedArchive);
+    await rename(temporaryCache, cachedTarball);
   } catch (error) {
     await rm(temporaryCache, { force: true }).catch(() => {});
     throw error;
   }
-  return cachedArchive;
+  return cachedTarball;
 }
 
-function assertArchiveEntrySafe(entry, expectedRoot) {
-  const normalized = entry.replace(/^\.\//, "").replace(/\/$/, "");
-  if (!normalized || normalized.includes("\0") || isAbsolute(normalized)) throw new Error(`unsafe Gateway archive entry: ${entry}`);
-  const segments = normalized.split("/");
-  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
-    throw new Error(`unsafe Gateway archive entry: ${entry}`);
+/**
+ * Checks one `tar -tvzf` listing. npm tarballs hold regular files under
+ * package/; a directory entry is tolerated, anything else (a link, a device,
+ * a path escaping package/) rejects the whole tarball before it is unpacked.
+ */
+export function assertTarballListingSafe(verboseListing, names) {
+  const types = verboseListing.split("\n").filter(Boolean).map((line) => line[0]);
+  if (!names.length || types.length !== names.length) throw new Error("Gateway package tarball listing is unreadable");
+  names.forEach((entry, index) => {
+    if (types[index] !== "-" && types[index] !== "d") throw new Error(`Gateway package tarball has a non-file entry: ${entry}`);
+    const normalized = entry.replace(/^\.\//, "").replace(/\/$/, "");
+    if (!normalized || normalized.includes("\0") || isAbsolute(normalized)) throw new Error(`unsafe Gateway package entry: ${entry}`);
+    const segments = normalized.split("/");
+    if (segments.some((segment) => !segment || segment === "." || segment === "..")) throw new Error(`unsafe Gateway package entry: ${entry}`);
+    if (segments[0] !== "package") throw new Error(`unexpected Gateway package root: ${entry}`);
+  });
+}
+
+async function assertTarballSafe(tarball) {
+  const [{ stdout: verbose }, { stdout: plain }] = await Promise.all([
+    execFileAsync("tar", ["-tvzf", tarball], { maxBuffer: 64 * 1024 * 1024 }),
+    execFileAsync("tar", ["-tzf", tarball], { maxBuffer: 64 * 1024 * 1024 })
+  ]);
+  assertTarballListingSafe(verbose, plain.split("\n").filter(Boolean));
+}
+
+function sriToHex(integrity) {
+  return Buffer.from(integrity.slice("sha512-".length), "base64").toString("hex");
+}
+
+/**
+ * Pure check of the one `npm audit signatures --json --include-attestations`
+ * entry for the pinned package. npm has already verified the signatures; this
+ * pins *whose* they are: the SLSA statement's subject, source, and build, and
+ * the Fulcio certificate identity (the workflow that signed it).
+ */
+export function evaluateProvenance(entry, lock) {
+  const fail = (reason) => { throw new Error(`Gateway package provenance: ${reason}`); };
+  if (entry?.name !== lock.package.name || entry.version !== lock.version) fail("npm did not verify the pinned package");
+  const bundle = (entry.attestationBundles ?? []).find((item) => item?.predicateType === SLSA_PROVENANCE)?.bundle;
+  if (!bundle) fail("no verified SLSA provenance attestation");
+  let statement;
+  try {
+    statement = JSON.parse(Buffer.from(bundle.dsseEnvelope?.payload ?? "", "base64").toString("utf8"));
+  } catch {
+    fail("the provenance statement is unreadable");
   }
-  if (segments[0] !== expectedRoot) throw new Error(`unexpected Gateway archive root: ${entry}`);
-}
-
-async function assertArchiveSafe(archivePath, lock) {
-  const { stdout } = await execFileAsync("tar", ["-tzf", archivePath], { maxBuffer: 32 * 1024 * 1024 });
-  const entries = stdout.split("\n").filter(Boolean);
-  if (!entries.length) throw new Error("Gateway archive is empty");
-  for (const entry of entries) assertArchiveEntrySafe(entry, lock.runtimeRoot);
-}
-
-function confined(root, candidate) {
-  const rel = relative(root, candidate);
-  return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
-}
-
-async function verifyManifestFile(root, record) {
-  const path = join(root, ...record.path.replace(/\/$/, "").split("/"));
-  if (!confined(root, path)) throw new Error(`Gateway manifest path escapes runtime root: ${record.path}`);
-  const info = await lstat(path);
-  if (record.type === "directory") {
-    if (!info.isDirectory()) throw new Error(`Gateway manifest type mismatch: ${record.path}`);
-    return;
+  if (statement?.predicateType !== SLSA_PROVENANCE) fail("the statement is not SLSA provenance v1");
+  const subject = statement.subject?.find((item) => item?.name === `pkg:npm/${lock.package.name}@${lock.version}`);
+  if (!subject || subject.digest?.sha512 !== sriToHex(lock.package.integrity)) fail("the attested digest is not the pinned integrity");
+  const workflow = statement.predicate?.buildDefinition?.externalParameters?.workflow;
+  if (workflow?.repository !== lock.provenance.repository || workflow.path !== lock.provenance.workflow || workflow.ref !== lock.provenance.ref) {
+    fail(`built by ${workflow?.repository}/${workflow?.path}@${workflow?.ref}, not the pinned workflow`);
   }
-  if (record.type === "file") {
-    if (!info.isFile() || await sha256File(path) !== record.sha256) throw new Error(`Gateway manifest checksum mismatch: ${record.path}`);
-    return;
-  }
-  if (record.type === "symlink") {
-    const target = await readlink(path);
-    const resolved = resolve(dirname(path), target);
-    if (target !== record.target || !confined(root, resolved)) throw new Error(`Gateway manifest symlink mismatch: ${record.path}`);
-    return;
-  }
-  throw new Error(`Gateway manifest entry type is invalid: ${record.path}`);
-}
-
-export async function verifyExtractedGateway(root, lock) {
-  const manifest = JSON.parse(await readFile(join(root, "runtime-manifest.json"), "utf8"));
-  const expected = {
-    schemaVersion: 1,
-    package: "acp-gateway",
-    version: lock.version,
-    apiMajor: lock.apiMajor,
-    platform: lock.platform,
-    arch: lock.arch,
-    runtimeRoot: lock.runtimeRoot,
-    publicEntrypoint: `./${lock.publicEntrypoint}`,
-    artifact: lock.asset.name
+  const commits = (statement.predicate?.buildDefinition?.resolvedDependencies ?? []).map((item) => item?.digest?.gitCommit);
+  if (!commits.includes(lock.sourceCommit)) fail(`the attested source commit is not ${lock.sourceCommit}`);
+  const certificate = bundle.verificationMaterial?.certificate?.rawBytes
+    ?? bundle.verificationMaterial?.x509CertificateChain?.certificates?.[0]?.rawBytes;
+  if (!certificate) fail("the attestation carries no signing certificate");
+  const identity = `URI:${lock.provenance.repository}/${lock.provenance.workflow}@${lock.provenance.ref}`;
+  const certificateInfo = new X509Certificate(Buffer.from(certificate, "base64"));
+  if (!(certificateInfo.subjectAltName ?? "").split(", ").includes(identity)) fail(`the signing certificate is not issued to ${identity}`);
+  if (!/O=sigstore\.dev/.test(certificateInfo.issuer)) fail("the signing certificate is not issued by Sigstore");
+  return {
+    verified: true,
+    predicateType: SLSA_PROVENANCE,
+    repository: lock.provenance.repository,
+    workflow: lock.provenance.workflow,
+    ref: lock.provenance.ref,
+    sourceCommit: lock.sourceCommit
   };
-  for (const [key, value] of Object.entries(expected)) {
-    if (manifest[key] !== value) throw new Error(`Gateway manifest ${key} mismatch`);
-  }
-  if (manifest.source?.tag !== lock.tag || manifest.source?.commit !== lock.sourceCommit) {
-    throw new Error("Gateway manifest source identity does not match lock");
-  }
-  if (!Array.isArray(manifest.files) || !manifest.files.length) throw new Error("Gateway manifest files are missing");
-  const expectedPaths = new Set(manifest.files.map((entry) => entry.path.replace(/\/$/, "")));
-  expectedPaths.add("runtime-manifest.json");
-  const actualPaths = new Set();
-  async function walk(directory) {
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      const rel = relative(root, path).split(sep).join("/");
-      actualPaths.add(rel);
-      if (entry.isDirectory()) await walk(path);
-    }
-  }
-  await walk(root);
-  for (const path of actualPaths) if (!expectedPaths.has(path)) throw new Error(`Gateway payload has an unexpected entry: ${path}`);
-  for (const path of expectedPaths) if (!actualPaths.has(path)) throw new Error(`Gateway payload is missing an entry: ${path}`);
-  for (const record of manifest.files) await verifyManifestFile(root, record);
-  await access(join(root, lock.publicEntrypoint));
-  return manifest;
 }
 
+async function runNpmCommand(args, { cwd }) {
+  const { stdout } = await execFileAsync(process.env.ACP_LYNK_NPM || "npm", args, {
+    cwd,
+    maxBuffer: 64 * 1024 * 1024,
+    env: { ...process.env, npm_config_update_notifier: "false", npm_config_fund: "false" }
+  });
+  return stdout;
+}
+
+/**
+ * Installs the pinned version from the registry into a scratch project (no
+ * lifecycle scripts) purely so npm can verify its signatures and
+ * attestations; the scratch tree is discarded. What the app ships is the
+ * integrity-checked tarball, which must be the one npm verified.
+ */
+export async function verifyGatewayProvenance({ lock, runNpm = runNpmCommand }) {
+  const scratch = await mkdtemp(join(tmpdir(), "agenlynk-gateway-provenance-"));
+  try {
+    await writeFile(join(scratch, "package.json"), `${JSON.stringify({
+      name: "agenlynk-gateway-provenance",
+      private: true,
+      dependencies: { [lock.package.name]: lock.version }
+    })}\n`);
+    await runNpm(["install", "--ignore-scripts", "--no-audit", "--registry", lock.package.registry], { cwd: scratch });
+    const installed = JSON.parse(await readFile(join(scratch, "package-lock.json"), "utf8"))
+      ?.packages?.[`node_modules/${lock.package.name}`];
+    if (installed?.version !== lock.version || installed.integrity !== lock.package.integrity || installed.resolved !== lock.package.tarball) {
+      throw new Error("Gateway package provenance: npm resolved a different tarball than the lock pins");
+    }
+    let report;
+    try {
+      report = JSON.parse(await runNpm(["audit", "signatures", "--json", "--include-attestations", "--registry", lock.package.registry], { cwd: scratch }));
+    } catch (error) {
+      // A failed audit exits non-zero and still prints its JSON report.
+      try { report = JSON.parse(error?.stdout ?? ""); } catch { throw error; }
+    }
+    const rejected = [...(report?.invalid ?? []), ...(report?.missing ?? [])].find((item) => item?.name === lock.package.name);
+    if (rejected) throw new Error(`Gateway package provenance: npm could not verify ${lock.package.name}@${lock.version}`);
+    return evaluateProvenance((report?.verified ?? []).find((item) => item?.name === lock.package.name), lock);
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+}
+
+async function readPackageJson(packageRoot, lock) {
+  const packageJson = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
+  if (packageJson?.name !== lock.package.name || packageJson.version !== lock.version) {
+    throw new Error(`Gateway package is ${packageJson?.name}@${packageJson?.version}, not ${lock.package.name}@${lock.version}`);
+  }
+  if (packageJson.exports?.["./client"] !== `./${GATEWAY_CLIENT_ENTRYPOINT}`) {
+    throw new Error("Gateway package does not export its public client as ./client");
+  }
+  return packageJson;
+}
+
+/**
+ * Writes node_modules/acp-gateway-daemon, the gateway alias, and
+ * gateway-package.json into `outputRoot`, replacing only those three entries
+ * (a seed root already holds app-runtime/ and more).
+ */
 export async function fetchGatewayRuntime({
   lockPath = defaultLockPath,
   artifactPath = process.env.ACP_LYNK_GATEWAY_ARTIFACT || "",
   outputRoot,
   cacheRoot = join(repositoryRoot, "build", "cache", "gateway"),
-  fetchImpl = globalThis.fetch
+  fetchImpl = globalThis.fetch,
+  verifyProvenance = verifyGatewayProvenance,
+  skipProvenance = process.env.ACP_LYNK_GATEWAY_SKIP_PROVENANCE === "1"
 }) {
   if (!outputRoot) throw new Error("outputRoot is required");
   const lock = await readGatewayLock(lockPath);
-  const archive = artifactPath
+  const tarball = artifactPath
     ? resolve(artifactPath)
-    : await ensureCachedGatewayArchive({ lock, cacheRoot, fetchImpl });
-  const digest = await sha256File(archive);
-  if (digest !== lock.asset.sha256) throw new Error(`Gateway artifact SHA-256 mismatch (expected ${lock.asset.sha256}, found ${digest})`);
-  await assertArchiveSafe(archive, lock);
-  const temporary = await mkdtemp(join(tmpdir(), "agenlynk-gateway-"));
+    : await ensureCachedGatewayTarball({ lock, cacheRoot, fetchImpl });
+  const integrity = await integrityOfFile(tarball);
+  if (integrity !== lock.package.integrity) {
+    throw new Error(`Gateway package integrity mismatch (expected ${lock.package.integrity}, found ${integrity})`);
+  }
+  await assertTarballSafe(tarball);
+  const provenance = skipProvenance
+    ? { verified: false, reason: "skipped (ACP_LYNK_GATEWAY_SKIP_PROVENANCE=1); not for distribution" }
+    : await verifyProvenance({ lock });
+
+  await mkdir(outputRoot, { recursive: true });
+  const temporary = await mkdtemp(join(resolve(outputRoot), ".gateway-fetch-"));
   try {
-    await execFileAsync("tar", ["-xzf", archive, "-C", temporary]);
-    const extracted = join(temporary, lock.runtimeRoot);
-    await verifyExtractedGateway(extracted, lock);
-    const staged = `${outputRoot}.tmp-${process.pid}`;
-    await rm(staged, { recursive: true, force: true });
-    await cp(extracted, staged, { recursive: true, verbatimSymlinks: true });
-    await rm(outputRoot, { recursive: true, force: true });
-    await rename(staged, outputRoot);
-    return { lock, archive, outputRoot };
+    await execFileAsync("tar", ["-xzf", tarball, "-C", temporary]);
+    const unpacked = join(temporary, "package");
+    await readPackageJson(unpacked, lock);
+    const record = {
+      schemaVersion: 1,
+      name: lock.package.name,
+      version: lock.version,
+      tarball: lock.package.tarball,
+      integrity: lock.package.integrity,
+      sourceCommit: lock.sourceCommit,
+      provenance,
+      files: await collectGatewayInventory(unpacked)
+    };
+    await writeFile(join(temporary, GATEWAY_PACKAGE_RECORD_FILE), `${JSON.stringify(record, null, 2)}\n`);
+    await symlink(GATEWAY_PACKAGE_PATH, join(temporary, GATEWAY_ALIAS_PATH));
+
+    const packageTarget = join(outputRoot, GATEWAY_PACKAGE_PATH);
+    await mkdir(dirname(packageTarget), { recursive: true });
+    await rm(packageTarget, { recursive: true, force: true });
+    await rename(unpacked, packageTarget);
+    for (const name of [GATEWAY_ALIAS_PATH, GATEWAY_PACKAGE_RECORD_FILE]) {
+      await rm(join(outputRoot, name), { recursive: true, force: true });
+      await rename(join(temporary, name), join(outputRoot, name));
+    }
+    return { lock, tarball, outputRoot, provenance };
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -193,12 +293,20 @@ function parseArgs(argv) {
   return result;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// realpath: invoked through a symlinked directory (/tmp on macOS), argv[1] and
+// import.meta.url name the same file differently.
+if (process.argv[1] && realpathSync(resolve(process.argv[1])) === fileURLToPath(import.meta.url)) {
   try {
     const options = parseArgs(process.argv.slice(2));
     if (!options.outputRoot) throw new Error("--output <directory> is required");
     const result = await fetchGatewayRuntime(options);
-    process.stdout.write(`${JSON.stringify({ ok: true, version: result.lock.version, outputRoot: resolve(result.outputRoot) })}\n`);
+    if (!result.provenance.verified) process.stderr.write(`fetch-gateway-runtime: warning: provenance ${result.provenance.reason}\n`);
+    process.stdout.write(`${JSON.stringify({
+      ok: true,
+      package: `${result.lock.package.name}@${result.lock.version}`,
+      provenanceVerified: result.provenance.verified,
+      outputRoot: resolve(result.outputRoot)
+    })}\n`);
   } catch (error) {
     process.stderr.write(`fetch-gateway-runtime: ${error?.message ?? String(error)}\n`);
     process.exitCode = 1;

@@ -106,6 +106,8 @@ actor SidecarProcessActor {
         try BundledRuntime.validateVersion(at: nodeURL)
         let scriptURL = try BundledRuntime.sidecarResourceURL("src/server/monitor.js")
         let gatewayClientURL = try BundledRuntime.gatewayResourceURL("gateway-client/index.js")
+        // The Gateway package's real root (node_modules/acp-gateway-daemon for
+        // the npm package), which is what the daemon reports as runtimeRoot.
         let gatewayRuntimeRoot = gatewayClientURL.deletingLastPathComponent().deletingLastPathComponent()
         let launched = Process()
         let output = Pipe()

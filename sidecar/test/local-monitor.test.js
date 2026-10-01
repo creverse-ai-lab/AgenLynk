@@ -167,6 +167,54 @@ test("Gateway 1.6 openedBy attributes a worker without any transcript link", () 
   assert.equal(unseen[0].openerInstanceId, "g-main");
 });
 
+// Regression: a Grok worker the Gateway spawned in the same folder as a
+// running Codex was adopted by the same-cwd fallback, and that guess was then
+// taken as proof, so the worker showed up as the Codex Main's.
+test("a same-cwd guess never attributes a Gateway worker", () => {
+  const local = projectLocalSnapshot({ sessions: [
+    { provider: "codex", session: "codex-thread", state: "running", time: 100, cwd: "/repo" },
+    { provider: "grok", session: "grok-worker", parent: "codex-thread", parent_source: "cwd", state: "running", time: 101, cwd: "/repo" }
+  ] });
+  assert.equal(local.sessions.find((session) => session.localSessionId === "grok-worker").parentProof, "cwd");
+  const merged = mergeMonitorSessions([
+    { sessionId: "acp-g", acpSessionId: "grok-worker", provider: "grok", status: "running" }
+  ], local.sessions, new Map());
+  const worker = merged.find((session) => session.sessionId === "acp-g");
+  assert.equal(worker.role, "worker");
+  assert.equal(worker.openerInstanceId, undefined, "a guess is not an opener");
+  assert.equal(worker.parentSessionId ?? null, null);
+});
+
+// Gateway 1.7 records the calling Codex thread id on every call, so a worker a
+// Codex Main opened lands on that Main's own local session with no transcript.
+test("Gateway 1.7 names the Codex thread that opened a worker", () => {
+  const thread = "019fd0e2-b481-7c82-bb18-06b120592a5a";
+  const local = projectLocalSnapshot({ sessions: [
+    { provider: "codex", session: thread, state: "running", time: 100, cwd: "/repo" }
+  ] });
+  const main = local.sessions.find((session) => session.localSessionId === thread);
+  const merged = mergeMonitorSessions([
+    { sessionId: "acp-c", acpSessionId: "w-c", provider: "claude", status: "running",
+      openedBy: { provider: "codex", sessionId: thread, pid: 9, instanceId: "mcp-c" } }
+  ], local.sessions, new Map());
+  const worker = merged.find((session) => session.sessionId === "acp-c");
+  assert.equal(worker.parentSessionId, main.sessionId, "local:codex:<threadId> is the scanned Codex session");
+  assert.equal(worker.openerInstanceId, main.openerInstanceId);
+});
+
+test("a Claude Main that switched sessions is found by its pid, not its stale id", () => {
+  const local = projectLocalSnapshot({ sessions: [
+    { provider: "claude", session: "after-clear", state: "running", time: 100, cwd: "/repo" }
+  ] });
+  const openedBy = { provider: "claude", sessionId: "before-clear", pid: 4242, instanceId: "mcp-a" };
+  const merged = mergeMonitorSessions([
+    { sessionId: "acp-1", acpSessionId: "w1", provider: "claude", status: "running", openedBy }
+  ], local.sessions, new Map(), null, (caller) => (caller.pid === 4242 ? "after-clear" : null));
+  const worker = merged.find((session) => session.sessionId === "acp-1");
+  assert.equal(worker.parentSessionId, "local:claude:after-clear");
+  assert.equal(worker.openerInstanceId, "after-clear");
+});
+
 test("one proven Codex worker attributes every worker its control instance opened", () => {
   const workerTopology = new Map();
   const codexCaller = { provider: "codex", sessionId: null, pid: 36864, instanceId: "mcp-codex-thread" };

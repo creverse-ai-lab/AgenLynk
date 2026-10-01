@@ -162,8 +162,12 @@ private func legacyDefaultsImportChecks() throws {
     defaults.set(false, forKey: "monitor.showThoughts")
     LegacyDefaultsImport.run(into: defaults, from: [
         "monitor.showThoughts": true,
-        "monitor.frontdoorNicknames": ["fd-1": "api"]
+        "monitor.frontdoorNicknames": ["fd-1": "api"],
+        "NSStatusItem VisibleCC Item-0": false
     ])
+    guard defaults.object(forKey: "NSStatusItem VisibleCC Item-0") == nil else {
+        throw SettingsCheckError.failed("a status item hidden under the old identifier must not stay hidden")
+    }
     guard defaults.bool(forKey: "monitor.showThoughts") == false,
           defaults.dictionary(forKey: "monitor.frontdoorNicknames") as? [String: String] == ["fd-1": "api"],
           defaults.bool(forKey: LegacyDefaultsImport.markerKey) else {

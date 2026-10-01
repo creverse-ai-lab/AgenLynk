@@ -33,6 +33,9 @@ final class AppModel: ObservableObject {
     /// Agents carrying only the guide MCP (not Frontdoors), per `/api/frontdoors`.
     @Published private(set) var guideOnlyFrontdoors: [String] = []
     @Published private(set) var primaryFrontdoor: String?
+    /// Agent MCP entries still launching an old runtime version, per
+    /// `/api/frontdoors`; Settings offers to relink them all at once.
+    @Published private(set) var staleFrontdoorEntries: [StaleFrontdoorEntry] = []
     /// The agent whose Control MCP install is running right now (nil when idle),
     /// so only its row shows progress.
     @Published private(set) var installingFrontdoor: String?
@@ -135,6 +138,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var runtimeBusy = false
     @Published private(set) var runtimeError: String?
     @Published private(set) var runtimeNotice: String?
+    /// What "옛 런타임 정리" would remove now; refreshed with the inspection.
+    @Published private(set) var runtimePrunePreview: RuntimePrunePlan?
     /// The newest AgenLynk release the GitHub feed advertised, or nil until a
     /// successful check finds one.
     @Published private(set) var latestAppRelease: AppReleaseInfo?
@@ -1182,6 +1187,47 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// `installingFrontdoor` while every stale entry is being relinked.
+    static let relinkingFrontdoors = "*relink*"
+
+    /// Points every stale control and guide entry, of every CLI, back at
+    /// runtime/current in one go — relinking only the control entries used to
+    /// leave the guides (and sometimes Codex) on the old version.
+    func relinkStaleFrontdoors() {
+        guard installingFrontdoor == nil, !onboardingRunning, onboardingInstallLocationReady,
+              !staleFrontdoorEntries.isEmpty else { return }
+        installingFrontdoor = Self.relinkingFrontdoors
+        onboardingError = nil
+        lastNotice = nil
+        onboardingOutput.removeAll()
+        let nodeOverride = settings.nodePath
+        let groups = ["control", "guide"].compactMap { kind -> (String, [String])? in
+            let targets = Array(Set(staleFrontdoorEntries.filter { $0.entry == kind }.map(\.agent))).sorted()
+            return targets.isEmpty ? nil : (kind, targets)
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.installingFrontdoor = nil }
+            do {
+                for (kind, targets) in groups {
+                    let result = try await self.installer.relink(kind: kind, targets: targets, nodeOverride: nodeOverride) { line in
+                        Task { @MainActor [weak self] in self?.appendOnboardingOutput(line) }
+                    }
+                    guard result.ok else {
+                        self.onboardingError = result.message
+                        await self.loadInstalledFrontdoors()
+                        return
+                    }
+                }
+                self.lastNotice = "MCP 항목을 현재 Gateway로 다시 연결했습니다. 각 CLI를 다시 시작하면 적용됩니다."
+                await self.loadInstalledFrontdoors()
+            } catch {
+                self.onboardingError = error.localizedDescription
+                await self.loadInstalledFrontdoors()
+            }
+        }
+    }
+
     func setAgentEnabled(_ agent: ACPAgentCatalogItem, enabled: Bool) async {
         await mutateAgent(agent, body: [
             "action": .string("set_enabled"),
@@ -1201,6 +1247,7 @@ final class AppModel: ObservableObject {
             if installedFrontdoors != snapshot.installed { installedFrontdoors = snapshot.installed }
             if guideOnlyFrontdoors != snapshot.guideOnly { guideOnlyFrontdoors = snapshot.guideOnly }
             if primaryFrontdoor != snapshot.primary { primaryFrontdoor = snapshot.primary }
+            if staleFrontdoorEntries != snapshot.stale { staleFrontdoorEntries = snapshot.stale }
         } catch {
             // Non-fatal: the badges just stay at their last known state rather
             // than surfacing an error into Settings.
@@ -1248,6 +1295,30 @@ final class AppModel: ObservableObject {
         } catch {
             runtimeError = error.localizedDescription
         }
+        // Only a hint for the cleanup button; a failed preview hides it.
+        runtimePrunePreview = try? await runtimeManager.prune(dryRun: true)
+    }
+
+    /// Removes installed runtime versions that are neither current nor the
+    /// rollback target and that nothing still launches from. Each version
+    /// carries its own Node and Gateway (hundreds of MB), and nothing else
+    /// ever removes them.
+    func pruneRuntimeVersions() async {
+        guard !runtimeBusy else { return }
+        runtimeBusy = true
+        defer { runtimeBusy = false }
+        runtimeError = nil
+        runtimeNotice = nil
+        do {
+            let result = try await runtimeManager.prune(dryRun: false)
+            runtimeNotice = result.removed.isEmpty
+                ? "정리할 런타임이 없습니다."
+                : "런타임 \(result.removed.count)개를 삭제해 \(result.freedText)를 확보했습니다."
+        } catch {
+            runtimeError = error.localizedDescription
+        }
+        runtimeInspection = (try? await runtimeManager.inspect()) ?? runtimeInspection
+        runtimePrunePreview = try? await runtimeManager.prune(dryRun: true)
     }
 
     // MARK: - Unified update surface (app / gateway seed / adapters)

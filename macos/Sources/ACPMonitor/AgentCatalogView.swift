@@ -102,6 +102,9 @@ struct AgentCatalogView: View {
                     frontdoorRow(agent)
                 }
             }
+            if !model.staleFrontdoorEntries.isEmpty {
+                staleEntriesNotice
+            }
             if !model.onboardingInstallLocationReady {
                 Label("AgenLynk를 Applications 폴더로 옮긴 뒤 다시 실행해야 설치할 수 있습니다.", systemImage: "externaldrive.badge.exclamationmark")
                     .font(.caption)
@@ -117,6 +120,35 @@ struct AgentCatalogView: View {
         }
         .padding(14)
         .task { await model.loadInstalledFrontdoors() }
+    }
+
+    /// Entries pinned to an old runtime keep launching that Gateway after every
+    /// update; one button relinks all of them.
+    private var staleEntriesNotice: some View {
+        let entries = model.staleFrontdoorEntries
+        let relinking = model.installingFrontdoor == AppModel.relinkingFrontdoors
+        return HStack(alignment: .top, spacing: 8) {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("옛 Gateway에 고정된 MCP 항목이 \(entries.count)개 있습니다.")
+                    Text(entries.map { entry in
+                        let name = entry.entry == "guide" ? "가이드" : "Control"
+                        let detail = entry.reason == "missing" ? "파일 없음" : (entry.version ?? "옛 버전")
+                        return "\(entry.agent.capitalized) \(name) (\(detail))"
+                    }.joined(separator: ", "))
+                    .foregroundStyle(.secondary)
+                }
+            } icon: {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            }
+            .font(.caption)
+            // --force re-registers the entry as the installer writes it.
+            .help((entries.compactMap(\.path) + ["다시 연결하면 이 항목들에 직접 추가한 env 값은 지워집니다."]).joined(separator: "\n"))
+            Spacer()
+            Button(relinking ? "연결 중…" : "다시 연결") { model.relinkStaleFrontdoors() }
+                .disabled(model.installingFrontdoor != nil || !model.onboardingInstallLocationReady)
+            if relinking { ProgressView().controlSize(.small) }
+        }
     }
 
     @ViewBuilder

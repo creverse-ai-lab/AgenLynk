@@ -69,15 +69,19 @@ for SIZE in 16 32 128 256 512; do
 done
 iconutil -c icns "$ICONSET" -o "$CONTENTS/Resources/AppIcon.icns"
 
-# Assemble the three ownership roots. gateway/ is extracted only from the
-# immutable release asset in gateway.lock.json; sidecar/ is app-owned and is
-# never copied into an installed Gateway version; app-runtime/ contains only
-# AgenLynk's install/activate tooling, never Gateway implementation code.
+# Assemble the ownership roots. node_modules/acp-gateway-daemon is unpacked
+# only from the npm tarball gateway.lock.json pins (sha512 integrity and npm
+# provenance verified by fetch-gateway-runtime.js), with gateway/ as a relative
+# alias to it for agent MCP configs written against runtime/current/gateway;
+# sidecar/ is app-owned and is never copied into an installed Gateway version;
+# app-runtime/ contains only AgenLynk's install/activate tooling, never Gateway
+# implementation code.
 GATEWAY_SEED="$CONTENTS/Resources/gateway-seed"
+GATEWAY_PACKAGE="$GATEWAY_SEED/node_modules/acp-gateway-daemon"
 SIDECAR_ROOT="$CONTENTS/Resources/sidecar"
 rm -rf "$GATEWAY_SEED" "$SIDECAR_ROOT"
 mkdir -p "$GATEWAY_SEED/app-runtime" "$SIDECAR_ROOT"
-node "$REPO_ROOT/scripts/fetch-gateway-runtime.js" --output "$GATEWAY_SEED/gateway"
+node "$REPO_ROOT/scripts/fetch-gateway-runtime.js" --output "$GATEWAY_SEED"
 cp "$REPO_ROOT/gateway.lock.json" "$GATEWAY_SEED/gateway.lock.json"
 
 for FILE in \
@@ -91,6 +95,7 @@ for FILE in \
   runtime-staging.js \
   runtime-updater-cli.js \
   runtime-updater.js \
+  runtime-usage.js \
   verify-runtime-manifest-cli.js; do
   cp "$REPO_ROOT/src/$FILE" "$GATEWAY_SEED/app-runtime/$FILE"
 done
@@ -100,9 +105,12 @@ cp -R "$REPO_ROOT/sidecar/src" "$SIDECAR_ROOT/src"
 # The monitoring hook script the sidecar installs for Claude/Codex/Grok.
 cp -R "$REPO_ROOT/sidecar/hooks" "$SIDECAR_ROOT/hooks"
 for REQUIRED in \
+  gateway-seed/node_modules/acp-gateway-daemon/src/index.js \
+  gateway-seed/node_modules/acp-gateway-daemon/src/bootstrap.js \
+  gateway-seed/node_modules/acp-gateway-daemon/gateway-client/index.js \
   gateway-seed/gateway/src/index.js \
-  gateway-seed/gateway/src/bootstrap.js \
-  gateway-seed/gateway/gateway-client/index.js \
+  gateway-seed/gateway/src/guide.js \
+  gateway-seed/gateway-package.json \
   gateway-seed/app-runtime/runtime-installer-cli.js \
   sidecar/src/server/monitor.js \
   sidecar/src/local-agents/index.js \
@@ -114,11 +122,14 @@ for REQUIRED in \
   fi
 done
 
-# Distribution builds provide the complete official Node tree, including
-# npm/npx. Copying only bin/node is insufficient because first-run bootstrap
-# installs registry adapters through npm. Development builds deliberately omit
-# Node and keep the source-tree/system fallback used by SidecarController.
+# The npm package ships no Node, so the app provides it: distribution builds
+# bundle the complete official Node tree gateway.lock.json pins (`node`),
+# including npm/npx. Copying only bin/node is insufficient because first-run
+# bootstrap installs registry adapters through npm. Development builds
+# deliberately omit Node and keep the source-tree/system fallback used by
+# SidecarController.
 NODE_DIST=${ACP_LYNK_NODE_DIST_DIR:-}
+LOCKED_NODE_VERSION=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).node.version)' "$REPO_ROOT/gateway.lock.json")
 rm -rf "$GATEWAY_SEED/node"
 if [ -n "$NODE_DIST" ]; then
   NODE_BIN="$NODE_DIST/bin/node"
@@ -128,8 +139,13 @@ if [ -n "$NODE_DIST" ]; then
   fi
   NODE_ARCH=$("$NODE_BIN" -e 'process.stdout.write(process.arch)')
   NODE_MAJOR=$("$NODE_BIN" -e 'process.stdout.write(String(process.versions.node.split(".")[0]))')
+  NODE_VERSION=$("$NODE_BIN" -e 'process.stdout.write(process.versions.node)')
   if [ "$NODE_ARCH" != "arm64" ]; then
     echo "error: bundled Node must be arm64 (found '$NODE_ARCH')" >&2
+    exit 1
+  fi
+  if [ "$NODE_VERSION" != "$LOCKED_NODE_VERSION" ]; then
+    echo "error: bundled Node $NODE_VERSION is not the Node $LOCKED_NODE_VERSION gateway.lock.json pins" >&2
     exit 1
   fi
   case "$NODE_MAJOR" in
@@ -166,13 +182,12 @@ if [ -n "$NODE_DIST" ]; then
   done
 fi
 
-# Gateway dependencies are already verified inside the official artifact.
+# Gateway dependencies are bundled inside the verified npm tarball.
 # The app sidecar intentionally has no third-party runtime dependency.
 
 # Sign nested Mach-O files explicitly. Distribution signing uses hardened
 # runtime and a timestamp; ad-hoc development signing omits those flags.
-# Node/JIT entitlements apply only to the bundled official Node binary —
-# never to the official Claude helper shipped inside the Gateway artifact.
+# Node/JIT entitlements apply only to the bundled official Node binary.
 CODESIGN_IDENTITY=${ACP_LYNK_CODESIGN_IDENTITY:--}
 if [ "$CODESIGN_IDENTITY" = "-" ]; then
   SIGN_FLAGS=""
@@ -180,46 +195,26 @@ else
   SIGN_FLAGS="--options runtime --timestamp"
 fi
 
-OFFICIAL_HELPER_REL="node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude"
-OFFICIAL_HELPER="$GATEWAY_SEED/gateway/$OFFICIAL_HELPER_REL"
-TRANSFORMS_FILE="$GATEWAY_SEED/official-codesign-transforms.json"
-rm -f "$TRANSFORMS_FILE"
-
 if [ -f "$GATEWAY_SEED/node/bin/node" ]; then
   # shellcheck disable=SC2086
   codesign --force $SIGN_FLAGS --entitlements "$REPO_ROOT/macos/Resources/Node.entitlements" --sign "$CODESIGN_IDENTITY" "$GATEWAY_SEED/node/bin/node"
 fi
 
-if [ -f "$OFFICIAL_HELPER" ]; then
-  # Always seal the nested helper with the same identity as the containing
-  # app. A published signature can verify before the parent is sealed yet be
-  # invalid as an individually verified nested binary in the finished app.
-  # This helper is not Node, so it deliberately receives no JIT entitlements.
-  OFFICIAL_SHA=$(shasum -a 256 "$OFFICIAL_HELPER" | awk '{print $1}')
-  # shellcheck disable=SC2086
-  codesign --force $SIGN_FLAGS --sign "$CODESIGN_IDENTITY" "$OFFICIAL_HELPER"
-  INSTALLED_SHA=$(shasum -a 256 "$OFFICIAL_HELPER" | awk '{print $1}')
-  printf '%s\n' "[{\"path\":\"$OFFICIAL_HELPER_REL\",\"kind\":\"codesign\",\"officialSha256\":\"$OFFICIAL_SHA\",\"installedSha256\":\"$INSTALLED_SHA\"}]" > "$TRANSFORMS_FILE"
-  printf '%s\n' "re-signed official Claude helper without Node entitlements (codesign-only transform recorded)"
-  codesign --verify --strict "$OFFICIAL_HELPER"
-  "$OFFICIAL_HELPER" --version >/dev/null
-  printf '%s\n' "official Claude helper nested signature and --version smoke passed"
-fi
-
+# The npm package is shipped byte-for-byte as its integrity pins it, so
+# nothing inside it can be re-signed. Gateway 1.7 bundles no native binary
+# (the Claude platform helper is left out; Workers run the user's own CLI).
+# Should one ever appear it must already carry a valid signature.
 OTHER_UNSIGNED=""
 while IFS= read -r FILE; do
   [ -n "$FILE" ] || continue
   file "$FILE" | grep -q 'Mach-O' || continue
-  REL=${FILE#"$GATEWAY_SEED/gateway/"}
-  if [ "$REL" = "$OFFICIAL_HELPER_REL" ]; then
-    continue
-  fi
+  REL=${FILE#"$GATEWAY_PACKAGE/"}
   if ! codesign --verify --strict "$FILE" >/dev/null 2>&1; then
-    echo "error: official Gateway Mach-O is not safely signed and is not an allowed codesign transform: $REL" >&2
+    echo "error: official Gateway Mach-O is not safely signed: $REL" >&2
     OTHER_UNSIGNED=1
   fi
 done <<EOF
-$(find "$GATEWAY_SEED/gateway" -type f)
+$(find "$GATEWAY_PACKAGE" -type f)
 EOF
 if [ -n "$OTHER_UNSIGNED" ]; then
   exit 1
@@ -234,9 +229,9 @@ done <<EOF
 $(find "$SIDECAR_ROOT" -type f)
 EOF
 
-# Distribution builds only: snapshot this seed's gatewayVersion/gatewayBuildId
-# (reused as-is from src/version.js, not reinvented), gatewayApiVersion,
-# nodeVersion, and a complete payload checksum inventory into
+# Distribution builds only: snapshot this seed's gatewayVersion, gatewayBuildId
+# (the same src digest the daemon reports), the pinned package integrity,
+# gatewayApiVersion, nodeVersion, and a complete payload checksum inventory into
 # runtime-manifest.json. This runs *after* the nested-file signing loop above
 # but *before* the outer ACPMonitor/app-bundle signing below, for two
 # reasons: signing rewrites the embedded signature of every Mach-O file it
@@ -246,7 +241,7 @@ EOF
 # this one), so runtime-manifest.json must already exist by then or the
 # final `codesign --verify --deep --strict` would see an unsealed extra file.
 # RuntimeProvisioner (Swift) spawns runtime-installer-cli.js to copy this
-# seed into ~/.acp-gateway/runtime/versions/<gatewayVersion>-<gatewayBuildId>/
+# seed into ~/.acp-gateway/runtime/versions/<gatewayVersion>-<runtimeBuildId>/
 # on first run and reject an incomplete/corrupt copy using this manifest.
 rm -f "$GATEWAY_SEED/runtime-manifest.json"
 if [ -x "$GATEWAY_SEED/node/bin/node" ]; then

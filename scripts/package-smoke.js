@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -11,7 +11,9 @@ import { readManifestFile, verifyRuntimeManifest } from "../src/runtime-manifest
 const app = resolve(process.argv[2] || "build/AgenLynk.app");
 const resources = join(app, "Contents/Resources");
 const seed = join(resources, "gateway-seed");
-const gateway = join(seed, "gateway");
+// The npm package's real directory: what the daemon reports as its runtimeRoot
+// and what the app hands the sidecar. gateway/ is only the alias MCP configs use.
+const gateway = join(seed, "node_modules/acp-gateway-daemon");
 const sidecar = join(resources, "sidecar");
 const node = join(seed, "node/bin/node");
 
@@ -19,7 +21,10 @@ assert.notEqual(gateway, sidecar);
 await access(join(gateway, "src/gateway-daemon.js"));
 await access(join(gateway, "gateway-client/index.js"));
 await access(join(sidecar, "src/server/monitor.js"));
-await verifyRuntimeManifest(seed, await readManifestFile(seed));
+assert.equal(await readlink(join(seed, "gateway")), "node_modules/acp-gateway-daemon");
+assert.equal(await realpath(join(seed, "gateway/src/index.js")), await realpath(join(gateway, "src/index.js")));
+const seedManifest = await readManifestFile(seed);
+await verifyRuntimeManifest(seed, seedManifest);
 
 const temporary = await mkdtemp(join(tmpdir(), "agenlynk-package-smoke-"));
 const socketPath = join(temporary, "gateway.sock");
@@ -72,6 +77,9 @@ try {
     return value.capabilities?.gatewayCompatibility?.status === "supported" ? value : false;
   }, `sidecar did not decode the Gateway ${pinnedGateway} setup contract`);
   assert.equal(meta.gatewayIdentity.gatewayVersion, pinnedGateway);
+  // The manifest's gatewayBuildId is the digest the daemon itself reports, so
+  // the monitor can tell a daemon from a different runtime apart.
+  assert.equal(meta.gatewayIdentity.gatewayBuildId, seedManifest.gatewayBuildId);
 
   const firstSnapshot = await fetch(`${ready.url}/api/snapshot`, { headers });
   assert.equal(firstSnapshot.status, 200);
@@ -81,6 +89,10 @@ try {
   assert.equal(snapshot.connected, true);
   assert.equal(snapshot.streaming, true);
   assert.equal(snapshot.streamHealth, "healthy");
+  // ACP_GATEWAY_ACTIVE_ROOT and the manifest agree with the daemon the client
+  // spawned from the npm package: no split, and a verified build identity.
+  assert.equal(snapshot.gateway?.runtimeSplit, undefined);
+  assert.equal(snapshot.gateway?.runtimeIdentity?.status, "verified");
   const unchanged = await fetch(`${ready.url}/api/snapshot`, {
     headers: { ...headers, "if-none-match": tag }
   });

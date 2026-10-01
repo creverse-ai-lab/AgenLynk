@@ -35,6 +35,7 @@ const allowedRuntimeFiles = new Set([
   "runtime-staging.js",
   "runtime-updater-cli.js",
   "runtime-updater.js",
+  "runtime-usage.js",
   "verify-runtime-manifest-cli.js"
 ]);
 assert.deepEqual(new Set(await readdir(join(root, "src"))), allowedRuntimeFiles, "src/ must contain app runtime integration only");

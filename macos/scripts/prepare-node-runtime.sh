@@ -1,12 +1,21 @@
 #!/bin/sh
 set -eu
 
-# Pinned official Node.js LTS distribution used by the arm64 Lynk DMG.
-# Override both version and checksum together when intentionally upgrading.
-VERSION=${ACP_LYNK_NODE_VERSION:-22.23.2}
+REPO_ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+
+# The official Node.js distribution the arm64 Lynk DMG bundles. The Gateway
+# npm package ships no Node, so the app provides it, and gateway.lock.json
+# (`node`) pins which one: bump version and sha256 there to upgrade. The env
+# overrides exist for experiments only; build-app.sh still refuses a bundled
+# Node that is not the locked version.
+lock_field() {
+  node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).node[process.argv[2]]))' \
+    "$REPO_ROOT/gateway.lock.json" "$1"
+}
+DEFAULT_VERSION=$(lock_field version)
+DEFAULT_SHA256=$(lock_field sha256)
+VERSION=${ACP_LYNK_NODE_VERSION:-$DEFAULT_VERSION}
 ARCHIVE="node-v${VERSION}-darwin-arm64.tar.xz"
-DEFAULT_VERSION=22.23.2
-DEFAULT_SHA256=5eff7a9011895aae3f29d06f167b84a62b028a591370c7cafb59103559fd26e1
 
 if [ "$VERSION" = "$DEFAULT_VERSION" ]; then
   SHA256=${ACP_LYNK_NODE_SHA256:-$DEFAULT_SHA256}
@@ -15,7 +24,6 @@ else
   SHA256=$ACP_LYNK_NODE_SHA256
 fi
 
-REPO_ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 CACHE_ROOT=${ACP_LYNK_NODE_CACHE_DIR:-"$REPO_ROOT/build/node-runtime-cache"}
 ARCHIVE_PATH="$CACHE_ROOT/$ARCHIVE"
 DIST_DIR="$CACHE_ROOT/node-v${VERSION}-darwin-arm64"

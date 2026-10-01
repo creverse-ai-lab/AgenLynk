@@ -8,7 +8,11 @@
 const ACP_LINK_PATTERN = /"acpSessionId"\s*:\s*"([^"]+)"/g;
 const ACP_PROVIDER_PATTERN = /"provider"\s*:\s*"([a-z0-9_-]+)"/;
 const ACP_RESPONSE_PATTERN = /"ok"\s*:\s*true/;
+const PROVIDER_ID = /^[a-z0-9_-]+$/;
 const LINK_WINDOW = 400;
+// Gateway text nests JSON in strings (an MCP result's content[].text); a
+// response never goes deeper than a few levels of that.
+const MAX_LINK_DEPTH = 24;
 
 /** Map key for a (provider, session) pair. */
 export function linkKey(provider, session) {
@@ -16,11 +20,11 @@ export function linkKey(provider, session) {
 }
 
 /**
- * (provider, acpSessionId) pairs from an unescaped record dump. A match only
- * counts when a provider and an `"ok":true` marker sit within the same window,
- * i.e. the text really is a gateway response body.
+ * (provider, acpSessionId) pairs from an unescaped text dump that is not JSON.
+ * A match only counts when a provider and an `"ok":true` marker sit within the
+ * same window, i.e. the text really is a gateway response body.
  */
-export function claudeAcpLinks(text) {
+function textAcpLinks(text) {
   const links = [];
   ACP_LINK_PATTERN.lastIndex = 0;
   let match = ACP_LINK_PATTERN.exec(text);
@@ -35,28 +39,85 @@ export function claudeAcpLinks(text) {
 }
 
 /**
- * Links from a payload the log itself marked as a gateway tool result.
- * Callers must only pass proven structured content.
+ * (provider, acpSessionId) pairs from a gateway response, read as JSON: each
+ * pair is one object's own `acpSessionId` and `provider`, under an
+ * `"ok": true` response. Taking the first `"provider"` near an id instead
+ * picked up a neighbour's in a session list, or the nested
+ * `openedBy.provider` of the Main that opened it. JSON carried in strings is
+ * parsed in place; text that is not JSON falls back to the window match.
+ * Callers must only pass proven gateway tool output.
  */
 export function gatewayResponseLinks(payload) {
-  return claudeAcpLinks(JSON.stringify(payload).replaceAll('\\"', '"'));
+  const links = [];
+  const walk = (node, confirmed, depth) => {
+    if (depth > MAX_LINK_DEPTH) return;
+    if (typeof node === "string") {
+      if (!node.includes("acpSessionId")) return;
+      const text = node.trim();
+      if (text.startsWith("{") || text.startsWith("[")) {
+        let parsed;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          parsed = undefined;
+        }
+        if (parsed !== undefined) {
+          walk(parsed, confirmed, depth + 1);
+          return;
+        }
+      }
+      links.push(...textAcpLinks(node.replaceAll('\\"', '"')));
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item, confirmed, depth + 1);
+      return;
+    }
+    if (!node || typeof node !== "object") return;
+    const ok = confirmed || node.ok === true;
+    if (ok && typeof node.acpSessionId === "string" && node.acpSessionId
+      && typeof node.provider === "string" && PROVIDER_ID.test(node.provider)) {
+      links.push([node.provider, node.acpSessionId]);
+    }
+    for (const child of Object.values(node)) walk(child, ok, depth + 1);
+  };
+  walk(payload, false, 0);
+  return links;
 }
 
 /**
- * Records parenthood from a Codex `mcp_tool_call_end` record. The MCP server
- * name is the proof this is a gateway call rather than quoted text.
+ * The server and result of a finished Codex MCP call, in either rollout
+ * format: `mcp_tool_call_end` (older CLIs) or an `item_completed` event whose
+ * item is an `McpToolCall` (current CLI and desktop app, including calls made
+ * from code mode's `exec`).
+ */
+function finishedMcpCall(record) {
+  const payload = record?.payload ?? {};
+  if (record?.type !== "event_msg") return null;
+  if (payload.type === "mcp_tool_call_end") {
+    return { server: payload.invocation?.server, result: payload.result };
+  }
+  if (payload.type === "item_completed" && payload.item?.type === "McpToolCall" && payload.item.status === "completed") {
+    return { server: payload.item.server, result: payload.item.result };
+  }
+  return null;
+}
+
+/**
+ * Records parenthood from a finished Codex MCP call. The MCP server name is
+ * the proof this is a gateway call rather than quoted text.
  */
 export function recordExternalParent(record, parent, parents, now) {
-  const payload = record?.payload ?? {};
-  if (record?.type !== "event_msg" || payload?.type !== "mcp_tool_call_end") return false;
+  const call = finishedMcpCall(record);
+  if (!call) return false;
   let changed = false;
-  const resultText = JSON.stringify(payload?.result ?? {});
-  const server = String(payload?.invocation?.server ?? "").toLowerCase();
+  const resultText = JSON.stringify(call.result ?? {});
+  const server = String(call.server ?? "").toLowerCase();
 
   // Gateway responses (server named e.g. "agent-acp") carry the worker provider
   // inline, so the provider comes from the response body, not the server name.
   if (server.includes("acp")) {
-    for (const [provider, session] of claudeAcpLinks(resultText.replaceAll('\\"', '"'))) {
+    for (const [provider, session] of gatewayResponseLinks(call.result ?? {})) {
       const key = linkKey(provider, session);
       if (parents.get(key)?.[0] !== parent) {
         parents.set(key, [parent, now]);

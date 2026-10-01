@@ -319,7 +319,8 @@ test("a grok -p run is headless by Grok's own session summary", async () => {
 
 test("an SDK-launched Claude is a Frontdoor when a person is driving it", () => {
   const raw = { provider: "claude", session: "c1", state: "ready", time: 1, headless: true };
-  const prompt = (ts) => ({ kind: "user_message", ts });
+  // Each prompt opens its own turn, as a transcript records it.
+  const prompt = (ts) => ({ kind: "turn_start", ts });
   const project = (session, events = [prompt("2026-09-28T00:00:00Z")]) =>
     projectLocalSnapshot({ sessions: [session] }, new Map([["claude:c1", { events, session: {} }]])).sessions[0];
 
@@ -336,6 +337,9 @@ test("an SDK-launched Claude is a Frontdoor when a person is driving it", () => 
   const conversed = project(raw, [prompt("2026-09-28T00:00:00Z"), prompt("2026-09-28T00:01:00Z")]);
   assert.equal(conversed.role, "frontdoor", "more than one prompt is a conversation");
   assert.equal(conversed.headless, undefined);
+
+  const queued = project(raw, [prompt("2026-09-28T00:00:00Z"), { kind: "user_message", ts: "2026-09-28T00:00:30Z" }]);
+  assert.equal(queued.role, "frontdoor", "input queued inside a turn is a second prompt too");
 });
 
 test("a turn that ends closes the tool calls it left open, for every source", () => {

@@ -152,11 +152,25 @@ enum BundledRuntime {
         return pointer
     }
 
+    /// The Gateway package inside a runtime version directory, as its real
+    /// directory: the npm package at `node_modules/acp-gateway-daemon`
+    /// (Gateway 1.7+), else the runtime tarball mounted at `gateway/` (1.6 and
+    /// earlier). The `gateway` alias a 1.7 runtime also carries is for agent
+    /// MCP configs; paths handed to the sidecar avoid it so they match the
+    /// runtimeRoot the daemon reports (Node resolves symlinks for it).
+    static func gatewayPackageRoot(runtimeRoot: URL) -> URL {
+        let npmPackage = runtimeRoot.appendingPathComponent("node_modules/acp-gateway-daemon", isDirectory: true)
+        if FileManager.default.fileExists(atPath: npmPackage.appendingPathComponent("package.json").path) {
+            return npmPackage
+        }
+        return runtimeRoot.appendingPathComponent("gateway", isDirectory: true)
+    }
+
     /// Resolves a Gateway resource from the verified installed artifact.
     static func gatewayResourceURL(_ relativePath: String) throws -> URL {
         if isPackagedDistribution() {
             guard let installed = readCurrentRuntime() else { throw BundledRuntimeError.runtimeNotInstalled }
-            let resolved = installed.runtimeRoot.appendingPathComponent("gateway").appendingPathComponent(relativePath)
+            let resolved = gatewayPackageRoot(runtimeRoot: installed.runtimeRoot).appendingPathComponent(relativePath)
             guard FileManager.default.fileExists(atPath: resolved.path) else {
                 throw BundledRuntimeError.resourceNotFound(resolved.path)
             }
@@ -183,15 +197,17 @@ enum BundledRuntime {
     static func developmentGatewaySearchRoots() -> [URL] {
         developmentGatewaySearchRoots(
             environmentRoot: ProcessInfo.processInfo.environment["ACP_LYNK_GATEWAY_DEVELOPMENT_ROOT"],
-            installedGatewayRoot: readCurrentRuntime()?.runtimeRoot.appendingPathComponent("gateway"),
-            fetchedGatewayRoot: developmentRepositoryRoot().appendingPathComponent("build/cache/gateway-runtime")
+            installedGatewayRoot: readCurrentRuntime().map { gatewayPackageRoot(runtimeRoot: $0.runtimeRoot) },
+            fetchedGatewayRoot: developmentRepositoryRoot()
+                .appendingPathComponent("build/cache/gateway-runtime/node_modules/acp-gateway-daemon")
         )
     }
 
     /// Source-tree Gateway roots, in order:
     /// 1. `ACP_LYNK_GATEWAY_DEVELOPMENT_ROOT` (explicit checkout or unpacked artifact)
-    /// 2. verified installed `runtime/current/gateway` when present
-    /// 3. `build/cache/gateway-runtime` produced by `npm run gateway:fetch`
+    /// 2. the verified installed runtime's Gateway package when present
+    /// 3. `build/cache/gateway-runtime/node_modules/acp-gateway-daemon`
+    ///    produced by `npm run gateway:fetch`
     /// There is no ambient sibling `../ACP` fallback.
     static func developmentGatewaySearchRoots(
         environmentRoot: String?,
@@ -212,6 +228,9 @@ enum BundledRuntime {
     /// Stable symlink path used only while Gateway writes external MCP
     /// configuration. Normal app execution continues to use the verified
     /// current.json target above, so the symlink is not a second authority.
+    /// `current/gateway` is a directory in a 1.6 runtime and an alias for
+    /// `node_modules/acp-gateway-daemon` in a 1.7 runtime, so configs written
+    /// against it keep resolving across that switch.
     static func stableGatewayResourceURL(_ relativePath: String) throws -> URL {
         guard isPackagedDistribution(), readCurrentRuntime() != nil else {
             return try gatewayResourceURL(relativePath)
@@ -307,6 +326,9 @@ enum BundledRuntime {
             "/opt/homebrew/bin",
             "/usr/local/bin",
             "\(home)/.local/bin",
+            // The Grok installer puts its CLI here, outside any standard PATH;
+            // without it registering a Grok MCP fails with `spawn grok ENOENT`.
+            "\(home)/.grok/bin",
             "\(home)/.cargo/bin",
             "\(home)/.npm-global/bin"
         ]

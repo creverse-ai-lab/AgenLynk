@@ -12,6 +12,7 @@ struct RuntimeUpdateView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openURL) private var openURL
     @State private var pendingSwitch: RuntimeSwitch?
+    @State private var pendingPrune: RuntimePrunePlan?
 
     /// A runtime change waiting for the user's confirmation.
     private struct RuntimeSwitch: Identifiable {
@@ -118,6 +119,15 @@ struct RuntimeUpdateView: View {
             actionBar
         }
         .task { await refreshAll() }
+        .alert("옛 런타임 정리", isPresented: Binding(get: { pendingPrune != nil }, set: { if !$0 { pendingPrune = nil } }), presenting: pendingPrune) { _ in
+            Button("취소", role: .cancel) { pendingPrune = nil }
+            Button("삭제", role: .destructive) {
+                pendingPrune = nil
+                Task { await model.pruneRuntimeVersions() }
+            }
+        } message: { plan in
+            Text("\(plan.removed.map(\.versionId).joined(separator: ", "))을 삭제해 \(plan.freedText)를 확보합니다. 삭제한 버전으로는 되돌릴 수 없습니다.")
+        }
         .alert("Gateway 런타임 전환", isPresented: switchPresented, presenting: pendingSwitch) { change in
             Button("취소", role: .cancel) { pendingSwitch = nil }
             Button(change.kind == .rollback ? "이전 버전으로 전환" : "설치 및 전환") {
@@ -252,10 +262,39 @@ struct RuntimeUpdateView: View {
                 } else {
                     Text("설치된 런타임이 없습니다.").font(.caption).foregroundStyle(.secondary)
                 }
+                if let plan = model.runtimePrunePreview, !plan.removed.isEmpty || !plan.inUse.isEmpty {
+                    Divider()
+                    pruneRow(plan)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         } label: {
             Label("설치된 런타임", systemImage: "shippingbox").font(.headline)
+        }
+    }
+
+    /// Old versions pile up with every update (each holds its own Node and
+    /// Gateway); current and the rollback target always stay.
+    private func pruneRow(_ plan: RuntimePrunePlan) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                if plan.removed.isEmpty {
+                    Text("정리할 수 있는 옛 런타임이 없습니다.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text("옛 런타임 \(plan.removed.count)개 (\(plan.removed.map(\.versionId).joined(separator: ", "))) · \(plan.freedText) 확보 가능")
+                        .font(.caption)
+                }
+                Spacer()
+                Button("옛 런타임 정리") { pendingPrune = plan }
+                    .disabled(plan.removed.isEmpty || model.runtimeBusy)
+            }
+            ForEach(plan.inUse) { item in
+                Text("\(item.versionId)은 아직 사용 중이라 남겨 둡니다 (\(item.reasonText)).")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            Text("현재 버전과 되돌리기용 이전 버전은 항상 남습니다.")
+                .font(.caption2).foregroundStyle(.secondary)
         }
     }
 

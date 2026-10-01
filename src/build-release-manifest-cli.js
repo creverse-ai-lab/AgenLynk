@@ -87,7 +87,13 @@ try {
     gateway: {
       version: runtimeManifest.gatewayVersion,
       buildId: runtimeManifest.gatewayBuildId,
-      apiVersion: runtimeManifest.gatewayApiVersion
+      apiVersion: runtimeManifest.gatewayApiVersion,
+      // The npm package identity (format 5 runtimes); absent for the runtime tarball.
+      ...(runtimeManifest.gatewayPackage ? {
+        package: runtimeManifest.gatewayPackage,
+        integrity: runtimeManifest.gatewayIntegrity,
+        sourceCommit: runtimeManifest.gatewaySourceCommit
+      } : {})
     },
     sidecar: {
       version: sidecarModule.SIDECAR_VERSION,

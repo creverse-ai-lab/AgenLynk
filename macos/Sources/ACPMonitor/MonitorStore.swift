@@ -245,7 +245,13 @@ enum MonitorReducer {
     /// as `closed` with its events, matching `removeSession(id, {closed})`.
     @discardableResult
     static func removeSession(_ sessionId: String, from state: inout MonitorReducerState) -> Bool {
-        guard archiveSession(sessionId, status: "closed", in: &state) else { return false }
+        if !archiveSession(sessionId, status: "closed", in: &state) {
+            // The session list dropped it first: the close still lands on its
+            // history row, or it would keep the last status the list showed.
+            guard let index = state.historySessions.firstIndex(where: { $0.sessionId == sessionId }),
+                  state.historySessions[index].status != "closed" else { return false }
+            state.historySessions[index] = state.historySessions[index].with(status: "closed")
+        }
         rebuildLog(in: &state)
         return true
     }

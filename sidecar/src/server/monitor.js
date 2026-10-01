@@ -11,11 +11,10 @@
 // use separate short-lived control connections.
 
 import { randomBytes } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GatewayRpcClient } from "../gateway/client.js";
 import {
@@ -28,6 +27,7 @@ import { GatewaySubscriptionOwner } from "../gateway/subscription-reconciler.js"
 import { pathIsMissing } from "../app/fs-paths.js";
 import { gatewaySocketPath } from "../app/config.js";
 import { defaultInstallStatePath } from "../app/install-state.js";
+import { readInstalledFrontdoors } from "../app/frontdoor-configs.js";
 import {
   GATEWAY_SETTING_DEFINITIONS,
   defaultGatewaySettings,
@@ -76,6 +76,10 @@ const HOOK_LINEAGE_BUDGET_MS = 250;
 const HOOK_PROVIDERS = new Set(["claude", "codex", "grok"]);
 const GATEWAY_RUNTIME_ROOT = process.env.ACP_GATEWAY_ACTIVE_ROOT ?? null;
 const EXPECTED_GATEWAY_BUILD_ID = expectedGatewayBuildId(GATEWAY_RUNTIME_ROOT);
+const EXPECTED_GATEWAY_VERSION = expectedGatewayManifestField(GATEWAY_RUNTIME_ROOT, "gatewayVersion");
+// A superseded daemon is retried at most this often: shutdown_if_idle refuses
+// while work is in flight, and a respawn that is still split must not loop.
+const IDLE_RESTART_BACKOFF_MS = 5 * 60_000;
 // Initialized inside main() so corrupt settings are reported through its
 // guarded startup path instead of throwing while this module is imported.
 let localScanner = null;
@@ -397,7 +401,12 @@ async function main() {
   const applySessionSources = queuedSingleFlight(async () => {
     const beforeRevision = state.revision;
     const local = await readLocalProjection();
-    const merged = mergeMonitorSessions(state.gatewaySourceSessions, local.sessions, state.workerTopology, state.formerWorkerIds);
+    const lineage = localScanner?.lineage ?? hookLineage;
+    const merged = mergeMonitorSessions(
+      state.gatewaySourceSessions, local.sessions, state.workerTopology, state.formerWorkerIds,
+      // The live pid file names the session a Claude Main holds now.
+      (caller) => (caller?.provider === "claude" && caller.pid ? lineage?.claudeRecord(caller.pid)?.sessionId ?? null : null)
+    );
     const acceptedLocalIds = new Set(merged.filter((session) => session.source === "local").map((session) => session.sessionId));
     // Only timelines that changed since they were last handed over: an idle
     // session's window is otherwise re-merged event by event every second.
@@ -411,15 +420,34 @@ async function main() {
   });
 
   async function refreshGatewayInfo() {
+    let gateway;
     try {
-      const gateway = annotateRuntimeSplit(
+      gateway = annotateSupersededDaemon(annotateRuntimeSplit(
         decodeGatewaySetup(await rpc.call("setup", {})),
         GATEWAY_RUNTIME_ROOT,
         EXPECTED_GATEWAY_BUILD_ID
-      );
+      ), EXPECTED_GATEWAY_VERSION, state.restartBlockers());
       if (state.setGateway(gateway)) state.broadcast({ kind: "gateway", gateway });
     } catch {
       // setup is best-effort metadata; session/event flow works without it.
+      return;
+    }
+    await restartSupersededDaemon(gateway);
+  }
+
+  // A runtime update only moves runtime/current; the daemon already running
+  // keeps serving the old version until something restarts it (a 1.4.0
+  // daemon outlived its runtime by days). Restart it once nothing is in
+  // flight, idle-safely: shutdown_if_idle refuses while the daemon is busy.
+  let idleRestartAfter = 0;
+  async function restartSupersededDaemon(gateway) {
+    if (gateway?.supersededDaemon?.plan !== "restart" || Date.now() < idleRestartAfter) return;
+    idleRestartAfter = Date.now() + IDLE_RESTART_BACKOFF_MS;
+    try {
+      await restartGateway("shutdown_if_idle");
+      console.error(`Restarted superseded Gateway ${gateway.gatewayVersion} daemon from the ${EXPECTED_GATEWAY_VERSION} runtime`);
+    } catch (error) {
+      console.error(`Superseded Gateway daemon restart deferred: ${error.message}`);
     }
   }
 
@@ -650,7 +678,7 @@ async function main() {
       return;
     }
     if (url.pathname === "/api/frontdoors" && request.method === "GET") {
-      sendJson(response, await readInstalledFrontdoors());
+      sendJson(response, await readInstalledFrontdoors({ installStatePath: defaultInstallStatePath() }));
       return;
     }
     if (url.pathname === "/api/snapshot") {
@@ -898,8 +926,16 @@ async function main() {
     }
   }
 
-  async function restartGateway() {
-    await controlCall("daemon_shutdown", {});
+  // One restart at a time: the automatic one for a superseded daemon and the
+  // user's safe restart would otherwise race to stop and respawn it.
+  let restartInFlight = null;
+  function restartGateway(method = "daemon_shutdown") {
+    restartInFlight ??= restartGatewayOnce(method).finally(() => { restartInFlight = null; });
+    return restartInFlight;
+  }
+
+  async function restartGatewayOnce(method) {
+    await controlCall(method, {});
     const socketPath = gatewaySocketPath();
     for (let attempt = 0; attempt < 100; attempt += 1) {
       const socketGone = await pathIsMissing(socketPath);
@@ -915,11 +951,11 @@ async function main() {
     });
     try {
       const gateway = await starter.call("setup", {}, 15_000);
-      const decodedGateway = annotateRuntimeSplit(
+      const decodedGateway = annotateSupersededDaemon(annotateRuntimeSplit(
         decodeGatewaySetup(gateway),
         GATEWAY_RUNTIME_ROOT,
         EXPECTED_GATEWAY_BUILD_ID
-      );
+      ), EXPECTED_GATEWAY_VERSION, state.restartBlockers());
       state.setGateway(decodedGateway);
       state.setConnection({ connected: true, streaming: state.streaming, error: null });
       state.broadcast({ kind: "gateway", gateway: decodedGateway });
@@ -997,62 +1033,6 @@ async function collectLocalSessions() {
 // Missing Gateway setup values (e.g. before the first successful "setup"
 // call) surface as null rather than being omitted, per the shared wire
 // contract; apiToken/control token are never part of this shape.
-// Which agents already have the "agent-acp" Control MCP installed. The ground
-// truth is each agent's own config, NOT install.json's managedMcp record —
-// managedMcp only lists what this app installed, so an MCP the user set up any
-// other way (or before this app tracked it) would read as "not installed" and
-// be wrongly offered for install. The section header `[mcp_servers.agent-acp]`
-// (codex/grok TOML) or the `mcpServers["agent-acp"]` key (claude JSON) is what
-// actually gates the Frontdoor.
-const FRONT_DOOR_AGENTS = new Set(["codex", "claude", "grok"]);
-// Matches the control section but not agent-acp-guide (next char is `-`).
-const CONTROL_MCP_TOML = /^\[mcp_servers\.agent-acp[\].]/m;
-const GUIDE_MCP_TOML = /^\[mcp_servers\.agent-acp-guide[\].]/m;
-
-async function tomlMcp(path) {
-  try {
-    const text = await readFile(path, "utf8");
-    return { control: CONTROL_MCP_TOML.test(text), guide: GUIDE_MCP_TOML.test(text) };
-  } catch {
-    return { control: false, guide: false };
-  }
-}
-
-async function claudeJsonMcp(path) {
-  try {
-    const servers = JSON.parse(await readFile(path, "utf8"))?.mcpServers ?? {};
-    return { control: Boolean(servers["agent-acp"]), guide: Boolean(servers["agent-acp-guide"]) };
-  } catch {
-    return { control: false, guide: false };
-  }
-}
-
-async function readInstalledFrontdoors() {
-  const home = homedir();
-  const codexHome = process.env.CODEX_HOME || join(home, ".codex");
-  const grokHome = process.env.GROK_HOME || join(home, ".grok");
-  const [codex, claude, grok] = await Promise.all([
-    tomlMcp(join(codexHome, "config.toml")),
-    claudeJsonMcp(join(home, ".claude.json")),
-    tomlMcp(join(grokHome, "config.toml"))
-  ]);
-  const agents = { codex, claude, grok };
-  const installed = Object.keys(agents).filter((agent) => agents[agent].control);
-  // Only the guide MCP: the agent can read how to delegate but is not a
-  // Frontdoor, so Settings must not show it as installed nor as untouched.
-  const guideOnly = Object.keys(agents).filter((agent) => agents[agent].guide && !agents[agent].control);
-  // The exclusive primary is still whatever install.json recorded; it is only
-  // a label, and a missing/invalid file just means "no primary".
-  let primary = null;
-  try {
-    const raw = JSON.parse(await readFile(defaultInstallStatePath(), "utf8"));
-    if (FRONT_DOOR_AGENTS.has(raw?.frontDoor)) primary = raw.frontDoor;
-  } catch {
-    // no install.json → no primary
-  }
-  return { primary, installed, guideOnly };
-}
-
 function gatewayIdentity(state, identity) {
   return {
     rootId: identity.rootId ?? null,
@@ -1114,15 +1094,56 @@ export function annotateRuntimeSplit(gateway, monitorRuntimeRoot, monitorBuildId
 }
 
 function expectedGatewayBuildId(gatewayRuntimeRoot) {
+  return expectedGatewayManifestField(gatewayRuntimeRoot, "gatewayBuildId");
+}
+
+function expectedGatewayManifestField(gatewayRuntimeRoot, field) {
   if (!gatewayRuntimeRoot) return null;
   try {
-    const manifest = JSON.parse(readFileSync(join(gatewayRuntimeRoot, "..", "runtime-manifest.json"), "utf8"));
-    return typeof manifest.gatewayBuildId === "string" && manifest.gatewayBuildId
-      ? manifest.gatewayBuildId
-      : null;
+    // The version root: <version>/gateway (runtime tarball) or
+    // <version>/node_modules/acp-gateway-daemon (npm package).
+    const versionRoot = join(gatewayRuntimeRoot, basename(dirname(gatewayRuntimeRoot)) === "node_modules" ? "../.." : "..");
+    const manifest = JSON.parse(readFileSync(join(versionRoot, "runtime-manifest.json"), "utf8"));
+    return typeof manifest[field] === "string" && manifest[field] ? manifest[field] : null;
   } catch {
     return null;
   }
+}
+
+// shutdown_if_idle first shipped in Gateway 1.5.0; an older daemon rejects it.
+const IDLE_SHUTDOWN_SINCE = "1.5.0";
+
+/** -1/0/1 for two x.y.z release labels, or null when either does not parse. */
+export function compareReleases(left, right) {
+  const parse = (value) => /^(\d+)\.(\d+)\.(\d+)/.exec(String(value ?? ""))?.slice(1).map(Number) ?? null;
+  const a = parse(left);
+  const b = parse(right);
+  if (!a || !b) return null;
+  for (let index = 0; index < 3; index += 1) {
+    if (a[index] !== b[index]) return a[index] < b[index] ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Marks a split whose daemon is an older release than this monitor's runtime
+ * (the daemon outlived a runtime update) with what to do about it:
+ * - "restart": restart it now with shutdown_if_idle,
+ * - "blocked": the same, once the listed work finishes,
+ * - "manual": it predates shutdown_if_idle, so only the user's safe restart
+ *   (which checks for work in flight itself) may stop it.
+ * A daemon that is newer, or whose version does not order, is left alone:
+ * that is a dev checkout, not an update left half done.
+ */
+export function annotateSupersededDaemon(gateway, runtimeVersion, blockers = []) {
+  if (!gateway?.runtimeSplit || compareReleases(gateway.gatewayVersion, runtimeVersion) !== -1) return gateway;
+  const plan = compareReleases(gateway.gatewayVersion, IDLE_SHUTDOWN_SINCE) === -1
+    ? "manual"
+    : blockers.length ? "blocked" : "restart";
+  return {
+    ...gateway,
+    supersededDaemon: { daemonVersion: gateway.gatewayVersion, runtimeVersion, plan, ...(plan === "blocked" ? { blockers } : {}) }
+  };
 }
 
 export function restartBlockedError(blockers) {

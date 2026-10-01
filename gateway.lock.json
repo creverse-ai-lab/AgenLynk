@@ -1,15 +1,30 @@
 {
-  "schemaVersion": 1,
-  "version": "1.6.0",
+  "schemaVersion": 2,
+  "version": "1.7.2",
   "apiMajor": 1,
-  "tag": "v1.6.0",
-  "sourceCommit": "949966f5e73ab3bab4b48a8f0773485a7cca278d",
-  "asset": {
-    "name": "acp-gateway-runtime-darwin-arm64.tar.gz",
-    "url": "https://github.com/creverse-ai-lab/agent_gateway/releases/download/v1.6.0/acp-gateway-runtime-darwin-arm64.tar.gz",
-    "sha256": "0668b77c4211af704ad0efd26841b67eb4cf7295378a39d26e8158d4489ed108"
+  "tag": "v1.7.2",
+  "sourceCommit": "009a5174657d09e471101a5fdc217aa6a2a8698a",
+  "package": {
+    "name": "acp-gateway-daemon",
+    "registry": "https://registry.npmjs.org/",
+    "tarball": "https://registry.npmjs.org/acp-gateway-daemon/-/acp-gateway-daemon-1.7.2.tgz",
+    "integrity": "sha512-8hMJXQUjXtORW18cPrIFfxRIy7zQlOdiLhjgWb4FChT62WYBXIhOugFLqedmOvewkc7T9jYeTQ18InLATpC37A==",
+    "installPath": "node_modules/acp-gateway-daemon",
+    "clientSpecifier": "acp-gateway-daemon/client"
   },
-  "runtimeRoot": "acp-gateway-runtime",
+  "provenance": {
+    "predicateType": "https://slsa.dev/provenance/v1",
+    "repository": "https://github.com/creverse-ai-lab/agent_gateway",
+    "workflow": ".github/workflows/publish-npm.yml",
+    "ref": "refs/tags/v1.7.2"
+  },
+  "node": {
+    "provider": "app",
+    "version": "22.23.2",
+    "distribution": "https://nodejs.org/download/release/v22.23.2/node-v22.23.2-darwin-arm64.tar.xz",
+    "sha256": "5eff7a9011895aae3f29d06f167b84a62b028a591370c7cafb59103559fd26e1",
+    "installPath": "node"
+  },
   "publicEntrypoint": "gateway-client/index.js",
   "platform": "darwin",
   "arch": "arm64"

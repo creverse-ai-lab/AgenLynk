@@ -98,11 +98,19 @@ printf '%s\n' "No shipped binary resolves through a build-machine path"
 
 RUNTIME_DIR="$APP/Contents/Resources/gateway-seed"
 SIDECAR_DIR="$APP/Contents/Resources/sidecar"
-if [ ! -f "$RUNTIME_DIR/gateway/src/index.js" ] \
-  || [ ! -f "$RUNTIME_DIR/gateway/gateway-client/index.js" ] \
+if [ ! -f "$RUNTIME_DIR/node_modules/acp-gateway-daemon/src/index.js" ] \
+  || [ ! -f "$RUNTIME_DIR/node_modules/acp-gateway-daemon/gateway-client/index.js" ] \
+  || [ ! -f "$RUNTIME_DIR/gateway-package.json" ] \
   || [ ! -f "$RUNTIME_DIR/app-runtime/runtime-installer-cli.js" ] \
   || [ ! -f "$SIDECAR_DIR/src/server/monitor.js" ]; then
   echo "error: Gateway seed and sidecar resource roots are incomplete" >&2
+  exit 1
+fi
+# Agent MCP configs launch runtime/current/gateway/src/{index,guide}.js, so the
+# alias must be the relative link into the npm package, not a copy.
+if [ ! -L "$RUNTIME_DIR/gateway" ] || [ "$(readlink "$RUNTIME_DIR/gateway")" != "node_modules/acp-gateway-daemon" ] \
+  || [ ! -f "$RUNTIME_DIR/gateway/src/index.js" ] || [ ! -f "$RUNTIME_DIR/gateway/src/guide.js" ]; then
+  echo "error: gateway-seed/gateway is not the alias for node_modules/acp-gateway-daemon" >&2
   exit 1
 fi
 "$SYSTEM_NODE" "$REPO_ROOT/src/verify-runtime-manifest-cli.js" "$RUNTIME_DIR"

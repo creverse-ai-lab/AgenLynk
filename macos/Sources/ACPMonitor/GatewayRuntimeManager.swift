@@ -64,6 +64,13 @@ actor GatewayRuntimeManager {
         return try await finish(classify(result, success: .rolledBack(result.versionId)))
     }
 
+    /// Previews (`dryRun`) or removes installed runtime versions nobody uses.
+    func prune(dryRun: Bool) async throws -> RuntimePrunePlan {
+        let plan = RuntimePrunePlan(try await updater.run("prune", arguments: dryRun ? ["--dry-run"] : []))
+        if !plan.ok { throw RuntimeUpdaterError.invalidOutput(plan.errorMessage ?? "prune") }
+        return plan
+    }
+
     private func classify(
         _ result: RuntimeOperationResult,
         success: GatewayRuntimeChangeOutcome

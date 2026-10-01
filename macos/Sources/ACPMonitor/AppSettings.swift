@@ -56,12 +56,16 @@ enum DashboardMode: String, CaseIterable, Identifiable, Sendable {
 enum LegacyDefaultsImport {
     static let legacyDomain = "ai.creverse.acp-monitor"
     static let markerKey = "monitor.legacyDomainImportV1"
+    /// AppKit keeps the status item's visibility and position here. Carrying
+    /// a hidden item over would undo the point of the new identifier.
+    static let skippedPrefixes = ["NSStatusItem"]
 
     static func run(into defaults: UserDefaults = .standard, from legacy: [String: Any]? = nil) {
         guard !defaults.bool(forKey: markerKey) else { return }
         defer { defaults.set(true, forKey: markerKey) }
         guard let legacy = legacy ?? defaults.persistentDomain(forName: legacyDomain) else { return }
-        for (key, value) in legacy where defaults.object(forKey: key) == nil {
+        for (key, value) in legacy
+        where defaults.object(forKey: key) == nil && !skippedPrefixes.contains(where: key.hasPrefix) {
             defaults.set(value, forKey: key)
         }
     }

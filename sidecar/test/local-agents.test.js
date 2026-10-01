@@ -120,6 +120,32 @@ test("an unresolved approval overrides the transcript state until it is answered
   assert.equal(stuck.size, 0);
 });
 
+// Regression: the first "provider" within 400 characters of an id was taken,
+// so in a session list a worker could be filed under its neighbour's provider,
+// or under the provider of the Main named in its openedBy.
+test("a listed worker keeps its own provider, not a neighbour's", () => {
+  const parents = new Map();
+  const listing = JSON.stringify({ ok: true, sessions: [
+    { sessionId: "acp-1", title: "a {brace} \"quoted\" title", provider: "claude", acpSessionId: "claude-worker" },
+    { sessionId: "acp-0", title: "} before the id", acpSessionId: "codex-worker", provider: "codex" },
+    { sessionId: "acp-2", acpSessionId: "grok-worker",
+      openedBy: { provider: "codex", sessionId: "codex-main" }, provider: "grok" }
+  ] });
+  recordExternalParent({
+    type: "event_msg",
+    payload: {
+      type: "mcp_tool_call_end",
+      invocation: { server: "agent-acp" },
+      result: { content: [{ type: "text", text: listing }] }
+    }
+  }, "main", parents, 1);
+  assert.equal(externalParent(parents, "claude", "claude-worker"), "main");
+  assert.equal(externalParent(parents, "grok", "grok-worker"), "main");
+  assert.equal(externalParent(parents, "claude", "grok-worker"), null);
+  assert.equal(externalParent(parents, "codex", "grok-worker"), null);
+  assert.equal(externalParent(parents, "codex", "codex-worker"), "main", "a brace in an earlier string is only text");
+});
+
 test("gateway parenthood is claimed only from proven tool responses", () => {
   const parents = new Map();
   const now = 100;
@@ -149,6 +175,40 @@ test("gateway parenthood is claimed only from proven tool responses", () => {
     }
   }, "one", parents, now);
   assert.equal(externalParent(parents, "grok", "gw-77"), "one");
+
+  // The current Codex rollout records a finished MCP call as item_completed.
+  recordExternalParent({
+    type: "event_msg",
+    payload: {
+      type: "item_completed",
+      thread_id: "codex-thread",
+      item: {
+        type: "McpToolCall",
+        server: "agent-acp",
+        tool: "agent_acp_session_open",
+        status: "completed",
+        result: {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ ok: true, sessionId: "acp-8", acpSessionId: "claude-88", provider: "claude", status: "idle" })
+          }]
+        }
+      }
+    }
+  }, "codex-thread", parents, now);
+  assert.equal(externalParent(parents, "claude", "claude-88"), "codex-thread");
+
+  // A call that failed proves nothing.
+  const failed = new Map();
+  recordExternalParent({
+    type: "event_msg",
+    payload: {
+      type: "item_completed",
+      item: { type: "McpToolCall", server: "agent-acp", status: "failed",
+        result: { content: [{ type: "text", text: JSON.stringify({ ok: true, acpSessionId: "x-1", provider: "claude" }) }] } }
+    }
+  }, "codex-thread", failed, now);
+  assert.equal(failed.size, 0);
 
   // A record that is not a gateway tool call claims nothing.
   const untrusted = new Map();
@@ -189,6 +249,14 @@ test("a grok CLI session adopts the gateway workers its own log proves it opened
       // Quoted gateway output with no tool_name must not create a link.
       JSON.stringify({
         update: { content: JSON.stringify({ ok: true, acpSessionId: "worker-echo", provider: "claude" }) }
+      }),
+      // Nor may a grep result that mentions agent_acp beside quoted output:
+      // only the record's own rawOutput proves a Gateway call.
+      JSON.stringify({
+        params: { update: {
+          content: [{ type: "text", text: 'tool agent_acp_session_open said {"ok":true,"acpSessionId":"worker-grep","provider":"claude"}' }],
+          rawOutput: { type: "SearchTool", content: '{"ok":true,"acpSessionId":"worker-grep2","provider":"claude"}' }
+        } }
       })
     ].join("\n") + "\n");
 
@@ -202,6 +270,8 @@ test("a grok CLI session adopts the gateway workers its own log proves it opened
     assert.equal(await recordGrokAcpLinks(states, parents, 100, grokRoot), true);
     assert.equal(externalParent(parents, "claude", "worker-1"), "grok-session");
     assert.equal(externalParent(parents, "claude", "worker-echo"), null);
+    assert.equal(externalParent(parents, "claude", "worker-grep"), null);
+    assert.equal(externalParent(parents, "claude", "worker-grep2"), null);
 
     // The link is recorded against the provider-side id; the snapshot must
     // resolve it to the id it actually exposes for that session.
@@ -646,6 +716,10 @@ test("codex thread database supplies engine, cwd, spawn edges and sub-agent pare
       external: {
         provider: "grok", session: "external", state: "running",
         parent: null, engine: "grok-cli", cwd: "/work"
+      },
+      person: {
+        provider: "grok", session: "person", state: "running",
+        parent: null, engine: "grok-cli", cwd: "/work", interactive: true
       }
     }, database);
 
@@ -653,7 +727,11 @@ test("codex thread database supplies engine, cwd, spawn edges and sub-agent pare
     assert.equal(find("two").parent, "one", "a spawn edge wins");
     assert.equal(find("two").engine, "gpt-child", "the engine comes from the database");
     // The same-cwd fallback only adopts into an active session in that cwd.
-    assert.equal(find("external").parent, "two");
+    // Regression: a Grok session in the same folder was adopted by the
+    // running Codex and shown as its worker.
+    assert.equal(find("external").parent, null, "only Codex's own sub-agents are adopted by cwd");
+    assert.equal(find("person").parent, null, "a session someone runs in a terminal is its own root");
+    assert.equal(find("review").parent_source, "cwd", "a cwd adoption is marked as a guess");
     assert.equal(find("review").parent, "two");
     assert.equal(find("lonely").parent, null, "nothing is running in /solo");
   });

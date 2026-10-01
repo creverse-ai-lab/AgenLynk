@@ -15,6 +15,7 @@ enum OnboardingLogicChecks {
         try checkRuntimeProvisionerResultParsing()
         try checkBundledRuntimeErrorStableCodes()
         try checkDevelopmentGatewaySearchRoots()
+        try checkGatewayPackageRoot()
         print("Swift onboarding logic checks passed")
     }
 
@@ -102,6 +103,16 @@ enum OnboardingLogicChecks {
     }
 
     static func checkBootstrapResultParsing() throws {
+        // Relinking forces only the stale targets of one kind, so no other
+        // entry's env is re-registered.
+        guard InstallerController.relinkArguments(kind: "guide", targets: ["claude", "grok"])
+            == ["--install-guide", "--target", "claude", "--target", "grok", "--force"] else {
+            throw CheckError.failed("expected relink to register only the named guide targets")
+        }
+        guard InstallerController.relinkArguments(kind: "control", targets: ["codex"]).first == "--install-control" else {
+            throw CheckError.failed("expected a control relink to use --install-control")
+        }
+
         let healthyOutput = """
         {"ok":true,"health":{"checked":true,"ok":true}}
         """
@@ -228,6 +239,32 @@ enum OnboardingLogicChecks {
 
         guard all.allSatisfy({ !$0.path.hasSuffix("/ACP") && !$0.path.contains("/ACP/") }) else {
             throw CheckError.failed("development Gateway roots must not include an ambient sibling ACP checkout")
+        }
+    }
+
+    /// The one check here that touches the filesystem (a scratch directory):
+    /// a 1.7 runtime resolves to its real npm package directory, never the
+    /// `gateway` alias, and a 1.6 runtime keeps its mounted `gateway/`.
+    static func checkGatewayPackageRoot() throws {
+        let fileManager = FileManager.default
+        let scratch = fileManager.temporaryDirectory.appendingPathComponent("agenlynk-package-root-\(UUID().uuidString)")
+        defer { try? fileManager.removeItem(at: scratch) }
+        let npmRuntime = scratch.appendingPathComponent("versions/1.7.2-deadbeef", isDirectory: true)
+        let package = npmRuntime.appendingPathComponent("node_modules/acp-gateway-daemon", isDirectory: true)
+        try fileManager.createDirectory(at: package, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: package.appendingPathComponent("package.json"))
+        try fileManager.createSymbolicLink(
+            atPath: npmRuntime.appendingPathComponent("gateway").path,
+            withDestinationPath: "node_modules/acp-gateway-daemon"
+        )
+        guard BundledRuntime.gatewayPackageRoot(runtimeRoot: npmRuntime).path == package.path else {
+            throw CheckError.failed("expected a 1.7 runtime to resolve to node_modules/acp-gateway-daemon")
+        }
+
+        let tarballRuntime = scratch.appendingPathComponent("versions/1.6.0-deadbeef", isDirectory: true)
+        try fileManager.createDirectory(at: tarballRuntime.appendingPathComponent("gateway"), withIntermediateDirectories: true)
+        guard BundledRuntime.gatewayPackageRoot(runtimeRoot: tarballRuntime).lastPathComponent == "gateway" else {
+            throw CheckError.failed("expected a 1.6 runtime to keep its mounted gateway/ directory")
         }
     }
 }

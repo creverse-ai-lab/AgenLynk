@@ -114,11 +114,13 @@ export async function snapshotSessions(states, database = null) {
   };
 
   for (const item of sessions) {
-    // Only processes Codex plausibly spawned. Interactive Claude Code
-    // sessions (claude-cli) are roots of their own.
+    // Only Codex's own sub-agents, which it records without a spawn edge.
+    // Any other session sharing the folder (a Grok worker the Gateway spawned,
+    // a CLI someone runs in a terminal) was not started by whatever ran there
+    // last, and adopting it filed a Grok worker under the Codex beside it.
     const eligible = !item.parent
-      && item.engine !== "claude-cli"
-      && (item.provider !== "codex" || subagents.has(item.session));
+      && item.provider === "codex"
+      && subagents.has(item.session);
     if (eligible) {
       const cwd = item.provider === "codex" ? workdirs.get(item.session) : item.cwd;
       const candidates = cwd
@@ -129,6 +131,8 @@ export async function snapshotSessions(states, database = null) {
         const newest = candidates.reduce((best, candidate) =>
           (candidate.time ?? 0) > (best.time ?? 0) ? candidate : best);
         item.parent = newest.session;
+        // A guess from a shared cwd, not proof of who started it.
+        item.parent_source = "cwd";
         parentOf.set(item.session, item.parent);
       }
     }

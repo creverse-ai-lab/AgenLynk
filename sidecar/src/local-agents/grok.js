@@ -11,7 +11,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { reversedRecords } from "./jsonl.js";
 import { headlessArgs, LINEAGE_ID } from "./lineage.js";
-import { claudeAcpLinks, externalParent, linkKey } from "./parent-links.js";
+import { externalParent, gatewayResponseLinks, linkKey } from "./parent-links.js";
 
 const execFileAsync = promisify(execFile);
 const PROCESS_TIMEOUT_MS = 1_000;
@@ -38,27 +38,35 @@ export async function lastGrokTurn(path) {
   return null;
 }
 
+/**
+ * The output of a finished Gateway MCP call in a grok `updates.jsonl` record,
+ * or null. Proof is structural: the record's own rawOutput names an agent_acp
+ * tool on a Gateway server. chat_history.jsonl is not read for links: its
+ * tool results carry no tool name, so a grep or file read that merely shows
+ * gateway output would read as a response.
+ */
+function gatewayToolOutput(record) {
+  const raw = (record?.params?.update ?? record?.update)?.rawOutput;
+  const tool = String(raw?.tool_name ?? "");
+  const server = String(raw?.server_name ?? "").toLowerCase();
+  if (!tool.startsWith("agent_acp_") || !server.includes("acp") || server.includes("guide")) return null;
+  return raw.output ?? null;
+}
+
 /** Gateway worker links recorded in a grok CLI session's own logs. */
 export async function grokAcpLinks(sessionDirectory, limit = GROK_LINK_SCAN_LIMIT) {
   const links = [];
-  for (const name of ["updates.jsonl", "chat_history.jsonl"]) {
-    let index = 0;
-    for await (const record of reversedRecords(join(sessionDirectory, name))) {
-      if (index >= limit) break;
-      index += 1;
-      const dumped = JSON.stringify(record);
-      // "agent_acp" is the tool_name grok records for a real gateway call —
-      // proof this is a response rather than quoted text.
-      if (dumped.includes("acpSessionId") && dumped.includes("agent_acp")) {
-        links.push(...claudeAcpLinks(dumped.replaceAll('\\"', '"')));
-      }
-    }
-    if (links.length) break;
+  let index = 0;
+  for await (const record of reversedRecords(join(sessionDirectory, "updates.jsonl"))) {
+    if (index >= limit) break;
+    index += 1;
+    const output = gatewayToolOutput(record);
+    if (output) links.push(...gatewayResponseLinks(output));
   }
   return links;
 }
 
-const GROK_LINK_LOGS = ["updates.jsonl", "chat_history.jsonl"];
+const GROK_LINK_LOGS = ["updates.jsonl"];
 
 /** size:mtime of the logs grokAcpLinks reads; null when the directory is gone. */
 async function grokLinkFingerprint(sessionDirectory) {

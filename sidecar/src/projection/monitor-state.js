@@ -18,6 +18,8 @@ const LOCAL_ACTIVE_STATUSES = new Set(["running", "waiting_permission", "waiting
  * hook came, its process exited, or it went stale. Whatever turn it last
  * showed is over too, so history keeps it as idle rather than frozen mid-turn
  * (a SessionEnd can beat the transcript's own turn end to the scan).
+ * A Gateway session is closed by its own session_closed event, which may come
+ * after the list that no longer names it (see removeSession).
  */
 function settledLocalSession(session) {
   if (session.source !== "local" || !LOCAL_ACTIVE_STATUSES.has(session.status)) return session;
@@ -249,6 +251,12 @@ export class MonitorState {
       this.historySessions.set(sessionId, archived);
       this.historyExpiresAt.set(sessionId, Date.now() + this.historyRetentionMs);
       this.persistence?.writeSession(archived);
+    } else if (closed && this.historySessions.has(sessionId) && this.historySessions.get(sessionId).status !== "closed") {
+      // The list dropped it first; the close that follows is still news.
+      const archived = { ...this.historySessions.get(sessionId), status: "closed" };
+      this.historySessions.set(sessionId, archived);
+      this.persistence?.writeSession(archived);
+      this.revision += 1;
     } else if (!this.historySessions.has(sessionId)) {
       // Never listed (events that beat the session list, then its close):
       // no history row would ever expire these, so they go now. Whatever was
@@ -463,7 +471,19 @@ export class MonitorState {
     let restored = 0;
     for (const session of this.persistence.readSessions({ since: now - this.historyRetentionMs })) {
       if (!session?.sessionId || this.sessions.has(session.sessionId)) continue;
-      if (session.source !== "local") this.#rememberWorker(session);
+      if (session.source !== "local") {
+        this.#rememberWorker(session);
+        // The proof of a worker's parent (its Main's transcript) is often gone
+        // by the next start, while the Gateway still lists the worker: without
+        // its recorded topology the first merge would rewrite it unattributed.
+        if (session.openerInstanceId && !this.workerTopology.has(session.sessionId)) {
+          this.workerTopology.set(session.sessionId, {
+            opener: session.opener ?? null,
+            openerInstanceId: session.openerInstanceId,
+            parentSessionId: session.parentSessionId ?? null
+          });
+        }
+      }
       const events = this.persistence.readEvents(session.sessionId, { limit: this.maxEventsPerSession });
       // Rows written before empty hook-only sessions were held back (a usage
       // probe's bare SessionStart/SessionEnd) must not come back as Frontdoors.

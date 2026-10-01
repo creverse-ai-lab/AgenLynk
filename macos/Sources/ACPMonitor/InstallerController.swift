@@ -61,6 +61,30 @@ final class InstallerController {
         )
     }
 
+    /// Re-registers entries that launch an old runtime version (or a missing
+    /// script) so they go through runtime/current again. `--force` because the
+    /// Gateway installer leaves an entry it has no ownership record for as it
+    /// is. That also drops any env a user added to those entries; only the
+    /// stale targets of one kind are passed, so no other entry's env is reset.
+    func relink(
+        kind: String,
+        targets: [String],
+        nodeOverride: String = "",
+        onOutputLine: @escaping (String) -> Void
+    ) async throws -> BootstrapResult {
+        try await run(
+            arguments: Self.relinkArguments(kind: kind, targets: targets),
+            nodeOverride: nodeOverride,
+            onOutputLine: onOutputLine
+        )
+    }
+
+    static func relinkArguments(kind: String, targets: [String]) -> [String] {
+        [kind == "guide" ? "--install-guide" : "--install-control"]
+            + targets.flatMap { ["--target", $0] }
+            + ["--force"]
+    }
+
     func run(
         arguments: [String],
         nodeOverride: String = "",

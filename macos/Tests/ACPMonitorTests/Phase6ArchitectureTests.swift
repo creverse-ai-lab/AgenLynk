@@ -240,6 +240,16 @@ enum Phase6ArchitectureChecks {
         try check(state.historySessions.first { $0.sessionId == "s1" }?.status == "closed", "a closed session is archived as closed")
         try check(state.historyEventsBySession["s1"]?.count == 3, "session_removed must keep the session's events")
         try check(state.logEventsBySession["s1"]?.count == 3, "session_removed must keep the session in the log")
+
+        // The list can drop a Gateway worker before its session_removed
+        // arrives; the close still lands, or history shows it running for good.
+        state.sessions = [try session("late")]
+        _ = MonitorReducer.applyStateMessage(["sessions": .array([])], to: &state)
+        try check(state.historySessions.first { $0.sessionId == "late" }?.status == "running",
+                  "the list alone archives the last status it showed")
+        try check(MonitorReducer.removeSession("late", from: &state), "a late close must change history")
+        try check(state.historySessions.first { $0.sessionId == "late" }?.status == "closed",
+                  "a late session_removed marks the archived worker closed")
     }
 
     private static func reducerPrependsOlderEventsBeyondTheStreamCap() throws {

@@ -334,8 +334,11 @@ export async function clearCurrentActivation(runtimeRoot) {
  * references — chiefly each agent's Control MCP config — can point through it
  * (`current/node/bin/node`, `current/gateway/src/index.js`) and keep working across
  * runtime updates, instead of pinning a version dir that goes stale the moment
- * a newer runtime activates. Best-effort: a filesystem without symlinks must
- * not break activation, so failure is swallowed.
+ * a newer runtime activates. `gateway` is a directory in a Gateway 1.6 runtime
+ * and a symlink to node_modules/acp-gateway-daemon from 1.7 on, so the same
+ * paths survive that switch too; Gateway's installer sees them reached through
+ * a symlink and leaves such entries to this app. Best-effort: a filesystem
+ * without symlinks must not break activation, so failure is swallowed.
  */
 async function updateCurrentSymlink(runtimeRoot, target) {
   const link = join(runtimeRoot, "current");

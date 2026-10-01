@@ -131,7 +131,10 @@ export function projectLocalSnapshot(snapshot, timelines = new Map()) {
     // unattributed Worker, never a Frontdoor of its own. An SDK entrypoint
     // alone does not make one: a chat host that asks a person for permission,
     // or a conversation with more than one prompt, is someone talking to it.
-    const conversed = (timeline?.events ?? []).filter((event) => event.kind === "user_message").length > 1;
+    // Each turn opens on its prompt (turn_start); user_message is only input
+    // queued inside an open turn. Both are a person (or launcher) speaking.
+    const conversed = (timeline?.events ?? [])
+      .filter((event) => event.kind === "turn_start" || event.kind === "user_message").length > 1;
     const headless = Boolean(raw.headless || facts.headless === true) && !raw.interactive && !conversed;
     const orphanRun = headless && raw.session === rootId && !raw.parent;
 
@@ -166,7 +169,11 @@ export function projectLocalSnapshot(snapshot, timelines = new Map()) {
       parentSessionId: byRawId.has(raw.parent)
         ? `local:${byRawId.get(raw.parent).provider ?? "local"}:${raw.parent}`
         : raw.parent && raw.parent_provider ? `local:${raw.parent_provider}:${raw.parent}` : null,
-      ...(raw.parent && raw.parent_source === "lineage" ? { parentProof: "lineage" } : {}),
+      // How the parent was found when it was not read from a transcript:
+      // process lineage or a same-cwd guess. Neither proves a Gateway worker.
+      ...(raw.parent && (raw.parent_source === "lineage" || raw.parent_source === "cwd")
+        ? { parentProof: raw.parent_source }
+        : {}),
       // A one-shot run (`claude -p`, `grok -p`, `codex exec`), so the app can
       // tell it from an interactive session.
       ...(headless ? { headless: true } : {})
@@ -227,7 +234,12 @@ function pruneCallerTopology(workerTopology) {
   for (const key of keys.slice(0, Math.max(0, keys.length - MAX_CALLER_TOPOLOGY))) workerTopology.delete(key);
 }
 
-export function mergeMonitorSessions(gatewaySessions, localSessions, workerTopology = null, formerWorkerIds = null) {
+/**
+ * `currentCallerSession(caller)` may name the session a caller's process holds
+ * now: a Claude Main that ran `/clear` has a new session id while its control
+ * server still reports the one it started with.
+ */
+export function mergeMonitorSessions(gatewaySessions, localSessions, workerTopology = null, formerWorkerIds = null, currentCallerSession = null) {
   // ownedWorkerIds is LOAD-BEARING even though the scanner no longer produces
   // Gateway sessions itself: an ACP claude worker writes a transcript under
   // ~/.claude/projects like any other claude session, so the local scanner
@@ -254,12 +266,13 @@ export function mergeMonitorSessions(gatewaySessions, localSessions, workerTopol
   // exported its session id is its local session; the group is that
   // session's own group when the scan sees it.
   const callerTopology = (caller) => {
-    if (!caller?.provider || !caller?.sessionId) return null;
-    const parentSessionId = `local:${caller.provider}:${caller.sessionId}`;
+    const sessionId = currentCallerSession?.(caller) ?? caller?.sessionId;
+    if (!caller?.provider || !sessionId) return null;
+    const parentSessionId = `local:${caller.provider}:${sessionId}`;
     const parent = localByMonitorId.get(parentSessionId);
     return {
       opener: caller.provider,
-      openerInstanceId: parent?.openerInstanceId ?? caller.sessionId,
+      openerInstanceId: parent?.openerInstanceId ?? sessionId,
       parentSessionId
     };
   };
@@ -282,11 +295,11 @@ export function mergeMonitorSessions(gatewaySessions, localSessions, workerTopol
     const localMatch = localByProviderId.get(session?.acpSessionId)
       ?? localByProviderId.get(session?.sessionId);
     // Process lineage is not proof for a Gateway worker: the daemon may carry
-    // whichever session's environment first started it. Only transcript
-    // (MCP response) links attribute a Gateway session.
+    // whichever session's environment first started it. Nor is a same-cwd
+    // guess. Only transcript (MCP response) links attribute a Gateway session.
     const proven = localMatch?.openerInstanceId
       && localMatch.openerInstanceId !== localMatch.localSessionId
-      && localMatch.parentProof !== "lineage"
+      && !localMatch.parentProof
       ? {
         opener: localMatch.opener ?? null,
         openerInstanceId: localMatch.openerInstanceId,

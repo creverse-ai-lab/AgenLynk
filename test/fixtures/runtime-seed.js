@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { collectGatewayInventory, gatewaySourceDigest } from "../../src/runtime-manifest.js";
 
 export const OFFICIAL_CLAUDE_HELPER_PATH = "node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude";
+export const GATEWAY_PACKAGE_PATH = "node_modules/acp-gateway-daemon";
 
 function sourceCommit(value) {
   return createHash("sha256").update(String(value)).digest("hex").slice(0, 40);
@@ -20,10 +22,119 @@ function directoryRecord(path) {
   return { path, type: "directory", mode: "0755", bytes: 0 };
 }
 
-export async function writeRuntimeSeed(
+const clientJs = "export const GATEWAY_API_VERSION = 1; export class GatewayRpcClient {} export class GatewayError extends Error {} export const ERROR_CODES = {};\n";
+
+async function writeAppRuntimeAndNode(root, nodeVersion) {
+  await mkdir(join(root, "app-runtime"), { recursive: true });
+  await mkdir(join(root, "node/bin"), { recursive: true });
+  for (const name of [
+    "runtime-installer-cli.js",
+    "runtime-installer.js",
+    "runtime-updater-cli.js",
+    "runtime-updater.js"
+  ]) await writeFile(join(root, "app-runtime", name), "export default {};\n");
+
+  for (const [name, output] of [["node", `v${nodeVersion}`], ["npm", "10.9.0"], ["npx", "10.9.0"]]) {
+    const path = join(root, "node/bin", name);
+    await writeFile(path, `#!/bin/sh\necho "${output}"\n`);
+    await chmod(path, 0o755);
+  }
+}
+
+/**
+ * A runtime seed in the npm package layout (manifest format 5) by default, or
+ * with `layout: "tarball"` the Gateway <= 1.6 layout that mounted the GitHub
+ * runtime tarball at gateway/ (format 4).
+ */
+export async function writeRuntimeSeed(root, options = {}) {
+  return options.layout === "tarball" ? writeTarballRuntimeSeed(root, options) : writeNpmRuntimeSeed(root, options);
+}
+
+async function writeNpmRuntimeSeed(
   root,
   {
-    gatewayVersion = "1.4.0",
+    gatewayVersion = "1.7.2",
+    gatewayBuildId = "fixture-gateway",
+    gatewayApiVersion = 1,
+    nodeVersion = "22.14.0",
+    marker = "fixture",
+    provenanceVerified = true
+  } = {}
+) {
+  const commit = sourceCommit(gatewayBuildId);
+  const integrity = `sha512-${createHash("sha512").update(`${gatewayVersion}:${gatewayBuildId}`).digest("base64")}`;
+  const registry = "https://registry.npmjs.org/";
+  const tarball = `${registry}acp-gateway-daemon/-/acp-gateway-daemon-${gatewayVersion}.tgz`;
+  const packageRoot = join(root, GATEWAY_PACKAGE_PATH);
+  await mkdir(join(packageRoot, "gateway-client"), { recursive: true });
+  await mkdir(join(packageRoot, "src"), { recursive: true });
+
+  const lock = {
+    schemaVersion: 2,
+    version: gatewayVersion,
+    apiMajor: gatewayApiVersion,
+    tag: `v${gatewayVersion}`,
+    sourceCommit: commit,
+    package: {
+      name: "acp-gateway-daemon",
+      registry,
+      tarball,
+      integrity,
+      installPath: GATEWAY_PACKAGE_PATH,
+      clientSpecifier: "acp-gateway-daemon/client"
+    },
+    provenance: {
+      predicateType: "https://slsa.dev/provenance/v1",
+      repository: "https://github.com/creverse-ai-lab/agent_gateway",
+      workflow: ".github/workflows/publish-npm.yml",
+      ref: `refs/tags/v${gatewayVersion}`
+    },
+    node: {
+      provider: "app",
+      version: nodeVersion,
+      distribution: `https://nodejs.org/download/release/v${nodeVersion}/node-v${nodeVersion}-darwin-arm64.tar.xz`,
+      sha256: "5eff7a9011895aae3f29d06f167b84a62b028a591370c7cafb59103559fd26e1",
+      installPath: "node"
+    },
+    publicEntrypoint: "gateway-client/index.js",
+    platform: "darwin",
+    arch: "arm64"
+  };
+  await writeFile(join(root, "gateway.lock.json"), `${JSON.stringify(lock)}\n`);
+  await writeFile(join(packageRoot, "package.json"), JSON.stringify({
+    name: "acp-gateway-daemon",
+    version: gatewayVersion,
+    type: "module",
+    exports: { ".": "./gateway-client/index.js", "./client": "./gateway-client/index.js" }
+  }));
+  await writeFile(join(packageRoot, "src/index.js"), `export const marker = ${JSON.stringify(marker)};\n`);
+  for (const name of ["guide.js", "bootstrap.js", "gateway-daemon.js"]) {
+    await writeFile(join(packageRoot, "src", name), "export default {};\n");
+  }
+  await writeFile(join(packageRoot, "gateway-client/index.js"), clientJs);
+  await symlink(GATEWAY_PACKAGE_PATH, join(root, "gateway"));
+
+  const record = {
+    schemaVersion: 1,
+    name: "acp-gateway-daemon",
+    version: gatewayVersion,
+    tarball,
+    integrity,
+    sourceCommit: commit,
+    provenance: provenanceVerified
+      ? { verified: true, predicateType: lock.provenance.predicateType, repository: lock.provenance.repository, workflow: lock.provenance.workflow, ref: lock.provenance.ref, sourceCommit: commit }
+      : { verified: false, reason: "skipped" },
+    files: await collectGatewayInventory(packageRoot)
+  };
+  await writeFile(join(root, "gateway-package.json"), `${JSON.stringify(record)}\n`);
+  await writeAppRuntimeAndNode(root, nodeVersion);
+  return { commit, gatewayBuildId: await gatewaySourceDigest(packageRoot), integrity };
+}
+
+async function writeTarballRuntimeSeed(
+  root,
+  {
+    gatewayVersion = "1.6.0",
     gatewayBuildId = "fixture-gateway",
     gatewayApiVersion = 1,
     nodeVersion = "22.14.0",
@@ -36,8 +147,6 @@ export async function writeRuntimeSeed(
   const assetSha256 = "c03ad69362e4f75b115f345aeafccc03fc9895a3ebb539e6fe8342bea16bfc8c";
   await mkdir(join(root, "gateway/gateway-client"), { recursive: true });
   await mkdir(join(root, "gateway/src"), { recursive: true });
-  await mkdir(join(root, "app-runtime"), { recursive: true });
-  await mkdir(join(root, "node/bin"), { recursive: true });
 
   const lock = {
     schemaVersion: 1,
@@ -59,7 +168,6 @@ export async function writeRuntimeSeed(
   const packageLock = "{}\n";
   const indexJs = `export const marker = ${JSON.stringify(marker)};\n`;
   const bootstrapJs = "export default {};\n";
-  const clientJs = "export const GATEWAY_API_VERSION = 1; export class GatewayRpcClient {} export class GatewayError extends Error {} export const ERROR_CODES = {};\n";
 
   await writeFile(join(root, "gateway.lock.json"), `${JSON.stringify(lock)}\n`);
   await writeFile(join(root, "gateway/package.json"), packageJson);
@@ -103,18 +211,6 @@ export async function writeRuntimeSeed(
     files
   };
   await writeFile(join(root, "gateway/runtime-manifest.json"), `${JSON.stringify(upstream)}\n`);
-
-  for (const name of [
-    "runtime-installer-cli.js",
-    "runtime-installer.js",
-    "runtime-updater-cli.js",
-    "runtime-updater.js"
-  ]) await writeFile(join(root, "app-runtime", name), "export default {};\n");
-
-  for (const [name, output] of [["node", `v${nodeVersion}`], ["npm", "10.9.0"], ["npx", "10.9.0"]]) {
-    const path = join(root, "node/bin", name);
-    await writeFile(path, `#!/bin/sh\necho "${output}"\n`);
-    await chmod(path, 0o755);
-  }
+  await writeAppRuntimeAndNode(root, nodeVersion);
   return { commit, officialHelperSha256: includeOfficialHelper ? sha256Text(officialHelperContents) : null };
 }

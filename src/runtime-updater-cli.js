@@ -70,7 +70,8 @@ const OPERATIONS = {
   }),
   prune: (flags) => pruneRuntimeVersions({
     runtimeRoot: flags["runtime-root"] ?? defaultRuntimeRoot(),
-    keep: parseJsonFlag(flags.keep, "keep") ?? []
+    keep: parseJsonFlag(flags.keep, "keep") ?? [],
+    dryRun: flags["dry-run"] === "true"
   })
 };
 

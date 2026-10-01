@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Build-time helper: snapshots the pinned Gateway artifact, Node, and
-// AgenLynk-owned runtime manager into runtime-manifest.json.
+// Build-time helper: snapshots the pinned Gateway npm package, the
+// app-provided Node, and AgenLynk-owned runtime manager into
+// runtime-manifest.json.
 // runtime-installer.js reads this later to reject an incomplete/corrupt
 // staged copy before activating it. Run by build-app.sh after every other
 // runtime asset has been copied into place; the executing Node here can be

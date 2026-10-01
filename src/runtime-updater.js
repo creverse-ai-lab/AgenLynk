@@ -26,6 +26,7 @@ import {
 } from "./runtime-manifest.js";
 import { PREVIOUS_POINTER_FILE, readPointerFile, writePointerFile } from "./runtime-pointer.js";
 import { stageVerifiedRuntime } from "./runtime-staging.js";
+import { directoryBytes, runtimeVersionsInUse } from "./runtime-usage.js";
 
 export { defaultRuntimeRoot };
 
@@ -539,13 +540,16 @@ export async function rollbackRuntime(options) {
 
 /**
  * prune: remove staged versions/<id> directories that are neither the
- * current nor previous target, nor explicitly kept. Never touches
- * current.json/previous.json/staging/. Every removal path is re-confirmed
- * confined to runtimeRoot/versions/ immediately before it is removed.
+ * current nor previous target, nor explicitly kept, nor still in use (an
+ * agent MCP entry or a running process references it; see runtime-usage.js).
+ * `dryRun` reports what would go without removing anything, so Settings can
+ * show the space first. Never touches current.json/previous.json/staging/.
+ * Every removal path is re-confirmed confined to runtimeRoot/versions/
+ * immediately before it is removed.
  */
 export async function pruneRuntimeVersions(options) {
   return runOperation("prune", async () => {
-    const { runtimeRoot = defaultRuntimeRoot(), keep = [] } = options ?? {};
+    const { runtimeRoot = defaultRuntimeRoot(), keep = [], dryRun = false, usage = null } = options ?? {};
     return withRuntimeLock(runtimeRoot, async () => {
     if (!Array.isArray(keep)) throw new RuntimeUpdaterError("INVALID_ARGS", "keep must be an array of versionId strings");
 
@@ -560,6 +564,7 @@ export async function pruneRuntimeVersions(options) {
     for (const id of keep) {
       if (typeof id === "string" && id) protectedIds.add(id);
     }
+    const inUseById = usage ?? await runtimeVersionsInUse(versionsRoot);
 
     let entries;
     try {
@@ -571,10 +576,17 @@ export async function pruneRuntimeVersions(options) {
 
     const removed = [];
     const skipped = [];
+    const inUse = [];
+    let freedBytes = 0;
     for (const entry of entries) {
       if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
       if (protectedIds.has(entry.name)) {
         skipped.push(entry.name);
+        continue;
+      }
+      if (inUseById.has(entry.name)) {
+        skipped.push(entry.name);
+        inUse.push({ versionId: entry.name, reasons: inUseById.get(entry.name) });
         continue;
       }
       const candidate = join(versionsRoot, entry.name);
@@ -582,11 +594,13 @@ export async function pruneRuntimeVersions(options) {
         skipped.push(entry.name);
         continue;
       }
-      await rm(candidate, { recursive: true, force: true });
-      removed.push(entry.name);
+      const bytes = await directoryBytes(candidate);
+      if (!dryRun) await rm(candidate, { recursive: true, force: true });
+      removed.push({ versionId: entry.name, bytes });
+      freedBytes += bytes;
     }
 
-    return { removed, protected: [...protectedIds], skipped };
+    return { dryRun, removed, freedBytes, inUse, protected: [...protectedIds], skipped };
     });
   });
 }

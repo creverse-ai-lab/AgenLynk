@@ -20,6 +20,7 @@ enum MonitorModelChecks {
         try agentCatalogDecodesInstallAndEnabledState()
         try monitoringHookStatusDecodesPerCliState()
         try installedFrontdoorsDecodePrimaryInstalledAndNullEmpty()
+        try runtimePrunePlanDecodesRemovalsAndInUse()
         try gatewayConfigDecodesAllControlMetadata()
         try gatewayConfigRepresentsAllKnownSettingIds()
         try gatewayConfigDecodesBothLanguagesAndFallsBackToEnglish()
@@ -938,6 +939,16 @@ enum MonitorModelChecks {
             ])
         ])
         try check(runtimeSplitWarning(gateway: buildSplit)?.contains("old") == true, "a build-id split must surface as a warning")
+        let superseded = JSONValue.object([
+            "runtimeSplit": .object(["daemonBuildId": .string("old"), "monitorBuildId": .string("new")]),
+            "supersededDaemon": .object([
+                "daemonVersion": .string("1.4.0"),
+                "runtimeVersion": .string("1.6.0"),
+                "plan": .string("manual")
+            ])
+        ])
+        try check(runtimeSplitWarning(gateway: superseded)?.contains("자동 idle 재시작을 지원하지 않습니다") == true,
+                  "a daemon too old for shutdown_if_idle is left to the user")
         try check(runtimeSplitWarning(gateway: .object(["gatewayVersion": .string("1.3.1")])) == nil, "no annotation, no warning")
         try check(runtimeSplitWarning(gateway: nil) == nil, "no gateway info, no warning")
     }
@@ -1265,6 +1276,20 @@ enum MonitorModelChecks {
         try check(!response.agents[1].installSupported, "manual binary install state decode failed")
     }
 
+    private static func runtimePrunePlanDecodesRemovalsAndInUse() throws {
+        let plan = RuntimePrunePlan(JSONValue(any: try JSONSerialization.jsonObject(with: Data(#"""
+        {"ok":true,"op":"prune","dryRun":true,"freedBytes":874512384,
+         "removed":[{"versionId":"1.3.2-aaa","bytes":436256192},{"versionId":"1.4.0-bbb","bytes":438256192}],
+         "inUse":[{"versionId":"1.5.2-ccc","reasons":["config:/Users/x/.claude.json","process"]}]}
+        """#.utf8))))
+        try check(plan.ok && plan.dryRun, "prune envelope flags decode")
+        try check(plan.removed.map(\.versionId) == ["1.3.2-aaa", "1.4.0-bbb"], "prune removals decode")
+        try check(plan.freedBytes == 874_512_384, "freed bytes decode")
+        try check(plan.inUse.first?.reasonText == ".claude.json 설정, 실행 중인 프로세스", "in-use reasons read as Korean labels")
+        let failed = RuntimePrunePlan(JSONValue(any: try JSONSerialization.jsonObject(with: Data(#"{"ok":false,"op":"prune","error":{"code":"LOCKED","message":"busy"}}"#.utf8))))
+        try check(!failed.ok && failed.errorMessage == "busy", "a failed prune carries its message")
+    }
+
     private static func installedFrontdoorsDecodePrimaryInstalledAndNullEmpty() throws {
         let populated = try InstalledFrontdoors.decode(Data(#"""
         {"primary":"codex","installed":["codex","claude"],"guideOnly":["grok"]}
@@ -1279,6 +1304,18 @@ enum MonitorModelChecks {
         try check(empty.primary == nil, "null primary must decode to nil")
         try check(empty.installed.isEmpty, "empty installed list decode failed")
         try check(empty.guideOnly.isEmpty, "a missing guideOnly decodes to empty")
+        try check(empty.stale.isEmpty, "a missing stale list decodes to empty")
+
+        let stale = try InstalledFrontdoors.decode(Data(#"""
+        {"primary":null,"installed":["codex"],"stale":[
+          {"agent":"claude","entry":"guide","reason":"pinned","path":"/v/1.4.0/guide.js","version":"1.4.0"},
+          {"agent":"auggie","entry":"guide","reason":"missing","path":"/v/1.3.0/guide.js"},
+          {"agent":"codex","entry":"skill","reason":"pinned"}
+        ]}
+        """#.utf8))
+        try check(stale.stale.count == 2, "only control and guide entries are relinkable")
+        try check(stale.stale[0] == StaleFrontdoorEntry(agent: "claude", entry: "guide", reason: "pinned", path: "/v/1.4.0/guide.js", version: "1.4.0"), "a pinned entry decodes")
+        try check(stale.stale[1].version == nil, "a missing script has no version")
     }
 
     private static func gatewayConfigDecodesAllControlMetadata() throws {

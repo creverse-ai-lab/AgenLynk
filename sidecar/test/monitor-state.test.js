@@ -68,6 +68,15 @@ test("a removed session moves to history with its events intact", () => {
   assert.equal(snapshot.events[a], undefined);
 });
 
+test("a Gateway close that comes after the list dropped the worker still lands", () => {
+  const state = new MonitorState();
+  state.setSessions([{ sessionId: "acp-g", provider: "grok", source: "gateway", status: "running", turnId: "t1" }]);
+  state.setSessions([]);
+  assert.equal(state.historySessions.get("acp-g").status, "running", "the list alone does not close it");
+  state.removeSession("acp-g", { closed: true });
+  assert.equal(state.historySessions.get("acp-g").status, "closed", "a finished worker never stays running in history");
+});
+
 test("Gateway chunks merge into one message and replays are ignored", () => {
   const state = new MonitorState();
   const chunk = (sequence, text, ts) => ({ sessionId: "s1", sequence, type: "agent_message_chunk", ts, turnId: "t1", text });
@@ -205,6 +214,27 @@ test("the monitor remembers every worker the Gateway reported, across a restart"
     const restarted = new MonitorState({ persistence: store });
     restarted.restoreHistory();
     assert.ok(restarted.formerWorkerIds.has("worker-2"), "restored Gateway history keeps its workers known");
+    store.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a worker's recorded Frontdoor survives a restart that lost its proof", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "agenlynk-topology-"));
+  try {
+    const store = await SqliteMonitorStore.open(join(directory, "monitor.db"), { flushMs: 1 });
+    store.writeSession({
+      sessionId: "acp-3", acpSessionId: "worker-3", provider: "codex", source: "gateway", role: "worker",
+      opener: "grok", openerInstanceId: "grok-main", parentSessionId: "local:grok:grok-main",
+      updatedAt: new Date().toISOString()
+    });
+    store.flush();
+    const restarted = new MonitorState({ persistence: store });
+    restarted.restoreHistory();
+    assert.deepEqual(restarted.workerTopology.get("acp-3"), {
+      opener: "grok", openerInstanceId: "grok-main", parentSessionId: "local:grok:grok-main"
+    });
     store.close();
   } finally {
     await rm(directory, { recursive: true, force: true });

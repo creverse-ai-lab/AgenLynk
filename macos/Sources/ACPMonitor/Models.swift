@@ -1603,6 +1603,8 @@ struct InstalledFrontdoors: Equatable, Sendable {
     /// Agents with only the guide MCP: they can read how to delegate but are
     /// not Frontdoors (the Gateway installs the guide into every agent).
     var guideOnly: [String] = []
+    /// Registered entries that no longer launch the current runtime.
+    var stale: [StaleFrontdoorEntry] = []
 
     static func decode(_ data: Data) throws -> InstalledFrontdoors {
         let raw = try JSONSerialization.jsonObject(with: data)
@@ -1610,9 +1612,29 @@ struct InstalledFrontdoors: Equatable, Sendable {
         return InstalledFrontdoors(
             primary: root.string("primary"),
             installed: (root.array("installed") ?? []).compactMap { $0.stringValue },
-            guideOnly: (root.array("guideOnly") ?? []).compactMap { $0.stringValue }
+            guideOnly: (root.array("guideOnly") ?? []).compactMap { $0.stringValue },
+            stale: (root.array("stale") ?? []).compactMap { item in
+                guard let entry = item.objectValue,
+                      let agent = entry.string("agent"),
+                      let kind = entry.string("entry"),
+                      kind == "control" || kind == "guide",
+                      let reason = entry.string("reason") else { return nil }
+                return StaleFrontdoorEntry(agent: agent, entry: kind, reason: reason, path: entry.string("path"), version: entry.string("version"))
+            }
         )
     }
+}
+
+/// An agent MCP entry pinned to a runtime version that is no longer current
+/// ("pinned") or pointing at a script that is gone ("missing"), so it keeps
+/// launching an old Gateway, or nothing, until relinked.
+struct StaleFrontdoorEntry: Equatable, Sendable, Hashable {
+    let agent: String
+    /// "control" (agent-acp) or "guide" (agent-acp-guide).
+    let entry: String
+    let reason: String
+    let path: String?
+    let version: String?
 }
 
 enum MonitorReducerDefaults {
@@ -1993,6 +2015,59 @@ struct RuntimeInspection: Equatable, Sendable {
 
 /// A single updater operation's outcome. The library reports expected failures
 /// inside the envelope, so an unsuccessful result is still a decoded value.
+/// What a runtime cleanup removes (or, as a preview, would remove): every
+/// installed version that is neither current nor previous, minus the ones an
+/// agent MCP entry or a running process still launches from.
+struct RuntimePrunePlan: Equatable, Sendable {
+    struct Removal: Equatable, Sendable, Identifiable {
+        let versionId: String
+        let bytes: Int64
+        var id: String { versionId }
+    }
+
+    struct InUse: Equatable, Sendable, Identifiable {
+        let versionId: String
+        /// "config:<path>" or "process".
+        let reasons: [String]
+        var id: String { versionId }
+
+        var reasonText: String {
+            reasons.map { reason in
+                if reason == "process" { return "실행 중인 프로세스" }
+                if reason.hasPrefix("config:") { return "\((String(reason.dropFirst(7)) as NSString).lastPathComponent) 설정" }
+                return reason
+            }.joined(separator: ", ")
+        }
+    }
+
+    let ok: Bool
+    let dryRun: Bool
+    let removed: [Removal]
+    let freedBytes: Int64
+    let inUse: [InUse]
+    let errorMessage: String?
+
+    init(_ value: JSONValue) {
+        let root = value.objectValue ?? [:]
+        ok = root.bool("ok") ?? false
+        dryRun = root.bool("dryRun") ?? false
+        removed = (root.array("removed") ?? []).compactMap { item in
+            guard let entry = item.objectValue, let id = entry.string("versionId") else { return nil }
+            return Removal(versionId: id, bytes: Int64(entry.double("bytes") ?? 0))
+        }
+        freedBytes = Int64(root.double("freedBytes") ?? 0)
+        inUse = (root.array("inUse") ?? []).compactMap { item in
+            guard let entry = item.objectValue, let id = entry.string("versionId") else { return nil }
+            return InUse(versionId: id, reasons: (entry.array("reasons") ?? []).compactMap(\.stringValue))
+        }
+        errorMessage = root.object("error")?.string("message")
+    }
+
+    var freedText: String {
+        ByteCountFormatter.string(fromByteCount: freedBytes, countStyle: .file)
+    }
+}
+
 struct RuntimeOperationResult: Equatable, Sendable {
     let ok: Bool
     let op: String
@@ -2409,6 +2484,22 @@ func upsertMonitorEvents(_ changes: [MonitorEvent], into bucket: inout [MonitorE
 /// runtime and heals it.
 func runtimeSplitWarning(gateway: JSONValue?) -> String? {
     guard let split = gateway?.objectValue?.object("runtimeSplit") else { return nil }
+    // The daemon outlived a runtime update. The monitor restarts it by itself
+    // when it can (shutdown_if_idle); these are the cases it leaves to the user.
+    if let superseded = gateway?.objectValue?.object("supersededDaemon"),
+       let daemonVersion = superseded.string("daemonVersion"),
+       let runtimeVersion = superseded.string("runtimeVersion") {
+        switch superseded.string("plan") {
+        case "manual":
+            return "Gateway \(daemonVersion) daemon이 아직 실행 중입니다(설치된 runtime은 \(runtimeVersion)). 이 버전은 자동 idle 재시작을 지원하지 않습니다. 진행 중인 작업이 없을 때 Gateway 구성에서 '적용 및 안전 재시작'을 실행하세요."
+        case "blocked":
+            return "Gateway \(daemonVersion) daemon이 아직 실행 중입니다(설치된 runtime은 \(runtimeVersion)). 진행 중인 작업이 끝나면 자동으로 재시작합니다."
+        case "restart":
+            return "Gateway \(daemonVersion) daemon을 설치된 runtime \(runtimeVersion)으로 곧 자동 재시작합니다."
+        default:
+            break
+        }
+    }
     if let daemonRoot = split.string("daemonRuntimeRoot") {
         return "실행 중인 Gateway가 다른 runtime(\(daemonRoot))에서 동작하고 있습니다. Gateway 구성에서 '적용 및 안전 재시작'을 실행하면 현재 runtime으로 전환됩니다."
     }
