@@ -66,8 +66,8 @@ jobs:
         run: echo "ACP_LYNK_NODE_DIST_DIR=$(sh macos/scripts/prepare-node-runtime.sh)" >> "$GITHUB_ENV"
       - name: Build packaged app
         env:
-          ACP_LYNK_APP_VERSION: 0.5.0-beta.3
-          ACP_LYNK_BUILD_NUMBER: 15
+          ACP_LYNK_APP_VERSION: 0.5.0-beta.4
+          ACP_LYNK_BUILD_NUMBER: 16
         run: sh macos/scripts/build-app.sh
       - name: Run packaged Gateway and sidecar smoke test
         run: node scripts/package-smoke.js build/AgenLynk.app

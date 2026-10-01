@@ -173,6 +173,7 @@ npm run macos:test    # Swift 모델·설정·Pet·온보딩
 
 | 버전 | 주요 내용 |
 |---|---|
+| **0.5.0 beta 4** | AgenLynk가 agent-delegator skill을 직접 배포하고 앱 실행 때마다 최신으로 갱신 · skill을 ACP 호출 방법 중심으로 짧게 정리(모델 지정 규칙 제거) · Worker 작업을 백그라운드로 시작하고 나중에 결과 회수 |
 | **0.5.0 beta 3** | Gateway 1.7.2를 npm 패키지로 받음(무결성·출처 검증, runtime 용량 약 418MB → 145MB) · 옛 Gateway에 고정된 MCP 항목 감지와 일괄 다시 연결 · 옛 runtime 정리 · 런타임 업데이트 뒤 옛 daemon 자동 재시작 · Grok Worker가 Codex로 표시되던 문제 등 Worker 연결 오류 수정 |
 | **0.5.0 beta 2** | Gateway 1.6.0 호출자 기록으로 Worker를 연 Main을 직접 연결 · 이벤트에 보낸 쪽·받는 쪽(`from`/`to`) 기록 · SDK로 띄운 채팅 호스트 세션을 Frontdoor로 표시 · macOS 26에서 메뉴바 아이콘이 안 보이던 문제 수정 · 앱 시작 즉시 Gateway 연결 |
 | **0.5.0 beta 1** | Claude · Codex · Grok 실시간 hook(동의 후 설치) · 세 CLI 공통 이벤트 형식과 SQLite 기록 보관 · 토큰 사용량과 작업 예상치 · 대시보드 현황/그래프/시퀀스 보기와 보기 설정 · 메뉴바 작업 파이프라인과 `메인 \| 서브` 개수 · 셸로 띄운 에이전트와 2~3단 서브에이전트를 Worker로 연결 · 대기 Worker 접기 · Gateway 1.5.2 |
@@ -183,6 +184,17 @@ npm run macos:test    # Swift 모델·설정·Pet·온보딩
 | **0.3.4** | Frontdoor 설치 상태를 실제 에이전트 config로 감지 · 온보딩 다중 설치 |
 | **0.3.3** | Frontdoor 이름 지정 · 시퀀스 다이어그램 호출/응답 화살표 · 선택 에이전트 활동 |
 | **0.2.0** | AgenLynk로 리네임 · Pet Canvas 렌더 · DMG 경량화 |
+
+### 0.5.0 beta 4 변경 사항
+
+**agent-delegator skill**
+- 각 CLI(Claude·Codex·Grok·Auggie)가 읽는 `agent-delegator` skill을 AgenLynk가 직접 배포합니다. 예전에는 Gateway가 처음 설치할 때 한 번 넣고 끝이라, 1.4 시절 안내가 그대로 남아 새 Gateway와 맞지 않았습니다.
+- 앱을 실행할 때마다 skill을 앱에 포함된 판으로 갱신합니다. 아무도 고치지 않은 사본만 자동으로 바꾸고, 직접 고친 사본이나 skill이 없는 CLI는 설정 > Frontdoor MCP 설치에서 **업데이트**로 바꿉니다.
+- skill 내용을 ACP 호출 방법만 남기고 짧게 줄였습니다(83줄 → 42줄). 어떤 모델을 쓸지는 skill이 정하지 않습니다.
+
+**백그라운드 실행**
+- Worker 작업을 `agent_acp_run {waitMs: 0}`으로 시작해 바로 돌려받고, Main은 다른 일을 하다가 `taskId`로 결과를 받습니다.
+- Claude Code처럼 백그라운드 서브에이전트가 있는 CLI에서는 대기를 서브에이전트에 맡깁니다. 권한 요청과 질문은 언제나 Main이 답합니다.
 
 ### 0.5.0 beta 3 변경 사항
 
