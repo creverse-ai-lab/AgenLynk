@@ -202,6 +202,11 @@ export async function verifyGatewayProvenance({ lock, runNpm = runNpmCommand }) 
     }
     const rejected = [...(report?.invalid ?? []), ...(report?.missing ?? [])].find((item) => item?.name === lock.package.name);
     if (rejected) throw new Error(`Gateway package provenance: npm could not verify ${lock.package.name}@${lock.version}`);
+    // npm 10 (the one Node 22 bundles) accepts --include-attestations but
+    // reports only failures, so there is no attestation to pin.
+    if (!Array.isArray(report?.verified)) {
+      throw new Error("Gateway package provenance: this npm does not report verified attestations; use npm 11 or newer (set ACP_LYNK_NPM)");
+    }
     return evaluateProvenance((report?.verified ?? []).find((item) => item?.name === lock.package.name), lock);
   } finally {
     await rm(scratch, { recursive: true, force: true });

@@ -182,6 +182,11 @@ test("npm provenance verification installs the pinned version and reads npm's ve
     verifyGatewayProvenance({ lock, runNpm: runNpm(installed, { invalid: [{ name: "acp-gateway-daemon" }], verified: [] }) }),
     /could not verify/
   );
+  // npm 10's report (Node 22's bundled npm) names only failures.
+  await assert.rejects(
+    verifyGatewayProvenance({ lock, runNpm: runNpm(installed, { invalid: [], missing: [] }) }),
+    /use npm 11 or newer/
+  );
 });
 
 async function packFixture(workspace, { extra } = {}) {
