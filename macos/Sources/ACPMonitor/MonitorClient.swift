@@ -61,6 +61,23 @@ actor MonitorClient {
         return try ACPAgentCatalogSnapshot.decode(data)
     }
 
+    func fetchSkillStatus(endpoint: MonitorEndpoint) async throws -> DelegatorSkillStatus {
+        let (data, response) = try await URLSession.shared.data(for: endpoint.request(path: "api/skill"))
+        try validate(response: response, data: data)
+        return try DelegatorSkillStatus.decode(data)
+    }
+
+    /// `install` adds the skill where it is missing; `force` replaces copies
+    /// the user edited.
+    func syncSkill(endpoint: MonitorEndpoint, install: [String], force: [String]) async throws -> DelegatorSkillStatus {
+        var request = endpoint.request(path: "api/skill", method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["install": install, "force": force] as [String: Any])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response: response, data: data)
+        return try DelegatorSkillStatus.decode(data)
+    }
+
     func fetchHookStatus(endpoint: MonitorEndpoint) async throws -> MonitoringHookStatus {
         let (data, response) = try await URLSession.shared.data(for: endpoint.request(path: "api/hooks"))
         try validate(response: response, data: data)

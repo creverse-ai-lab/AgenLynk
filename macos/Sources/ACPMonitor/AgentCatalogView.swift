@@ -105,6 +105,9 @@ struct AgentCatalogView: View {
             if !model.staleFrontdoorEntries.isEmpty {
                 staleEntriesNotice
             }
+            if let skill = model.delegatorSkill, !skill.pending.isEmpty {
+                skillNotice(skill)
+            }
             if !model.onboardingInstallLocationReady {
                 Label("AgenLynk를 Applications 폴더로 옮긴 뒤 다시 실행해야 설치할 수 있습니다.", systemImage: "externaldrive.badge.exclamationmark")
                     .font(.caption)
@@ -119,7 +122,35 @@ struct AgentCatalogView: View {
             }
         }
         .padding(14)
-        .task { await model.loadInstalledFrontdoors() }
+        .task {
+            await model.loadInstalledFrontdoors()
+            await model.loadDelegatorSkill()
+        }
+    }
+
+    /// The delegation skill each Main reads. Unedited copies follow the app by
+    /// themselves; an edited or missing one waits for this button.
+    private func skillNotice(_ skill: DelegatorSkillStatus) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("agent-delegator skill이 최신이 아닌 CLI가 있습니다.")
+                    Text(skill.pending.map { target in
+                        "\(target.agent.capitalized) (\(target.state == "missing" ? "없음" : target.state == "customized" ? "직접 수정됨" : "이전 버전"))"
+                    }.joined(separator: ", "))
+                    .foregroundStyle(.secondary)
+                }
+            } icon: {
+                Image(systemName: "text.badge.exclamationmark").foregroundStyle(.orange)
+            }
+            .font(.caption)
+            .help("직접 수정한 skill은 자동으로 바꾸지 않습니다. 업데이트하면 수정한 내용은 앱에 포함된 skill로 바뀝니다.")
+            Spacer()
+            Button(model.delegatorSkillUpdating ? "업데이트 중…" : "업데이트") {
+                Task { await model.updateDelegatorSkill() }
+            }
+            .disabled(model.delegatorSkillUpdating)
+        }
     }
 
     /// Entries pinned to an old runtime keep launching that Gateway after every

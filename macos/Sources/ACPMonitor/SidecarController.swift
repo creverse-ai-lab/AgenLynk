@@ -121,8 +121,10 @@ actor SidecarProcessActor {
             "ACP_GATEWAY_MONITOR_PORT": "0",
             "ACP_GATEWAY_MONITOR_AUTOSTART": "1",
             // Only the app's own sidecar receives agent hooks and keeps the
-            // user's hook registrations current (see sidecar/src/hooks).
+            // user's hook registrations and agent-delegator skill current
+            // (see sidecar/src/hooks, sidecar/src/app/delegator-skill.js).
             "ACP_GATEWAY_MONITOR_HOOKS": "1",
+            "ACP_GATEWAY_MONITOR_SKILL_SYNC": "1",
             "ACP_GATEWAY_MONITOR_PARENT_PID": String(ProcessInfo.processInfo.processIdentifier),
             "PATH": path,
             "ACP_GATEWAY_NODE": nodeURL.path,

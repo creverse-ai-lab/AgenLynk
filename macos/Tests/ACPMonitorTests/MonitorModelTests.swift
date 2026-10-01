@@ -21,6 +21,7 @@ enum MonitorModelChecks {
         try monitoringHookStatusDecodesPerCliState()
         try installedFrontdoorsDecodePrimaryInstalledAndNullEmpty()
         try runtimePrunePlanDecodesRemovalsAndInUse()
+        try delegatorSkillStatusListsWhatIsNotCurrent()
         try gatewayConfigDecodesAllControlMetadata()
         try gatewayConfigRepresentsAllKnownSettingIds()
         try gatewayConfigDecodesBothLanguagesAndFallsBackToEnglish()
@@ -1274,6 +1275,19 @@ enum MonitorModelChecks {
         try check(response.agents.count == 2, "agent catalog decode failed")
         try check(response.agents[0].installed && !response.agents[0].enabled, "installed and enabled must be independent")
         try check(!response.agents[1].installSupported, "manual binary install state decode failed")
+    }
+
+    private static func delegatorSkillStatusListsWhatIsNotCurrent() throws {
+        let status = try DelegatorSkillStatus.decode(Data(#"""
+        {"name":"agent-delegator","digest":"abc","targets":[
+          {"agent":"claude","state":"current","path":"/c"},
+          {"agent":"grok","state":"customized","path":"/g"},
+          {"agent":"auggie","state":"missing","path":"/a"},
+          {"agent":"codex"}
+        ]}
+        """#.utf8))
+        try check(status.targets.count == 3, "a target without a state is dropped")
+        try check(status.pending.map(\.agent) == ["grok", "auggie"], "only copies that are not current wait for the user")
     }
 
     private static func runtimePrunePlanDecodesRemovalsAndInUse() throws {

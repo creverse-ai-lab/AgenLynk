@@ -28,6 +28,7 @@ import { pathIsMissing } from "../app/fs-paths.js";
 import { gatewaySocketPath } from "../app/config.js";
 import { defaultInstallStatePath } from "../app/install-state.js";
 import { readInstalledFrontdoors } from "../app/frontdoor-configs.js";
+import { delegatorSkillStatus, SKILL_AGENTS, syncDelegatorSkill } from "../app/delegator-skill.js";
 import {
   GATEWAY_SETTING_DEFINITIONS,
   defaultGatewaySettings,
@@ -70,6 +71,9 @@ const HISTORY_ENABLED = booleanEnv("ACP_GATEWAY_MONITOR_HISTORY", true);
 // Off unless the app turns it on: a sidecar started by tests or by hand must
 // never take over the app's hook endpoint or edit the user's agent configs.
 const HOOKS_ENABLED = booleanEnv("ACP_GATEWAY_MONITOR_HOOKS", false);
+// Like hooks, only the app turns this on: a test or dev sidecar must not
+// rewrite the skills in the user's agent homes.
+const SKILL_SYNC_ENABLED = booleanEnv("ACP_GATEWAY_MONITOR_SKILL_SYNC", false);
 const MAX_HOOK_BODY_BYTES = 1024 * 1024;
 // How long a hook answer may wait for its process tree to be read.
 const HOOK_LINEAGE_BUDGET_MS = 250;
@@ -558,6 +562,16 @@ async function main() {
       console.error(`Hook install failed: ${error.message}`);
     }
   }
+  // Every start brings the delegation skill in each Main CLI up to the one
+  // this build ships; a copy someone edited is left alone (see
+  // delegator-skill.js).
+  if (SKILL_SYNC_ENABLED) {
+    void syncDelegatorSkill()
+      .then((result) => {
+        if (Object.keys(result.errors).length) console.error(`Skill update incomplete: ${Object.values(result.errors).join("; ")}`);
+      })
+      .catch((error) => console.error(`Skill update failed: ${error.message}`));
+  }
   console.log(JSON.stringify({
     kind: "monitor_ready",
     schemaVersion: MONITOR_SCHEMA_VERSION,
@@ -719,6 +733,18 @@ async function main() {
         sessionId,
         events: state.store.page(sessionId, { before: Number.isFinite(before) && before > 0 ? before : Infinity, limit })
       });
+      return;
+    }
+    if (url.pathname === "/api/skill" && request.method === "GET") {
+      sendJson(response, await delegatorSkillStatus());
+      return;
+    }
+    if (url.pathname === "/api/skill" && request.method === "POST") {
+      // `install`: agents to add it to; `force`: agents whose edited copy
+      // the user chose to replace.
+      const body = await readJsonBody(request);
+      const agents = (list) => (Array.isArray(list) ? list.filter((agent) => SKILL_AGENTS.includes(agent)) : []);
+      sendJson(response, await syncDelegatorSkill({ install: agents(body.install), force: agents(body.force) }));
       return;
     }
     if (url.pathname === "/api/hooks" && request.method === "GET") {

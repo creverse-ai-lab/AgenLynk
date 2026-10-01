@@ -104,6 +104,8 @@ cp "$REPO_ROOT/sidecar/package.json" "$SIDECAR_ROOT/package.json"
 cp -R "$REPO_ROOT/sidecar/src" "$SIDECAR_ROOT/src"
 # The monitoring hook script the sidecar installs for Claude/Codex/Grok.
 cp -R "$REPO_ROOT/sidecar/hooks" "$SIDECAR_ROOT/hooks"
+# The agent-delegator skill the sidecar keeps current in every Main CLI.
+cp -R "$REPO_ROOT/sidecar/skills" "$SIDECAR_ROOT/skills"
 for REQUIRED in \
   gateway-seed/node_modules/acp-gateway-daemon/src/index.js \
   gateway-seed/node_modules/acp-gateway-daemon/src/bootstrap.js \

@@ -1625,6 +1625,30 @@ struct InstalledFrontdoors: Equatable, Sendable {
     }
 }
 
+/// The agent-delegator skill in each Main CLI, per `/api/skill`. The sidecar
+/// replaces unedited older copies by itself; "customized" and "missing" wait
+/// for the user.
+struct DelegatorSkillStatus: Equatable, Sendable {
+    struct Target: Equatable, Sendable, Identifiable {
+        let agent: String
+        /// "current", "outdated", "customized", or "missing".
+        let state: String
+        var id: String { agent }
+    }
+
+    let targets: [Target]
+    var pending: [Target] { targets.filter { $0.state != "current" } }
+
+    static func decode(_ data: Data) throws -> DelegatorSkillStatus {
+        let raw = try JSONSerialization.jsonObject(with: data)
+        guard let root = JSONValue(any: raw).objectValue else { throw MonitorDecodeError.invalidMessage }
+        return DelegatorSkillStatus(targets: (root.array("targets") ?? []).compactMap { item in
+            guard let entry = item.objectValue, let agent = entry.string("agent"), let state = entry.string("state") else { return nil }
+            return Target(agent: agent, state: state)
+        })
+    }
+}
+
 /// An agent MCP entry pinned to a runtime version that is no longer current
 /// ("pinned") or pointing at a script that is gone ("missing"), so it keeps
 /// launching an old Gateway, or nothing, until relinked.

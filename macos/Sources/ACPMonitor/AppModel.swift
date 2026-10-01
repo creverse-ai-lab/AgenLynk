@@ -36,6 +36,9 @@ final class AppModel: ObservableObject {
     /// Agent MCP entries still launching an old runtime version, per
     /// `/api/frontdoors`; Settings offers to relink them all at once.
     @Published private(set) var staleFrontdoorEntries: [StaleFrontdoorEntry] = []
+    /// The agent-delegator skill in each Main CLI, per `/api/skill`.
+    @Published private(set) var delegatorSkill: DelegatorSkillStatus?
+    @Published private(set) var delegatorSkillUpdating = false
     /// The agent whose Control MCP install is running right now (nil when idle),
     /// so only its row shows progress.
     @Published private(set) var installingFrontdoor: String?
@@ -1184,6 +1187,32 @@ final class AppModel: ObservableObject {
                 self.installingFrontdoor = nil
                 self.onboardingError = error.localizedDescription
             }
+        }
+    }
+
+    func loadDelegatorSkill() async {
+        if endpoint == nil { await ensureStarted() }
+        guard let endpoint else { return }
+        if let status = try? await client.fetchSkillStatus(endpoint: endpoint), status != delegatorSkill {
+            delegatorSkill = status
+        }
+    }
+
+    /// Puts the shipped skill everywhere it is not current: adds it where it
+    /// is missing and replaces copies the user edited (they asked to).
+    func updateDelegatorSkill() async {
+        guard let endpoint, let pending = delegatorSkill?.pending, !pending.isEmpty, !delegatorSkillUpdating else { return }
+        delegatorSkillUpdating = true
+        defer { delegatorSkillUpdating = false }
+        do {
+            delegatorSkill = try await client.syncSkill(
+                endpoint: endpoint,
+                install: pending.filter { $0.state == "missing" }.map(\.agent),
+                force: pending.filter { $0.state == "customized" }.map(\.agent)
+            )
+            lastNotice = "agent-delegator skill을 업데이트했습니다. 새로 시작하는 세션부터 적용됩니다."
+        } catch {
+            onboardingError = error.localizedDescription
         }
     }
 

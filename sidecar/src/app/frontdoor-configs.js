@@ -82,12 +82,17 @@ export async function staleReason(entry, gatewayHome, currentId) {
   if (!script) return null;
   const runtime = join(gatewayHome, "runtime") + sep;
   if (!script.startsWith(runtime)) return null;
+  let resolved;
   try {
-    await realpath(script);
+    resolved = await realpath(script);
   } catch {
     return { reason: "missing", path: script };
   }
   const [area, id] = script.slice(runtime.length).split(sep);
+  // A version path that resolves into the current version (a hand-made
+  // alias) still launches the current runtime.
+  const current = currentId ? await realpath(join(runtime, "versions", currentId)).catch(() => null) : null;
+  if (current && resolved.startsWith(current + sep)) return null;
   if (area === "versions" && id && currentId && id !== currentId) {
     return { reason: "pinned", path: script, version: id };
   }
