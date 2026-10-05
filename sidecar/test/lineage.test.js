@@ -215,7 +215,7 @@ test("lineage projects a shell-launched agent as a worker of its launcher", () =
 test("a hook-only session with no activity is held back, then dropped, even with a transcript", async () => {
   await withTempDirectory(async (root) => {
     const claudeRoot = join(root, "projects");
-    const registry = new HookSessions({ claudeRoot, grokRoot: join(root, "grok") });
+    const registry = new HookSessions({ claudeRoot, grokRoot: join(root, "grok"), isAlive: () => true });
     const at = Date.parse("2026-09-27T01:01:49Z");
     const probe = { session_id: "probe-1", cwd: "/Users/x/Library/Application Support/CodexBar/ClaudeProbe", transcript_path: join(claudeRoot, "p", "probe-1.jsonl") };
 
@@ -269,7 +269,7 @@ test("hook lineage makes a shell-launched session a worker; the scanner's proven
       4900: { ppid: 4866, comm: "/bin/sh", args: "sh -c hook" }
     });
     const lineage = new ProcessLineage({ claudeSessionsDir: sessions, run });
-    const registry = new HookSessions({ claudeRoot: join(root, "projects"), grokRoot: join(root, "grok") });
+    const registry = new HookSessions({ claudeRoot: join(root, "projects"), grokRoot: join(root, "grok"), isAlive: () => true });
     const at = Date.parse("2026-09-27T01:00:00Z");
 
     const recorded = registry.record("grok", { hook_event_name: "UserPromptSubmit", sessionId: GROK_ID, cwd: "/w" }, at,
@@ -475,7 +475,7 @@ test("a grok sub-agent's parent is the grok session that spawned it, not its pro
       4900: { ppid: 4866, comm: "/bin/sh", args: "sh -c hook" }
     });
     const lineage = new ProcessLineage({ claudeSessionsDir: sessions, run });
-    const registry = new HookSessions({ claudeRoot: join(root, "projects"), grokRoot });
+    const registry = new HookSessions({ claudeRoot: join(root, "projects"), grokRoot, isAlive: () => true });
     const at = Date.parse("2026-09-27T04:46:52Z");
     for (const sessionId of [GROK_PARENT_ID, GROK_CHILD_ID]) {
       const recorded = registry.record("grok", { hook_event_name: "UserPromptSubmit", sessionId, cwd: "/w" }, at,

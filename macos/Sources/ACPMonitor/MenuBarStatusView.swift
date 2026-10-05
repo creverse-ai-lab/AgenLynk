@@ -191,6 +191,8 @@ struct MenuBarStatusView: View {
         HStack(spacing: 12) {
             Button("대시보드 열기") { openDashboard() }
                 .buttonStyle(.borderless)
+            Button("노치 채팅") { model.notchChat.toggle() }
+                .buttonStyle(.borderless)
             Spacer()
             // SettingsLink is the only supported way to open the Settings
             // scene from a menu-bar popover on macOS 14. Activate too, or the

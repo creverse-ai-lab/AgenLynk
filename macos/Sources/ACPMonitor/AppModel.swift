@@ -154,6 +154,8 @@ final class AppModel: ObservableObject {
     let settings = AppSettings()
     private let sidecar = SidecarController()
     private let client = MonitorClient()
+    /// The panel hanging from the notch; created on first use.
+    private(set) lazy var notchChat = NotchChatController(model: self)
     private let petStore = PetStore()
     private let installer = InstallerController()
     private let runtimeProvisioner = RuntimeProvisioner()
@@ -970,6 +972,14 @@ final class AppModel: ObservableObject {
         if onboardingOutput.count > 200 { onboardingOutput.removeFirst(onboardingOutput.count - 200) }
     }
 
+    /// The notch chat's way in: the same client and sidecar as the rest of
+    /// the app, nil until the sidecar is up.
+    func chatConnection() async -> (MonitorClient, MonitorEndpoint)? {
+        if endpoint == nil { await ensureStarted() }
+        guard let endpoint else { return nil }
+        return (client, endpoint)
+    }
+
     func ensureStarted() async {
         startIfNeeded()
         await startTask?.value
@@ -1675,6 +1685,7 @@ final class AppModel: ObservableObject {
             }, onState: { [weak self] connected, error in
                 guard let self, self.connectionIsCurrent(generation) else { return }
                 self.sidecarStreamConnected = connected
+                if connected { self.notchChat.streamConnected() }
                 if !connected {
                     self.phase = .disconnected(error ?? "Dashboard 데이터 스트림이 끊겼습니다.")
                     Task { [weak self] in
@@ -1758,6 +1769,9 @@ final class AppModel: ObservableObject {
         guard let message = value.objectValue, let kind = message.string("kind") else { return }
         monitorStore.markStreamMessage()
         switch kind {
+        case "reply_slot", "reply_slot_closed":
+            // A Frontdoor's Stop the notch may answer; not monitor state.
+            notchChat.handleReplyMessage(kind: kind, message: message)
         case "events":
             // Changed canonical events, upserted by id (Monitor API v2).
             monitorStore.applyEventsMessage(message)

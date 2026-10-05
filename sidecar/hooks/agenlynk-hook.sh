@@ -3,9 +3,11 @@
 #
 # Forwards the hook event on stdin to the local AgenLynk sidecar so the
 # dashboard sees tool calls, permission prompts and turn ends as they happen.
-# Observe-only: it never prints a decision, always exits 0, and gives up in
-# about a second when AgenLynk is not running, so it can never block or
-# change what the agent does.
+# Every event but Stop is observe-only: nothing is printed and it gives up in
+# about a second when AgenLynk is not running. A Stop may wait while the
+# notch offers a reply to a Frontdoor; it prints only what the sidecar
+# answers (a reply to continue with, or nothing to stop as usual) and always
+# exits 0, so a missing or slow AgenLynk still lets the agent stop.
 #
 # Usage (registered by AgenLynk's hook installer): agenlynk-hook.sh claude|codex|grok
 
@@ -62,8 +64,34 @@ if [ "$provider" != "codex" ] && id_ok "${CODEX_THREAD_ID:-}"; then set -- "$@" 
 if id_ok "${CLAUDE_CODE_ENTRYPOINT:-}"; then set -- "$@" -H "X-AgenLynk-Entrypoint: ${CLAUDE_CODE_ENTRYPOINT}"; fi
 case "${PPID:-}" in ''|*[!0-9]*) ;; *) set -- "$@" -H "X-AgenLynk-Hook-Ppid: ${PPID}" ;; esac
 
+payload=$(mktemp "${TMPDIR:-/tmp}/agenlynk-hook.XXXXXX") || { cat >/dev/null 2>&1; exit 0; }
+trap 'rm -f "$payload"' EXIT
+cat > "$payload" 2>/dev/null || :
+
+# Stop is the one event the sidecar may hold (for a notch reply); its own
+# deadline is shorter than this and than the hook timeout.
+if grep -Eq '"(hook_event_name|hookEventName)"[[:space:]]*:[[:space:]]*"(Stop|stop)"' "$payload" 2>/dev/null; then
+  # In the background so that an agent interrupting or timing out this hook
+  # (which signals the shell) also ends the request, and with it the reply
+  # window; a foreground curl would be orphaned and keep it open.
+  answer_file=$(mktemp "${TMPDIR:-/tmp}/agenlynk-hook.XXXXXX") || exit 0
+  trap 'rm -f "$payload" "$answer_file"' EXIT
+  curl -sS -X POST "http://127.0.0.1:${port}/api/hooks/${provider}" \
+    --connect-timeout 0.3 --max-time 150 \
+    "$@" \
+    --data-binary @"$payload" -o "$answer_file" 2>/dev/null &
+  curl_pid=$!
+  trap 'kill "$curl_pid" 2>/dev/null; exit 0' TERM INT HUP
+  wait "$curl_pid" 2>/dev/null || :
+  answer=$(cat "$answer_file" 2>/dev/null) || answer=
+  case "$answer" in
+    '{"decision":"block"'*) printf '%s\n' "$answer" ;;
+  esac
+  exit 0
+fi
+
 curl -sS -X POST "http://127.0.0.1:${port}/api/hooks/${provider}" \
   --connect-timeout 0.3 --max-time 1 \
   "$@" \
-  --data-binary @- >/dev/null 2>&1 || :
+  --data-binary @"$payload" >/dev/null 2>&1 || :
 exit 0

@@ -306,11 +306,24 @@ export class ProcessLineage {
     const value = {
       parent: this.#walk(entry.ppid, markers, self),
       headless: headlessArgs(self?.provider, args),
+      ...(this.#underGateway(entry.ppid) ? { gatewayWorker: true } : {}),
       ...(interactiveHostArgs(self?.provider, args) ? { interactive: true } : {})
     };
     this.cache.set(key, { self: `${self?.provider}:${self?.session}`, value });
     if (this.cache.size > MAX_CACHED) this.cache.delete(this.cache.keys().next().value);
     return value;
+  }
+
+  /** True when a Gateway process is among the ancestors (an ACP Worker). */
+  #underGateway(start) {
+    let current = start;
+    for (let hop = 0; hop < MAX_HOPS && current > 1; hop += 1) {
+      const entry = this.table.get(current);
+      if (!entry) return false;
+      if (isGatewayProcess(entry.comm)) return true;
+      current = entry.ppid;
+    }
+    return false;
   }
 
   #walk(start, markers, self) {

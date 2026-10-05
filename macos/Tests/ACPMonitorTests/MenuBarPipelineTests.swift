@@ -17,6 +17,7 @@ struct MenuBarPipelineTests {
         try restingWorkersKeepTheirDepthAndClosedOnesFoldToo()
         try pipelineAndSequenceShareOneTree()
         try idleParentOfAMovingWorkerStaysListed()
+        try frontdoorAlertsFollowTransitions()
         print("Swift menu bar pipeline checks passed")
     }
 
@@ -150,6 +151,48 @@ struct MenuBarPipelineTests {
         try check(card.stages.map(\.id) == ["root", "w2"], "the Frontdoor and the failed Worker are listed, got \(card.stages.map(\.id))")
         try check(card.restingStages.map(\.id) == ["w1", "w1a"], "closed and idle Workers rest, got \(card.restingStages.map(\.id))")
         try check(card.restingStages.map(\.depth) == [1, 2], "a resting nested Worker keeps its depth")
+    }
+
+    /// The notch alerts on a Frontdoor's changes, never on what it found at
+    /// launch, and a Worker's wait is reported through its Frontdoor.
+    private static func frontdoorAlertsFollowTransitions() throws {
+        func frontdoors(root: String, worker: String) throws -> [FrontdoorSession] {
+            FrontdoorSession.make(sessions: [
+                try session("root", status: root, role: "frontdoor"),
+                try session("w1", status: worker, parent: "root", created: "2026-09-26T00:01:00.000Z")
+            ])
+        }
+        var tracker = FrontdoorAlertTracker()
+        let notLoaded = tracker.update([])
+        try check(notLoaded.isEmpty, "an empty list neither alerts nor primes")
+        func step(_ root: String, _ worker: String) throws -> [NotchAlert] {
+            tracker.update(try frontdoors(root: root, worker: worker))
+        }
+        let launch = try step("waiting_permission", "idle")
+        try check(launch.isEmpty, "the launch snapshot alerts nothing")
+        let started = try step("running", "idle")
+        try check(started.isEmpty, "starting to run is not an alert")
+        let waiting = try step("running", "waiting_permission")
+        try check(waiting.map(\.kind) == [.permission], "a waiting Worker alerts through its Frontdoor, got \(waiting.map(\.kind))")
+        try check(waiting.first?.sessionId == "w1", "the alert opens the waiting Worker")
+        try check(waiting.first?.isSticky == true, "a wait stays until it is answered")
+        let stillWaiting = try step("running", "waiting_permission")
+        try check(stillWaiting.isEmpty, "an unchanged wait alerts once")
+        let resumed = try step("running", "idle")
+        try check(resumed.isEmpty, "back to running is quiet")
+        let done = try step("idle", "idle")
+        try check(done.map(\.kind) == [.done], "running to idle is done, got \(done.map(\.kind))")
+        try check(done.first?.sessionId == "root", "a finished Frontdoor opens its root")
+        let next = try step("running", "idle")
+        try check(next.isEmpty, "a new turn is quiet")
+        let failed = try step("error", "idle")
+        try check(failed.map(\.kind) == [.failed], "running to error fails")
+        _ = try step("running", "waiting_input")
+        let reconnecting = tracker.update([])
+        try check(reconnecting.isEmpty, "a reconnect's empty list is not a change")
+        let back = try step("running", "waiting_input")
+        try check(back.isEmpty, "the same wait after a reconnect alerts nothing")
+        try check(FrontdoorAlertTracker.alertKind(from: nil, to: .idle) == nil, "a Frontdoor first seen idle stays quiet")
     }
 
     private static func statusItemCountsMainAndSubAgents() throws {

@@ -46,6 +46,7 @@ env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/EventTimeline.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/MenuBarPipeline.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/MenuBarCounts.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/FrontdoorAlerts.swift" \
   "$REPO_ROOT/macos/Tests/ACPMonitorTests/MenuBarPipelineTests.swift" \
   -o "$PIPELINE_OUT"
 

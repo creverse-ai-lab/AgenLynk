@@ -15,6 +15,8 @@
 // is no proof: a probe writes one and deletes it, and a real session with a
 // transcript is listed by the scanner on its own.
 
+import { readdirSync, readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isWithin } from "../app/fs-paths.js";
@@ -50,15 +52,21 @@ const SCANNER_STATE = {
   idle: "ready"
 };
 
+const BACKGROUND_RUNNING_TTL_MS = 120_000;
+
 export class HookSessions {
   constructor({
     staleAfterMs = DEFAULT_STALE_AFTER_MS,
     grokRoot = join(homedir(), ".grok", "sessions"),
-    claudeRoot = join(homedir(), ".claude", "projects")
+    claudeRoot = join(homedir(), ".claude", "projects"),
+    claudeSessionsDir = join(homedir(), ".claude", "sessions"),
+    isAlive = processAlive
   } = {}) {
     this.staleAfterMs = staleAfterMs;
     this.grokRoot = grokRoot;
     this.claudeRoot = claudeRoot;
+    this.claudeSessionsDir = claudeSessionsDir;
+    this.isAlive = isAlive;
     this.sessions = new Map();
     this.parents = new Map();
     // provider -> ms of the last hook received, so settings can tell
@@ -97,13 +105,20 @@ export class HookSessions {
       this.sessions.set(key, entry);
       if (this.sessions.size > MAX_SESSIONS) this.sessions.delete(this.sessions.keys().next().value);
     }
-    const { hook, status, statusAt, events } = entry.normalizer.ingest(provider, payload, receivedAt);
+    const { hook, statusAt, events, status: reported } = entry.normalizer.ingest(provider, payload, receivedAt);
+    let status = reported;
     entry.lastSeen = receivedAt;
     if (isActivity(hook)) entry.active = true;
     if (lineage?.markers) entry.markers = { ...entry.markers, ...lineage.markers };
     if (lineage?.ppid && !entry.ppid) entry.ppid = lineage.ppid;
     if (provider === "claude" && headlessEntrypoint(entry.markers.entrypoint)) entry.headless = true;
-    if (hook.cwd) entry.cwd = hook.cwd;
+    // The folder it was started in names the session; later payloads carry
+    // wherever its shell has since cd'ed to.
+    if (hook.cwd && !entry.cwd) {
+      entry.cwd = hook.cwd;
+      // Only a session seen from its start knows its launch folder this way.
+      entry.cwdIsLaunch = hook.event === "SessionStart";
+    }
     if (hook.model) entry.model = hook.model;
     // A transcript path from a payload is only followed inside the agent's
     // own transcript tree: the monitor must never become a reader of
@@ -113,6 +128,14 @@ export class HookSessions {
     } else if (provider === "grok" && entry.cwd && /^[A-Za-z0-9-]+$/.test(entry.session)) {
       entry.transcript = join(this.grokRoot, encodeURIComponent(entry.cwd), entry.session);
     }
+    // A Claude turn that ends with background tasks still out is not at
+    // rest: it wakes itself when they report back.
+    const backgroundTasks = Array.isArray(payload?.background_tasks) ? payload.background_tasks.length : 0;
+    if (status === "idle" && hook.event === "Stop" && backgroundTasks > 0) status = "running";
+    entry.backgroundTasks = hook.event === "Stop" ? backgroundTasks : (entry.backgroundTasks ?? 0);
+    // Only that Stop's "running" is provisional (see merge); any later hook
+    // speaks for itself.
+    entry.backgroundRunning = hook.event === "Stop" && backgroundTasks > 0;
     if (status) {
       entry.status = status;
       entry.statusAt = Date.parse(statusAt) || receivedAt;
@@ -126,6 +149,31 @@ export class HookSessions {
       status,
       heldBack: !listable(entry)
     };
+  }
+
+  /**
+   * A notch reply turned this session's Stop into another round: it is
+   * working again, though no hook says so until its next tool call.
+   */
+  markRunning(key, at = Date.now()) {
+    const entry = this.sessions.get(key);
+    if (!entry) return;
+    entry.status = "running";
+    entry.statusAt = at;
+    entry.event = "NotchReply";
+  }
+
+  /**
+   * Whether a person is on the other end of this session's Stop: a root
+   * session (no launching agent) whose own process was found and is not a
+   * one-shot run. Only such a Frontdoor gets a notch reply window.
+   */
+  replyTarget(key) {
+    const entry = this.sessions.get(key);
+    if (!entry) return null;
+    const person = !entry.headless || entry.interactiveKind;
+    const eligible = Boolean(entry.lineageResolved && entry.agentPid && person && !entry.parent && !entry.gatewayWorker);
+    return { eligible, provider: entry.provider, cwd: entry.cwd ?? null, backgroundTasks: entry.backgroundTasks ?? 0 };
   }
 
   /**
@@ -149,10 +197,13 @@ export class HookSessions {
         if (!lineage.table.has(entry.ppid)) await lineage.refresh(nowMs / 1000, { force: true });
         agentPid = lineage.agentPidFromHook(entry.ppid, entry.provider);
         if (agentPid) {
+          entry.agentPid = agentPid;
+          if (entry.provider === "claude") await this.#readClaudeSession(entry, agentPid);
           const resolved = await lineage.resolve(agentPid, self);
           if (resolved.parent) entry.parent = resolved.parent;
           if (resolved.headless) entry.headless = true;
           if (resolved.interactive) entry.interactive = true;
+          if (resolved.gatewayWorker) entry.gatewayWorker = true;
           entry.lineageResolved = true;
         }
       } catch {
@@ -174,6 +225,49 @@ export class HookSessions {
     while (this.parents.size > MAX_SESSIONS) this.parents.delete(this.parents.keys().next().value);
   }
 
+  /** Live Claude sessions (id -> the folder each was started in), or null where Claude keeps no such records. */
+  #liveClaudeSessions(nowMs) {
+    if (this.liveCache && nowMs - this.liveCache.at < 1_000) return this.liveCache.ids;
+    let ids = null;
+    try {
+      const names = readdirSync(this.claudeSessionsDir).filter((name) => /^\d+\.json$/.test(name));
+      if (names.length) {
+        ids = new Map();
+        for (const name of names) {
+          try {
+            // A crash or SIGKILL leaves the file behind; only a live pid counts.
+            if (!this.isAlive(Number(name.slice(0, -".json".length)))) continue;
+            const record = JSON.parse(readFileSync(join(this.claudeSessionsDir, name), "utf8"));
+            if (typeof record?.sessionId === "string") ids.set(record.sessionId, typeof record.cwd === "string" ? record.cwd : null);
+          } catch {
+            // Half-written or foreign file.
+          }
+        }
+      }
+    } catch {
+      ids = null;
+    }
+    this.liveCache = { at: nowMs, ids };
+    return ids;
+  }
+
+  // Claude's own record of a live session (~/.claude/sessions/<pid>.json):
+  // the folder it was started in, and whether a person drives it. An IDE or
+  // desktop host runs Claude as `sdk-cli` yet marks it "interactive".
+  async #readClaudeSession(entry, pid) {
+    try {
+      const record = JSON.parse(await readFile(join(this.claudeSessionsDir, `${pid}.json`), "utf8"));
+      if (record?.sessionId !== entry.session) return;
+      if (typeof record.cwd === "string" && record.cwd) {
+        entry.cwd = record.cwd;
+        entry.cwdIsLaunch = true;
+      }
+      if (record.kind === "interactive") entry.interactiveKind = true;
+    } catch {
+      // No record (an older Claude, or already gone): nothing to add.
+    }
+  }
+
   /** The hook-learned launcher of a session, if any. */
   parentOf(provider, session) {
     return this.parents.get(`${provider}:${session}`) ?? null;
@@ -192,11 +286,28 @@ export class HookSessions {
         continue;
       }
       const raw = byKey.get(key);
+      // Killed without a SessionEnd (a closed terminal, SIGTERM): its
+      // process is the witness that it is over.
+      // Its record is dropped with it, so a `--resume` of the same session in
+      // a new process starts over (new lineage, new pid) instead of being
+      // judged by the dead one.
+      if (entry.agentPid && !this.isAlive(entry.agentPid)) {
+        if (raw) merged.splice(merged.indexOf(raw), 1);
+        this.sessions.delete(key);
+        continue;
+      }
       if (entry.status === "closed") {
         if (raw) merged.splice(merged.indexOf(raw), 1);
         // Nothing ever listed it: its end is the end of it.
         else if (!listable(entry)) this.sessions.delete(key);
         continue;
+      }
+      // A turn left background work running: running while that work is
+      // likely still reporting back, at rest after that (a dev server or a
+      // `tail -f` never wakes it, and the person is the one waiting).
+      if (entry.backgroundRunning && entry.status === "running" && nowMs - entry.statusAt > BACKGROUND_RUNNING_TTL_MS) {
+        entry.status = "idle";
+        entry.backgroundRunning = false;
       }
       const state = SCANNER_STATE[entry.status];
       if (raw) {
@@ -215,7 +326,9 @@ export class HookSessions {
           raw.time = entry.statusAt / 1000;
         }
         if (!raw.transcript && entry.transcript) raw.transcript = entry.transcript;
-        if (!raw.cwd && entry.cwd) raw.cwd = entry.cwd;
+        // The hook knows where it was started; the transcript only where
+        // its last record ran.
+        if (entry.cwd && (entry.cwdIsLaunch || !raw.cwd)) raw.cwd = entry.cwd;
         continue;
       }
       if (!state) continue;
@@ -248,6 +361,33 @@ export class HookSessions {
       raw.parent_provider = parent.provider;
       raw.parent_source = "lineage";
     }
+    // A finished Claude Frontdoor has no record in ~/.claude/sessions (Claude
+    // keeps one per live process). Without this, one that ended without a
+    // SessionEnd sits "idle" for the whole retention window.
+    const live = this.#liveClaudeSessions(nowMs);
+    if (live) {
+      for (let index = merged.length - 1; index >= 0; index -= 1) {
+        const raw = merged[index];
+        if (raw.provider !== "claude") continue;
+        if (!raw.parent && raw.state === "ready" && !live.has(raw.session)) {
+          merged.splice(index, 1);
+          continue;
+        }
+        // Where it was started, also before any hook (e.g. right after a
+        // monitor restart) has said so.
+        if (!raw.hooked && live.get(raw.session)) raw.cwd = live.get(raw.session);
+      }
+    }
     return merged;
+  }
+}
+
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM: alive, just not ours to signal.
+    return error?.code === "EPERM";
   }
 }

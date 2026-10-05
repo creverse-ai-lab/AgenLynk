@@ -27,6 +27,7 @@ export const HOOKS_CONSENT_VERSION = 1;
 const SCRIPT_NAME = "agenlynk-hook.sh";
 const BUNDLED_SCRIPT = fileURLToPath(new URL("../../hooks/agenlynk-hook.sh", import.meta.url));
 const HOOK_TIMEOUT_SECONDS = 5;
+const STOP_HOOK_TIMEOUT_SECONDS = 160;
 
 // Events each CLI is registered for. Claude and Codex lists are the events
 // their current releases accept (the same sets other tools register on this
@@ -107,8 +108,14 @@ function isOurs(group) {
 function ourGroup(target, event, script, provider) {
   return {
     ...(target.matcherEvents.has(event) ? { matcher: target.matcher } : {}),
-    hooks: [{ type: "command", command: hookCommand(script, provider), timeout: HOOK_TIMEOUT_SECONDS }]
+    hooks: [{ type: "command", command: hookCommand(script, provider), timeout: hookTimeout(event) }]
   };
+}
+
+// A Stop may wait for a notch reply (sidecar/src/hooks/stop-replies.js caps
+// that at 140 s); the hook's own deadline has to outlast it.
+function hookTimeout(event) {
+  return event === "Stop" ? STOP_HOOK_TIMEOUT_SECONDS : HOOK_TIMEOUT_SECONDS;
 }
 
 function readJson(path) {

@@ -238,6 +238,37 @@ actor MonitorClient {
         try validate(response: response, data: data)
     }
 
+    /// Notch chat calls (`api/chat/open|prompt|permission|cancel`): the
+    /// sidecar forwards the body to the Gateway and returns its answer as is.
+    func chatPost(endpoint: MonitorEndpoint, path: String, body: [String: JSONValue]) async throws -> JSONValue {
+        try await postJSON(endpoint: endpoint, path: "api/chat/\(path)", body: body)
+    }
+
+    func postJSON(endpoint: MonitorEndpoint, path: String, body: [String: JSONValue]) async throws -> JSONValue {
+        var request = endpoint.request(path: path, method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 150
+        request.httpBody = try JSONSerialization.data(withJSONObject: body.mapValues(\.foundationValue))
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response: response, data: data)
+        return JSONValue(any: try JSONSerialization.jsonObject(with: data))
+    }
+
+    func chatPoll(endpoint: MonitorEndpoint, sessionId: String, cursor: Int, waitMs: Int) async throws -> JSONValue {
+        var components = URLComponents(url: endpoint.baseURL.appendingPathComponent("api/chat/poll"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [
+            URLQueryItem(name: "sessionId", value: sessionId),
+            URLQueryItem(name: "cursor", value: String(cursor)),
+            URLQueryItem(name: "waitMs", value: String(waitMs))
+        ]
+        var request = endpoint.request(path: "api/chat/poll")
+        request.url = components.url
+        request.timeoutInterval = 60
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response: response, data: data)
+        return JSONValue(any: try JSONSerialization.jsonObject(with: data))
+    }
+
     func startStream(endpoint: MonitorEndpoint, onMessage: @escaping MessageHandler, onState: @escaping StateHandler) {
         streamTask?.cancel()
         streamTask = Task {

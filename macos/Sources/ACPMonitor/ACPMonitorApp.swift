@@ -36,7 +36,10 @@ struct ACPMonitorApp: App {
         LaunchServicesHygiene.runOncePerBuild()
         let model = AppModel()
         _model = StateObject(wrappedValue: model)
-        appDelegate.launchHandler = { [weak model] in model?.startIfNeeded() }
+        appDelegate.launchHandler = { [weak model] in
+            model?.startIfNeeded()
+            model?.notchChat.show()
+        }
         appDelegate.terminationHandler = { [weak model] in await model?.stop() }
     }
 
@@ -82,6 +85,7 @@ struct ACPMonitorApp: App {
 /// steps that wait for the user called out after them.
 struct MenuBarLabel: View {
     @ObservedObject var model: AppModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         let counts = MenuBarCounts(model.menuBarPipeline)
@@ -92,5 +96,10 @@ struct MenuBarLabel: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(counts.accessibility)
         .help(counts.accessibility)
+        .onReceive(NotificationCenter.default.publisher(for: .openSessionDetail)) { note in
+            guard let sessionId = note.object as? String else { return }
+            NSApp.activate(ignoringOtherApps: true)
+            openWindow(id: "session-detail", value: sessionId)
+        }
     }
 }

@@ -51,6 +51,8 @@ import {
 } from "../store/sqlite-store.js";
 import { HookSessions } from "../hooks/registry.js";
 import { defaultWorkerLedgerPath, readWorkerLedger, workerLedgerWriter } from "../store/worker-ledger.js";
+import { CHAT_POLL_MAX_WAIT_MS, chatCancelArgs, chatFrontdoor, chatOpenArgs, chatPermissionArgs, chatPollArgs, chatPromptArgs } from "../app/notch-chat.js";
+import { StopReplies, isStopPayload, stopReplyDecision } from "../hooks/stop-replies.js";
 import { defaultHookEndpointPath, newHookToken, removeHookEndpoint, writeHookEndpoint } from "../hooks/endpoint.js";
 import { HOOK_PROVIDERS as INSTALLABLE_HOOK_PROVIDERS, ensureHooks, hookStatus, installHooks, uninstallHooks } from "../hooks/installer.js";
 /*
@@ -91,6 +93,8 @@ let localTimeline = null;
 // Live facts from agent hooks, overlaid on every local scan. Replaced in
 // main() once the retention setting is known.
 let hookSessions = new HookSessions();
+// Open notch reply windows on Frontdoor Stops (see hooks/stop-replies.js).
+const stopReplies = new StopReplies();
 // Lineage resolver for hooks when the local scanner (which owns one) is off.
 let hookLineage = null;
 
@@ -632,6 +636,14 @@ async function main() {
   };
 
   async function handleHook(provider, request, response) {
+    // Watched from the start: a hook killed while this is still reading or
+    // resolving lineage must not leave a reply window open behind it.
+    let hookGone = false;
+    let heldSlotId = null;
+    response.on("close", () => {
+      hookGone = true;
+      if (heldSlotId) stopReplies.dismiss(heldSlotId);
+    });
     let payload;
     try {
       payload = await readJsonBody(request, MAX_HOOK_BODY_BYTES);
@@ -651,8 +663,13 @@ async function main() {
         new Promise((resolve) => setTimeout(resolve, HOOK_LINEAGE_BUDGET_MS).unref?.())
       ]);
     }
-    // The agent is waiting on this hook; everything else happens after.
-    response.writeHead(204).end();
+    const replyTarget = recorded && isStopPayload(payload) && stopReplies.enabled && state.sseClients.size > 0
+      && !state.formerWorkerIds.has(recorded.localSessionId)
+      ? hookSessions.replyTarget(recorded.key)
+      : null;
+    // The agent is waiting on this hook; everything else happens after,
+    // except for a Frontdoor's Stop that the notch may still answer.
+    if (!replyTarget?.eligible) response.writeHead(204).end();
     if (!recorded) return;
     // A Gateway worker's own CLI runs the same hooks; its timeline is the
     // Gateway's, and these events would sit in a bucket nothing ever lists.
@@ -663,6 +680,33 @@ async function main() {
       const changed = state.setExternalEvents({ [recorded.sessionId]: recorded.events });
       for (const [sessionId, events] of Object.entries(changed)) queueEvents(sessionId, events);
     }
+    nudgeLocalRefresh();
+    if (replyTarget?.eligible && !hookGone) {
+      await holdForReply(recorded, replyTarget, payload, response, (id) => { heldSlotId = id; });
+    } else if (replyTarget?.eligible && !response.writableEnded) {
+      response.writeHead(204).end();
+    }
+  }
+
+  // Holds an eligible Stop open while the notch offers a reply box. The hook
+  // prints whatever this answers; an empty answer lets the agent stop.
+  async function holdForReply(recorded, target, payload, response, onOpen) {
+    const { slot, reply } = stopReplies.open({
+      provider: target.provider, sessionId: recorded.sessionId, cwd: target.cwd, payload,
+      backgroundTasks: target.backgroundTasks
+    });
+    onOpen(slot.id);
+    state.broadcast({ kind: "reply_slot", slot });
+    const text = await reply;
+    state.broadcast({ kind: "reply_slot_closed", id: slot.id, answered: text != null });
+    if (response.writableEnded || response.destroyed) return;
+    if (text == null) {
+      response.writeHead(204).end();
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    response.end(stopReplyDecision(text));
+    hookSessions.markRunning(recorded.key);
     nudgeLocalRefresh();
   }
 
@@ -719,7 +763,15 @@ async function main() {
       });
       response.write("retry: 2000\n\n");
       state.addSseClient(response);
-      request.on("close", () => state.removeSseClient(response));
+      // A reconnecting app still gets the reply windows that are open.
+      for (const slot of stopReplies.list()) {
+        response.write(`data: ${JSON.stringify({ kind: "reply_slot", slot })}\n\n`);
+      }
+      request.on("close", () => {
+        state.removeSseClient(response);
+        // Nobody left to answer: release every held Stop now.
+        if (state.sseClients.size === 0) stopReplies.closeAll();
+      });
       return;
     }
     const eventsRoute = url.pathname.match(/^\/api\/sessions\/([^/]+)\/events$/);
@@ -897,6 +949,69 @@ async function main() {
       scheduleRefresh();
       return;
     }
+    // Notch chat. Opening, prompting and answering are Main actions, so they
+    // go over a short-lived control connection like the settings mutations;
+    // poll is a read and stays on the observer connection.
+    // Notch replies to a Frontdoor's Stop: answer, dismiss or keep waiting.
+    if (url.pathname === "/api/notch/reply" && request.method === "POST") {
+      const body = await readJsonBody(request);
+      if (typeof body.id !== "string" || !body.id) throw new Error("id is required");
+      let ok;
+      if (body.action === "answer") ok = stopReplies.answer(body.id, body.text);
+      else if (body.action === "dismiss") ok = stopReplies.dismiss(body.id);
+      else if (body.action === "extend") {
+        const slot = stopReplies.extend(body.id);
+        sendJson(response, { ok: Boolean(slot), slot });
+        return;
+      } else throw new Error("action must be answer, dismiss or extend");
+      sendJson(response, { ok });
+      return;
+    }
+    if (url.pathname === "/api/notch/reply-settings" && request.method === "POST") {
+      const body = await readJsonBody(request);
+      if (typeof body.enabled !== "boolean") throw new Error("enabled must be a boolean");
+      stopReplies.enabled = body.enabled;
+      if (!body.enabled) stopReplies.closeAll();
+      sendJson(response, { ok: true, enabled: stopReplies.enabled });
+      return;
+    }
+    if (url.pathname === "/api/chat/open" && request.method === "POST") {
+      const body = await readJsonBody(request);
+      const frontdoor = chatFrontdoor(body);
+      // The Worker is the Frontdoor's: Gateway 1.6+ records the caller as
+      // openedBy; the topology is also set here so an older Gateway's worker
+      // joins the same Frontdoor instead of "연결 미확인".
+      const caller = { provider: frontdoor.provider, sessionId: frontdoor.sessionId, instanceId: `agenlynk-notch-${frontdoor.sessionId}`.slice(0, 128) };
+      const result = await controlCall("session_open", chatOpenArgs(body), 120_000, caller);
+      if (typeof result?.sessionId === "string") {
+        const parent = state.sessions.get(frontdoor.monitorSessionId);
+        state.workerTopology.set(result.sessionId, {
+          opener: frontdoor.provider,
+          openerInstanceId: parent?.openerInstanceId ?? frontdoor.sessionId,
+          parentSessionId: frontdoor.monitorSessionId
+        });
+      }
+      sendJson(response, result);
+      scheduleRefresh();
+      return;
+    }
+    if (url.pathname === "/api/chat/prompt" && request.method === "POST") {
+      sendJson(response, await controlCall("prompt", chatPromptArgs(await readJsonBody(request))));
+      return;
+    }
+    if (url.pathname === "/api/chat/poll" && request.method === "GET") {
+      const args = chatPollArgs(url.searchParams);
+      sendJson(response, await rpc.call("poll", args, CHAT_POLL_MAX_WAIT_MS + 10_000));
+      return;
+    }
+    if (url.pathname === "/api/chat/permission" && request.method === "POST") {
+      sendJson(response, await controlCall("permission", chatPermissionArgs(await readJsonBody(request))));
+      return;
+    }
+    if (url.pathname === "/api/chat/cancel" && request.method === "POST") {
+      sendJson(response, await controlCall("cancel", chatCancelArgs(await readJsonBody(request))));
+      return;
+    }
     if (url.pathname === "/api/gateway-config" && request.method === "GET") {
       sendJson(response, gatewaySettingsSnapshot({
         statePath: identity.statePath,
@@ -938,15 +1053,16 @@ async function main() {
     response.end('{"error":"not found","code":"monitor_not_found"}');
   }
 
-  async function controlCall(method, args) {
+  async function controlCall(method, args, timeoutMs, caller = null) {
     const control = new GatewayRpcClient({
       token: identity.token,
       rootId: identity.rootId,
       access: "control",
-      autoStart: false
+      autoStart: false,
+      ...(caller ? { caller } : {})
     });
     try {
-      return await control.call(method, args);
+      return await control.call(method, args, timeoutMs);
     } finally {
       control.close();
     }
@@ -1003,6 +1119,9 @@ async function main() {
     saveWorkerLedger?.flush();
     removeHookEndpoint(hookEndpointPath, hookToken);
     if (parentWatch) clearInterval(parentWatch);
+    // Held Stops first: their agents must not wait out a window nobody can
+    // answer, and server.close() would wait for them.
+    stopReplies.closeAll();
     state.closeSseClients();
     rpc.close();
     await new Promise((resolve) => server.close(resolve));
