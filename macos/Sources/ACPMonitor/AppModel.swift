@@ -1,5 +1,9 @@
+#if DEBUG
+import AppKit
+#endif
 import Combine
 import Foundation
+import LynkArt
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -156,6 +160,8 @@ final class AppModel: ObservableObject {
     private let client = MonitorClient()
     /// The panel hanging from the notch; created on first use.
     private(set) lazy var notchChat = NotchChatController(model: self)
+    private let settingsWindow = SettingsWindowPresenter()
+    private let sessionWindows = SessionDetailWindowPresenter()
     private let petStore = PetStore()
     private let installer = InstallerController()
     private let runtimeProvisioner = RuntimeProvisioner()
@@ -183,6 +189,83 @@ final class AppModel: ObservableObject {
             .store(in: &storeCancellables)
         monitorStore.objectWillChange
             .sink { [weak self] in self?.objectWillChange.send() }
+            .store(in: &storeCancellables)
+        #if DEBUG
+        // Debug-only: how often the model and the settings announce changes,
+        // one line per second, to find what keeps views re-rendering.
+        if let path = ProcessInfo.processInfo.environment["ACP_LYNK_DEBUG_PUBLISH"] {
+            var counts = (model: 0, settings: 0, monitor: 0, pet: 0, catalog: 0)
+            objectWillChange.sink { counts.model += 1 }.store(in: &storeCancellables)
+            settings.objectWillChange.sink { counts.settings += 1 }.store(in: &storeCancellables)
+            monitorStore.objectWillChange.sink { counts.monitor += 1 }.store(in: &storeCancellables)
+            petStore.objectWillChange.sink { counts.pet += 1 }.store(in: &storeCancellables)
+            agentCatalogStore.objectWillChange.sink { counts.catalog += 1 }.store(in: &storeCancellables)
+            Timer.publish(every: 1, on: .main, in: .common).autoconnect().sink { _ in
+                let line = "\(Date().timeIntervalSince1970) model=\(counts.model) settings=\(counts.settings) monitor=\(counts.monitor) pet=\(counts.pet) catalog=\(counts.catalog)\n"
+                counts = (0, 0, 0, 0, 0)
+                if let handle = FileHandle(forWritingAtPath: path) ?? {
+                    FileManager.default.createFile(atPath: path, contents: nil)
+                    return FileHandle(forWritingAtPath: path)
+                }() {
+                    handle.seekToEndOfFile()
+                    handle.write(Data(line.utf8))
+                    try? handle.close()
+                }
+            }.store(in: &storeCancellables)
+            if let path = ProcessInfo.processInfo.environment["ACP_LYNK_DEBUG_MASCOTS"] {
+                Task { @MainActor in AgentMascotSheet.write(to: path) }
+            }
+            if let target = ProcessInfo.processInfo.environment["ACP_LYNK_DEBUG_JUMP"] {
+                // Jump to a session's window and record which app is in front.
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 12_000_000_000)
+                    guard let self, let session = self.sessions.first(where: { $0.sessionId.contains(target) }) else {
+                        try? "no session \(target)".write(toFile: "/tmp/agenlynk-jump.txt", atomically: true, encoding: .utf8)
+                        return
+                    }
+                    let before = NSWorkspace.shared.frontmostApplication?.localizedName ?? "-"
+                    let host = session.pid.flatMap { SessionWindowJumper.hostApp(of: pid_t($0))?.localizedName } ?? "-"
+                    let outcome = SessionWindowJumper.jump(to: session)
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    let after = NSWorkspace.shared.frontmostApplication?.localizedName ?? "-"
+                    try? "pid=\(session.pid.map(String.init) ?? "-") host=\(host) outcome=\(outcome) before=\(before) after=\(after)"
+                        .write(toFile: "/tmp/agenlynk-jump.txt", atomically: true, encoding: .utf8)
+                }
+            }
+            if ProcessInfo.processInfo.environment["ACP_LYNK_DEBUG_OPEN_SETTINGS"] != nil {
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 6_000_000_000)
+                    NotchChatController.openSettings()
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    // Frames of the whole settings window (toolbar tabs too).
+                    let windows = NSApp.windows.map { "\($0.identifier?.rawValue ?? "-") \($0.title) \($0.isVisible)" }
+                    try? windows.joined(separator: "\n").write(toFile: "/tmp/agenlynk-windows.txt", atomically: true, encoding: .utf8)
+                    guard let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "agenlynk-settings" }),
+                          let frameView = window.contentView?.superview else { return }
+                    for index in 0..<20 {
+                        if let rep = frameView.bitmapImageRepForCachingDisplay(in: frameView.bounds) {
+                            frameView.cacheDisplay(in: frameView.bounds, to: rep)
+                            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "/tmp/agenlynk-settings-\(index).png"))
+                        }
+                        try? await Task.sleep(nanoseconds: 150_000_000)
+                    }
+                }
+            }
+        }
+        #endif
+        NotificationCenter.default.publisher(for: .openSessionDetail)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in
+                guard let self, let sessionId = note.object as? String else { return }
+                self.sessionWindows.show(model: self, sessionId: sessionId)
+            }
+            .store(in: &storeCancellables)
+        NotificationCenter.default.publisher(for: .openSurfacesSettings)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.settingsWindow.show(model: self, tab: .surfaces)
+            }
             .store(in: &storeCancellables)
         monitorStore.$logRevision
             .dropFirst()
@@ -1036,6 +1119,13 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// A new look takes a restart: the pet reads its style at launch.
+    func setPetStyle(_ style: PetStyle) {
+        guard settings.petStyle != style else { return }
+        settings.petStyle = style
+        if petRunning { startPet() }
+    }
+
     func restartPet() {
         settings.petEnabled = true
         startPet()
@@ -1044,6 +1134,8 @@ final class AppModel: ObservableObject {
     func resetSettings() {
         settings.reset()
         petStore.stop()
+        // Reset turns the pet back on; it should be running, not just ticked.
+        if settings.petEnabled { startPet() }
     }
 
     func loadAgentCatalog(refresh: Bool = false) async {
@@ -1852,6 +1944,7 @@ final class AppModel: ObservableObject {
         petStore.start(
             executablePath: settings.resolvedPetExecutablePath,
             projection: PetActivityProjection.make(sessions: realtimeSessions, inbox: realtimeInbox, nickname: petNickname),
+            style: settings.petStyle,
             enabled: { [weak self] in self?.settings.petEnabled == true }
         )
     }

@@ -1,5 +1,6 @@
 import ACPShared
 import AppKit
+import LynkArt
 import SwiftUI
 
 /// The menu bar popover: work in progress as pipelines. One card per
@@ -191,8 +192,10 @@ struct MenuBarStatusView: View {
         HStack(spacing: 12) {
             Button("대시보드 열기") { openDashboard() }
                 .buttonStyle(.borderless)
-            Button("노치 채팅") { model.notchChat.toggle() }
-                .buttonStyle(.borderless)
+            if settings.notchEnabled {
+                Button("노치") { model.notchChat.toggle() }
+                    .buttonStyle(.borderless)
+            }
             Spacer()
             // SettingsLink is the only supported way to open the Settings
             // scene from a menu-bar popover on macOS 14. Activate too, or the

@@ -2,13 +2,17 @@ import SwiftUI
 
 /// Settings window tabs, so one tab can send the user to another.
 enum SettingsTab: Hashable {
-    case display, gateway, agents, monitoring, pet, updates
+    case display, gateway, agents, monitoring, surfaces, updates
 }
 
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
-    @State private var tab: SettingsTab = .display
+    @State private var tab: SettingsTab
+
+    init(initialTab: SettingsTab = .display) {
+        _tab = State(initialValue: initialTab)
+    }
     /// A Gateway 구성 group to scroll to when that tab opens.
     @State private var gatewayFocusGroup: String?
     @State private var confirmDisplayReset = false
@@ -34,7 +38,7 @@ struct SettingsView: View {
                 Button("기본값으로 재설정") { confirmDisplayReset = true }
             }
             .padding(20)
-            .alert("표시, Node 경로, 펫 설정을 기본값으로 되돌릴까요?", isPresented: $confirmDisplayReset) {
+            .alert("표시, Node 경로, 표시 요소(메뉴 막대·노치·펫) 설정을 기본값으로 되돌릴까요?", isPresented: $confirmDisplayReset) {
                 Button("취소", role: .cancel) {}
                 Button("기본값으로 재설정", role: .destructive) { model.resetSettings() }
             } message: {
@@ -58,9 +62,9 @@ struct SettingsView: View {
             .tabItem { Label("모니터링", systemImage: "bolt.horizontal.circle") }
             .tag(SettingsTab.monitoring)
 
-            petConfiguration
-                .tabItem { Label("펫", systemImage: "pawprint") }
-                .tag(SettingsTab.pet)
+            surfacesConfiguration
+                .tabItem { Label("표시 요소", systemImage: "rectangle.3.group") }
+                .tag(SettingsTab.surfaces)
 
             RuntimeUpdateView()
                 .tabItem { Label("버전·업데이트", systemImage: "arrow.down.circle") }
@@ -73,14 +77,50 @@ struct SettingsView: View {
 
     private var dashboardViewsSection: some View { DashboardViewsSection() }
 
-    private var petConfiguration: some View {
+    /// The app's surfaces — menu bar, notch, pet — each on its own switch,
+    /// so one that is not wanted can simply be turned off.
+    private var surfacesConfiguration: some View {
         Form {
-            ACPLogoLockup(subtitle: "에이전트 상태 펫")
-            Section("렌더러") {
+            ACPLogoLockup(subtitle: "메뉴 막대 · 노치 · 펫")
+            Section {
+                Toggle("메뉴 막대에 표시", isOn: $settings.menuBarEnabled)
+            } header: {
+                Text("메뉴 막대")
+            } footer: {
+                Text("끄면 메뉴 막대 아이콘과 팝오버가 사라집니다. 설정은 Dock 아이콘이나 ⌘, 로 열 수 있습니다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle("노치 사용", isOn: $settings.notchEnabled)
+                Group {
+                    Toggle("Frontdoor 알림 띄우기", isOn: $settings.notchAlertsEnabled)
+                        .help("권한·입력 대기, 작업 완료·실패를 노치에서 알립니다.")
+                    Toggle("알림 소리", isOn: $settings.notchSoundsEnabled)
+                    Toggle("끝난 Frontdoor에 노치에서 답장", isOn: $settings.notchRepliesEnabled)
+                        .help("사람이 쓰는 Frontdoor가 턴을 마치면 Stop hook이 최대 20초(입력 중에는 최대 140초) 답장을 기다립니다. 그동안 터미널 입력은 대기가 끝난 뒤 처리됩니다.")
+                }
+                .disabled(!settings.notchEnabled)
+            } header: {
+                Text("노치")
+            } footer: {
+                Text("노치(또는 노치 없는 화면의 상단 중앙)에 Frontdoor 카드·상태·알림·채팅을 표시합니다. 노치를 끄면 답장 대기도 함께 꺼집니다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("펫") {
                 Toggle("에이전트 상태 펫 사용", isOn: Binding(
                     get: { settings.petEnabled },
                     set: { model.setPetEnabled($0) }
                 ))
+                Picker("펫 모양", selection: Binding(
+                    get: { settings.petStyle },
+                    set: { model.setPetStyle($0) }
+                )) {
+                    ForEach(PetStyle.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .help("기본 펫의 모양입니다. 둘 다 마우스 주변을 천체처럼 돌며 세션 상태를 보여 줍니다.")
                 LabeledContent("현재 렌더러", value: settings.usesBundledPet ? "AgenLynk 기본 펫" : "사용자 지정")
                 TextField("사용자 렌더러 경로 (비우면 기본 펫)", text: $settings.petExecutablePath)
                     .disabled(model.petRunning)
@@ -96,7 +136,7 @@ struct SettingsView: View {
                 }
                 .disabled(settings.resolvedPetExecutablePath.isEmpty)
             }
-            Section("상태 공유") {
+            Section("펫 상태 공유") {
                 Label("AgenLynk가 Gateway(ACP)와 로컬 세션을 하나의 상태로 요약해 pet-state.json/pet-actions.json에 기록하면, 지정한 실행 파일이 그 두 파일만 읽어 표시합니다.", systemImage: "dot.radiowaves.left.and.right")
                 Text("각 Worker를 연 최초 에이전트는 Frontdoor 루트로 합성되어 작업 트리의 시작점으로 함께 표시됩니다.")
                     .font(.caption)

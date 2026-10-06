@@ -15,6 +15,7 @@ struct NotchAlert: Identifiable, Equatable {
     enum Kind: Equatable { case permission, input, done, failed }
 
     let id = UUID()
+    let createdAt = Date()
     let kind: Kind
     let frontdoorId: String
     /// The session to open: the waiting member, else the Frontdoor's root.

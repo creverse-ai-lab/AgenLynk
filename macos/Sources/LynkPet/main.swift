@@ -1,6 +1,7 @@
 import ACPShared
 import AppKit
 import Combine
+import LynkArt
 import Darwin
 import SwiftUI
 
@@ -401,6 +402,22 @@ private final class StatusStore: ObservableObject {
         refresh()
         timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.refresh() }
         RunLoop.main.add(timer!, forMode: .common)
+        watchStateDirectory()
+    }
+
+    // The app replaces the state files atomically (a rename into their
+    // folder), so watching the folder reacts to a new frame at once; the
+    // 0.5 s timer stays as the safety net.
+    private var directorySource: DispatchSourceFileSystemObject?
+
+    private func watchStateDirectory() {
+        let descriptor = open(stateURL.deletingLastPathComponent().path, O_EVTONLY)
+        guard descriptor >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor, eventMask: [.write, .rename, .link], queue: .main)
+        source.setEventHandler { [weak self] in self?.refresh() }
+        source.setCancelHandler { close(descriptor) }
+        source.resume()
+        directorySource = source
     }
 
     private func refresh() {
@@ -839,6 +856,44 @@ private func logoForProvider(_ provider: String) -> NSImage? {
     providerLogos[provider.lowercased()]
 }
 
+/// The built-in looks (PET_STYLE, set by the app at launch): logo discs
+/// orbiting the cursor like planets, or the AgenLynk mascot doing the same.
+private enum PetStyle: String {
+    case orbit, mochi
+
+    static let current = PetStyle(rawValue: ProcessInfo.processInfo.environment["PET_STYLE"] ?? "") ?? .orbit
+}
+
+/// The mascot's expression for a pet state.
+private func mascotMood(_ agent: AgentSession, warm: Bool) -> AgentMascot.Mood {
+    if warm { return .idle }
+    switch agent.state {
+    case "running": return .working
+    case "needs_input": return .waiting
+    case "blocked": return .failed
+    case "ready": return .happy
+    default: return .idle
+    }
+}
+
+/// Mascots rendered once per provider, mood and size, then drawn as images:
+/// the scene is one Canvas on purpose (see TreeFlowScene), and a live view
+/// per node would bring back the per-frame layout it avoids. The motion
+/// (bob, hop) is added when drawing.
+@MainActor private var mascotImages: [String: Image] = [:]
+
+@MainActor private func mascotImage(provider: String, mood: AgentMascot.Mood, size: CGFloat) -> Image? {
+    let side = (size / 4).rounded() * 4
+    let key = "\(provider.lowercased())|\(mood)|\(Int(side))"
+    if let image = mascotImages[key] { return image }
+    let renderer = ImageRenderer(content: AgentMascot(provider: provider, size: side, mood: mood))
+    renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
+    guard let cgImage = renderer.cgImage else { return nil }
+    let image = Image(decorative: cgImage, scale: renderer.scale)
+    mascotImages[key] = image
+    return image
+}
+
 // One line only: the app's name for the session when the producer sends it
 // (pet-state `name`), else the repo (top folder of the session's cwd), the
 // task snippet, then the engine name so multiple instances stay tellable.
@@ -950,6 +1005,11 @@ private struct TreeFlowScene: View {
             )
         }
 
+        if PetStyle.current == .mochi {
+            drawMascot(node, time: time, pulsing: pulsing, spinning: spinning, hovered: hovered, in: &context)
+            return
+        }
+
         let body = circle(diameter: size)
         context.fill(body, with: .color(brandColor(node.agent.provider).opacity(node.opacity)))
         if let logo = logoForProvider(node.agent.provider) {
@@ -1020,6 +1080,60 @@ private struct TreeFlowScene: View {
             // Stands in for lineLimit(1).frame(maxWidth: 92): a long repo name
             // is cut off at the same width rather than widening the node.
             let anchor = CGPoint(x: center.x, y: center.y + node.size / 2 + 10)
+            layer.clip(to: Path(CGRect(x: anchor.x - 46, y: anchor.y - 8, width: 92, height: 16)))
+            layer.draw(
+                Text(verbatim: nodeLabel(node.agent))
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.75 * labelOpacity)),
+                at: anchor
+            )
+        }
+    }
+
+    /// The mochi look: the same node, drawn as the mascot. It bobs while
+    /// working, hops while it waits on the person, and keeps the Frontdoor
+    /// mark, the inbox count, the hover ring and the label.
+    private func drawMascot(_ node: RenderNode, time: TimeInterval, pulsing: Bool, spinning: Bool, hovered: Bool, in context: inout GraphicsContext) {
+        let center = node.point
+        let side = node.size * 1.8
+        let lift: CGFloat = spinning
+            ? CGFloat(sin(time * 3.2)) * side * 0.03
+            : pulsing ? -abs(CGFloat(sin(time * 5))) * side * 0.05 : 0
+        func circle(diameter: CGFloat, at point: CGPoint) -> Path {
+            Path(ellipseIn: CGRect(x: point.x - diameter / 2, y: point.y - diameter / 2, width: diameter, height: diameter))
+        }
+        if pulsing {
+            let phase = CGFloat((time * 0.8).truncatingRemainder(dividingBy: 1))
+            context.stroke(
+                circle(diameter: node.size + phase * 28, at: center),
+                with: .color(.orange.opacity(Double(1 - phase) * 0.6 * node.opacity)),
+                lineWidth: 1.5
+            )
+        }
+        let mood = mascotMood(node.agent, warm: node.warm)
+        if let image = MainActor.assumeIsolated({ mascotImage(provider: node.agent.provider, mood: mood, size: side) }) {
+            context.drawLayer { layer in
+                layer.opacity = node.opacity
+                layer.draw(image, in: CGRect(x: center.x - side / 2, y: center.y - side / 2 + lift, width: side, height: side))
+            }
+        }
+        if isFrontdoor(node.agent) {
+            let corner = CGPoint(x: center.x - side * 0.36, y: center.y - side * 0.3)
+            context.fill(circle(diameter: 14, at: corner), with: .color(.cyan.opacity(node.opacity)))
+            context.draw(Text(verbatim: "F").font(.system(size: 8, weight: .black)).foregroundStyle(.black), at: corner)
+        }
+        if let pending = node.agent.inboxPending, pending > 0, !node.warm {
+            let corner = CGPoint(x: center.x + side * 0.34, y: center.y + side * 0.3)
+            context.fill(circle(diameter: 14, at: corner), with: .color(.purple.opacity(node.opacity)))
+            context.draw(Text(verbatim: "\(pending)").font(.system(size: 9, weight: .bold)).foregroundStyle(.white), at: corner)
+        }
+        if hovered {
+            context.stroke(circle(diameter: side * 0.95, at: center), with: .color(.white.opacity(0.9 * node.opacity)), lineWidth: 1.5)
+        }
+        let labelOpacity = hovered ? 0 : node.labelOpacity * node.opacity
+        guard labelOpacity > 0.02 else { return }
+        context.drawLayer { layer in
+            let anchor = CGPoint(x: center.x, y: center.y + side * 0.45 + 8)
             layer.clip(to: Path(CGRect(x: anchor.x - 46, y: anchor.y - 8, width: 92, height: 16)))
             layer.draw(
                 Text(verbatim: nodeLabel(node.agent))
@@ -1328,6 +1442,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let store = StatusStore()
         self.store = store
         controller = MotionController(store: store)
+        #if DEBUG
+        // Debug-only: write the pet window to a PNG after a few seconds.
+        if let path = ProcessInfo.processInfo.environment["PET_DEBUG_SNAPSHOT"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 14) { [weak self] in
+                guard let controller = self?.controller else { return }
+                // The scene itself, on a dark backdrop (the window is clear).
+                let renderer = ImageRenderer(content: TreeFlowScene(controller: controller).background(Color(white: 0.12)))
+                renderer.scale = 2
+                guard let cgImage = renderer.cgImage else { return }
+                let rep = NSBitmapImageRep(cgImage: cgImage)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+            }
+        }
+        #endif
         if let value = ProcessInfo.processInfo.environment["PET_PARENT_PID"],
            let parentPID = Int32(value), parentPID > 0 {
             let timer = Timer(timeInterval: 1, repeats: true) { _ in

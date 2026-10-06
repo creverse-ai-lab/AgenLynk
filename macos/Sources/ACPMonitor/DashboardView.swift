@@ -1,4 +1,5 @@
 import ACPShared
+import LynkArt
 import SwiftUI
 
 struct DashboardView: View {

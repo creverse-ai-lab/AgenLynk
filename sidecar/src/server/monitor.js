@@ -978,6 +978,15 @@ async function main() {
     if (url.pathname === "/api/chat/open" && request.method === "POST") {
       const body = await readJsonBody(request);
       const frontdoor = chatFrontdoor(body);
+      // Only a live Frontdoor the monitor lists can own a Worker; a gone one
+      // would leave the Worker unattributed.
+      const owner = state.sessions.get(frontdoor.monitorSessionId);
+      if (!owner || owner.role !== "frontdoor" || owner.status === "closed") {
+        const error = new Error("그 Frontdoor는 더 이상 실행 중이 아닙니다. 다른 Frontdoor를 골라 주세요.");
+        error.statusCode = 409;
+        error.code = "monitor_frontdoor_gone";
+        throw error;
+      }
       // The Worker is the Frontdoor's: Gateway 1.6+ records the caller as
       // openedBy; the topology is also set here so an older Gateway's worker
       // joins the same Frontdoor instead of "연결 미확인".
@@ -1006,6 +1015,13 @@ async function main() {
     }
     if (url.pathname === "/api/chat/permission" && request.method === "POST") {
       sendJson(response, await controlCall("permission", chatPermissionArgs(await readJsonBody(request))));
+      return;
+    }
+    // A chat abandoned while its session was opening: close that Worker.
+    if (url.pathname === "/api/chat/close" && request.method === "POST") {
+      const { sessionId } = chatCancelArgs(await readJsonBody(request));
+      sendJson(response, await controlCall("session", { action: "close", sessionId }));
+      scheduleRefresh();
       return;
     }
     if (url.pathname === "/api/chat/cancel" && request.method === "POST") {

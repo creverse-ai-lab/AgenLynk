@@ -117,3 +117,51 @@ test("an idle Claude Frontdoor with no live process record has ended", async () 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("a SessionStart (new launch or --resume) learns the process again", () => {
+  const registry = new HookSessions({ claudeRoot: "/nowhere", claudeSessionsDir: "/nowhere", isAlive: () => true });
+  registry.record("grok", { hook_event_name: "UserPromptSubmit", sessionId: "g1", cwd: "/w" }, at, { ppid: 100 });
+  Object.assign(registry.sessions.get("grok:g1"), { agentPid: 111, agentStart: "Mon Oct 5 07:00:00 2026", lineageResolved: true });
+  registry.record("grok", { hook_event_name: "SessionStart", sessionId: "g1", cwd: "/w" }, at + 1000, { ppid: 200 });
+  const entry = registry.sessions.get("grok:g1");
+  assert.equal(entry.agentPid, undefined);
+  assert.equal(entry.lineageResolved, undefined);
+  assert.equal(entry.ppid, 200, "the new process's hook parent is taken");
+});
+
+test("a Stop with background tasks out is never held for a reply", () => {
+  const registry = new HookSessions({ claudeRoot: "/nowhere", claudeSessionsDir: "/nowhere", isAlive: () => true });
+  registry.record("claude", { hook_event_name: "Stop", session_id: "c1", background_tasks: [{ id: "t" }] }, at, { ppid: 9 });
+  Object.assign(registry.sessions.get("claude:c1"), { agentPid: 10, lineageResolved: true });
+  assert.equal(registry.replyTarget("claude:c1").eligible, false);
+  registry.record("claude", { hook_event_name: "Stop", session_id: "c1", background_tasks: [] }, at + 1000);
+  assert.equal(registry.replyTarget("claude:c1").eligible, true);
+});
+
+test("a Stop is held only while its own process is alive (same pid and start)", () => {
+  let alive = true;
+  const registry = new HookSessions({ claudeRoot: "/nowhere", claudeSessionsDir: "/nowhere", isAlive: () => alive });
+  registry.record("grok", { hook_event_name: "Stop", sessionId: "g1", cwd: "/w" }, at, { ppid: 9 });
+  Object.assign(registry.sessions.get("grok:g1"), { agentPid: 10, lineageResolved: true });
+  assert.equal(registry.replyTarget("grok:g1").eligible, true);
+  alive = false;
+  assert.equal(registry.replyTarget("grok:g1").eligible, false);
+});
+
+test("an empty ~/.claude/sessions means no Claude is running; a reused pid is not the session", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "agenlynk-claude-empty-"));
+  try {
+    const empty = new HookSessions({ claudeRoot: "/nowhere", claudeSessionsDir: dir, isAlive: () => true });
+    assert.deepEqual(empty.merge([{ provider: "claude", session: "gone", state: "ready", time: at / 1000 }], at), [],
+      "the last Claude ended: its idle row goes");
+    await writeFile(join(dir, "7.json"), JSON.stringify({ pid: 7, sessionId: "old", procStart: "Mon Oct  5 01:00:00 2026" }));
+    const reused = new HookSessions({
+      claudeRoot: "/nowhere", claudeSessionsDir: dir,
+      isAlive: (pid, start) => pid === 7 && (start == null || start.replace(/\s+/g, " ") === "Mon Oct 5 09:00:00 2026")
+    });
+    assert.deepEqual(reused.merge([{ provider: "claude", session: "old", state: "ready", time: at / 1000 }], at), [],
+      "pid 7 now belongs to a process started later");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -13,10 +13,10 @@ final class PetStore: ObservableObject {
         self.controller = controller ?? PetController()
     }
 
-    func start(executablePath: String, projection: PetActivityProjection, enabled: @escaping () -> Bool) {
+    func start(executablePath: String, projection: PetActivityProjection, style: PetStyle = .orbit, enabled: @escaping () -> Bool) {
         do {
             lastProjection = projection
-            try controller.start(executablePath: executablePath, projection: projection) { [weak self] status in
+            try controller.start(executablePath: executablePath, projection: projection, style: style) { [weak self] status in
                 guard let self else { return }
                 self.running = false
                 if enabled() { self.error = "Pet이 종료되었습니다 (exit \(status))." }

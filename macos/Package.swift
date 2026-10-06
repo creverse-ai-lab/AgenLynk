@@ -14,14 +14,19 @@ let package = Package(
             name: "ACPShared",
             path: "Sources/ACPShared"
         ),
+        // Artwork both executables draw: the ACP mark and the mascot.
+        .target(
+            name: "LynkArt",
+            path: "Sources/LynkArt"
+        ),
         .executableTarget(
             name: "ACPMonitor",
-            dependencies: ["ACPShared"],
+            dependencies: ["ACPShared", "LynkArt"],
             path: "Sources/ACPMonitor"
         ),
         .executableTarget(
             name: "LynkPet",
-            dependencies: ["ACPShared"],
+            dependencies: ["ACPShared", "LynkArt"],
             path: "Sources/LynkPet",
             resources: [.process("Resources")]
         )

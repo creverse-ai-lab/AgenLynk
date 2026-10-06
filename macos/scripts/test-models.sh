@@ -85,6 +85,7 @@ SETTINGS_OUT="$CHECK_ROOT/settings"
 env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 \
   "$REPO_ROOT/macos/Sources/ACPMonitor/AppSettings.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/PetStyle.swift" \
   "$REPO_ROOT/macos/Tests/ACPMonitorTests/AppSettingsTests.swift" \
   -o "$SETTINGS_OUT"
 
@@ -94,6 +95,7 @@ LS_HYGIENE_OUT="$CHECK_ROOT/launch-services-hygiene"
 env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   swiftc -sdk "$SDK" -target arm64-apple-macosx14.0 \
   "$REPO_ROOT/macos/Sources/ACPMonitor/AppSettings.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/PetStyle.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/LaunchServicesHygiene.swift" \
   "$REPO_ROOT/macos/Tests/ACPMonitorTests/LaunchServicesHygieneTests.swift" \
   -o "$LS_HYGIENE_OUT"
@@ -116,6 +118,7 @@ env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/TimeText.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/SessionTree.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/PetController.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/PetStyle.swift" \
   "$REPO_ROOT/macos/Sources/LynkPet/PetHover.swift" \
   "$REPO_ROOT/macos/Tests/ACPMonitorTests/PetControllerTests.swift" \
   -o "$PET_CONTROLLER_OUT"

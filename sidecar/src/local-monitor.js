@@ -149,6 +149,8 @@ export function projectLocalSnapshot(snapshot, timelines = new Map()) {
       opener: root?.provider ?? rootLink.provider ?? raw.provider ?? "local",
       openerInstanceId: orphanRun ? null : rootId,
       cwd: raw.cwd ?? facts.cwd ?? root?.cwd ?? "",
+      // The agent's own process, when known (the notch jumps to its window).
+      ...(Number.isInteger(raw.pid) && raw.pid > 1 ? { pid: raw.pid } : {}),
       turnId: active ? facts.turnId ?? `local-turn:${raw.session}` : null,
       stopReason: status === "idle" ? "completed" : null,
       createdAt: firstEventAt && firstEventAt < scannedAt ? firstEventAt : scannedAt,

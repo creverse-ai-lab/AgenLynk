@@ -15,6 +15,7 @@
 // is no proof: a probe writes one and deletes it, and a real session with a
 // transcript is listed by the scanner on its own.
 
+import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -53,6 +54,8 @@ const SCANNER_STATE = {
 };
 
 const BACKGROUND_RUNNING_TTL_MS = 120_000;
+// CLIs whose Stop hook answer was verified to continue the turn.
+const REPLY_PROVIDERS = new Set(["claude", "grok"]);
 
 export class HookSessions {
   constructor({
@@ -110,6 +113,13 @@ export class HookSessions {
     entry.lastSeen = receivedAt;
     if (isActivity(hook)) entry.active = true;
     if (lineage?.markers) entry.markers = { ...entry.markers, ...lineage.markers };
+    // A SessionStart (a new launch or a `--resume`) may be a new process for
+    // the same session id: its lineage is learned again, not inherited.
+    if (payload?.hook_event_name === "SessionStart" || payload?.hookEventName === "session_start") {
+      for (const field of ["ppid", "agentPid", "agentStart", "lineageResolved", "lineageAttempts", "parent", "headless", "interactive", "interactiveKind", "gatewayWorker"]) {
+        delete entry[field];
+      }
+    }
     if (lineage?.ppid && !entry.ppid) entry.ppid = lineage.ppid;
     if (provider === "claude" && headlessEntrypoint(entry.markers.entrypoint)) entry.headless = true;
     // The folder it was started in names the session; later payloads carry
@@ -172,7 +182,15 @@ export class HookSessions {
     const entry = this.sessions.get(key);
     if (!entry) return null;
     const person = !entry.headless || entry.interactiveKind;
-    const eligible = Boolean(entry.lineageResolved && entry.agentPid && person && !entry.parent && !entry.gatewayWorker);
+    // Codex is left out until its Stop answer is verified end to end: holding
+    // a Codex turn (often the Codex app or IDE panel) for a reply it may not
+    // take only showed "awaiting reply" with nothing to answer.
+    const eligible = Boolean(REPLY_PROVIDERS.has(entry.provider)
+      && entry.lineageResolved && entry.agentPid && this.isAlive(entry.agentPid, entry.agentStart)
+      && person && !entry.parent && !entry.gatewayWorker
+      // Background work reports back only once the Stop hook returns:
+      // holding it would freeze exactly the work the turn is waiting on.
+      && !(entry.backgroundTasks > 0));
     return { eligible, provider: entry.provider, cwd: entry.cwd ?? null, backgroundTasks: entry.backgroundTasks ?? 0 };
   }
 
@@ -198,6 +216,8 @@ export class HookSessions {
         agentPid = lineage.agentPidFromHook(entry.ppid, entry.provider);
         if (agentPid) {
           entry.agentPid = agentPid;
+          // With its start time, so a reused pid is not taken for it.
+          entry.agentStart = lineage.table.get(agentPid)?.start ?? null;
           if (entry.provider === "claude") await this.#readClaudeSession(entry, agentPid);
           const resolved = await lineage.resolve(agentPid, self);
           if (resolved.parent) entry.parent = resolved.parent;
@@ -225,23 +245,27 @@ export class HookSessions {
     while (this.parents.size > MAX_SESSIONS) this.parents.delete(this.parents.keys().next().value);
   }
 
-  /** Live Claude sessions (id -> the folder each was started in), or null where Claude keeps no such records. */
+  /** Live Claude sessions (id -> {cwd it was started in, pid}), or null where Claude keeps no such records. */
   #liveClaudeSessions(nowMs) {
     if (this.liveCache && nowMs - this.liveCache.at < 1_000) return this.liveCache.ids;
     let ids = null;
     try {
       const names = readdirSync(this.claudeSessionsDir).filter((name) => /^\d+\.json$/.test(name));
-      if (names.length) {
-        ids = new Map();
-        for (const name of names) {
-          try {
-            // A crash or SIGKILL leaves the file behind; only a live pid counts.
-            if (!this.isAlive(Number(name.slice(0, -".json".length)))) continue;
-            const record = JSON.parse(readFileSync(join(this.claudeSessionsDir, name), "utf8"));
-            if (typeof record?.sessionId === "string") ids.set(record.sessionId, typeof record.cwd === "string" ? record.cwd : null);
-          } catch {
-            // Half-written or foreign file.
+      // The folder exists: Claude keeps these records, so an empty one means
+      // no Claude session is running (not "unknown").
+      ids = new Map();
+      for (const name of names) {
+        try {
+          const record = JSON.parse(readFileSync(join(this.claudeSessionsDir, name), "utf8"));
+          // A crash or SIGKILL leaves the file behind; only the same live
+          // process (pid and start time) counts.
+          const start = typeof record?.procStart === "string" ? record.procStart : null;
+          if (!this.isAlive(Number(name.slice(0, -".json".length)), start)) continue;
+          if (typeof record?.sessionId === "string") {
+            ids.set(record.sessionId, { cwd: typeof record.cwd === "string" ? record.cwd : null, pid: Number(name.slice(0, -".json".length)) });
           }
+        } catch {
+          // Half-written or foreign file.
         }
       }
     } catch {
@@ -291,7 +315,7 @@ export class HookSessions {
       // Its record is dropped with it, so a `--resume` of the same session in
       // a new process starts over (new lineage, new pid) instead of being
       // judged by the dead one.
-      if (entry.agentPid && !this.isAlive(entry.agentPid)) {
+      if (entry.agentPid && !this.isAlive(entry.agentPid, entry.agentStart)) {
         if (raw) merged.splice(merged.indexOf(raw), 1);
         this.sessions.delete(key);
         continue;
@@ -320,6 +344,7 @@ export class HookSessions {
         }
         if (entry.headless) raw.headless = true;
         if (entry.interactive) raw.interactive = true;
+        if (entry.agentPid && !raw.pid) raw.pid = entry.agentPid;
         if (state && entry.statusAt / 1000 >= Number(raw.time || 0)) {
           raw.state = state;
           raw.event = `hook/${entry.event}`;
@@ -342,7 +367,7 @@ export class HookSessions {
         state,
         event: `hook/${entry.event}`,
         time: entry.statusAt / 1000,
-        pid: null,
+        pid: entry.agentPid ?? null,
         parent: null,
         engine: entry.model ?? null,
         cwd: entry.cwd ?? null,
@@ -375,19 +400,54 @@ export class HookSessions {
         }
         // Where it was started, also before any hook (e.g. right after a
         // monitor restart) has said so.
-        if (!raw.hooked && live.get(raw.session)) raw.cwd = live.get(raw.session);
+        const record = live.get(raw.session);
+        if (!raw.hooked && record?.cwd) raw.cwd = record.cwd;
+        // The process, so the app can bring its window forward.
+        if (record?.pid && !raw.pid) raw.pid = record.pid;
       }
     }
     return merged;
   }
 }
 
-function processAlive(pid) {
+/**
+ * Whether `pid` is alive and, when `start` is known (`ps -o lstart` form, as
+ * the lineage table and Claude's records keep it), still the same process:
+ * macOS reuses pids quickly.
+ */
+function processAlive(pid, start = null) {
   try {
     process.kill(pid, 0);
-    return true;
   } catch (error) {
     // EPERM: alive, just not ours to signal.
-    return error?.code === "EPERM";
+    if (error?.code !== "EPERM") return false;
   }
+  if (!start) return true;
+  const current = processStart(pid);
+  return current == null || normalizeStart(current) === normalizeStart(start);
+}
+
+const startCache = new Map();
+const START_CACHE_MS = 10_000;
+
+/** A pid's start time, cached briefly: merge runs every second. */
+function processStart(pid, nowMs = Date.now()) {
+  const cached = startCache.get(pid);
+  if (cached && nowMs - cached.at < START_CACHE_MS) return cached.start;
+  let start = null;
+  try {
+    // UTC and C locale, like the lineage table and Claude's procStart.
+    start = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf8", timeout: 1_000, env: { ...process.env, TZ: "UTC", LC_ALL: "C" }
+    }).trim() || null;
+  } catch {
+    start = null;
+  }
+  startCache.set(pid, { at: nowMs, start });
+  if (startCache.size > 256) startCache.delete(startCache.keys().next().value);
+  return start;
+}
+
+function normalizeStart(value) {
+  return String(value).trim().replace(/\s+/g, " ");
 }

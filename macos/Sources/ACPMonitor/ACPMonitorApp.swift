@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -29,6 +30,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct ACPMonitorApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model: AppModel
+    /// The menu bar switch alone (see MenuBarVisibility).
+    @StateObject private var menuBar: MenuBarVisibility
 
     init() {
         // Before AppModel reads any setting.
@@ -36,9 +39,10 @@ struct ACPMonitorApp: App {
         LaunchServicesHygiene.runOncePerBuild()
         let model = AppModel()
         _model = StateObject(wrappedValue: model)
+        _menuBar = StateObject(wrappedValue: MenuBarVisibility(settings: model.settings))
         appDelegate.launchHandler = { [weak model] in
             model?.startIfNeeded()
-            model?.notchChat.show()
+            if model?.settings.notchEnabled == true { model?.notchChat.show() }
         }
         appDelegate.terminationHandler = { [weak model] in await model?.stop() }
     }
@@ -69,7 +73,10 @@ struct ACPMonitorApp: App {
             SettingsView().environmentObject(model).environmentObject(model.settings)
         }
 
-        MenuBarExtra {
+        MenuBarExtra(isInserted: Binding(
+            get: { menuBar.isVisible },
+            set: { menuBar.set($0) }
+        )) {
             MenuBarStatusView()
                 .environmentObject(model)
                 .environmentObject(model.settings)
@@ -85,7 +92,6 @@ struct ACPMonitorApp: App {
 /// steps that wait for the user called out after them.
 struct MenuBarLabel: View {
     @ObservedObject var model: AppModel
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         let counts = MenuBarCounts(model.menuBarPipeline)
@@ -96,10 +102,33 @@ struct MenuBarLabel: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(counts.accessibility)
         .help(counts.accessibility)
-        .onReceive(NotificationCenter.default.publisher(for: .openSessionDetail)) { note in
-            guard let sessionId = note.object as? String else { return }
-            NSApp.activate(ignoringOtherApps: true)
-            openWindow(id: "session-detail", value: sessionId)
-        }
+    }
+}
+
+/// Whether the menu bar item is shown, published only when it really changes.
+/// MenuBarExtra writes its isInserted binding back as it inserts the item;
+/// a source that announces every write (all of AppSettings, or @AppStorage)
+/// re-ran the scene, which re-inserted the item, without end.
+@MainActor
+final class MenuBarVisibility: ObservableObject {
+    @Published private(set) var isVisible: Bool
+    private let settings: AppSettings
+    private var subscription: AnyCancellable?
+
+    init(settings: AppSettings) {
+        self.settings = settings
+        isVisible = settings.menuBarEnabled
+        subscription = settings.$menuBarEnabled
+            .removeDuplicates()
+            .sink { [weak self] visible in
+                guard let self, self.isVisible != visible else { return }
+                self.isVisible = visible
+            }
+    }
+
+    func set(_ visible: Bool) {
+        guard isVisible != visible else { return }
+        isVisible = visible
+        if settings.menuBarEnabled != visible { settings.menuBarEnabled = visible }
     }
 }

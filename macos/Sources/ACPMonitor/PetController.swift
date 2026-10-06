@@ -54,6 +54,7 @@ final class PetController {
     func start(
         executablePath: String,
         projection: PetActivityProjection,
+        style: PetStyle = .orbit,
         onTermination: @escaping @MainActor (Int32) -> Void
     ) throws {
         stop()
@@ -87,7 +88,8 @@ final class PetController {
         process.environment = PetChildEnvironment.make(
             from: ProcessInfo.processInfo.environment,
             stateFilePath: stateFileURL.path,
-            actionsFilePath: actionsFileURL.path
+            actionsFilePath: actionsFileURL.path,
+            style: style.rawValue
         )
         process.terminationHandler = { [weak self] finished in
             guard let controller = self else { return }

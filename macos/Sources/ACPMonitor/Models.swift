@@ -132,6 +132,8 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
     let alerts: [SessionAlert]
     /// Recent turns' token use, newest last (contracts/monitor/v2 turnUsage).
     let turnUsage: [TurnUsage]
+    /// The agent's own process for a local session, when the monitor knows it.
+    let pid: Int?
 
     var id: String { sessionId }
     /// Naming policy (docs/ux-policy.md): the sidecar's title (the CLI's own
@@ -208,6 +210,7 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
         source = object.string("source") ?? "gateway"
         role = object.string("role") ?? "worker"
         parentSessionId = object.string("parentSessionId")
+        pid = object.int("pid").flatMap { $0 > 1 ? $0 : nil }
         usage = SessionUsage(object["usage"])
         usagePartial = object.bool("usagePartial") ?? false
         capabilities = Set((object.array("capabilities") ?? []).compactMap { item -> String? in
@@ -1145,13 +1148,18 @@ struct PetActionsEnvelope: Encodable, Equatable, Sendable {
 enum PetChildEnvironment {
     static let allowlistedKeys: Set<String> = ["HOME", "PATH", "TMPDIR", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL"]
 
-    static func make(from source: [String: String], stateFilePath: String, actionsFilePath: String) -> [String: String] {
+    static func make(from source: [String: String], stateFilePath: String, actionsFilePath: String, style: String = "orbit") -> [String: String] {
         var result = source.filter { allowlistedKeys.contains($0.key) }
         result["PET_STATE_FILE"] = stateFilePath
         result["PET_ACTIONS_FILE"] = actionsFilePath
+        result["PET_STYLE"] = style
+        #if DEBUG
+        if let snapshot = source["PET_DEBUG_SNAPSHOT"] { result["PET_DEBUG_SNAPSHOT"] = snapshot }
+        #endif
         return result
     }
 }
+
 
 /// One canonical timeline event (contracts/monitor/v2 `event`). The sidecar
 /// gives every source — Gateway, Claude/Codex/Grok transcripts, agent hooks —

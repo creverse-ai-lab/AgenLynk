@@ -1,3 +1,4 @@
+import LynkArt
 import SwiftUI
 
 // The notch's home page: the same Frontdoor cards as the menu bar, each with
@@ -60,6 +61,18 @@ struct NotchStatusBadge: View {
     }
 }
 
+extension MenuBarPipeline {
+    /// The notch's view of the pipeline: every Worker belongs to a Frontdoor,
+    /// so ones the monitor could not place are left to the dashboard. Cards,
+    /// the pill and the counts all read this one list.
+    var notchCards: MenuBarPipeline {
+        MenuBarPipeline(
+            activeCards: activeCards.filter { !$0.frontdoor.isUnattributed },
+            idleCards: idleCards.filter { !$0.frontdoor.isUnattributed }
+        )
+    }
+}
+
 struct NotchSessionsView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var controller: NotchChatController
@@ -76,12 +89,15 @@ struct NotchSessionsView: View {
             ScrollView {
                 LazyVStack(spacing: 8) {
                     if store.sessionId != nil { chatCard }
-                    let pipeline = model.menuBarPipeline
+                    let pipeline = model.menuBarPipeline.notchCards
                     let replying = controller.replyingSessionIds
-                    // Every Worker belongs to a Frontdoor; ones the monitor could
-                    // not place are the dashboard's to sort out, not the notch's.
-                    let active = pipeline.activeCards.filter { !$0.frontdoor.isUnattributed }
-                    let idle = pipeline.idleCards.filter { !$0.frontdoor.isUnattributed }
+                    // A Frontdoor holding its turn open for a reply is not resting:
+                    // it is listed with the active ones.
+                    let awaiting = { (card: MenuBarPipeline.Card) in
+                        FrontdoorPhase.members(card.frontdoor).contains { replying.contains($0.sessionId) }
+                    }
+                    let active = pipeline.activeCards + pipeline.idleCards.filter(awaiting)
+                    let idle = pipeline.idleCards.filter { !awaiting($0) }
                     ForEach(active) { card in NotchSessionCard(card: card, replying: replying) }
                     if !idle.isEmpty {
                         Text("쉬는 중")
@@ -89,7 +105,7 @@ struct NotchSessionsView: View {
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.top, 4)
-                        ForEach(idle.prefix(6)) { card in NotchSessionCard(card: card, replying: replying) }
+                        ForEach(idle) { card in NotchSessionCard(card: card, replying: replying) }
                     }
                     if active.isEmpty && idle.isEmpty && store.sessionId == nil {
                         Text("지금 보이는 Frontdoor가 없어요.\n+ 를 눌러 채팅을 시작할 수 있어요.")
@@ -107,15 +123,16 @@ struct NotchSessionsView: View {
     private var header: some View {
         HStack(spacing: 8) {
             Text("AgenLynk").font(.headline)
-            let counts = MenuBarCounts(model.menuBarPipeline)
-            if let text = counts.text {
-                Text(text).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            let counts = MenuBarCounts(model.menuBarPipeline.notchCards)
+            if counts.main > 0 || counts.sub > 0 {
+                Text("Frontdoor \(counts.main) / Worker \(counts.sub)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
             Spacer()
             Button { controller.openChat(new: true) } label: { Image(systemName: "plus.circle.fill").font(.title3) }
                 .buttonStyle(.borderless)
                 .help("새 채팅")
             Menu {
+                Button("표시 요소 설정…") { NotchChatController.openSettings() }
                 Toggle("끝난 Frontdoor에 노치에서 답장", isOn: Binding(
                     get: { controller.repliesEnabled },
                     set: { controller.setRepliesEnabled($0) }
@@ -125,7 +142,7 @@ struct NotchSessionsView: View {
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            Button { controller.collapse() } label: { Image(systemName: "chevron.up") }
+            Button { controller.collapse(restoreFocus: true) } label: { Image(systemName: "chevron.up") }
                 .buttonStyle(.borderless)
         }
     }
@@ -134,7 +151,7 @@ struct NotchSessionsView: View {
     private var chatCard: some View {
         Button { controller.openChat(new: false) } label: {
             HStack(spacing: 10) {
-                ProviderOrb(provider: store.sessionProvider ?? store.provider, size: 28, active: store.isRunning)
+                ProviderOrb(provider: store.sessionProvider ?? store.provider, size: 44, mood: AgentMascot.Mood(urgency: chatUrgency))
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         Text("채팅 · \(providerDisplayLabel(store.sessionProvider ?? store.provider))")
@@ -172,12 +189,18 @@ private struct NotchSessionCard: View {
         let focus = card.focus
         let awaitingReply = FrontdoorPhase.members(card.frontdoor).contains { replying.contains($0.sessionId) }
         let style = awaitingReply ? .awaitingReply : NotchStatusStyle(urgency: card.urgency, currentStep: focus?.currentStep)
+        let detailId = focus?.session.sessionId ?? card.frontdoor.root?.sessionId
+        let root = card.frontdoor.root
         Button {
-            let sessionId = focus?.session.sessionId ?? card.frontdoor.root?.sessionId
-            if let sessionId { NotificationCenter.default.post(name: .openSessionDetail, object: sessionId) }
+            // The window it runs in when that is known; its details otherwise.
+            if let root, SessionWindowJumper.canJump(root) {
+                SessionWindowJumper.jump(to: root)
+            } else if let detailId {
+                NotificationCenter.default.post(name: .openSessionDetail, object: detailId)
+            }
         } label: {
             HStack(spacing: 10) {
-                ProviderOrb(provider: card.frontdoor.provider, size: 28, active: card.urgency.isMoving && card.urgency != .error)
+                ProviderOrb(provider: card.frontdoor.provider, size: 44, mood: awaitingReply ? .waiting : AgentMascot.Mood(urgency: card.urgency))
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         Text(card.frontdoor.displayName).font(.callout.weight(.semibold)).lineLimit(1)
@@ -195,6 +218,14 @@ private struct NotchSessionCard: View {
                         .foregroundStyle(.secondary)
                         .help("실행 중인 Worker \(workers)개")
                 }
+                if SessionWindowJumper.canJump(root) {
+                    Image(systemName: "macwindow.on.rectangle").foregroundStyle(.tertiary).help("눌러서 이 세션의 창으로 이동")
+                }
+                Button {
+                    if let detailId { NotificationCenter.default.post(name: .openSessionDetail, object: detailId) }
+                } label: { Image(systemName: "info.circle") }
+                    .buttonStyle(.borderless)
+                    .help("세션 상세")
             }
             .padding(10)
             .background(Color.white.opacity(card.urgency.needsUser ? 0.12 : 0.06), in: RoundedRectangle(cornerRadius: 12))

@@ -81,7 +81,44 @@ enum AppSettingsChecks {
 
         try dashboardModeChecks()
         try legacyDefaultsImportChecks()
+        try surfaceChecks()
         print("Swift settings checks passed")
+    }
+}
+
+/// Menu bar, notch and pet each have their own switch: all on by default,
+/// each remembered, the notch's old reply switch carried over, and reset
+/// turns everything back on.
+@MainActor
+private func surfaceChecks() throws {
+    let suite = "ACPMonitor.AppSettingsTests.surfaces.\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suite) else {
+        throw SettingsCheckError.failed("could not create isolated defaults")
+    }
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let fresh = AppSettings(defaults: defaults, bundledPetExecutablePath: nil)
+    guard fresh.menuBarEnabled, fresh.notchEnabled, fresh.notchAlertsEnabled, fresh.notchSoundsEnabled, fresh.notchRepliesEnabled else {
+        throw SettingsCheckError.failed("every surface starts on")
+    }
+    fresh.menuBarEnabled = false
+    fresh.notchAlertsEnabled = false
+    let reloaded = AppSettings(defaults: defaults, bundledPetExecutablePath: nil)
+    guard !reloaded.menuBarEnabled, !reloaded.notchAlertsEnabled, reloaded.notchEnabled else {
+        throw SettingsCheckError.failed("surface switches survive relaunch, one at a time")
+    }
+    reloaded.reset()
+    guard reloaded.menuBarEnabled, reloaded.notchAlertsEnabled else {
+        throw SettingsCheckError.failed("reset turns the surfaces back on")
+    }
+
+    let legacySuite = "\(suite).legacy"
+    guard let legacy = UserDefaults(suiteName: legacySuite) else {
+        throw SettingsCheckError.failed("could not create isolated defaults")
+    }
+    defer { legacy.removePersistentDomain(forName: legacySuite) }
+    legacy.set(false, forKey: "notchRepliesEnabled")
+    guard !AppSettings(defaults: legacy, bundledPetExecutablePath: nil).notchRepliesEnabled else {
+        throw SettingsCheckError.failed("the notch's earlier reply switch is kept")
     }
 }
 

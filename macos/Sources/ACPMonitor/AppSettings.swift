@@ -81,6 +81,14 @@ final class AppSettings: ObservableObject {
         static let followLatestEventUXMigration = "monitor.followLatestEventUXMigrationV2"
         static let nodePath = "monitor.nodePath"
         static let petEnabled = "monitor.petEnabled"
+        static let menuBarEnabled = "monitor.menuBarEnabled"
+        static let petStyle = "monitor.petStyle"
+        static let notchEnabled = "monitor.notchEnabled"
+        static let notchAlertsEnabled = "monitor.notchAlertsEnabled"
+        static let notchSoundsEnabled = "monitor.notchSoundsEnabled"
+        static let notchRepliesEnabled = "monitor.notchRepliesEnabled"
+        /// Where the notch kept its reply switch before it moved here.
+        static let legacyNotchRepliesEnabled = "notchRepliesEnabled"
         static let petExecutablePath = "monitor.petExecutablePath"
         static let bundledPetDefaultMigration = "monitor.bundledPetDefaultV1"
         static let frontdoorNicknames = "monitor.frontdoorNicknames"
@@ -104,6 +112,15 @@ final class AppSettings: ObservableObject {
     @Published var showInspectorColumn: Bool { didSet { defaults.set(showInspectorColumn, forKey: Key.showInspectorColumn) } }
     @Published var nodePath: String { didSet { defaults.set(nodePath, forKey: Key.nodePath) } }
     @Published var petEnabled: Bool { didSet { defaults.set(petEnabled, forKey: Key.petEnabled) } }
+    @Published var petStyle: PetStyle { didSet { defaults.set(petStyle.rawValue, forKey: Key.petStyle) } }
+    // The app's three surfaces; each can be turned off on its own.
+    @Published var menuBarEnabled: Bool { didSet { defaults.set(menuBarEnabled, forKey: Key.menuBarEnabled) } }
+    @Published var notchEnabled: Bool { didSet { defaults.set(notchEnabled, forKey: Key.notchEnabled) } }
+    /// Frontdoor alerts popping out of the notch.
+    @Published var notchAlertsEnabled: Bool { didSet { defaults.set(notchAlertsEnabled, forKey: Key.notchAlertsEnabled) } }
+    @Published var notchSoundsEnabled: Bool { didSet { defaults.set(notchSoundsEnabled, forKey: Key.notchSoundsEnabled) } }
+    /// A finished Frontdoor's Stop waits for a notch reply.
+    @Published var notchRepliesEnabled: Bool { didSet { defaults.set(notchRepliesEnabled, forKey: Key.notchRepliesEnabled) } }
     /// Optional custom renderer executable. Empty selects Lynk's bundled Pet.
     @Published var petExecutablePath: String { didSet { defaults.set(petExecutablePath, forKey: Key.petExecutablePath) } }
 
@@ -226,6 +243,13 @@ final class AppSettings: ObservableObject {
         self.defaults = defaults
         self.bundledPetExecutablePath = bundledPetExecutablePath
         activeOnly = defaults.object(forKey: Key.activeOnly) as? Bool ?? false
+        menuBarEnabled = defaults.object(forKey: Key.menuBarEnabled) as? Bool ?? true
+        petStyle = defaults.string(forKey: Key.petStyle).flatMap(PetStyle.init(rawValue:)) ?? .orbit
+        notchEnabled = defaults.object(forKey: Key.notchEnabled) as? Bool ?? true
+        notchAlertsEnabled = defaults.object(forKey: Key.notchAlertsEnabled) as? Bool ?? true
+        notchSoundsEnabled = defaults.object(forKey: Key.notchSoundsEnabled) as? Bool ?? true
+        notchRepliesEnabled = defaults.object(forKey: Key.notchRepliesEnabled) as? Bool
+            ?? defaults.object(forKey: Key.legacyNotchRepliesEnabled) as? Bool ?? true
         showSessionColumn = defaults.object(forKey: Key.showSessionColumn) as? Bool ?? true
         showInspectorColumn = defaults.object(forKey: Key.showInspectorColumn) as? Bool ?? true
         showThoughts = defaults.object(forKey: Key.showThoughts) as? Bool ?? true
@@ -286,5 +310,11 @@ final class AppSettings: ObservableObject {
         lastDashboardMode = nil
         petEnabled = bundledPetExecutablePath != nil
         petExecutablePath = ""
+        menuBarEnabled = true
+        petStyle = .orbit
+        notchEnabled = true
+        notchAlertsEnabled = true
+        notchSoundsEnabled = true
+        notchRepliesEnabled = true
     }
 }

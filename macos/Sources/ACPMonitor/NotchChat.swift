@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import LynkArt
 import SwiftUI
 
 // Notch chat: a small panel that hangs from the notch (or the top of a screen
@@ -89,6 +90,9 @@ final class NotchChatStore: ObservableObject {
         generation += 1
         ownerId = nil
         customCwd = nil
+        // The previous chat's request no longer holds this one's send button.
+        busy = false
+        activity = nil
         pollTask?.cancel()
         sessionId = nil
         sessionProvider = nil
@@ -105,6 +109,11 @@ final class NotchChatStore: ObservableObject {
         sessionProvider = session.provider
         provider = session.provider
         messages = [NotchChatMessage(role: .note, text: "\(session.displayName) 세션에 연결했습니다.")]
+        // A turn already running streams into a bubble of its own.
+        if session.isActive {
+            status = session.status
+            messages.append(NotchChatMessage(role: .agent, text: ""))
+        }
         startPolling()
     }
 
@@ -131,7 +140,7 @@ final class NotchChatStore: ObservableObject {
         busy = true
         let started = generation
         Task {
-            defer { busy = false }
+            defer { if started == generation { busy = false } }
             do {
                 guard let (client, endpoint) = await model?.chatConnection() else {
                     throw NotchChatError("Gateway monitor에 아직 연결되지 않았습니다.")
@@ -146,7 +155,12 @@ final class NotchChatStore: ObservableObject {
                     guard let id = opened.objectValue?["sessionId"]?.stringValue else {
                         throw NotchChatError("세션을 열지 못했습니다.")
                     }
-                    guard started == generation else { return }
+                    guard started == generation else {
+                        // The chat was left while this opened: close the
+                        // Worker rather than leave it behind unseen.
+                        _ = try? await client.chatPost(endpoint: endpoint, path: "close", body: ["sessionId": .string(id)])
+                        return
+                    }
                     ownerId = ownerRoot
                     sessionId = id
                     sessionProvider = openProvider
@@ -225,7 +239,7 @@ final class NotchChatStore: ObservableObject {
 
     /// true: keep polling; false: the turn is over; nil: this poll failed.
     private func pollOnce() async -> Bool? {
-        guard let sessionId else { return false }
+        guard let sessionId, !Task.isCancelled else { return false }
         guard let (client, endpoint) = await model?.chatConnection() else { return nil }
         do {
             let reply = try await client.chatPoll(endpoint: endpoint, sessionId: sessionId, cursor: cursor, waitMs: 0)
@@ -241,7 +255,9 @@ final class NotchChatStore: ObservableObject {
                     activity = title
                 }
             }
-            if status != "waiting_permission" { permission = nil }
+            // The card goes with a response or the end of the turn, not with a
+            // status that has not caught up with the request yet.
+            if !isRunning { permission = nil }
             if let text = root["result"]?.objectValue?["text"]?.stringValue, !text.isEmpty,
                let last = messages.indices.last, messages[last].role == .agent {
                 messages[last].text = text
@@ -266,6 +282,8 @@ final class NotchChatStore: ObservableObject {
 }
 
 extension Notification.Name {
+    /// Show Settings on the 표시 요소 tab (handled by AppModel).
+    static let openSurfacesSettings = Notification.Name("AgenLynk.openSurfacesSettings")
     /// object: the session ID whose detail window should open.
     static let openSessionDetail = Notification.Name("AgenLynk.openSessionDetail")
 }
@@ -301,16 +319,18 @@ final class NotchChatController: NSObject, ObservableObject {
     private var tracker = FrontdoorAlertTracker()
     private var modelSubscription: AnyCancellable?
     private var alertDismissal: Task<Void, Never>?
+    /// The app that had the keyboard before the notch opened.
+    private var previousApp: NSRunningApplication?
     /// Alerts that arrived while a reply box was open.
-    private var queued: [NotchAlert] = []
-    private var pendingEnded: Task<Void, Never>?
-    @Published private(set) var repliesEnabled = UserDefaults.standard.object(forKey: repliesEnabledKey) as? Bool ?? true
-    private static let repliesEnabledKey = "notchRepliesEnabled"
+    @Published private var queued: [NotchAlert] = []
+    private var settingsSubscriptions: Set<AnyCancellable> = []
+    private var settings: AppSettings? { model?.settings }
+    var repliesEnabled: Bool { settings?.notchRepliesEnabled ?? true }
     private(set) var notchSize = CGSize(width: 200, height: 32)
 
     static let expandedSize = CGSize(width: 440, height: 520)
     static let alertHeight: CGFloat = 62
-    static let replyHeight: CGFloat = 84
+    static let replyHeight: CGFloat = 108
 
     init(model: AppModel) {
         self.model = model
@@ -321,6 +341,25 @@ final class NotchChatController: NSObject, ObservableObject {
         modelSubscription = model.objectWillChange
             .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
             .sink { [weak self] _ in self?.refreshAlerts() }
+        // Settings → 표시 요소: the notch itself, and whether a Frontdoor
+        // waits for a reply (only while the notch is there to take it).
+        model.settings.$notchEnabled.dropFirst().removeDuplicates()
+            .sink { [weak self] enabled in
+                guard let self else { return }
+                enabled ? self.show() : self.hide()
+                self.pushReplySetting(notchEnabled: enabled)
+            }
+            .store(in: &settingsSubscriptions)
+        model.settings.$notchRepliesEnabled.dropFirst().removeDuplicates()
+            .sink { [weak self] enabled in self?.pushReplySetting(repliesEnabled: enabled) }
+            .store(in: &settingsSubscriptions)
+        model.settings.$notchAlertsEnabled.dropFirst().removeDuplicates()
+            .sink { [weak self] enabled in
+                guard let self, !enabled, self.alert?.reply == nil else { return }
+                self.queued.removeAll { $0.reply == nil }
+                self.dismissAlert()
+            }
+            .store(in: &settingsSubscriptions)
     }
 
     private func refreshAlerts() {
@@ -342,16 +381,12 @@ final class NotchChatController: NSObject, ObservableObject {
         // A wait is shown at once. "Done" and "failed" wait a moment and are
         // shown only if the Frontdoor is still at rest: a status that dips to
         // idle between steps (or a reply that set it going again) is not news.
-        if let sticky = fresh.first(where: \.isSticky) {
-            present(sticky)
-        } else if let ended = fresh.last {
-            confirmEnded(ended)
-        }
+        for sticky in fresh where sticky.isSticky { present(sticky) }
+        for ended in fresh where !ended.isSticky { confirmEnded(ended) }
     }
 
     private func confirmEnded(_ ended: NotchAlert) {
-        pendingEnded?.cancel()
-        pendingEnded = Task { [weak self] in
+        Task { [weak self] in
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             guard !Task.isCancelled, let self, let model = self.model,
                   let frontdoor = model.frontdoorSessions.first(where: { $0.id == ended.frontdoorId }) else { return }
@@ -418,13 +453,13 @@ final class NotchChatController: NSObject, ObservableObject {
     }
 
     func setRepliesEnabled(_ enabled: Bool) {
-        repliesEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: Self.repliesEnabledKey)
-        pushReplySetting()
+        settings?.notchRepliesEnabled = enabled
     }
 
-    private func pushReplySetting() {
-        let enabled = repliesEnabled
+    /// Values passed in come from a publisher's willSet, before the setting
+    /// itself has changed.
+    private func pushReplySetting(notchEnabled: Bool? = nil, repliesEnabled: Bool? = nil) {
+        let enabled = (notchEnabled ?? settings?.notchEnabled ?? true) && (repliesEnabled ?? self.repliesEnabled)
         Task { [weak self] in
             guard let (client, endpoint) = await self?.model?.chatConnection() else { return }
             _ = try? await client.postJSON(endpoint: endpoint, path: "api/notch/reply-settings", body: ["enabled": .bool(enabled)])
@@ -483,13 +518,24 @@ final class NotchChatController: NSObject, ObservableObject {
     func present(_ next: NotchAlert) {
         // An open reply box is never pushed aside: whatever else happens
         // waits its turn, so a half-typed reply is not lost.
-        if let current = alert, current.reply != nil, next.reply?.id != current.reply?.id {
-            queued.append(next)
-            return
+        // With alerts off only a reply box still shows: it is how a reply
+        // is given, and replies have their own switch.
+        if next.reply == nil, settings?.notchAlertsEnabled == false { return }
+        if let current = alert {
+            // An open reply box, or a wait the person has not answered yet,
+            // is never pushed aside: the newcomer queues behind it. The same
+            // Frontdoor's own newer alert replaces it.
+            let replyOpen = current.reply != nil && next.reply?.id != current.reply?.id
+            let waitOpen = current.isSticky && current.reply == nil && current.frontdoorId != next.frontdoorId
+            if replyOpen || waitOpen {
+                queued.removeAll { $0.frontdoorId == next.frontdoorId && $0.reply == nil && next.reply == nil }
+                queued.append(next)
+                return
+            }
         }
         alertDismissal?.cancel()
         alert = next
-        NSSound(named: next.isSticky ? "Glass" : "Pop")?.play()
+        if settings?.notchSoundsEnabled != false { NSSound(named: next.isSticky ? "Glass" : "Pop")?.play() }
         if !expanded { layout(animated: true) }
         if next.reply != nil {
             armReplyExpiry(next)
@@ -511,7 +557,9 @@ final class NotchChatController: NSObject, ObservableObject {
             let wait = max(0, slot.expiresAt.timeIntervalSinceNow) + 3
             try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
             guard !Task.isCancelled, self?.alert?.reply?.id == slot.id else { return }
-            self?.dismissAlert(release: false)
+            // Closed on the sidecar too: an extend that landed late must not
+            // keep the agent waiting behind a box that is gone.
+            self?.dismissAlert(release: true)
         }
     }
 
@@ -521,9 +569,10 @@ final class NotchChatController: NSObject, ObservableObject {
         guard let current = alert else { return }
         if release, let slot = current.reply { self.release(slot) }
         alert = nil
-        if let next = queued.isEmpty ? nil : (queued.firstIndex(where: \.isSticky) ?? queued.indices.last) {
+        // Waiting ones first; a "done" that sat in the queue too long is old news.
+        queued.removeAll { !$0.isSticky && Date().timeIntervalSince($0.createdAt) > 30 }
+        if let next = queued.firstIndex(where: \.isSticky) ?? queued.indices.last {
             present(queued.remove(at: next))
-            queued.removeAll { !$0.isSticky }
         } else if !expanded {
             layout(animated: true)
         }
@@ -531,7 +580,34 @@ final class NotchChatController: NSObject, ObservableObject {
 
     /// Sessions whose Stop is held open for a notch reply right now.
     var replyingSessionIds: Set<String> {
-        Set(([alert].compactMap { $0 } + queued).filter { $0.reply != nil }.compactMap(\.sessionId))
+        let now = Date()
+        return Set(([alert].compactMap { $0 } + queued)
+            .filter { ($0.reply?.expiresAt).map { $0 > now } ?? false }
+            .compactMap(\.sessionId))
+    }
+
+    /// The notch is not part of a SwiftUI scene, so it cannot use the
+    /// Settings scene's opener; it shows the same view in its own window.
+    static func openSettings() {
+        NotificationCenter.default.post(name: .openSurfacesSettings, object: nil)
+    }
+
+    func expandToSessions() {
+        page = .sessions
+        expand()
+    }
+
+    /// The live session an alert is about.
+    private func session(for alert: NotchAlert) -> GatewaySession? {
+        guard let sessionId = alert.sessionId else { return nil }
+        return model?.sessions.first { $0.sessionId == sessionId }
+    }
+
+    func canJump(to alert: NotchAlert) -> Bool { SessionWindowJumper.canJump(session(for: alert)) }
+
+    func jumpToWindow(of alert: NotchAlert) {
+        guard let session = session(for: alert) else { return }
+        SessionWindowJumper.jump(to: session)
     }
 
     func openChat(new: Bool) {
@@ -542,7 +618,9 @@ final class NotchChatController: NSObject, ObservableObject {
 
     func openAlert() {
         guard let alert else { return }
-        dismissAlert()
+        // Looking at the session must not answer for the person: a reply box
+        // stays open (and the Frontdoor keeps waiting) while they read.
+        if alert.reply == nil { dismissAlert() }
         if let sessionId = alert.sessionId {
             NotificationCenter.default.post(name: .openSessionDetail, object: sessionId)
         }
@@ -569,15 +647,26 @@ final class NotchChatController: NSObject, ObservableObject {
     }
 
     func expand() {
+        if !expanded, let front = NSWorkspace.shared.frontmostApplication,
+           front.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+            previousApp = front
+        }
         expanded = true
         layout(animated: true)
         NSApp.activate(ignoringOtherApps: true)
         panel?.makeKeyAndOrderFront(nil)
     }
 
-    func collapse() {
+    /// `restoreFocus`: the person closed the notch (Esc, chevron), so the app
+    /// they were typing in gets the keyboard back.
+    func collapse(restoreFocus: Bool = false) {
         expanded = false
         layout(animated: true)
+        if restoreFocus, let app = previousApp, !app.isTerminated {
+            panel?.resignKey()
+            app.activate()
+        }
+        previousApp = nil
     }
 
     #if DEBUG
@@ -723,7 +812,7 @@ final class NotchChatController: NSObject, ObservableObject {
         self.panel = panel
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, event.keyCode == 53, self.expanded, event.window === self.panel else { return event }
-            self.collapse()
+            self.collapse(restoreFocus: true)
             return nil
         }
         NotificationCenter.default.addObserver(
@@ -812,13 +901,13 @@ private struct NotchChatRootView: View {
     /// Left of the notch: the most urgent Frontdoor's provider and state;
     /// right: how many need the person, and how many are running.
     private var collapsedPill: some View {
-        let pipeline = model.menuBarPipeline
+        let pipeline = model.menuBarPipeline.notchCards
         let top = pipeline.activeCards.first
         return HStack(spacing: 6) {
             ProviderOrb(
                 provider: top?.frontdoor.provider ?? store.sessionProvider ?? store.provider,
-                size: 18,
-                active: top != nil || store.isRunning
+                size: max(18, controller.notchSize.height * 0.82),
+                mood: top.map { AgentMascot.Mood(urgency: $0.urgency) } ?? (store.isRunning ? .working : .idle)
             )
             if let top {
                 NotchStatusBadge(style: NotchStatusStyle(urgency: top.urgency, currentStep: top.focus?.currentStep), showsLabel: false)
@@ -829,10 +918,13 @@ private struct NotchChatRootView: View {
                 NotchStatusBadge(style: NotchStatusStyle(urgency: .permission), showsLabel: false)
                 Text("\(waiting)").font(.caption.monospacedDigit().weight(.bold)).foregroundStyle(.orange)
             }
-            let running = pipeline.runningCount + (store.isRunning ? 1 : 0)
-            if running > 0 {
-                NotchStatusBadge(style: NotchStatusStyle(urgency: .running), showsLabel: false)
-                Text("\(running)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            // Working Frontdoors / their working Workers, as in the menu bar.
+            let counts = MenuBarCounts(pipeline)
+            if counts.main > 0 || counts.sub > 0 {
+                Text("\(counts.main)/\(counts.sub)")
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .help("작업 중 Frontdoor \(counts.main)개 / Worker \(counts.sub)개")
             }
         }
         .padding(.horizontal, 12)
@@ -877,7 +969,7 @@ private struct NotchChatExpandedView: View {
             Button { controller.page = .sessions } label: { Image(systemName: "chevron.left") }
                 .buttonStyle(.borderless)
                 .help("세션 목록")
-            ProviderOrb(provider: store.sessionProvider ?? store.provider, size: 22, active: store.isRunning)
+            ProviderOrb(provider: store.sessionProvider ?? store.provider, size: 30, active: store.isRunning)
             if store.sessionId == nil {
                 Picker("", selection: $store.provider) {
                     ForEach(NotchChatStore.providers, id: \.self) { Text(providerDisplayLabel($0)).tag($0) }
@@ -887,7 +979,7 @@ private struct NotchChatExpandedView: View {
                 .frame(width: 210)
             } else {
                 Text(providerDisplayLabel(store.sessionProvider ?? store.provider)).font(.headline)
-                if let status = store.status { Text(status).font(.caption).foregroundStyle(.secondary) }
+                if let status = store.status { Text(NotchStatusStyle(status: status).label).font(.caption).foregroundStyle(.secondary) }
             }
             Spacer()
             if let sessionId = store.sessionId {
@@ -897,6 +989,7 @@ private struct NotchChatExpandedView: View {
             }
             Menu {
                 Button("새 채팅") { store.newChat() }
+                Button("표시 요소 설정…") { NotchChatController.openSettings() }
                 Toggle("끝난 Frontdoor에 노치에서 답장", isOn: Binding(
                     get: { controller.repliesEnabled },
                     set: { controller.setRepliesEnabled($0) }
@@ -916,7 +1009,7 @@ private struct NotchChatExpandedView: View {
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            Button { controller.collapse() } label: { Image(systemName: "chevron.up") }
+            Button { controller.collapse(restoreFocus: true) } label: { Image(systemName: "chevron.up") }
                 .buttonStyle(.borderless)
         }
     }
@@ -964,6 +1057,9 @@ private struct NotchChatExpandedView: View {
             .pickerStyle(.menu)
             .font(.caption)
             .fixedSize()
+            // What the picker shows is the choice: if that Frontdoor goes away
+            // before sending, the chat says so instead of moving to another.
+            .onAppear { if store.ownerId == nil { store.ownerId = store.owner?.root?.sessionId } }
         }
     }
 
@@ -995,11 +1091,10 @@ private struct NotchChatExpandedView: View {
     private func permissionCard(_ permission: NotchChatPermission) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Label(permission.title, systemImage: "lock.shield").font(.callout).lineLimit(2)
-            HStack {
-                ForEach(permission.options) { option in
-                    Button(option.name) { store.answer(option) }
-                        .tint(option.kind.hasPrefix("allow") ? .green : .red)
-                }
+            // Side by side when they fit, stacked when the options are many.
+            ViewThatFits(in: .horizontal) {
+                HStack { permissionButtons(permission) }
+                VStack(alignment: .leading) { permissionButtons(permission) }
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
@@ -1007,6 +1102,14 @@ private struct NotchChatExpandedView: View {
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.orange.opacity(0.18), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    @ViewBuilder
+    private func permissionButtons(_ permission: NotchChatPermission) -> some View {
+        ForEach(permission.options) { option in
+            Button(option.name) { store.answer(option) }
+                .tint(option.kind.hasPrefix("allow") ? .green : .red)
+        }
     }
 
     private var input: some View {
@@ -1098,13 +1201,21 @@ struct NotchAlertRow: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            ProviderOrb(provider: alert.provider, size: 26, active: alert.isSticky)
+            ProviderOrb(provider: alert.provider, size: 46, mood: alertMood)
             VStack(alignment: .leading, spacing: 2) {
                 Text(alert.title).font(.callout.weight(.semibold)).lineLimit(1)
                 Text(alert.message).font(.caption).foregroundStyle(tint).lineLimit(1)
             }
             Spacer(minLength: 6)
             Image(systemName: icon).foregroundStyle(tint).font(.title3)
+            if controller.canJump(to: alert) {
+                Button { controller.jumpToWindow(of: alert) } label: { Image(systemName: "macwindow.on.rectangle") }
+                    .buttonStyle(.borderless)
+                    .help("이 세션이 실행 중인 창으로 이동")
+            }
+            Button { controller.openAlert() } label: { Image(systemName: "info.circle") }
+                .buttonStyle(.borderless)
+                .help("세션 상세")
             Button { controller.dismissAlert() } label: { Image(systemName: "xmark").font(.caption) }
                 .buttonStyle(.borderless)
                 .foregroundStyle(.secondary)
@@ -1112,11 +1223,22 @@ struct NotchAlertRow: View {
         .padding(.horizontal, 14)
         .frame(height: NotchChatController.alertHeight)
         .contentShape(Rectangle())
-        .onTapGesture { controller.openAlert() }
+        // Opens the notch around it (the reply box gets room) instead of
+        // closing it.
+        .onTapGesture { if !controller.expanded { controller.expandToSessions() } }
+    }
+
+    private var alertMood: AgentMascot.Mood {
+        switch alert.kind {
+        case .permission, .input: .waiting
+        case .done: alert.reply == nil ? .happy : .waiting
+        case .failed: .failed
+        }
     }
 
     private var icon: String {
-        switch alert.kind {
+        if alert.reply != nil { return "arrowshape.turn.up.left.fill" }
+        return switch alert.kind {
         case .permission: "lock.shield.fill"
         case .input: "questionmark.bubble.fill"
         case .done: "checkmark.circle.fill"
@@ -1125,7 +1247,8 @@ struct NotchAlertRow: View {
     }
 
     private var tint: Color {
-        switch alert.kind {
+        if alert.reply != nil { return .teal }
+        return switch alert.kind {
         case .permission, .input: .orange
         case .done: .green
         case .failed: .red
@@ -1133,27 +1256,16 @@ struct NotchAlertRow: View {
     }
 }
 
-/// The semi-3D orb that stands for the provider; it breathes while a turn runs.
+/// The provider's mascot (AgentMascot); it moves while a turn runs. `mood`
+/// overrides what `active` alone says.
 struct ProviderOrb: View {
     let provider: String
     var size: CGFloat
     var active = false
-    @State private var pulse = false
+    var mood: AgentMascot.Mood?
 
     var body: some View {
-        Circle()
-            .fill(RadialGradient(
-                colors: [.white.opacity(0.9), providerColor(provider), providerColor(provider).opacity(0.55)],
-                center: UnitPoint(x: 0.32, y: 0.28),
-                startRadius: 0,
-                endRadius: size * 0.75
-            ))
-            .overlay(ProviderIcon(provider: provider, size: size * 0.55).opacity(0.9))
-            .shadow(color: providerColor(provider).opacity(active ? 0.8 : 0.3), radius: active ? 6 : 2)
-            .frame(width: size, height: size)
-            .scaleEffect(active && pulse ? 1.08 : 1)
-            .animation(active ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true) : .default, value: pulse)
-            .onAppear { pulse = true }
+        AgentMascot(provider: provider, size: size, mood: mood ?? (active ? .working : .idle))
     }
 }
 

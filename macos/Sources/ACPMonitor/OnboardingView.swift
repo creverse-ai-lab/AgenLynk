@@ -1,3 +1,4 @@
+import LynkArt
 import SwiftUI
 
 // First-run installation surface shown when ~/.acp-gateway/install.json is
