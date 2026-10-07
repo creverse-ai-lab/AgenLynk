@@ -924,7 +924,7 @@ private func mascotMood(_ agent: AgentSession, warm: Bool) -> AgentMascot.Mood {
     let side = (size / 4).rounded() * 4
     let key = "\(kind)|\(provider.lowercased())|\(mood)|\(Int(side))"
     if let image = mascotImages[key] { return image }
-    let renderer = ImageRenderer(content: AgentMascot(provider: provider, size: side, mood: mood, kind: kind))
+    let renderer = ImageRenderer(content: AgentMascot(provider: provider, size: side, mood: mood, kind: kind, still: true))
     renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
     guard let cgImage = renderer.cgImage else { return nil }
     let image = Image(decorative: cgImage, scale: renderer.scale)

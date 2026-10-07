@@ -43,20 +43,30 @@ public struct AgentMascot: View {
     /// The AgenLynk spear in its hand; dropped at small sizes either way.
     public var holdsStaff = true
     public var kind: Kind = .mermaid
+    /// Leaves out the resting motion (breathing, swaying, sagging), for a
+    /// host that renders the mascot once as a still image.
+    public var still = false
 
-    public init(provider: String, size: CGFloat, mood: Mood = .idle, holdsStaff: Bool = true, kind: Kind = .mermaid) {
+    public init(provider: String, size: CGFloat, mood: Mood = .idle, holdsStaff: Bool = true, kind: Kind = .mermaid, still: Bool = false) {
         self.provider = provider
         self.size = size
         self.mood = mood
         self.holdsStaff = holdsStaff
         self.kind = kind
+        self.still = still
     }
 
     public var body: some View {
-        switch kind {
-        case .devil: DevilMascot(provider: provider, size: size, mood: mood, holdsStaff: holdsStaff)
-        case .mermaid: MermaidMascot(provider: provider, size: size, mood: mood, holdsStaff: holdsStaff)
+        Group {
+            switch kind {
+            case .devil: DevilMascot(provider: provider, size: size, mood: mood, holdsStaff: holdsStaff)
+            case .mermaid: MermaidMascot(provider: provider, size: size, mood: mood, holdsStaff: holdsStaff)
+            }
         }
+        // Flattened once, so the resting motion only moves a finished image
+        // instead of re-compositing every gradient and shadow each frame.
+        .drawingGroup()
+        .modifier(RestingMotion(mood: still ? .working : mood))
     }
 
     static func label(_ provider: String) -> String {
@@ -373,6 +383,35 @@ struct MermaidMascot: View {
             }
             .offset(x: -size * 0.4, y: -size * 0.25 - rise)
         }
+    }
+}
+
+/// The slight motion a mascot keeps outside a turn, so it never looks
+/// frozen: resting, it breathes (a slow swell, anchored at its base); done, it
+/// sways a little; failed, it sags slowly. A running or waiting mascot has its
+/// own bob and hop instead. A repeating animation of the transform only: the
+/// mascot itself is not redrawn, which keeps a row of resting mascots cheap.
+struct RestingMotion: ViewModifier {
+    let mood: AgentMascot.Mood
+    @State private var phase = false
+
+    func body(content: Content) -> some View {
+        let (scaleX, scaleY, angle): (CGFloat, CGFloat, Double) = switch mood {
+        case .idle: phase ? (0.992, 1.014, 0) : (1.004, 0.994, 0)
+        case .happy: (1, 1, phase ? 2.5 : -2.5)
+        case .failed: phase ? (1.01, 0.978, 0) : (1, 1, 0)
+        case .working, .waiting: (1, 1, 0)
+        }
+        let period: Double = switch mood {
+        case .idle: 1.9
+        case .happy: 0.9
+        default: 2.6
+        }
+        content
+            .scaleEffect(x: scaleX, y: scaleY, anchor: .bottom)
+            .rotationEffect(.degrees(angle), anchor: .bottom)
+            .animation(.easeInOut(duration: period).repeatForever(autoreverses: true), value: phase)
+            .onAppear { phase = true }
     }
 }
 
