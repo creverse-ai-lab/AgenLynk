@@ -86,12 +86,6 @@ public struct AgentFamiliar: View {
                     .fill(Color.white)
                     .frame(width: size * 0.06, height: size * 0.06)
                     .offset(x: side * size * 0.055, y: -size * 0.02)
-                // Two small fangs.
-                Triangle()
-                    .fill(Color.white)
-                    .frame(width: size * 0.03, height: size * 0.04)
-                    .rotationEffect(.degrees(180))
-                    .offset(x: side * size * 0.025, y: size * 0.07)
             }
         }
         .shadow(color: .black.opacity(0.3), radius: size * 0.03, y: size * 0.02)

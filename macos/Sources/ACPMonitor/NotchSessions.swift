@@ -30,6 +30,10 @@ struct NotchStatusStyle: Equatable {
         }
     }
 
+    /// A Frontdoor that finished its turn moments ago (see
+    /// `MenuBarPipeline.Card.finishedLinger`); after that it is resting.
+    static let finished = NotchStatusStyle(icon: "checkmark.circle.fill", color: .green, label: "완료", animated: false)
+
     /// A Frontdoor whose turn ended and whose CLI holds it open for a notch
     /// reply: neither working nor done.
     static let awaitingReply = NotchStatusStyle(icon: "arrowshape.turn.up.left.fill", color: .teal, label: "답장 대기", animated: true)
@@ -187,9 +191,20 @@ private struct NotchSessionCard: View {
     let replying: Set<String>
 
     var body: some View {
+        // Re-read every 30 s: "완료" turns into "쉬는 중" with time alone.
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            content(finished: card.justFinished(now: context.date))
+        }
+    }
+
+    @ViewBuilder
+    private func content(finished: Bool) -> some View {
         let focus = card.focus
         let awaitingReply = FrontdoorPhase.members(card.frontdoor).contains { replying.contains($0.sessionId) }
-        let style = awaitingReply ? .awaitingReply : NotchStatusStyle(urgency: card.urgency, currentStep: focus?.currentStep)
+        let style = awaitingReply ? .awaitingReply
+            : finished ? .finished
+            : NotchStatusStyle(urgency: card.urgency, currentStep: focus?.currentStep)
+        let mood: AgentMascot.Mood = awaitingReply ? .waiting : finished ? .happy : AgentMascot.Mood(urgency: card.urgency)
         let detailId = focus?.session.sessionId ?? card.frontdoor.root?.sessionId
         let root = card.frontdoor.root
         Button {
@@ -201,7 +216,7 @@ private struct NotchSessionCard: View {
             }
         } label: {
             HStack(spacing: 10) {
-                ProviderOrb(provider: card.frontdoor.provider, size: 44, mood: awaitingReply ? .waiting : AgentMascot.Mood(urgency: card.urgency))
+                ProviderOrb(provider: card.frontdoor.provider, size: 44, mood: mood)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         Text(card.frontdoor.displayName).font(.callout.weight(.semibold)).lineLimit(1)

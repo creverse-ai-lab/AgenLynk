@@ -970,12 +970,18 @@ private struct NotchChatRootView: View {
         let pipeline = model.menuBarPipeline.notchCards
         let top = pipeline.activeCards.first
         return HStack(spacing: 6) {
-            ProviderOrb(
-                provider: top?.frontdoor.provider ?? store.sessionProvider ?? store.provider,
-                size: max(18, controller.notchSize.height * 0.82),
-                mood: top.map { AgentMascot.Mood(urgency: $0.urgency) } ?? (store.isRunning ? .working : .idle),
-                still: true
-            )
+            // Nothing moving: done for a while after a turn ends, then asleep;
+            // re-read every 30 s so the change needs no other update.
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                let finished = pipeline.idleCards.first { $0.justFinished(now: context.date) }
+                ProviderOrb(
+                    provider: top?.frontdoor.provider ?? finished?.frontdoor.provider ?? store.sessionProvider ?? store.provider,
+                    size: max(18, controller.notchSize.height * 0.82),
+                    mood: top.map { AgentMascot.Mood(urgency: $0.urgency) }
+                        ?? (store.isRunning ? .working : finished != nil ? .happy : .idle),
+                    still: true
+                )
+            }
             if let top {
                 NotchStatusBadge(style: NotchStatusStyle(urgency: top.urgency, currentStep: top.focus?.currentStep), showsLabel: false)
             }

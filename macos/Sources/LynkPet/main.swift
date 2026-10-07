@@ -932,8 +932,8 @@ private func mascotMood(_ agent: AgentSession, warm: Bool) -> AgentMascot.Mood {
     case "running": return .working
     case "needs_input": return .waiting
     case "blocked": return .failed
-    // At rest between turns: asleep, like the notch's "쉬는 중".
-    case "ready": return .idle
+    // Just finished: done for `readyLinger`, then warm, which sleeps.
+    case "ready": return .happy
     default: return .idle
     }
 }

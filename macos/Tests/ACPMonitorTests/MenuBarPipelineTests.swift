@@ -19,6 +19,7 @@ struct MenuBarPipelineTests {
         try idleParentOfAMovingWorkerStaysListed()
         try frontdoorAlertsFollowTransitions()
         try workersOfAnEndedFrontdoorDoNotReadAsOne()
+        try aFinishedFrontdoorReadsDoneThenResting()
         print("Swift menu bar pipeline checks passed")
     }
 
@@ -47,6 +48,21 @@ struct MenuBarPipelineTests {
         if let status { object["status"] = .string(status) }
         guard let value = MonitorEvent(.object(object)) else { throw CheckError.failed("event \(id) did not decode") }
         return value
+    }
+
+    /// A Frontdoor at rest reads "완료" for `finishedLinger` after its last
+    /// activity, then "쉬는 중"; anything not at rest is neither.
+    private static func aFinishedFrontdoorReadsDoneThenResting() throws {
+        let ended = "2026-10-08T00:00:00.000Z"
+        let pipeline = MenuBarPipeline.make(frontdoors: FrontdoorSession.make(sessions: [
+            try session("done", status: "idle", opener: "a", role: "frontdoor", updated: ended),
+            try session("busy", status: "running", opener: "b", role: "frontdoor", updated: ended)
+        ]), eventsBySession: [:])
+        guard let card = pipeline.idleCards.first, let busy = pipeline.activeCards.first,
+              let endedAt = parseTimestamp(ended) else { throw CheckError.failed("cards") }
+        try check(card.justFinished(now: endedAt.addingTimeInterval(60)), "a minute after its turn it is done")
+        try check(!card.justFinished(now: endedAt.addingTimeInterval(MenuBarPipeline.Card.finishedLinger + 1)), "then it rests")
+        try check(!busy.justFinished(now: endedAt.addingTimeInterval(60)), "a running one is neither")
     }
 
     /// A Frontdoor that ended and left the list (its retention ran out while
