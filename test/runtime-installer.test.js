@@ -216,7 +216,9 @@ test("app launch upgrades an installed 1.6 runtime tarball to the npm package se
 // The distribution build packs these into runtime-payload.tar.xz (build-app.sh).
 async function pack(root, entries = ["node_modules", "gateway", "node/bin/npm", "node/bin/npx"]) {
   const { execFileSync } = await import("node:child_process");
-  execFileSync("/usr/bin/tar", ["--no-xattrs", "--no-mac-metadata", "-cJf", SEED_PAYLOAD_FILE, ...entries],
+  // macOS's bsdtar flags; CI's Linux runs GNU tar, which has neither.
+  const macOnly = process.platform === "darwin" ? ["--no-xattrs", "--no-mac-metadata"] : [];
+  execFileSync("tar", [...macOnly, "-cJf", SEED_PAYLOAD_FILE, ...entries],
     { cwd: root, env: { ...process.env, COPYFILE_DISABLE: "1" } });
   for (const entry of entries) await rm(join(root, entry), { recursive: true, force: true });
 }
