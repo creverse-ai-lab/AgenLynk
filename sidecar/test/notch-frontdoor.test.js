@@ -138,6 +138,15 @@ test("a Stop with background tasks out is never held for a reply", () => {
   assert.equal(registry.replyTarget("claude:c1").eligible, true);
 });
 
+test("a headless host that asks a person for permission can be answered", () => {
+  const registry = new HookSessions({ claudeRoot: "/nowhere", claudeSessionsDir: "/nowhere", isAlive: () => true });
+  registry.record("claude", { hook_event_name: "Stop", session_id: "c2" }, at, { ppid: 9 });
+  Object.assign(registry.sessions.get("claude:c2"), { agentPid: 10, lineageResolved: true, headless: true });
+  assert.equal(registry.replyTarget("claude:c2").eligible, false, "a one-shot run is not held");
+  registry.sessions.get("claude:c2").interactive = true;
+  assert.equal(registry.replyTarget("claude:c2").eligible, true, "a chat host (--permission-prompt-tool stdio) is a person");
+});
+
 test("a Stop is held only while its own process is alive (same pid and start)", () => {
   let alive = true;
   const registry = new HookSessions({ claudeRoot: "/nowhere", claudeSessionsDir: "/nowhere", isAlive: () => alive });

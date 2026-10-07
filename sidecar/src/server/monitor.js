@@ -52,7 +52,7 @@ import {
 import { HookSessions } from "../hooks/registry.js";
 import { defaultWorkerLedgerPath, readWorkerLedger, workerLedgerWriter } from "../store/worker-ledger.js";
 import { CHAT_POLL_MAX_WAIT_MS, chatCancelArgs, chatFrontdoor, chatOpenArgs, chatPermissionArgs, chatPollArgs, chatPromptArgs } from "../app/notch-chat.js";
-import { StopReplies, isStopPayload, stopReplyDecision } from "../hooks/stop-replies.js";
+import { StopReplies, isFrontdoorStop, stopReplyDecision } from "../hooks/stop-replies.js";
 import { defaultHookEndpointPath, newHookToken, removeHookEndpoint, writeHookEndpoint } from "../hooks/endpoint.js";
 import { HOOK_PROVIDERS as INSTALLABLE_HOOK_PROVIDERS, ensureHooks, hookStatus, installHooks, uninstallHooks } from "../hooks/installer.js";
 /*
@@ -663,7 +663,7 @@ async function main() {
         new Promise((resolve) => setTimeout(resolve, HOOK_LINEAGE_BUDGET_MS).unref?.())
       ]);
     }
-    const replyTarget = recorded && isStopPayload(payload) && stopReplies.enabled && state.sseClients.size > 0
+    const replyTarget = recorded && isFrontdoorStop(provider, payload) && stopReplies.enabled && state.sseClients.size > 0
       && !state.formerWorkerIds.has(recorded.localSessionId)
       ? hookSessions.replyTarget(recorded.key)
       : null;

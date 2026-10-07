@@ -1,12 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { StopReplies, isStopPayload, stopReplyDecision } from "../src/hooks/stop-replies.js";
+import { StopReplies, isFrontdoorStop, isStopPayload, stopReplyDecision } from "../src/hooks/stop-replies.js";
 
 test("only a Stop is held, in both payload spellings", () => {
   assert.equal(isStopPayload({ hook_event_name: "Stop" }), true);
   assert.equal(isStopPayload({ hookEventName: "stop" }), true);
   assert.equal(isStopPayload({ hook_event_name: "SubagentStop" }), false);
   assert.equal(isStopPayload({ hook_event_name: "StopFailure" }), false);
+});
+
+// Regression: a Claude sub-agent's Stop (it carries agent_id) was held like
+// the Frontdoor's own, freezing the turn that was still running for up to
+// 140 s and sending a reply to the sub-agent.
+test("a sub-agent's Stop is not the Frontdoor's", () => {
+  assert.equal(isFrontdoorStop("claude", { hook_event_name: "Stop", session_id: "c1" }), true);
+  assert.equal(isFrontdoorStop("claude", { hook_event_name: "Stop", session_id: "c1", agent_id: "a1" }), false);
+  assert.equal(isFrontdoorStop("codex", { hookEventName: "stop", agentId: "a1" }), false);
+  assert.equal(isFrontdoorStop("grok", { hook_event_name: "Stop", agentId: "g1" }), true, "Grok's agentId is its session's own");
 });
 
 test("an answer resolves the slot with the reply the agent continues with", async () => {

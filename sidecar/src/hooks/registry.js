@@ -181,7 +181,10 @@ export class HookSessions {
   replyTarget(key) {
     const entry = this.sessions.get(key);
     if (!entry) return null;
-    const person = !entry.headless || entry.interactiveKind;
+    // The same signs of a person as the Frontdoor projection uses: not
+    // headless, an interactive host kind, or a host that asks a person for
+    // permission (entry.interactive).
+    const person = !entry.headless || entry.interactiveKind || entry.interactive;
     // Codex is left out until its Stop answer is verified end to end: holding
     // a Codex turn (often the Codex app or IDE panel) for a reply it may not
     // take only showed "awaiting reply" with nothing to answer.

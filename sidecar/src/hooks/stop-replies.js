@@ -20,6 +20,16 @@ export function isStopPayload(payload) {
   return payload?.hook_event_name === "Stop" || payload?.hookEventName === "stop";
 }
 
+/**
+ * A Stop that ends the Frontdoor's own turn. A Stop carrying an agent id is a
+ * sub-agent finishing inside a turn that is still going (see
+ * normalize/hook.js; Grok's agentId is its session's own): holding it would
+ * freeze that turn, and a reply would go to the sub-agent.
+ */
+export function isFrontdoorStop(provider, payload) {
+  return isStopPayload(payload) && (provider === "grok" || !(payload?.agent_id ?? payload?.agentId));
+}
+
 /** What the hook prints so the agent continues with the reply. */
 export function stopReplyDecision(text) {
   return JSON.stringify({
