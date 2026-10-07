@@ -63,12 +63,13 @@ struct NotchStatusBadge: View {
 
 extension MenuBarPipeline {
     /// The notch's view of the pipeline: every Worker belongs to a Frontdoor,
-    /// so ones the monitor could not place are left to the dashboard. Cards,
-    /// the pill and the counts all read this one list.
+    /// so ones the monitor could not place are left to the dashboard, and so
+    /// are the idle Workers of a Frontdoor that has ended (no Frontdoor to
+    /// show them under). Cards, the pill and the counts all read this one list.
     var notchCards: MenuBarPipeline {
         MenuBarPipeline(
             activeCards: activeCards.filter { !$0.frontdoor.isUnattributed },
-            idleCards: idleCards.filter { !$0.frontdoor.isUnattributed }
+            idleCards: idleCards.filter { !$0.frontdoor.isUnattributed && !$0.frontdoor.frontdoorEnded }
         )
     }
 }

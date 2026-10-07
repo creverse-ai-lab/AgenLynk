@@ -1,3 +1,4 @@
+import { isMisrecordedWorker } from "../local-monitor.js";
 import { GatewayEventNormalizer } from "../normalize/acp.js";
 import { EventStore } from "../store/event-store.js";
 
@@ -488,6 +489,7 @@ export class MonitorState {
     let restored = 0;
     for (const session of this.persistence.readSessions({ since: now - this.historyRetentionMs })) {
       if (!session?.sessionId || this.sessions.has(session.sessionId)) continue;
+      if (isMisrecordedWorker(session)) continue;
       if (session.source !== "local") {
         this.#rememberWorker(session);
         // The proof of a worker's parent (its Main's transcript) is often gone

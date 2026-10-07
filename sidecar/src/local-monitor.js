@@ -1,3 +1,25 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+/**
+ * Where the Gateway puts a snapshot worker's private copy of its folder (the
+ * same rule as the daemon's workspace.js). Only Gateway workers run there, so
+ * a local session there is a worker or one of its sub-agents, never a
+ * Frontdoor, even when nothing else links it to its parent.
+ */
+export function gatewayWorkspacesRoot(env = process.env) {
+  return env.ACP_GATEWAY_WORKSPACES || join(homedir(), ".cache", "acp-gateway", "workspaces");
+}
+
+export function inGatewayWorkspace(cwd, root = gatewayWorkspacesRoot()) {
+  return typeof cwd === "string" && (cwd === root || cwd.startsWith(`${root}/`));
+}
+
+/** A record an older monitor stored as a local Frontdoor that is really a Gateway worker's. */
+export function isMisrecordedWorker(session) {
+  return session?.role === "frontdoor" && session?.source === "local" && inGatewayWorkspace(session?.cwd);
+}
+
 function isoTimestamp(value) {
   const seconds = Number(value);
   if (!Number.isFinite(seconds) || seconds <= 0) return new Date().toISOString();
@@ -345,12 +367,28 @@ export function mergeMonitorSessions(gatewaySessions, localSessions, workerTopol
     session?.sessionId,
     session?.acpSessionId
   ]).filter(Boolean));
-  // A worker the Gateway already closed is history, not a new local root.
-  const local = (Array.isArray(localSessions) ? localSessions : [])
-    .filter((session) => !ownedWorkerIds.has(session.localSessionId) && !formerWorkerIds?.has(session.localSessionId))
+  // A worker the Gateway already closed is history, not a new local root;
+  // so are the sub-agents its own CLI ran (a Codex worker's spawned threads).
+  // Their parent is filtered out here, so each would otherwise head a group
+  // of its own and read as a Frontdoor.
+  const localList = Array.isArray(localSessions) ? localSessions : [];
+  const underFormerWorker = (session) => {
+    const seen = new Set();
+    for (let current = session; current && !seen.has(current.sessionId); current = localByMonitorId.get(current.parentSessionId)) {
+      seen.add(current.sessionId);
+      if (formerWorkerIds?.has(current.localSessionId)) return true;
+    }
+    return false;
+  };
+  const local = localList
+    .filter((session) => !ownedWorkerIds.has(session.localSessionId) && !underFormerWorker(session))
     .map((session) => ({
       ...session,
       parentSessionId: resolvedParentSessionId(session)
-    }));
+    }))
+    // A session in a Gateway workspace that nothing links to its parent would
+    // head a group of its own: it is a worker's, so it is left out. One that
+    // is linked (under a live worker) stays where it belongs.
+    .filter((session) => session.parentSessionId || !inGatewayWorkspace(session.cwd));
   return [...enrichedGateway, ...local];
 }

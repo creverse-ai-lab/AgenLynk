@@ -18,6 +18,7 @@ struct MenuBarPipelineTests {
         try pipelineAndSequenceShareOneTree()
         try idleParentOfAMovingWorkerStaysListed()
         try frontdoorAlertsFollowTransitions()
+        try workersOfAnEndedFrontdoorDoNotReadAsOne()
         print("Swift menu bar pipeline checks passed")
     }
 
@@ -46,6 +47,23 @@ struct MenuBarPipelineTests {
         if let status { object["status"] = .string(status) }
         guard let value = MonitorEvent(.object(object)) else { throw CheckError.failed("event \(id) did not decode") }
         return value
+    }
+
+    /// A Frontdoor that ended and left the list (its retention ran out while
+    /// the Gateway keeps its Workers) still groups them, but says it ended,
+    /// and its idle Workers are not notch cards.
+    private static func workersOfAnEndedFrontdoorDoNotReadAsOne() throws {
+        let groups = FrontdoorSession.make(sessions: [
+            try session("live", status: "running", opener: "a", role: "frontdoor"),
+            try session("w1", status: "idle", opener: "gone", parent: "local:codex:gone"),
+            try session("w2", status: "disconnected", opener: "gone", parent: "local:codex:gone")
+        ])
+        guard let ended = groups.first(where: { $0.id == "gone" }), let live = groups.first(where: { $0.id == "a" }) else {
+            throw CheckError.failed("both groups: \(groups.map(\.id))")
+        }
+        try check(ended.root == nil && ended.frontdoorEnded && ended.workers.count == 2, "the Workers stay together under the ended Frontdoor")
+        try check(ended.statusText == "Frontdoor 종료", "the row says the Frontdoor ended: \(ended.statusText)")
+        try check(!live.frontdoorEnded && live.statusText == "실행 중", "a listed Frontdoor reads as before")
     }
 
     /// The menu bar and the sequence lay out the same `SessionTree`: same

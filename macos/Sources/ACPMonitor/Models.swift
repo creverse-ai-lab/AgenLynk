@@ -145,6 +145,12 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
         let identity = "\(model ?? "") \(title ?? "")".lowercased()
         return identity.contains("auto-review") || identity.contains("auto_review")
     }
+    /// A Gateway worker's local transcript (or one of its sub-agents') that an
+    /// older monitor stored as a Frontdoor: it ran in a Gateway snapshot
+    /// workspace, where only workers run. Kept out of "지난 기록" rows.
+    var isMisrecordedWorker: Bool {
+        isFrontdoorRecord && isLocalSource && cwd.contains("/.cache/acp-gateway/workspaces/")
+    }
     var isActive: Bool {
         ["running", "waiting_permission", "waiting_input", "cancelling", "restoring"].contains(status)
     }
@@ -477,10 +483,16 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
             waitingInputCount > 0 ? "입력 대기 \(waitingInputCount)" : nil
         ].compactMap { $0 }
         if !waits.isEmpty { return waits.joined(separator: " · ") }
+        // Said outright, or the Workers left behind read as a Frontdoor.
+        if frontdoorEnded { return isActive ? "Frontdoor 종료 · Worker 실행 중" : "Frontdoor 종료" }
         if isActive { return "실행 중" }
         if isClosed { return "종료" }
         return "대기"
     }
+    /// Workers whose Frontdoor is no longer listed: it ended and its retention
+    /// ran out, while the Gateway keeps its Workers for days. The group is
+    /// still that Frontdoor's, shown without it.
+    var frontdoorEnded: Bool { root == nil && !isUnattributed }
     /// The status the pill's color follows (see statusColor).
     var statusKey: String {
         if waitingPermissionCount > 0 { return "waiting_permission" }
@@ -603,7 +615,7 @@ struct HistoryGroups: Sendable {
     ) -> HistoryGroups {
         let listedIds = Set(listed.map(\.sessionId))
         var seen = listedIds
-        let candidates = browsed.filter { !$0.isInternalReview && seen.insert($0.sessionId).inserted }
+        let candidates = browsed.filter { !$0.isInternalReview && !$0.isMisrecordedWorker && seen.insert($0.sessionId).inserted }
         guard !candidates.isEmpty else { return .empty }
         // Listed sessions first: where both know a parent, the listed one wins.
         let groupKey = FrontdoorSession.groupKeyResolver(listed + candidates)

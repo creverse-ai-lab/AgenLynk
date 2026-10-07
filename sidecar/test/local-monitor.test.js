@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mergeMonitorSessions, projectLocalSnapshot } from "../src/local-monitor.js";
+import { isMisrecordedWorker, mergeMonitorSessions, projectLocalSnapshot } from "../src/local-monitor.js";
 import { normalizeCodexRecords } from "../src/normalize/codex.js";
 
 // Regression: the state scan invents `local-turn:<session>` for a running
@@ -248,6 +248,36 @@ test("a worker the Gateway closed does not return as a local Frontdoor", () => {
   const merged = mergeMonitorSessions([], local.sessions, new Map(), formerWorkerIds);
   assert.deepEqual(merged.map((session) => session.localSessionId), ["main"]);
   assert.deepEqual(merged.filter((session) => session.role === "frontdoor").map((session) => session.localSessionId), ["main"]);
+});
+
+test("a closed worker's own sub-agents do not come back as a Frontdoor either", () => {
+  const local = projectLocalSnapshot({ sessions: [
+    { provider: "codex", session: "main", state: "ready", time: 100, cwd: "/repo" },
+    { provider: "codex", session: "worker-thread", state: "ready", time: 101, cwd: "/snapshot" },
+    { provider: "codex", session: "worker-sub", state: "ready", time: 102, cwd: "/snapshot", parent: "worker-thread", parent_provider: "codex" },
+    { provider: "codex", session: "worker-sub-sub", state: "ready", time: 103, cwd: "/snapshot", parent: "worker-sub", parent_provider: "codex" }
+  ] });
+  const merged = mergeMonitorSessions([], local.sessions, new Map(), new Set(["worker-thread"]));
+  assert.deepEqual(merged.map((session) => session.localSessionId), ["main"]);
+});
+
+test("a session in a Gateway snapshot workspace with no parent is a worker's, not a Frontdoor", () => {
+  const previous = process.env.ACP_GATEWAY_WORKSPACES;
+  process.env.ACP_GATEWAY_WORKSPACES = "/ws-root";
+  try {
+    const local = projectLocalSnapshot({ sessions: [
+      { provider: "codex", session: "main", state: "ready", time: 100, cwd: "/repo" },
+      { provider: "codex", session: "stray", state: "ready", time: 101, cwd: "/ws-root/ws-1/tree" },
+      { provider: "codex", session: "linked", state: "ready", time: 102, cwd: "/ws-root/ws-1/tree", parent: "main", parent_provider: "codex" }
+    ] });
+    const merged = mergeMonitorSessions([], local.sessions, new Map(), new Set());
+    assert.deepEqual(merged.map((session) => session.localSessionId).sort(), ["linked", "main"], "a linked one stays under its parent");
+    assert.equal(isMisrecordedWorker({ role: "frontdoor", source: "local", cwd: "/ws-root/ws-2/tree" }), true);
+    assert.equal(isMisrecordedWorker({ role: "frontdoor", source: "local", cwd: "/repo" }), false);
+  } finally {
+    if (previous == null) delete process.env.ACP_GATEWAY_WORKSPACES;
+    else process.env.ACP_GATEWAY_WORKSPACES = previous;
+  }
 });
 
 test("sessions are named by the CLI's title, else their latest prompt, never an id", () => {
