@@ -551,3 +551,11 @@ test("the grok sub-agent resolver beats lineage in the scan and rereads a worksp
     assert.equal(second[0].parent, GROK_PARENT_ID);
   });
 });
+
+test("an old process table no longer answers liveness", async () => {
+  const lineage = new ProcessLineage({ claudeSessionsDir: "/nonexistent", run: async () => "" });
+  assert.equal(lineage.freshTable(1_000), null, "never loaded");
+  await lineage.refresh(1_000);
+  assert.equal(lineage.freshTable(1_004), lineage.table);
+  assert.equal(lineage.freshTable(1_100), null, "a pid may have been reused since");
+});

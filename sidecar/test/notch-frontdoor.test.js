@@ -174,3 +174,14 @@ test("an empty ~/.claude/sessions means no Claude is running; a reused pid is no
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// The 1 s merge checked every live pid with a blocking `ps`; the lineage
+// table already holds start times.
+test("liveness reads start times from the process table when it has them", async () => {
+  const { processAliveFrom } = await import("../src/hooks/registry.js");
+  const table = new Map([[process.pid, { start: "Mon Oct  6 09:00:00 2026" }]]);
+  const alive = processAliveFrom(() => table);
+  assert.equal(alive(process.pid, "Mon Oct 6 09:00:00 2026"), true, "the same start, spacing aside");
+  assert.equal(alive(process.pid, "Tue Oct 7 10:00:00 2026"), false, "a reused pid is not the session");
+  assert.equal(alive(999_999_999, "Mon Oct 6 09:00:00 2026"), false, "a gone pid");
+});

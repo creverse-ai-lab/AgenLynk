@@ -46,6 +46,16 @@ const MAX_GATEWAY_IDENTITIES = 4_000;
 // ones are paged from /api/sessions/:id/events.
 const DEFAULT_SNAPSHOT_EVENT_LIMIT = 200;
 
+// Whether a state frame carries data rather than only status; see
+// #enqueueSseFrame. A list that is present is data even when empty (it may
+// clear the client's copy); removals and events only when there are some.
+const carriesData = (envelope) => envelope.sessions !== undefined
+  || envelope.tasks !== undefined
+  || envelope.inbox !== undefined
+  || Boolean(envelope.historyCleared)
+  || (envelope.removedSessionIds?.length ?? 0) > 0
+  || Object.keys(envelope.events ?? {}).length > 0;
+
 export class MonitorState {
   constructor({
     maxEventsPerSession = 2000,
@@ -63,6 +73,9 @@ export class MonitorState {
     this.persistence = persistence;
     this.store = new EventStore({ maxEventsPerSession, persistence });
     this.sessions = new Map();
+    // Bumped whenever the session list or a session record changes, so a
+    // state frame carries the list only when there is something new in it.
+    this.sessionsVersion = 0;
     this.sessionSignatures = new Map();
     // Raw Gateway session source retained inside the canonical state owner so
     // transport callbacks do not maintain a competing module-level copy.
@@ -181,7 +194,10 @@ export class MonitorState {
     }
     this.sessions = nextSessions;
     this.sessionSignatures = nextSignatures;
-    if (changed) this.revision += 1;
+    if (changed) {
+      this.revision += 1;
+      this.sessionsVersion += 1;
+    }
     return removedSessionIds;
   }
 
@@ -263,7 +279,7 @@ export class MonitorState {
       // persisted stays on disk.
       this.#forgetEvents(sessionId);
     }
-    this.sessions.delete(sessionId);
+    if (this.sessions.delete(sessionId)) this.sessionsVersion += 1;
     this.sessionSignatures.delete(sessionId);
     this.workerTopology.delete(sessionId);
     this.gatewayNormalizers.delete(sessionId);
@@ -317,6 +333,7 @@ export class MonitorState {
     const changed = this.store.upsert(sessionId, normalizer.ingest(event));
     this.diagnostics.overflowDroppedEvents += this.store.overflowDropped - before;
     if (event.type === "session_closed" && this.sessions.has(sessionId)) {
+      this.sessionsVersion += 1;
       this.sessions.set(sessionId, {
         ...this.sessions.get(sessionId),
         status: "closed",
@@ -501,6 +518,9 @@ export class MonitorState {
     this.store.evict(sessionId);
     this.gatewaySeen.delete(sessionId);
     this.gatewayCursors.delete(sessionId);
+    // With its timeline gone a normalizer has nothing left to pair against;
+    // kept, one per expired orphan session piled up for good.
+    this.gatewayNormalizers.delete(sessionId);
   }
 
   /** Forgets every history session (the user cleared the history). */
@@ -557,12 +577,15 @@ export class MonitorState {
   }
 
   broadcast(message) {
+    // Nobody listening: nothing to serialize (broadcasts keep no state).
+    if (!this.sseClients.size) return;
     const envelope = { ...message, schemaVersion: MONITOR_SCHEMA_VERSION, monitorApiVersion: MONITOR_API_VERSION };
     const frame = `data: ${JSON.stringify(envelope)}\n\n`;
+    const supersedable = envelope.kind === "state" && !carriesData(envelope);
     for (const client of this.sseClients) {
       const pending = this.sseBackpressure.get(client);
       if (pending) {
-        if (!this.#enqueueSseFrame(pending, envelope.kind, frame)) {
+        if (!this.#enqueueSseFrame(pending, envelope.kind, frame, supersedable)) {
           this.removeSseClient(client, { end: true });
         }
         continue;
@@ -599,18 +622,21 @@ export class MonitorState {
     }
   }
 
-  #enqueueSseFrame(pending, kind, frame) {
-    // Only consecutive state snapshots supersede one another. Incremental
-    // event/session/gateway frames retain order so backpressure never becomes
-    // silent data loss. The bounded queue still evicts a client that cannot
-    // drain within a safe memory budget; its reconnect begins with a snapshot.
+  #enqueueSseFrame(pending, kind, frame, supersedable) {
+    // Only a state frame that carries nothing but status is superseded by the
+    // next state frame. A frame with sessions, records or events is the only
+    // copy of that change (later frames send the session list only when it
+    // changes again), so it keeps its place like every other frame. The bounded
+    // queue still evicts a client that cannot drain within a safe memory
+    // budget; its reconnect begins with a snapshot.
     const last = pending.queue.at(-1);
-    if (kind === "state" && last?.kind === "state") {
+    if (kind === "state" && last?.kind === "state" && last.supersedable) {
       pending.bytes -= Buffer.byteLength(last.frame);
       last.frame = frame;
+      last.supersedable = supersedable;
       pending.bytes += Buffer.byteLength(frame);
     } else {
-      pending.queue.push({ kind, frame });
+      pending.queue.push({ kind, frame, supersedable });
       pending.bytes += Buffer.byteLength(frame);
     }
     return pending.queue.length <= MAX_PENDING_SSE_FRAMES && pending.bytes <= MAX_PENDING_SSE_BYTES;
@@ -639,28 +665,34 @@ export class MonitorState {
 
 export function queuedSingleFlight(operation) {
   let active = null;
-  let queued = false;
+  let next = null;
 
-  const run = () => {
-    if (active) {
-      queued = true;
-      return active;
-    }
+  const start = () => {
     active = (async () => {
       try {
         return await operation();
       } finally {
         active = null;
-        if (queued) {
-          queued = false;
-          void run().catch(() => {});
-        }
       }
     })();
     return active;
   };
 
-  return run;
+  // Overlapping callers share one pass queued after the running one, and get
+  // its result: they asked because something changed, which the running pass
+  // may have read too early to see.
+  return () => {
+    if (!active) return start();
+    if (!next) {
+      next = active.catch(() => {}).then(() => {
+        next = null;
+        return active ?? start();
+      });
+      // Callers often fire and forget; a failure is theirs to read, not a crash.
+      next.catch(() => {});
+    }
+    return next;
+  };
 }
 
 const LIFECYCLE_KINDS = new Set(["session_start", "session_end"]);

@@ -13,7 +13,6 @@
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GatewayRpcClient } from "../gateway/client.js";
@@ -49,7 +48,7 @@ import {
   defaultMonitorDatabasePath,
   removeDatabaseFiles
 } from "../store/sqlite-store.js";
-import { HookSessions } from "../hooks/registry.js";
+import { HookSessions, processAliveFrom } from "../hooks/registry.js";
 import { defaultWorkerLedgerPath, readWorkerLedger, workerLedgerWriter } from "../store/worker-ledger.js";
 import { CHAT_POLL_MAX_WAIT_MS, chatCancelArgs, chatFrontdoor, chatOpenArgs, chatPermissionArgs, chatPollArgs, chatPromptArgs } from "../app/notch-chat.js";
 import { StopReplies, isFrontdoorStop, stopReplyDecision } from "../hooks/stop-replies.js";
@@ -138,7 +137,7 @@ function optionalPositiveIntegerEnv(name) {
 function loadIdentity() {
   const envToken = process.env.ACP_GATEWAY_CONTROL_TOKEN;
   const envRootId = process.env.ACP_GATEWAY_ROOT_ID;
-  const path = process.env.ACP_GATEWAY_INSTALL_STATE || join(homedir(), ".acp-gateway", "install.json");
+  const path = defaultInstallStatePath();
   if (envToken && envRootId) return { token: envToken, rootId: envRootId, statePath: path };
   let state;
   try {
@@ -167,8 +166,12 @@ async function main() {
     readyAfter: monitorSettings.localSessionRetentionMs / 1_000
   }) : null;
   // One retention rule for every provider, whether hooks are on or not.
-  hookSessions = new HookSessions({ staleAfterMs: monitorSettings.localSessionRetentionMs });
   hookLineage = localScanner ? null : new ProcessLineage();
+  const lineageForHooks = localScanner?.lineage ?? hookLineage;
+  hookSessions = new HookSessions({
+    staleAfterMs: monitorSettings.localSessionRetentionMs,
+    isAlive: processAliveFrom(() => lineageForHooks?.freshTable() ?? null)
+  });
   localTimeline = localScanner
     ? new LocalTimeline({
       codexRecords: (sessionId) => localScanner.conversationRecords(sessionId),
@@ -335,6 +338,17 @@ async function main() {
   };
   owner.onEvent = onEvent;
 
+  // State frames carry the session list only when it changed since the last
+  // frame: every second's frame used to resend every session, and the app
+  // re-decoded and compared them all. A client that (re)connects fetches a
+  // snapshot, so it never depends on a frame it missed.
+  let sentSessionsVersion = -1;
+  const changedSessions = () => {
+    if (state.sessionsVersion === sentSessionsVersion) return {};
+    sentSessionsVersion = state.sessionsVersion;
+    return { sessions: [...state.sessions.values()] };
+  };
+
   let refreshTimer = null;
   const scheduleRefresh = () => {
     if (refreshTimer) return;
@@ -354,7 +368,9 @@ async function main() {
         rpc.call("inbox", { action: "list" })
       ]);
       state.setGatewaySourceSessions(sessions.sessions ?? []);
-      const { removedSessionIds, localEvents } = await applySessionSources();
+      // The 1 s local loop already scans the transcripts; a Gateway refresh
+      // only re-merges with its last result instead of scanning again.
+      const { removedSessionIds, localEvents } = await applySessionSources({ reuseLocal: true });
       const recordsChanged = state.setRecords({ tasks: tasks.tasks ?? [], inbox: inbox.items ?? [] });
       const preserveHealth = state.streamHealth === "reconciling" || state.streamHealth === "degraded";
       state.setConnection({
@@ -368,11 +384,10 @@ async function main() {
           kind: "state",
           connected: true,
           streaming: state.streaming,
-          sessions: [...state.sessions.values()],
+          ...changedSessions(),
           removedSessionIds,
           ...(localEvents ? { events: localEvents } : {}),
-          tasks: state.tasks,
-          inbox: state.inbox
+          ...(recordsChanged || !wasConnected ? { tasks: state.tasks, inbox: state.inbox } : {})
         });
       }
     } catch (error) {
@@ -392,7 +407,7 @@ async function main() {
         connected: false,
         streaming: state.streaming,
         error: state.lastError,
-        sessions: [...state.sessions.values()],
+        ...changedSessions(),
         removedSessionIds,
         ...(localEvents ? { events: localEvents } : {})
       });
@@ -406,9 +421,17 @@ async function main() {
   // same cursor) and duplicate cached transcript records. Overlapping callers
   // share the in-flight pass; a queued re-run follows for the latecomer.
   const localDelivery = new LocalEventDelivery();
-  const applySessionSources = queuedSingleFlight(async () => {
+  // A Gateway refresh merges against the last local scan rather than scanning
+  // again (its events were handed over by the pass that read them). Any other
+  // caller wants a fresh scan, and so does the queued pass that serves it,
+  // even if a Gateway refresh queued behind the same pass.
+  let freshScanWanted = true;
+  let lastLocal = null;
+  const runSessionSources = queuedSingleFlight(async () => {
     const beforeRevision = state.revision;
-    const local = await readLocalProjection();
+    const reuse = !freshScanWanted && lastLocal;
+    freshScanWanted = false;
+    const local = reuse ? lastLocal : (lastLocal = await readLocalProjection());
     const lineage = localScanner?.lineage ?? hookLineage;
     const merged = mergeMonitorSessions(
       state.gatewaySourceSessions, local.sessions, state.workerTopology, state.formerWorkerIds,
@@ -418,7 +441,9 @@ async function main() {
     const acceptedLocalIds = new Set(merged.filter((session) => session.source === "local").map((session) => session.sessionId));
     // Only timelines that changed since they were last handed over: an idle
     // session's window is otherwise re-merged event by event every second.
-    const events = localDelivery.select(local.events, local.changedSessionIds, acceptedLocalIds);
+    // A reused scan's events were handed over already; the next fresh scan
+    // hands over any session this merge newly accepted.
+    const events = reuse ? {} : localDelivery.select(local.events, local.changedSessionIds, acceptedLocalIds);
     const removedSessionIds = state.setSessions(merged);
     // Only the events that changed travel with the state frame; the app
     // upserts them by id (an event outside a transcript window is kept).
@@ -426,6 +451,10 @@ async function main() {
     const localEvents = Object.keys(changedEvents).length ? changedEvents : null;
     return { removedSessionIds, changed: state.revision !== beforeRevision, localEvents };
   });
+  const applySessionSources = ({ reuseLocal = false } = {}) => {
+    if (!reuseLocal) freshScanWanted = true;
+    return runSessionSources();
+  };
 
   async function refreshGatewayInfo() {
     let gateway;
@@ -464,6 +493,8 @@ async function main() {
     try {
       await owner.ensure();
       if (owner.subscriptionActive && !before.active) {
+        // A (re)connected daemon may be a different one: read its setup now.
+        void refreshGatewayInfo();
         state.broadcast({
           kind: "state",
           connected: true,
@@ -594,10 +625,14 @@ async function main() {
     await refreshGatewayInfo();
     await refresh();
   })().catch((error) => console.error(`Initial monitor refresh failed: ${error.message}`));
+  // `setup` (versions, capabilities, health) rarely changes: every 20th tick
+  // (60 s) instead of every 3 s; a (re)connect refreshes it at once too.
+  let ticks = 0;
   const interval = setInterval(() => {
     void ensureSubscription();
     void refresh();
-    void refreshGatewayInfo();
+    ticks += 1;
+    if (ticks % 20 === 0) void refreshGatewayInfo();
   }, REFRESH_INTERVAL_MS);
   interval.unref();
   async function broadcastLocalChanges() {
@@ -608,7 +643,7 @@ async function main() {
         kind: "state",
         connected: state.connected,
         streaming: state.streaming,
-        sessions: [...state.sessions.values()],
+        ...changedSessions(),
         removedSessionIds,
         ...(localEvents ? { events: localEvents } : {})
       });
@@ -1053,11 +1088,6 @@ async function main() {
       sendJson(response, result);
       return;
     }
-    // What a retention change would delete, counted without deleting it. The
-    // app asks before saving a value that destroys data.
-    if (url.pathname === "/api/retention-preview" && request.method === "POST") {
-      throw unavailableFeatureError("retention preview");
-    }
     if (url.pathname === "/api/gateway-restart" && request.method === "POST") {
       const blockers = state.restartBlockers();
       if (blockers.length) throw restartBlockedError(blockers);
@@ -1158,7 +1188,8 @@ async function readLocalProjection() {
   // A Grok sub-agent only a hook reported carries the hook's lineage parent
   // (its parent's launcher); Grok's own record of the parent replaces it.
   await localScanner?.annotateGrokSubagents(sessions);
-  if (!sessions.length) return { sessions: [], events: {}, changedSessionIds: new Set() };
+  // No early return for an empty list: the timeline's update is also where
+  // the tails and windows of sessions that left expire.
   try {
     // One pipeline for every provider: the scanner found the sessions and
     // their transcripts, the timeline tails and normalizes them.

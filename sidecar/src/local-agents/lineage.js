@@ -41,7 +41,7 @@ const MARKER_KEYS = {
   CODEX_THREAD_ID: "codex"
 };
 
-async function runCommand(command, args) {
+export async function runCommand(command, args) {
   try {
     const { stdout } = await execFileAsync(command, args, {
       timeout: PROCESS_TIMEOUT_MS,
@@ -204,6 +204,15 @@ export class ProcessLineage {
     this.cache = new Map();
     // `${pid}@${start}` -> working directory of a codex process (or null).
     this.cwds = new Map();
+  }
+
+  /**
+   * The process table while it is recent enough to answer liveness, or null.
+   * Without the local scanner nothing refreshes it on a timer, and an old
+   * table would vouch for a pid the system has since reused.
+   */
+  freshTable(now = Date.now() / 1000) {
+    return now - this.loadedAt <= TABLE_TTL_SECONDS * 2 ? this.table : null;
   }
 
   /** Refreshes the process table and Claude's pid files, at most every TTL. */

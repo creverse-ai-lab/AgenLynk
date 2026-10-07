@@ -111,7 +111,6 @@ export function recordExternalParent(record, parent, parents, now) {
   const call = finishedMcpCall(record);
   if (!call) return false;
   let changed = false;
-  const resultText = JSON.stringify(call.result ?? {});
   const server = String(call.server ?? "").toLowerCase();
 
   // Gateway responses (server named e.g. "agent-acp") carry the worker provider
@@ -128,6 +127,8 @@ export function recordExternalParent(record, parent, parents, now) {
 
   const provider = server.includes("claude") ? "claude" : server.includes("grok") ? "grok" : null;
   if (!provider) return changed;
+  // Serialized only for a server whose result is read.
+  const resultText = JSON.stringify(call.result ?? {});
   for (const match of resultText.matchAll(/"(?:sessionId|acpSessionId)"\s*:\s*"([^"]+)"/g)) {
     const key = linkKey(provider, match[1]);
     if (parents.get(key)?.[0] !== parent) {

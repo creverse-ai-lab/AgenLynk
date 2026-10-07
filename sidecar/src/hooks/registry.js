@@ -418,7 +418,7 @@ export class HookSessions {
  * the lineage table and Claude's records keep it), still the same process:
  * macOS reuses pids quickly.
  */
-function processAlive(pid, start = null) {
+function processAlive(pid, start = null, table = null) {
   try {
     process.kill(pid, 0);
   } catch (error) {
@@ -426,8 +426,19 @@ function processAlive(pid, start = null) {
     if (error?.code !== "EPERM") return false;
   }
   if (!start) return true;
-  const current = processStart(pid);
+  // The lineage table (refreshed every few seconds) already holds start
+  // times: only a process younger than the table costs a `ps` of its own.
+  const current = table?.get(pid)?.start ?? processStart(pid);
   return current == null || normalizeStart(current) === normalizeStart(start);
+}
+
+/**
+ * Liveness against a process table (pid -> {start}), such as
+ * ProcessLineage's: merge runs every second over every live session, and a
+ * blocking `ps` per pid there stalled the event loop.
+ */
+export function processAliveFrom(table) {
+  return (pid, start = null) => processAlive(pid, start, table());
 }
 
 const startCache = new Map();

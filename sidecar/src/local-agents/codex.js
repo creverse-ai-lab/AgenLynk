@@ -331,7 +331,7 @@ export async function poll({ cursors, states, parents, now }) {
 /** Retires cursors whose transcript has gone quiet for longer than its lifetime. */
 export function prune({ cursors, states, retired, readyAfter, staleAfter, now }) {
   let changed = false;
-  for (const [path, cursor] of [...cursors]) {
+  for (const [path, cursor] of cursors) {
     const state = states[cursor.session];
     const lifetime = state && state.state === "ready" ? readyAfter : staleAfter;
     if (now - cursor.seen <= lifetime) continue;
@@ -342,7 +342,7 @@ export function prune({ cursors, states, retired, readyAfter, staleAfter, now })
       changed = true;
     }
   }
-  for (const [path, modified] of [...retired]) {
+  for (const [path, modified] of retired) {
     if (now - modified > staleAfter) retired.delete(path);
   }
   return changed;

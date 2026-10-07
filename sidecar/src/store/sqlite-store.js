@@ -178,10 +178,11 @@ export class SqliteMonitorStore {
     const bound = Number.isFinite(before) ? before : Number.MAX_SAFE_INTEGER;
     // Keyset pagination on (updated_at, session_id): a page boundary inside a
     // run of equal timestamps continues with the next id instead of skipping.
-    return this.database
-      .prepare(`SELECT record FROM sessions
+    // Prepared once: restoring and paging call this many times in a row.
+    this.selectSessions ??= this.database.prepare(`SELECT record FROM sessions
                  WHERE updated_at >= ? AND (updated_at < ? OR (updated_at = ? AND session_id < ?))
-                 ORDER BY updated_at DESC, session_id DESC LIMIT ?`)
+                 ORDER BY updated_at DESC, session_id DESC LIMIT ?`);
+    return this.selectSessions
       .all(since, bound, bound, beforeId ?? "", limit)
       .map((row) => parse(row.record))
       .filter(Boolean);
@@ -245,8 +246,9 @@ export class SqliteMonitorStore {
   readEvents(sessionId, { before = Number.MAX_SAFE_INTEGER, limit = 200 } = {}) {
     if (this.failed) return [];
     const bound = Number.isFinite(before) ? before : Number.MAX_SAFE_INTEGER;
-    return this.database
-      .prepare("SELECT record FROM events WHERE session_id = ? AND sequence < ? ORDER BY sequence DESC LIMIT ?")
+    this.selectEvents ??= this.database
+      .prepare("SELECT record FROM events WHERE session_id = ? AND sequence < ? ORDER BY sequence DESC LIMIT ?");
+    return this.selectEvents
       .all(sessionId, bound, limit)
       .map((row) => parse(row.record))
       .filter(Boolean)

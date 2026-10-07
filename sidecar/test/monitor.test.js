@@ -17,18 +17,22 @@ test("queuedSingleFlight serializes overlapping refreshes and coalesces the queu
   let maxConcurrent = 0;
   const refresh = queuedSingleFlight(async () => {
     calls += 1;
+    const pass = calls;
     concurrent += 1;
     maxConcurrent = Math.max(maxConcurrent, concurrent);
     if (calls === 1) await firstGate;
     concurrent -= 1;
+    return pass;
   });
 
   const first = refresh();
-  refresh();
-  refresh();
+  const second = refresh();
+  const third = refresh();
   assert.equal(calls, 1);
+  assert.equal(second, third, "latecomers share one follow-up");
   releaseFirst();
-  await first;
+  assert.equal(await first, 1);
+  assert.equal(await second, 2, "a latecomer gets the pass that ran after it asked");
   for (let attempt = 0; calls < 2 && attempt < 10; attempt += 1) {
     await new Promise((resolve) => setImmediate(resolve));
   }
@@ -113,6 +117,33 @@ test("MonitorState coalesces SSE frames during backpressure and resumes on drain
   state.closeSseClients();
   assert.equal(ended, true);
   assert.equal(state.sseClients.size, 0);
+});
+
+test("a queued state frame that carries sessions is never superseded", () => {
+  const state = new MonitorState({ sseBackpressureTimeoutMs: 1_000 });
+  const client = new EventEmitter();
+  const frames = [];
+  client.write = (frame) => { frames.push(JSON.parse(frame.replace(/^data: /, "").trim())); return frames.length > 1; };
+  client.end = () => {};
+  state.addSseClient(client);
+  state.broadcast({ kind: "state", connected: true });
+  state.broadcast({ kind: "state", connected: true, sessions: [{ sessionId: "one" }], removedSessionIds: [] });
+  // Sessions unchanged since: this frame has no list, so it must not replace the one above.
+  state.broadcast({ kind: "state", connected: true, removedSessionIds: [] });
+  state.broadcast({ kind: "state", connected: false });
+  client.emit("drain");
+  assert.deepEqual(frames.map((frame) => frame.sessions?.length ?? null), [null, 1, null]);
+  assert.equal(frames.at(-1).connected, false, "status-only frames still collapse to the latest");
+
+  // An empty list is data too: it clears the client's copy.
+  frames.length = 0;
+  client.write = (frame) => { frames.push(JSON.parse(frame.replace(/^data: /, "").trim())); return frames.length > 1; };
+  state.broadcast({ kind: "state", connected: true });
+  state.broadcast({ kind: "state", connected: true, tasks: [], inbox: [] });
+  state.broadcast({ kind: "state", connected: true });
+  client.emit("drain");
+  assert.deepEqual(frames.map((frame) => frame.tasks?.length ?? null), [null, 0, null]);
+  state.closeSseClients();
 });
 
 test("MonitorState blocks Gateway restart while work or inbox responses are active", () => {
