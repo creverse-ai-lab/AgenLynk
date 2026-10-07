@@ -9,7 +9,9 @@ extension AgentMascot.Mood {
         case .permission, .input: self = .waiting
         case .running: self = .working
         case .error: self = .failed
-        case .idle: self = .happy
+        // Resting between turns is asleep, not "done": the done face is the
+        // finished-work alert's.
+        case .idle: self = .idle
         case .closed: self = .idle
         }
     }

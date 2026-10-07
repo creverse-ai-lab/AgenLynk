@@ -228,6 +228,11 @@ struct MermaidMascot: View {
                         HappyEye()
                             .stroke(style.ink, style: StrokeStyle(lineWidth: eyeWidth * 0.7, lineCap: .round))
                             .frame(width: eyeWidth * 2, height: eyeHeight * 0.4)
+                    case .idle:
+                        // Asleep: lids shut, curving down.
+                        SleepyEye()
+                            .stroke(style.ink, style: StrokeStyle(lineWidth: eyeWidth * 0.6, lineCap: .round))
+                            .frame(width: eyeWidth * 1.9, height: eyeHeight * 0.3)
                     case .failed:
                         Image(systemName: "xmark")
                             .font(.system(size: eyeHeight * 0.7, weight: .heavy))
@@ -267,7 +272,13 @@ struct MermaidMascot: View {
     /// A small open smile; none when it failed.
     @ViewBuilder
     private func mouth(_ style: MascotStyle, width: CGFloat, height: CGFloat) -> some View {
-        if size >= 26 && mood != .failed {
+        if size >= 26 && mood == .idle {
+            // Breathing slowly through a small round mouth.
+            Ellipse()
+                .fill(style.ink)
+                .frame(width: width * 0.06, height: height * 0.05)
+                .offset(y: height * 0.24)
+        } else if size >= 26 && mood != .failed {
             OpenSmile()
                 .fill(style.ink)
                 .frame(width: width * 0.14, height: height * 0.1)
@@ -283,7 +294,7 @@ struct MermaidMascot: View {
         case .waiting: (symbol, color) = ("exclamationmark", .orange)
         case .happy: (symbol, color) = ("checkmark", .green)
         case .failed: (symbol, color) = ("xmark", .red)
-        case .idle: return nil
+        case .idle: (symbol, color) = ("zzz", Color(red: 0.42, green: 0.45, blue: 0.86))
         }
         return AnyView(
             Image(systemName: symbol)
@@ -536,6 +547,16 @@ struct Bun: Shape {
 }
 
 /// The two curved eyes of a happy face.
+/// A shut eye: a lid line curving down, as in sleep.
+struct SleepyEye: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+        path.addQuadCurve(to: CGPoint(x: rect.maxX, y: rect.minY), control: CGPoint(x: rect.midX, y: rect.maxY + rect.height))
+        return path
+    }
+}
+
 struct HappyEye: Shape {
     func path(in rect: CGRect) -> Path {
         var path = Path()

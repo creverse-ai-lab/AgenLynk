@@ -134,6 +134,11 @@ struct DevilMascot: View {
                         HappyEye()
                             .stroke(style.ink, style: StrokeStyle(lineWidth: eyeWidth * 0.7, lineCap: .round))
                             .frame(width: eyeWidth * 2, height: eyeHeight * 0.4)
+                    case .idle:
+                        // Asleep: lids shut, curving down.
+                        SleepyEye()
+                            .stroke(style.ink, style: StrokeStyle(lineWidth: eyeWidth * 0.6, lineCap: .round))
+                            .frame(width: eyeWidth * 1.9, height: eyeHeight * 0.3)
                     case .failed:
                         Image(systemName: "xmark")
                             .font(.system(size: eyeHeight * 0.7, weight: .heavy))
@@ -175,7 +180,13 @@ struct DevilMascot: View {
     /// reads as a tooth, not as a stray mark on the light face.
     @ViewBuilder
     private func mouth(_ style: MascotStyle, width: CGFloat, height: CGFloat) -> some View {
-        if size >= 26 && mood != .failed {
+        if size >= 26 && mood == .idle {
+            // Asleep: a small round mouth, the fang tucked away.
+            Ellipse()
+                .fill(style.ink)
+                .frame(width: width * 0.06, height: height * 0.05)
+                .offset(y: height * 0.24)
+        } else if size >= 26 && mood != .failed {
             let mouthWidth = width * 0.17
             let mouthHeight = height * 0.12
             ZStack(alignment: .top) {
@@ -199,7 +210,7 @@ struct DevilMascot: View {
         case .waiting: (symbol, color) = ("exclamationmark", .orange)
         case .happy: (symbol, color) = ("checkmark", .green)
         case .failed: (symbol, color) = ("xmark", .red)
-        case .idle: return nil
+        case .idle: (symbol, color) = ("zzz", Color(red: 0.42, green: 0.45, blue: 0.86))
         }
         return AnyView(
             Image(systemName: symbol)

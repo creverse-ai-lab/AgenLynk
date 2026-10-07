@@ -25,8 +25,8 @@ struct NotchStatusStyle: Equatable {
             } else {
                 (icon, color, label, animated) = ("sparkles", .purple, "생각 중", true)
             }
-        case .idle: (icon, color, label, animated) = ("checkmark.circle.fill", .green, "쉬는 중", false)
-        case .closed: (icon, color, label, animated) = ("moon.zzz.fill", .gray, "종료됨", false)
+        case .idle: (icon, color, label, animated) = ("zzz", .indigo, "쉬는 중", false)
+        case .closed: (icon, color, label, animated) = ("power.circle.fill", .gray, "종료됨", false)
         }
     }
 
