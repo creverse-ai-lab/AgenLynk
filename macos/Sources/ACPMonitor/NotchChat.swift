@@ -1150,6 +1150,11 @@ private struct NotchChatExpandedView: View {
 
 /// One Frontdoor alert: who, what it needs, and a tap to open the session.
 /// A Frontdoor still listening gets its last answer and a reply box.
+///
+/// `@MainActor` on the type: the controller is a plain `let`, so nothing else
+/// isolates the helpers that call it, and the macOS 14 SDK isolates only
+/// `body` (CI builds with it).
+@MainActor
 struct NotchAlertRow: View {
     let alert: NotchAlert
     let controller: NotchChatController

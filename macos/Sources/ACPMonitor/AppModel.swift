@@ -203,14 +203,7 @@ final class AppModel: ObservableObject {
             Timer.publish(every: 1, on: .main, in: .common).autoconnect().sink { _ in
                 let line = "\(Date().timeIntervalSince1970) model=\(counts.model) settings=\(counts.settings) monitor=\(counts.monitor) pet=\(counts.pet) catalog=\(counts.catalog)\n"
                 counts = (0, 0, 0, 0, 0)
-                if let handle = FileHandle(forWritingAtPath: path) ?? {
-                    FileManager.default.createFile(atPath: path, contents: nil)
-                    return FileHandle(forWritingAtPath: path)
-                }() {
-                    handle.seekToEndOfFile()
-                    handle.write(Data(line.utf8))
-                    try? handle.close()
-                }
+                DebugLog.append(line, to: path)
             }.store(in: &storeCancellables)
             if let path = ProcessInfo.processInfo.environment["ACP_LYNK_DEBUG_MASCOTS"] {
                 Task { @MainActor in AgentMascotSheet.write(to: path) }
