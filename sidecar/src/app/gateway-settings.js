@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
+import { defaultInstallStatePath } from "./install-state.js";
 
 // Every definition carries both languages. `label`/`description` stay English
 // (they are also the wire-level fallback), and `labelKo`/`descriptionKo` are
@@ -142,11 +142,9 @@ export const GATEWAY_SETTING_DEFINITIONS = Object.freeze([
 
 const DEFINITIONS_BY_ID = new Map(GATEWAY_SETTING_DEFINITIONS.map((definition) => [definition.id, definition]));
 
-export function defaultGatewayInstallStatePath() {
-  return process.env.ACP_GATEWAY_INSTALL_STATE || join(homedir(), ".acp-gateway", "install.json");
-}
+export { defaultInstallStatePath as defaultGatewayInstallStatePath };
 
-export function resolveGatewaySettings({ statePath = defaultGatewayInstallStatePath(), env = process.env } = {}) {
+export function resolveGatewaySettings({ statePath = defaultInstallStatePath(), env = process.env } = {}) {
   const state = readStateSync(statePath);
   return Object.fromEntries(GATEWAY_SETTING_DEFINITIONS.map((definition) => [
     definition.id,
@@ -162,7 +160,7 @@ export function defaultGatewaySettings({ env = process.env } = {}) {
 }
 
 export function gatewaySettingsSnapshot({
-  statePath = defaultGatewayInstallStatePath(),
+  statePath = defaultInstallStatePath(),
   env = process.env,
   activeValues = null
 } = {}) {
@@ -205,7 +203,7 @@ export function gatewaySettingsSnapshot({
 }
 
 export async function updateGatewaySettings({
-  statePath = defaultGatewayInstallStatePath(),
+  statePath = defaultInstallStatePath(),
   env = process.env,
   values = {},
   resetIds = []

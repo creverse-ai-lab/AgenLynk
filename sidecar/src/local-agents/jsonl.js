@@ -6,8 +6,7 @@ const CARRIAGE_RETURN = 0x0D;
 
 export function readRecord(line) {
   try {
-    const parsed = JSON.parse(line);
-    return parsed === null || typeof parsed !== "object" ? parsed : parsed;
+    return JSON.parse(line);
   } catch {
     return null;
   }

@@ -169,7 +169,7 @@ export class LocalAgentScanner {
       // Lineage is a refinement; the scan stands without it.
     }
 
-    if (now - this.lastProcessScan >= (this.processScanIntervalSeconds ?? PROCESS_SCAN_INTERVAL_SECONDS)) {
+    if (now - this.lastProcessScan >= PROCESS_SCAN_INTERVAL_SECONDS) {
       this.processStates = await detectCliProcesses(
         now, this.processStates, this.parents, this.grokEventPathCache, this.grokRoot, this.staleAfter
       );

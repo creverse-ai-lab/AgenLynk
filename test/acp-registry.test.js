@@ -12,7 +12,6 @@ import {
   setProviderEnabled,
   validateRegistry
 } from "../sidecar/src/app/acp-registry.js";
-import { providerConfig } from "../sidecar/src/app/providers.js";
 
 const registry = {
   version: "1.0.0",
@@ -105,25 +104,15 @@ test("provider definitions are merged into a private dynamic registry", async ()
     }]);
     const saved = JSON.parse(await readFile(path, "utf8"));
     assert.equal(saved.providers.gemini.registryVersion, "4.5.6");
-    const previous = process.env.ACP_GATEWAY_PROVIDERS;
-    process.env.ACP_GATEWAY_PROVIDERS = path;
-    try {
-      const configured = providerConfig("gemini", { model: "gemini-test" });
-      assert.equal(configured.command, "npx");
-      assert.equal(configured.expectedModel, "gemini-test");
-    } finally {
-      if (previous == null) delete process.env.ACP_GATEWAY_PROVIDERS;
-      else process.env.ACP_GATEWAY_PROVIDERS = previous;
-    }
+    assert.equal((await readProviderRegistry(path)).providers.gemini.command, "npx");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });
 
-test("provider enabled state is atomic, survives definition merges, and blocks new sessions", async () => {
+test("provider enabled state is atomic and survives definition merges", async () => {
   const directory = await mkdtemp(join(tmpdir(), "acp-provider-enabled-"));
   const path = join(directory, "providers.json");
-  const previous = process.env.ACP_GATEWAY_PROVIDERS;
   try {
     await mergeProviderDefinitions(path, [{ id: "gemini", command: "npx", args: ["gemini"], env: {} }]);
     await setProviderEnabled("gemini", false, path);
@@ -133,13 +122,11 @@ test("provider enabled state is atomic, survives definition merges, and blocks n
     assert.ok(saved.providers.gemini);
     assert.ok(saved.providers.cursor);
 
-    process.env.ACP_GATEWAY_PROVIDERS = path;
-    assert.throws(() => providerConfig("gemini"), /disabled in ACP Connections/);
     await setProviderEnabled("gemini", true, path);
-    assert.equal(providerConfig("gemini").command, "npx");
+    const enabled = await readProviderRegistry(path);
+    assert.deepEqual(enabled.disabled, []);
+    assert.equal(enabled.providers.gemini.command, "npx");
   } finally {
-    if (previous == null) delete process.env.ACP_GATEWAY_PROVIDERS;
-    else process.env.ACP_GATEWAY_PROVIDERS = previous;
     await rm(directory, { recursive: true, force: true });
   }
 });

@@ -295,13 +295,13 @@ function packageNameFromSpec(spec) {
   return at > 0 ? spec.slice(0, at) : spec;
 }
 
-function platformTarget(platform = process.platform, arch = process.arch) {
+export function platformTarget(platform = process.platform, arch = process.arch) {
   const platformName = platform === "darwin" ? "darwin" : platform === "linux" ? "linux" : platform === "win32" ? "windows" : platform;
   const archName = arch === "arm64" ? "aarch64" : arch === "x64" ? "x86_64" : arch;
   return `${platformName}-${archName}`;
 }
 
-async function executableExists(command, path) {
+export async function executableExists(command, path = process.env.PATH ?? "") {
   if (!command) return false;
   const candidates = command.includes("/") ? [command] : path.split(delimiter).filter(Boolean).map((directory) => join(directory, command));
   for (const candidate of candidates) {

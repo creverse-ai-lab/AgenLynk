@@ -1,9 +1,7 @@
-import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { access } from "node:fs/promises";
-import { constants, readFileSync } from "node:fs";
-import { defaultProviderRegistryPath } from "./acp-registry.js";
+import { readFileSync } from "node:fs";
+import { defaultProviderRegistryPath, executableExists } from "./acp-registry.js";
 
 const GROK_BIN = process.env.GROK_BIN || join(homedir(), ".grok/bin/grok");
 
@@ -32,80 +30,6 @@ export const PROVIDER_MANIFESTS = {
     install: "npm install -g @agentclientprotocol/codex-acp"
   }
 };
-
-export function providerConfig(provider, { model } = {}) {
-  const document = providerRegistryDocument();
-  if (document.disabled.has(provider)) throw new Error(`${provider} is disabled in ACP Connections`);
-  const configured = document.providers[provider];
-  if (configured) {
-    return {
-      provider,
-      command: configured.command,
-      args: [...configured.args],
-      env: { ...configured.env },
-      permissionPolicy: configured.permissionPolicy ?? "ask",
-      expectedModel: optionalModel(model),
-      modelScope: configured.modelScope ?? "session"
-    };
-  }
-
-  if (provider === "grok") {
-    const selectedModel = optionalModel(model) ?? "grok-4.5";
-    return {
-      provider,
-      command: GROK_BIN,
-      args: [
-        "--sandbox",
-        "off",
-        "--permission-mode",
-        "default",
-        "agent",
-        "--model",
-        selectedModel,
-        "stdio"
-      ],
-      permissionPolicy: "ask",
-      expectedModel: selectedModel,
-      modelScope: "process"
-    };
-  }
-
-  if (provider === "claude") {
-    return {
-      provider,
-      command: process.execPath,
-      args: [
-        fileURLToPath(
-          import.meta.resolve("@agentclientprotocol/claude-agent-acp/dist/index.js")
-        )
-      ],
-      env: {
-        CLAUDE_CODE_EXECUTABLE:
-          process.env.CLAUDE_CODE_EXECUTABLE || join(homedir(), ".local/bin/claude")
-      },
-      permissionPolicy: "ask",
-      expectedModel: null,
-      modelScope: "session"
-    };
-  }
-
-  if (provider === "codex") {
-    return {
-      provider,
-      command: process.env.CODEX_ACP_BIN || "codex-acp",
-      args: [],
-      env: {
-        CODEX_PATH: process.env.CODEX_PATH || "codex",
-        NO_BROWSER: "1"
-      },
-      permissionPolicy: "ask",
-      expectedModel: null,
-      modelScope: "session"
-    };
-  }
-
-  throw new Error(`provider must be one of: ${providerIds().join(", ")}`);
-}
 
 export async function detectProviders() {
   const document = providerRegistryDocument();
@@ -150,12 +74,6 @@ export async function detectProviders() {
   ];
 }
 
-export function providerIds() {
-  const document = providerRegistryDocument();
-  return [...new Set([...PROVIDERS, ...Object.keys(document.providers)])]
-    .filter((provider) => !document.disabled.has(provider));
-}
-
 function providerRegistryDocument() {
   if (process.env.ACP_GATEWAY_DISABLE_DYNAMIC_PROVIDERS === "1" && !process.env.ACP_GATEWAY_PROVIDERS) {
     return { providers: {}, disabled: new Set() };
@@ -182,34 +100,3 @@ function providerRegistryDocument() {
   }
 }
 
-async function executableExists(command) {
-  if (!command) return false;
-  if (command.includes("/")) {
-    try {
-      await access(command, constants.X_OK);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  const paths = (process.env.PATH ?? "").split(":").filter(Boolean);
-  for (const directory of paths) {
-    try {
-      await access(join(directory, command), constants.X_OK);
-      return true;
-    } catch {
-      // Continue searching PATH.
-    }
-  }
-  return false;
-}
-
-export function currentModelId(initResult) {
-  return initResult?._meta?.modelState?.currentModelId ?? null;
-}
-
-function optionalModel(value) {
-  if (value == null) return null;
-  if (typeof value !== "string" || !value.trim()) throw new Error("model must be a non-empty string");
-  return value.trim();
-}

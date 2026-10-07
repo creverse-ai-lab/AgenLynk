@@ -1,15 +1,4 @@
-import {
-  defaultProviderRegistryPath,
-  discoverRegistryAgents,
-  installedGlobalNpmPackages,
-  loadOfficialRegistry,
-  mergeProviderDefinitions,
-  providerDefinition,
-  providerIdForRegistryAgent,
-  readProviderRegistry,
-  selectDistribution,
-  setProviderEnabled
-} from "./acp-registry.js";
+import { defaultProviderRegistryPath, discoverRegistryAgents, installedGlobalNpmPackages, loadOfficialRegistry, mergeProviderDefinitions, providerDefinition, providerIdForRegistryAgent, readProviderRegistry, selectDistribution, setProviderEnabled, platformTarget } from "./acp-registry.js";
 import { detectProviders } from "./providers.js";
 import { spawn } from "node:child_process";
 
@@ -159,8 +148,3 @@ function firstWebUrl(...values) {
   return null;
 }
 
-function platformTarget(platform, arch) {
-  const platformName = platform === "darwin" ? "darwin" : platform === "linux" ? "linux" : platform === "win32" ? "windows" : platform;
-  const archName = arch === "arm64" ? "aarch64" : arch === "x64" ? "x86_64" : arch;
-  return `${platformName}-${archName}`;
-}

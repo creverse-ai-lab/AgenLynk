@@ -50,7 +50,6 @@ export class RecordTail {
     // True when the first read skipped the head of the file: cumulative facts
     // (Claude token totals) then cover only what was read.
     this.adoptedFromTail = false;
-    this.missing = false;
   }
 
   /** Reads appended lines. Returns true when the window changed. */
@@ -59,10 +58,8 @@ export class RecordTail {
     try {
       metadata = await stat(this.path);
     } catch {
-      this.missing = true;
       return false;
     }
-    this.missing = false;
     if (metadata.size < this.offset
       || (metadata.size === this.offset && this.offset > 0 && metadata.mtimeMs !== this.lastMtimeMs)) {
       this.offset = 0;

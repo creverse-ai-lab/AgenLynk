@@ -18,6 +18,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agenlynkHome } from "../hooks/endpoint.js";
+import { defaultInstallStatePath } from "./install-state.js";
 
 export const SKILL_NAME = "agent-delegator";
 export const SKILL_AGENTS = ["claude", "codex", "grok", "auggie"];
@@ -85,7 +86,7 @@ function defaultOptions(options = {}) {
     targets: options.targets ?? skillTargets(),
     recordPath: options.recordPath ?? join(agenlynkHome(), "skills.json"),
     gatewayStatePath: options.gatewayStatePath
-      ?? (process.env.ACP_GATEWAY_INSTALL_STATE || join(homedir(), ".acp-gateway", "install.json"))
+      ?? defaultInstallStatePath()
   };
 }
 

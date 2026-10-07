@@ -4,32 +4,14 @@
 // for grok processes, then `lsof` to learn which events.jsonl each one holds
 // open. That transcript's last turn marker says whether it is still working.
 
-import { execFile } from "node:child_process";
 import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { promisify } from "node:util";
 import { reversedRecords } from "./jsonl.js";
-import { headlessArgs, LINEAGE_ID } from "./lineage.js";
+import { headlessArgs, LINEAGE_ID, runCommand } from "./lineage.js";
 import { externalParent, gatewayResponseLinks, linkKey } from "./parent-links.js";
 
-const execFileAsync = promisify(execFile);
-const PROCESS_TIMEOUT_MS = 1_000;
 const GROK_LINK_SCAN_LIMIT = 400;
-
-async function runCommand(command, args) {
-  try {
-    const { stdout } = await execFileAsync(command, args, {
-      timeout: PROCESS_TIMEOUT_MS,
-      maxBuffer: 4 * 1024 * 1024
-    });
-    return stdout;
-  } catch (error) {
-    // `ps`/`lsof` exit nonzero when a pid vanished mid-call; partial output is
-    // still usable, and a hard failure just means no grok sessions this pass.
-    return typeof error?.stdout === "string" ? error.stdout : "";
-  }
-}
 
 export async function lastGrokTurn(path) {
   for await (const record of reversedRecords(path)) {
