@@ -26,7 +26,6 @@ enum MonitorModelChecks {
         try gatewayConfigRepresentsAllKnownSettingIds()
         try gatewayConfigDecodesBothLanguagesAndFallsBackToEnglish()
         try gatewayDisplayUnitsRoundTripExactlyAndFallBackToMilliseconds()
-        try retentionPreviewDecodesCountsAndSummarisesOnlyNonZeroOnes()
         try runtimeInspectionAndOperationEnvelopesDecode()
         try sessionConfigDecodesSelectBooleanAndFlattensNestedChoices()
         try sessionConfigPreservesUnknownTypeInsteadOfDropping()
@@ -1460,23 +1459,6 @@ enum MonitorModelChecks {
 
         // A typed-in absurd number must saturate, not trap on overflow.
         try check(week.stored(Int.max) == Int.max, "overflowing display values must saturate")
-    }
-
-    private static func retentionPreviewDecodesCountsAndSummarisesOnlyNonZeroOnes() throws {
-        let data = Data(#"{"ok":true,"sessions":3,"tasks":0,"inbox":2,"artifacts":11}"#.utf8)
-        let preview = try RetentionPreview.decode(data)
-        try check(preview.sessions == 3 && preview.inbox == 2 && preview.artifacts == 11, "counts must decode")
-        try check(!preview.isEmpty, "a preview with counts is not empty")
-        try check(preview.summary.contains("세션 3개"), "the summary must name sessions")
-        try check(!preview.summary.contains("태스크"), "a zero count must be left out of the summary")
-
-        let empty = try RetentionPreview.decode(Data(#"{"ok":true,"sessions":0,"tasks":0,"inbox":0,"artifacts":0}"#.utf8))
-        try check(empty.isEmpty, "an all-zero preview means the save destroys nothing")
-        try check(empty.summary.isEmpty, "an all-zero preview has no summary")
-
-        // Missing fields decode as zero rather than throwing, but a malformed
-        // body must not silently become an empty preview.
-        try check(RetentionPreview(.string("nope")) == nil, "a non-object body must not decode")
     }
 
     /// The updater screen must read the library's own envelopes, including the

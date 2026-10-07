@@ -67,7 +67,7 @@ public struct AgentMascot: View {
         // and the resting motion moves just that. In a turn its parts are
         // flattened one by one instead, so they can move on their own.
         .moving(!AgentMascot.moves(mood), WholeFlattened())
-        .modifier(RestingMotion(mood: still ? .working : mood))
+        .moving(!still, RestingMotion(mood: mood))
     }
 
     /// Whether this mood moves the mascot's parts (bob, hop, sway, bubbles).
@@ -123,14 +123,6 @@ struct MermaidMascot: View {
         .accessibilityLabel("\(AgentMascot.label(provider)) 봇")
     }
 
-    static func label(_ provider: String) -> String {
-        switch provider.lowercased() {
-        case "claude": "Claude"
-        case "codex": "Codex"
-        case "grok": "Grok"
-        default: "AgenLynk"
-        }
-    }
 
     private var bodyWidth: CGFloat { size * 0.72 }
     private var bodyHeight: CGFloat { size * 0.58 }
@@ -430,17 +422,6 @@ struct Flattened: ViewModifier {
     let margin: CGFloat
     func body(content: Content) -> some View {
         content.padding(margin).drawingGroup().padding(-margin)
-    }
-}
-
-/// Flattened only while `active`: a part is flattened on its own while the
-/// mascot moves, and the mascot as a whole while it rests.
-struct FlattenedIf: ViewModifier {
-    let active: Bool
-    let margin: CGFloat
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if active { content.modifier(Flattened(margin: margin)) } else { content }
     }
 }
 

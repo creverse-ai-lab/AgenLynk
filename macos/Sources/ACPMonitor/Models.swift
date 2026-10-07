@@ -78,18 +78,6 @@ enum JSONValue: Equatable, Sendable {
         return text
     }
 
-    /// Single-line JSON, for quoting a small structured value (a tool's
-    /// arguments) inside otherwise human-readable text. Slashes stay
-    /// unescaped: the values quoted this way are mostly paths, and `\/` reads
-    /// as noise in a sentence.
-    var compactPrinted: String {
-        guard JSONSerialization.isValidJSONObject(foundationValue),
-              let data = try? JSONSerialization.data(withJSONObject: foundationValue, options: [.sortedKeys, .withoutEscapingSlashes]),
-              let text = String(data: data, encoding: .utf8) else {
-            return stringValue ?? "null"
-        }
-        return text
-    }
 }
 
 extension Dictionary where Key == String, Value == JSONValue {
@@ -153,7 +141,6 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
     var providerLabel: String { providerDisplayLabel(provider) }
     var isFrontdoorRecord: Bool { role == "frontdoor" }
     var isLocalSource: Bool { source == "local" }
-    var sourceLabel: String { isLocalSource ? "LOCAL" : "ACP" }
     var isInternalReview: Bool {
         let identity = "\(model ?? "") \(title ?? "")".lowercased()
         return identity.contains("auto-review") || identity.contains("auto_review")
@@ -752,10 +739,8 @@ struct PetActivityProjection: Equatable, Sendable {
         nickname: (_ id: String, _ role: String) -> String? = { _, _ in nil }
     ) -> PetActivityProjection {
         let pendingBySession = Dictionary(grouping: inbox.filter {
-            $0.status == "pending" && $0.payload.objectValue?.string("sessionId") != nil
-        }, by: {
-            $0.payload.objectValue!.string("sessionId")!
-        }).mapValues(\.count)
+            $0.status == "pending" && $0.sessionId != nil
+        }, by: { $0.sessionId! }).mapValues(\.count)
 
         // The same groups as the dashboard and menu bar: a session joins the
         // Frontdoor its proven parent chain leads to. A known group is one
@@ -1160,7 +1145,6 @@ enum PetChildEnvironment {
     }
 }
 
-
 /// One canonical timeline event (contracts/monitor/v2 `event`). The sidecar
 /// gives every source — Gateway, Claude/Codex/Grok transcripts, agent hooks —
 /// this one shape, and has already done the work the app used to guess at:
@@ -1490,7 +1474,10 @@ struct MonitorRecord: Identifiable, Equatable, Sendable {
     let status: String?
     let title: String
     let subtitle: String
-    let payload: JSONValue
+    /// The session it belongs to. The only field read from the raw record:
+    /// keeping the whole raw tree made every state frame's equality check a
+    /// deep compare of it.
+    let sessionId: String?
 
     init(_ value: JSONValue, fallbackKind: String, index: Int) {
         let object = value.objectValue ?? [:]
@@ -1501,8 +1488,8 @@ struct MonitorRecord: Identifiable, Equatable, Sendable {
             ?? object.object("toolCall")?.string("title")
             ?? object.string("message")
             ?? kind.replacingOccurrences(of: "_", with: " ")
-        subtitle = object.string("sessionId") ?? id
-        payload = value
+        sessionId = object.string("sessionId")
+        subtitle = sessionId ?? id
     }
 }
 
@@ -2121,51 +2108,6 @@ struct RuntimeOperationResult: Equatable, Sendable {
         let raw = try JSONSerialization.jsonObject(with: data)
         guard JSONValue(any: raw).objectValue != nil else { throw MonitorDecodeError.invalidMessage }
         return RuntimeOperationResult(JSONValue(any: raw))
-    }
-}
-
-/// How many sessions/tasks/inbox records/artifacts a retention change would
-/// delete. Counted by the Gateway without deleting anything, so the app can
-/// ask before a destructive save.
-struct RetentionPreview: Equatable, Sendable {
-    let sessions: Int
-    let tasks: Int
-    let inbox: Int
-    let artifacts: Int
-
-    var isEmpty: Bool { sessions == 0 && tasks == 0 && inbox == 0 && artifacts == 0 }
-
-    /// A human-readable list of only the non-zero counts.
-    var summary: String {
-        var parts: [String] = []
-        if sessions > 0 { parts.append("세션 \(sessions)개") }
-        if tasks > 0 { parts.append("태스크 \(tasks)개") }
-        if inbox > 0 { parts.append("요청 \(inbox)개") }
-        if artifacts > 0 { parts.append("첨부 파일 \(artifacts)개") }
-        return parts.joined(separator: ", ")
-    }
-
-    init?(_ value: JSONValue) {
-        guard let object = value.objectValue else { return nil }
-        sessions = object.int("sessions") ?? 0
-        tasks = object.int("tasks") ?? 0
-        inbox = object.int("inbox") ?? 0
-        artifacts = object.int("artifacts") ?? 0
-    }
-
-    init(sessions: Int, tasks: Int, inbox: Int, artifacts: Int) {
-        self.sessions = sessions
-        self.tasks = tasks
-        self.inbox = inbox
-        self.artifacts = artifacts
-    }
-
-    static func decode(_ data: Data) throws -> RetentionPreview {
-        let raw = try JSONSerialization.jsonObject(with: data)
-        guard let preview = RetentionPreview(JSONValue(any: raw)) else {
-            throw MonitorDecodeError.invalidMessage
-        }
-        return preview
     }
 }
 

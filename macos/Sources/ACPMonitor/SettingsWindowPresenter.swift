@@ -38,10 +38,13 @@ final class SettingsWindowPresenter {
 
 /// Session detail windows for callers outside the SwiftUI scenes (the
 /// notch). The scene's `openWindow` lived only in the menu bar label, so with
-/// the menu bar turned off nothing opened them. One window per session.
+/// the menu bar turned off nothing opened them. One window per session,
+/// let go when it closes: a closed window kept its SessionDetailView, which
+/// observes the whole AppModel, alive for the rest of the app's life.
 @MainActor
 final class SessionDetailWindowPresenter {
     private var windows: [String: NSWindow] = [:]
+    private var closeObservers: [String: NSObjectProtocol] = [:]
 
     func show(model: AppModel, sessionId: String) {
         let window = windows[sessionId] ?? {
@@ -59,9 +62,23 @@ final class SessionDetailWindowPresenter {
                 .environmentObject(model.settings))
             window.center()
             windows[sessionId] = window
+            closeObservers[sessionId] = NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification, object: window, queue: .main
+            ) { [weak self] _ in
+                // Let go after the close finishes: this dictionary is the
+                // window's only owner, and AppKit is still closing it here.
+                DispatchQueue.main.async { self?.release(sessionId) }
+            }
             return window
         }()
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+    }
+
+    private func release(_ sessionId: String) {
+        if let observer = closeObservers.removeValue(forKey: sessionId) {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        windows.removeValue(forKey: sessionId)?.contentView = nil
     }
 }

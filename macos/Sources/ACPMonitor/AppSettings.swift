@@ -237,8 +237,6 @@ final class AppSettings: ObservableObject {
             && bundledPetExecutablePath != nil
     }
 
-    var bundledPetAvailable: Bool { bundledPetExecutablePath != nil }
-
     init(defaults: UserDefaults = .standard, bundledPetExecutablePath: String? = BundledPet.executablePath()) {
         self.defaults = defaults
         self.bundledPetExecutablePath = bundledPetExecutablePath

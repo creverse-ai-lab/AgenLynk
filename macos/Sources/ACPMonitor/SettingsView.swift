@@ -421,19 +421,9 @@ private struct GatewayConfigurationView: View {
         var messages: [String] = []
         var deletesDiskHistory = false
         if !lowered.keys.filter(Self.gatewayCountedIds.contains).isEmpty {
-            // Ask the Gateway what these exact values would delete. When it
-            // cannot count, say so instead of reading that as "nothing".
-            switch await model.retentionPreview(
-                sessionRetentionMs: lowered["sessionRetentionMs"],
-                artifactSessionLimit: lowered["artifactSessionLimit"]
-            ) {
-            case let .counted(preview) where !preview.isEmpty:
-                messages.append("보존 기준을 줄이면 \(preview.summary)가 삭제됩니다. 고정했거나 진행 중인 세션은 삭제되지 않습니다.")
-            case .counted:
-                break
-            case .uncounted:
-                messages.append("보존 기준을 줄이면 오래된 세션 기록이 삭제됩니다. 삭제될 개수는 확인할 수 없습니다.")
-            }
+            // The Gateway cannot count what these values would delete, so say
+            // so instead of reading that as "nothing".
+            messages.append("보존 기준을 줄이면 오래된 세션 기록이 삭제됩니다. 삭제될 개수는 확인할 수 없습니다.")
         }
         if let history = lowered["monitorHistoryRetentionMs"] {
             if history == 0 {

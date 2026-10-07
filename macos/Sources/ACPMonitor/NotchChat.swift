@@ -41,7 +41,14 @@ final class NotchChatStore: ObservableObject {
     }
     @Published private(set) var sessionId: String?
     @Published private(set) var sessionProvider: String?
-    @Published private(set) var messages: [NotchChatMessage] = []
+    /// The chat so far, its oldest lines dropped past a cap: a long-lived
+    /// chat used to keep every streamed message for the app's lifetime.
+    @Published private(set) var messages: [NotchChatMessage] = [] {
+        didSet {
+            if messages.count > Self.messageLimit { messages.removeFirst(messages.count - Self.messageLimit) }
+        }
+    }
+    private static let messageLimit = 300
     @Published private(set) var status: String?
     @Published private(set) var permission: NotchChatPermission?
     @Published private(set) var busy = false
@@ -349,6 +356,10 @@ final class NotchChatController: NSObject, ObservableObject {
         model.settings.$notchEnabled.dropFirst().removeDuplicates()
             .sink { [weak self] enabled in
                 guard let self else { return }
+                if enabled, let model = self.model {
+                    // Changes made while the notch was off are not news now.
+                    _ = self.tracker.update(model.frontdoorSessions)
+                }
                 enabled ? self.show() : self.hide()
                 self.pushReplySetting(notchEnabled: enabled)
             }
@@ -366,7 +377,9 @@ final class NotchChatController: NSObject, ObservableObject {
     }
 
     private func refreshAlerts() {
-        guard let model else { return }
+        // With the notch off nothing can show an alert: skip the work (and
+        // the sounds) instead of tracking Frontdoors for a hidden panel.
+        guard let model, model.settings.notchEnabled else { return }
         let frontdoors = model.frontdoorSessions
         let alerts = tracker.update(frontdoors)
         // A wait that was answered elsewhere takes its alert with it.
@@ -530,6 +543,8 @@ final class NotchChatController: NSObject, ObservableObject {
         // With alerts off only a reply box still shows: it is how a reply
         // is given, and replies have their own switch.
         if next.reply == nil, settings?.notchAlertsEnabled == false { return }
+        // A hidden notch shows no alert and plays no sound.
+        if settings?.notchEnabled == false { return }
         if let current = alert {
             // An open reply box, or a wait the person has not answered yet,
             // is never pushed aside: the newcomer queues behind it. The same
@@ -916,7 +931,8 @@ private struct NotchChatRootView: View {
             ProviderOrb(
                 provider: top?.frontdoor.provider ?? store.sessionProvider ?? store.provider,
                 size: max(18, controller.notchSize.height * 0.82),
-                mood: top.map { AgentMascot.Mood(urgency: $0.urgency) } ?? (store.isRunning ? .working : .idle)
+                mood: top.map { AgentMascot.Mood(urgency: $0.urgency) } ?? (store.isRunning ? .working : .idle),
+                still: true
             )
             if let top {
                 NotchStatusBadge(style: NotchStatusStyle(urgency: top.urgency, currentStep: top.focus?.currentStep), showsLabel: false)
@@ -1277,12 +1293,66 @@ struct ProviderOrb: View {
     var size: CGFloat
     var active = false
     var mood: AgentMascot.Mood?
+    /// No resting motion: for the always-visible collapsed pill, where a
+    /// breathing 20pt mascot is barely visible but would animate all day.
+    var still = false
     /// The look chosen for the pet (devil or mermaid) is the notch's too.
     @AppStorage("monitor.petStyle") private var petStyle = PetStyle.orbit.rawValue
 
     var body: some View {
-        AgentMascot(provider: provider, size: size, mood: mood ?? (active ? .working : .idle),
-                    kind: (PetStyle(stored: petStyle) ?? .orbit).mascotKind)
+        IsolatedMascot(spec: .init(
+            provider: provider, size: size, mood: mood ?? (active ? .working : .idle),
+            kind: (PetStyle(stored: petStyle) ?? .orbit).mascotKind, still: still
+        ))
+        .frame(width: size, height: size)
+    }
+}
+
+/// A hosting view that is drawn but never clicked: taps on the mascot fall
+/// through to the pill or card around it.
+private final class PassThroughHostingView: NSHostingView<AgentMascot> {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+/// The mascot in a hosting view of its own. Inside the notch's one big
+/// NSHostingView, every animation frame of a mascot made AppKit lay out the
+/// whole panel (cards, pipeline and all): a panel-sized tree with one moving
+/// mascot cost ~15% CPU, the same mascot isolated ~3.6%. The child view's
+/// size is fixed by the parent frame, so its frames stay inside it.
+private struct IsolatedMascot: NSViewRepresentable {
+    struct Spec: Equatable {
+        let provider: String
+        let size: CGFloat
+        let mood: AgentMascot.Mood
+        let kind: AgentMascot.Kind
+        let still: Bool
+
+        var mascot: AgentMascot {
+            AgentMascot(provider: provider, size: size, mood: mood, kind: kind, still: still)
+        }
+    }
+
+    let spec: Spec
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSHostingView<AgentMascot> {
+        let view = PassThroughHostingView(rootView: spec.mascot)
+        view.sizingOptions = []
+        context.coordinator.spec = spec
+        return view
+    }
+
+    func updateNSView(_ view: NSHostingView<AgentMascot>, context: Context) {
+        // The parent re-renders on every stream message; only a real change
+        // reaches the mascot.
+        guard context.coordinator.spec != spec else { return }
+        context.coordinator.spec = spec
+        view.rootView = spec.mascot
+    }
+
+    final class Coordinator {
+        var spec: IsolatedMascot.Spec?
     }
 }
 

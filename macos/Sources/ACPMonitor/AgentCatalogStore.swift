@@ -44,9 +44,10 @@ final class AgentCatalogStore: ObservableObject {
     }
 
     private func apply(_ snapshot: ACPAgentCatalogSnapshot) {
-        agents = snapshot.agents
-        source = snapshot.source
-        stale = snapshot.stale
-        error = snapshot.warning
+        // Each assignment publishes; an unchanged reload publishes nothing.
+        if agents != snapshot.agents { agents = snapshot.agents }
+        if source != snapshot.source { source = snapshot.source }
+        if stale != snapshot.stale { stale = snapshot.stale }
+        if error != snapshot.warning { error = snapshot.warning }
     }
 }

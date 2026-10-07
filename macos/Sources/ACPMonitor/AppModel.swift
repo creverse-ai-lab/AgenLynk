@@ -320,27 +320,6 @@ final class AppModel: ObservableObject {
         gateway?.objectValue?.array("detected")?.count ?? 0
     }
 
-    var gatewayLifecycle: [(String, String)] {
-        guard let values = gateway?.objectValue?.object("lifecycle") else { return [] }
-        return [
-            ("Idle unload", duration(values.int("idleUnloadMs"))),
-            ("Orphan grace", duration(values.int("orphanGraceMs"))),
-            ("Result retention", duration(values.int("resultRetentionMs"))),
-            ("Session retention", duration(values.int("sessionRetentionMs")))
-        ]
-    }
-
-    var gatewayResourceLimits: [(String, String)] {
-        guard let values = gateway?.objectValue?.object("resourceLimits") else { return [] }
-        return [
-            ("세션당 이벤트", formatted(values.int("maxEvents"))),
-            ("텍스트 bytes", formatted(values.int("maxTextBytes"))),
-            ("세션당 Terminal", formatted(values.int("maxTerminalsPerSession"))),
-            ("대기 요청", formatted(values.int("maxPendingRequestsPerSession")))
-        ]
-    }
-
-    var gatewayConfigPendingRestart: Bool { gatewayConfigOptions.contains { $0.pending && $0.requiresRestart } }
     var gatewayConfigPendingApply: Bool { gatewayConfigOptions.contains { $0.pending } }
     var gatewayConfigLockedCount: Int { gatewayConfigOptions.filter { !$0.editable }.count }
     var onboardingInstallLocationReady: Bool { BundledRuntime.installationLocationReady }
@@ -404,7 +383,7 @@ final class AppModel: ObservableObject {
         derived(\.realtimeInbox) {
             let sessionIds = Set(realtimeSessions.map(\.sessionId))
             return inbox.filter { record in
-                guard let sessionId = record.payload.objectValue?.string("sessionId") else { return false }
+                guard let sessionId = record.sessionId else { return false }
                 return sessionIds.contains(sessionId)
             }
         }
@@ -1551,28 +1530,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// What a lower retention would delete, as far as the Gateway can say.
-    enum RetentionPreviewOutcome: Equatable {
-        case counted(RetentionPreview)
-        /// The Gateway cannot count it (no preview in this contract, or the
-        /// request failed). The caller must not claim nothing would be lost.
-        case uncounted
-    }
-
-    /// What the Gateway would delete if these retention values were applied.
-    func retentionPreview(sessionRetentionMs: Int?, artifactSessionLimit: Int?) async -> RetentionPreviewOutcome {
-        guard let endpoint else { return .uncounted }
-        do {
-            return .counted(try await client.retentionPreview(
-                endpoint: endpoint,
-                sessionRetentionMs: sessionRetentionMs,
-                artifactSessionLimit: artifactSessionLimit
-            ))
-        } catch {
-            return .uncounted
-        }
-    }
-
     @discardableResult
     func saveGatewayConfig(values: [String: JSONValue]) async -> Bool {
         guard let endpoint else {
@@ -1769,8 +1726,12 @@ final class AppModel: ObservableObject {
                 self.apply(streamMessage: value)
             }, onState: { [weak self] connected, error in
                 guard let self, self.connectionIsCurrent(generation) else { return }
+                let reconnected = connected && !self.sidecarStreamConnected
                 self.sidecarStreamConnected = connected
                 if connected { self.notchChat.streamConnected() }
+                // State frames carry only what changed; a stream that just
+                // (re)connected catches up from one snapshot instead.
+                if reconnected { self.reconcileNow(endpoint: endpoint, generation: generation) }
                 if !connected {
                     self.phase = .disconnected(error ?? "Dashboard 데이터 스트림이 끊겼습니다.")
                     Task { [weak self] in
@@ -1796,11 +1757,25 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func reconcileNow(endpoint: MonitorEndpoint, generation: Int) {
+        Task { [weak self] in
+            guard let self, self.connectionIsCurrent(generation),
+                  let snapshot = try? await self.client.fetchSnapshot(endpoint: endpoint) else { return }
+            guard self.connectionIsCurrent(generation) else { return }
+            self.apply(snapshot)
+        }
+    }
+
     private func startReconciliation(endpoint: MonitorEndpoint, generation: Int) {
         reconciliationTask?.cancel()
         reconciliationTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                // A live stream already carries every change (and a reconnect
+                // fetches a snapshot): this is only a safety net and the
+                // sidecar's liveness check then. Without a stream it is how
+                // the app keeps up, so it runs often.
+                let streaming = self?.sidecarStreamConnected ?? false
+                try? await Task.sleep(nanoseconds: streaming ? 60_000_000_000 : 10_000_000_000)
                 guard !Task.isCancelled,
                       let self,
                       self.connectionIsCurrent(generation),
@@ -1985,14 +1960,4 @@ final class AppModel: ObservableObject {
         return true
     }
 
-    private func duration(_ milliseconds: Int?) -> String {
-        guard let milliseconds else { return "—" }
-        let seconds = milliseconds / 1_000
-        if seconds >= 86_400 { return "\(seconds / 86_400)일" }
-        if seconds >= 3_600 { return "\(seconds / 3_600)시간" }
-        if seconds >= 60 { return "\(seconds / 60)분" }
-        return "\(seconds)초"
-    }
-
-    private func formatted(_ value: Int?) -> String { value?.formatted() ?? "—" }
 }

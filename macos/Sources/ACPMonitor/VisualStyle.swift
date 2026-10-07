@@ -138,9 +138,12 @@ func contextPercentText(_ fraction: Double) -> String {
     "\(Int((fraction * 100).rounded()))%"
 }
 
+/// One formatter for every timeline row instead of one per call.
+private let shortTimeFormat = Date.FormatStyle(date: .omitted, time: .standard)
+
 func shortTime(_ timestamp: String?) -> String {
     guard let timestamp, let date = parseTimestamp(timestamp) else { return "—" }
-    return date.formatted(date: .omitted, time: .standard)
+    return date.formatted(shortTimeFormat)
 }
 
 extension View {

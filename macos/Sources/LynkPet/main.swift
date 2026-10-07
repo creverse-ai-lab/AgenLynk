@@ -387,18 +387,23 @@ private final class StatusStore: ObservableObject {
     @Published var sessions: [AgentSession] = []
     private let stateURL: URL
     private let actionsURL: URL?
-    private let agentStateDirectory: URL
+    /// Per-agent state files, read only when PET_AGENT_STATE_DIR is set (a
+    /// development hook; the app never sets it).
+    private let agentStateDirectory: URL?
     private var timer: Timer?
+    /// The last decoded frame and the file stamps it came from: the timer
+    /// re-filters it (displays fade with time) but re-reads the files only
+    /// when they changed.
+    private var cachedStamp: String?
+    private var cachedAgents: [AgentSession] = []
 
     init() {
         let path = ProcessInfo.processInfo.environment["PET_STATE_FILE"]
             ?? FileManager.default.currentDirectoryPath + "/.pet-codex-app-state.json"
         let actionsPath = ProcessInfo.processInfo.environment["PET_ACTIONS_FILE"]
-        let agentPath = ProcessInfo.processInfo.environment["PET_AGENT_STATE_DIR"]
-            ?? FileManager.default.currentDirectoryPath + "/.pet-agent-states"
         stateURL = URL(fileURLWithPath: path)
         actionsURL = actionsPath.map { URL(fileURLWithPath: $0) }
-        agentStateDirectory = URL(fileURLWithPath: agentPath)
+        agentStateDirectory = ProcessInfo.processInfo.environment["PET_AGENT_STATE_DIR"].map { URL(fileURLWithPath: $0) }
         refresh()
         timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.refresh() }
         RunLoop.main.add(timer!, forMode: .common)
@@ -420,9 +425,46 @@ private final class StatusStore: ObservableObject {
         directorySource = source
     }
 
+    /// Modification time and size of the state files. Read with a fresh stat
+    /// each time: URL.resourceValues caches on the URL and would never change.
+    private func fileStamp() -> String {
+        [stateURL, actionsURL].compactMap { $0 }.map { url -> String in
+            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+            let modified = (attributes?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? -1
+            return "\(modified):\((attributes?[.size] as? Int) ?? -1)"
+        }.joined(separator: "|")
+    }
+
     private func refresh() {
-        var latest: [String: AgentSession] = [:]
         let now = Date().timeIntervalSince1970
+        let stamp = fileStamp()
+        if stamp != cachedStamp {
+            guard let agents = readFrame() else { return }
+            cachedAgents = agents
+            cachedStamp = stamp
+        }
+        var latest: [String: AgentSession] = [:]
+        for session in cachedAgents where shouldDisplayACP(session, now: now) { latest[session.id] = session }
+        if let agentStateDirectory {
+            let files = (try? FileManager.default.contentsOfDirectory(at: agentStateDirectory, includingPropertiesForKeys: nil)) ?? []
+            for file in files where file.pathExtension == "json" {
+                if let data = try? Data(contentsOf: file),
+                   let session = try? JSONDecoder().decode(AgentSession.self, from: data) {
+                    if shouldDisplayACP(session, now: now) {
+                        latest[session.id] = session
+                    } else {
+                        try? FileManager.default.removeItem(at: file)
+                    }
+                }
+            }
+        }
+        let next = latest.values.sorted { $0.id < $1.id }
+        if sessions != next { sessions = next }
+    }
+
+    /// Every agent in the current frame, or nil to keep the last good one.
+    private func readFrame() -> [AgentSession]? {
+        var agents: [AgentSession] = []
         if let stateData = try? Data(contentsOf: stateURL),
            let actionsURL,
            let actionsData = try? Data(contentsOf: actionsURL),
@@ -436,38 +478,18 @@ private final class StatusStore: ObservableObject {
                 // mismatched pair. That is a timing artifact, not new truth —
                 // keep showing the last good frame and re-read next tick
                 // instead of flashing every node out for 0.5s.
-                return
+                return nil
             }
             let actionByID = actions.actions.reduce(into: [String: String]()) { result, item in
                 result[item.id] = item.action
             }
-            for agent in state.agents {
-                let session = AgentSession(contractAgent: agent, action: actionByID[agent.id])
-                if shouldDisplayACP(session, now: now) { latest[session.id] = session }
-            }
+            agents = state.agents.map { AgentSession(contractAgent: $0, action: actionByID[$0.id]) }
         } else if let data = try? Data(contentsOf: stateURL),
                   let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) {
             // Legacy fallback for direct development use outside Lynk.
-            for session in snapshot.sessions where shouldDisplayACP(session, now: now) {
-                latest[session.id] = session
-            }
+            agents = snapshot.sessions
         }
-        let files = (try? FileManager.default.contentsOfDirectory(
-            at: agentStateDirectory,
-            includingPropertiesForKeys: nil
-        )) ?? []
-        for file in files where file.pathExtension == "json" {
-            if let data = try? Data(contentsOf: file),
-               let session = try? JSONDecoder().decode(AgentSession.self, from: data) {
-                if shouldDisplayACP(session, now: now) {
-                    latest[session.id] = session
-                } else {
-                    try? FileManager.default.removeItem(at: file)
-                }
-            }
-        }
-        let next = latest.values.sorted { $0.id < $1.id }
-        if sessions != next { sessions = next }
+        return agents
     }
 }
 

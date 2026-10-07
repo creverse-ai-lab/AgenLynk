@@ -41,15 +41,6 @@ struct DevilMascot: View {
         .accessibilityLabel("\(AgentMascot.label(provider)) 봇")
     }
 
-    static func label(_ provider: String) -> String {
-        switch provider.lowercased() {
-        case "claude": "Claude"
-        case "codex": "Codex"
-        case "grok": "Grok"
-        default: "AgenLynk"
-        }
-    }
-
     private var bodyWidth: CGFloat { size * 0.72 }
     private var bodyHeight: CGFloat { size * 0.56 }
     private var animates: Bool { mood == .working || mood == .waiting }
@@ -274,7 +265,6 @@ struct DevilMascot: View {
     }
 }
 
-
 /// Mochi's body: a superellipse, wider than tall.
 private struct Squircle: InsettableShape {
     var exponent: CGFloat = 4
@@ -304,7 +294,6 @@ private struct Squircle: InsettableShape {
         return copy
     }
 }
-
 
 /// A short, slightly curved horn (drawn for the left side; flipped for the right).
 private struct Horn: Shape {
