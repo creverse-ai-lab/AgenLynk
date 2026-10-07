@@ -50,7 +50,8 @@ const SCANNER_STATE = {
   running: "running",
   waiting_permission: "needs_permission",
   waiting_input: "needs_input",
-  idle: "ready"
+  idle: "ready",
+  failed: "failed"
 };
 
 const BACKGROUND_RUNNING_TTL_MS = 120_000;
@@ -75,6 +76,10 @@ export class HookSessions {
     // provider -> ms of the last hook received, so settings can tell
     // "registered" from "actually arriving".
     this.lastReceived = new Map();
+    // provider:session -> ms its process was found dead. Its transcript is
+    // still on disk, and the next scan would list it again as it last was
+    // (running, or waiting on a prompt nobody will answer).
+    this.ended = new Map();
   }
 
   lastReceivedAt() {
@@ -99,6 +104,8 @@ export class HookSessions {
     const sessionId = readHookPayload(provider, payload).sessionId;
     if (typeof sessionId !== "string" || !sessionId) return null;
     const key = `${provider}:${sessionId}`;
+    // Heard from again: a resumed session is not over.
+    this.ended.delete(key);
     let entry = this.sessions.get(key);
     if (!entry) {
       entry = {
@@ -321,6 +328,8 @@ export class HookSessions {
       if (entry.agentPid && !this.isAlive(entry.agentPid, entry.agentStart)) {
         if (raw) merged.splice(merged.indexOf(raw), 1);
         this.sessions.delete(key);
+        this.ended.set(key, nowMs);
+        if (this.ended.size > MAX_SESSIONS) this.ended.delete(this.ended.keys().next().value);
         continue;
       }
       if (entry.status === "closed") {
@@ -381,6 +390,16 @@ export class HookSessions {
         ...(entry.interactive ? { interactive: true } : {})
       });
     }
+    // A dead session stays gone until its transcript moves on (a resume
+    // writes to it again).
+    for (const [key, endedAt] of this.ended) {
+      if (nowMs - endedAt > this.staleAfterMs) {
+        this.ended.delete(key);
+        continue;
+      }
+      const raw = byKey.get(key);
+      if (raw && Number(raw.time || 0) * 1_000 <= endedAt && merged.includes(raw)) merged.splice(merged.indexOf(raw), 1);
+    }
     for (const raw of merged) {
       if (raw.parent) continue;
       const parent = this.parentOf(raw.provider, raw.session);
@@ -397,7 +416,7 @@ export class HookSessions {
       for (let index = merged.length - 1; index >= 0; index -= 1) {
         const raw = merged[index];
         if (raw.provider !== "claude") continue;
-        if (!raw.parent && raw.state === "ready" && !live.has(raw.session)) {
+        if (!raw.parent && (raw.state === "ready" || raw.state === "failed") && !live.has(raw.session)) {
           merged.splice(index, 1);
           continue;
         }

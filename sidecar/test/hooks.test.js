@@ -201,6 +201,50 @@ test("Codex's approval mode is read from the turn's turn_context", async () => {
   }
 });
 
+test("a question is a wait for input, in any permission mode", () => {
+  const normalizer = new HookNormalizer();
+  const ask = { hook_event_name: "PermissionRequest", session_id: "s", tool_name: "AskUserQuestion", permission_mode: "bypassPermissions" };
+  const asked = normalizer.ingest("claude", ask);
+  assert.equal(asked.status, "waiting_input");
+  assert.equal(normalizer.ingest("claude", { hook_event_name: "Notification", session_id: "s", notification_type: "permission_prompt" }).status,
+    "waiting_input", "the dialog's own notice keeps it a question");
+  const answered = normalizer.ingest("claude", { hook_event_name: "PostToolUse", session_id: "s", tool_name: "AskUserQuestion" });
+  assert.equal(answered.status, "running");
+  assert.equal(answered.events[0].detail.outcome, "approved");
+});
+
+test("another agent's tool does not answer a sub-agent's prompt", () => {
+  const normalizer = new HookNormalizer();
+  normalizer.ingest("claude", { hook_event_name: "PermissionRequest", session_id: "s", agent_id: "a1", tool_name: "Bash" });
+  const other = normalizer.ingest("claude", { hook_event_name: "PostToolUse", session_id: "s", agent_id: "a2", tool_name: "Read", tool_use_id: "t2" });
+  assert.equal(other.status, "waiting_permission", "a parallel sub-agent's tool leaves the prompt open");
+  assert.deepEqual(other.events, []);
+  assert.equal(normalizer.ingest("claude", { hook_event_name: "SubagentStart", session_id: "s" }).status, "waiting_permission");
+  const own = normalizer.ingest("claude", { hook_event_name: "PostToolUse", session_id: "s", agent_id: "a1", tool_name: "Bash", tool_use_id: "t1" });
+  assert.equal(own.status, "running");
+  assert.equal(own.events[0].detail.outcome, "approved");
+
+  const ending = new HookNormalizer();
+  ending.ingest("claude", { hook_event_name: "PermissionRequest", session_id: "s", tool_name: "Bash" });
+  assert.equal(ending.ingest("claude", { hook_event_name: "Stop", session_id: "s", agent_id: "a2" }).status, "waiting_permission",
+    "a sub-agent ending does not end the main line's prompt");
+
+  const grok = new HookNormalizer();
+  grok.ingest("grok", { hook_event_name: "Notification", sessionId: "g", notificationType: "permission_prompt" });
+  const ended = grok.ingest("grok", { hook_event_name: "SubagentStop", sessionId: "g" });
+  assert.deepEqual([ended.status, ended.events[0]?.detail.outcome], ["idle", "cancelled"], "a Grok sub-agent session's turn end");
+});
+
+test("a turn that ends on an error is failed, not done", () => {
+  assert.equal(new HookNormalizer().ingest("claude", { hook_event_name: "StopFailure", session_id: "s" }).status, "failed");
+  assert.equal(new HookNormalizer().ingest("claude", { hook_event_name: "StopFailure", session_id: "s", agent_id: "a1" }).status,
+    "running", "a sub-agent failing leaves its parent working");
+  const registry = new HookSessions({ claudeRoot: "/nowhere", claudeSessionsDir: "/nowhere", isAlive: () => true });
+  registry.record("grok", { hook_event_name: "UserPromptSubmit", sessionId: "g", cwd: "/w" }, 1_000);
+  registry.record("grok", { hook_event_name: "StopFailure", sessionId: "g", cwd: "/w" }, 2_000);
+  assert.equal(registry.merge([], 2_000)[0].state, "failed");
+});
+
 test("a denied prompt reads as denied and an abandoned one as cancelled", () => {
   const ask = { hook_event_name: "PermissionRequest", session_id: "s", tool_name: "Bash" };
   const denied = new HookNormalizer();

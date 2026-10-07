@@ -13,7 +13,7 @@ import { isCodexTimelineRecord } from "../normalize/codex.js";
 import { epochMs } from "../normalize/model.js";
 import { readRecord, recordSize, reversedRecords, slimRecord } from "./jsonl.js";
 import { recordExternalParent } from "./parent-links.js";
-import { signalWithApprovals } from "./signals.js";
+import { approvesAutomatically, signalWithApprovals } from "./signals.js";
 import { stateRecord } from "./snapshot.js";
 import { DEFAULT_MAX_WINDOW_CHARS, MAX_READ_BYTES } from "./tail.js";
 import { readRecentThreads } from "./thread-db.js";
@@ -44,6 +44,9 @@ function newCursor(session, modified, database, {
     identified: false,
     database: database ?? null,
     pendingApprovals: new Set(),
+    // The latest turn_context decides approvals without the user (Auto
+    // review, or "never"): its escalated execs are not waits.
+    automaticApproval: false,
     // Conversation-shaped records from the tail, bounded by time and count,
     // consumed by the event projection.
     conversation: [],
@@ -283,6 +286,7 @@ export async function poll({ cursors, states, parents, now }) {
           cursor.session = record?.payload?.id || cursor.session;
           cursor.identified = true;
         }
+        if (record.type === "turn_context") cursor.automaticApproval = approvesAutomatically(record.payload);
         if (recordExternalParent(record, cursor.session, parents, now)) changed = true;
         // Second consumer of the same read: timeline records feed the Codex
         // normalizer so nothing re-reads this file for events.
@@ -293,7 +297,7 @@ export async function poll({ cursors, states, parents, now }) {
           cursor.conversationSizes.push(size);
           cursor.conversationChars += size;
         }
-        const signal = signalWithApprovals(record, cursor.pendingApprovals);
+        const signal = signalWithApprovals(record, cursor.pendingApprovals, cursor.automaticApproval);
         if (signal) {
           latest = stateRecord(cursor.session, signal[0], signal[1], modified, cursor.database);
           states[cursor.session] = latest;
@@ -365,9 +369,7 @@ export async function codexApprovesAutomatically(transcriptPath, turnId) {
   if (cached && turnId && cached.turnId === turnId) return cached.automatic;
   for await (const record of reversedRecords(transcriptPath)) {
     if (record?.type !== "turn_context") continue;
-    const policy = record.payload?.approval_policy;
-    const reviewer = record.payload?.approvals_reviewer;
-    const automatic = policy === "never" || (typeof reviewer === "string" && reviewer !== "user");
+    const automatic = approvesAutomatically(record.payload);
     approvalModes.delete(transcriptPath);
     approvalModes.set(transcriptPath, { turnId: record.payload?.turn_id ?? null, automatic });
     if (approvalModes.size > MAX_APPROVAL_MODES) approvalModes.delete(approvalModes.keys().next().value);

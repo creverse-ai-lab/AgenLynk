@@ -60,6 +60,19 @@ test("a session whose process is gone drops out, without waiting for SessionEnd"
   assert.equal(registry.merge([], at + 5000).length, 1);
 });
 
+test("a dead session's transcript does not bring it back on the next pass", () => {
+  const alive = new Set([111]);
+  const registry = new HookSessions({ claudeRoot: "/nowhere", isAlive: (pid) => alive.has(pid) });
+  registry.record("codex", { hook_event_name: "UserPromptSubmit", session_id: "c1", cwd: "/w" }, at);
+  registry.sessions.get("codex:c1").agentPid = 111;
+  const scanned = { provider: "codex", session: "c1", state: "needs_permission", time: at / 1000 };
+  alive.delete(111);
+  assert.deepEqual(registry.merge([scanned], at + 1000), []);
+  assert.deepEqual(registry.merge([scanned], at + 2000), [], "still a prompt nobody will answer");
+  const resumed = { ...scanned, state: "running", time: (at + 3000) / 1000 };
+  assert.equal(registry.merge([resumed], at + 3000).length, 1, "its transcript moving on is a resume");
+});
+
 test("a replied Stop marks the session running again", () => {
   const registry = new HookSessions({ claudeRoot: "/nowhere", claudeSessionsDir: "/nowhere" });
   registry.record("grok", { hook_event_name: "UserPromptSubmit", sessionId: "g1", cwd: "/w" }, at - 1000);

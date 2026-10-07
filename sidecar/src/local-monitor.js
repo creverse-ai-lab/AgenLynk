@@ -12,6 +12,8 @@ function monitorStatus(value) {
     case "needs_permission": return "waiting_permission";
     case "ready":
     case "idle": return "idle";
+    // A turn that ended on an error (a hook's StopFailure).
+    case "failed": return "error";
     default: return "disconnected";
   }
 }

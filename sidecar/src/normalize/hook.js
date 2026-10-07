@@ -62,7 +62,8 @@ const STATUS_BY_EVENT = {
   PreCompact: "running",
   PostCompact: "running",
   Stop: "idle",
-  StopFailure: "idle",
+  // The turn ended on an error (an API failure): not "done".
+  StopFailure: "failed",
   StopCancelled: "idle",
   Interrupt: "idle",
   SessionEnd: "closed"
@@ -79,7 +80,7 @@ function permissionOutcome(event) {
     return { status: "completed", label: "approved" };
   }
   if (event === "PermissionDenied") return { status: "failed", label: "denied" };
-  if (["Stop", "StopFailure", "StopCancelled", "Interrupt", "UserPromptSubmit", "SessionEnd"].includes(event)) {
+  if (["Stop", "StopFailure", "StopCancelled", "Interrupt", "UserPromptSubmit", "SessionStart", "SessionEnd"].includes(event)) {
     return { status: "cancelled", label: "cancelled" };
   }
   return null;
@@ -87,6 +88,26 @@ function permissionOutcome(event) {
 
 // Modes in which the agent never puts a permission question to its user.
 const UNASKED_PERMISSION_MODES = new Set(["bypassPermissions", "dontAsk"]);
+const TOOL_EVENTS = new Set(["PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionDenied"]);
+
+/**
+ * Whether a tool event answers the open prompt. Claude runs Task subagents
+ * side by side, each with its own agent_id: another agent's tool (or another
+ * tool) moving on says nothing about this prompt. Codex names a tool
+ * differently in its permission and tool hooks (code mode wraps MCP calls in
+ * `exec`), so there any tool event still counts.
+ */
+function answersPrompt(open, provider, hook) {
+  if (provider !== "claude") return true;
+  const agentId = hook.agentId ?? null;
+  if (!TOOL_EVENTS.has(hook.event)) {
+    // The main turn ending ends every prompt in it; one sub-agent ending
+    // ends only its own.
+    return agentId === null || agentId === open.agentId;
+  }
+  if (agentId !== open.agentId) return false;
+  return !hook.toolName || !open.toolName || hook.toolName === open.toolName;
+}
 
 function notificationStatus(type) {
   if (type === "permission_prompt") return "waiting_permission";
@@ -125,28 +146,44 @@ export class HookNormalizer {
     // Inside a Task subagent the parent session is still working; the
     // subagent's own line is the transcript's business. Grok's payload is
     // always about its own session.
-    if (provider !== "grok" && hook.agentId && status === "idle") status = "running";
+    if (provider !== "grok" && hook.agentId && (status === "idle" || status === "failed")) status = "running";
 
+    // Claude puts its questions (AskUserQuestion) through the permission
+    // dialog: the person is asked something, in any mode.
+    const asksQuestion = hook.event === "PermissionRequest" && hook.toolName === "AskUserQuestion";
     // A PermissionRequest hook runs before the agent's own approval rules: in
     // a mode that never asks, or under an automatic reviewer, nobody is asked
     // and the tool simply runs.
-    if (hook.event === "PermissionRequest"
+    if (hook.event === "PermissionRequest" && !asksQuestion
       && (automaticApproval || UNASKED_PERMISSION_MODES.has(hook.permissionMode))) {
       status = "running";
     }
-    const waitsForPermission = status === "waiting_permission";
-    const outcome = this.openPermission && !waitsForPermission ? permissionOutcome(hook.event) : null;
-    if (outcome) {
-      events.push(monitorEvent({
-        key: this.openPermission, kind: "permission_request", ts, source: SOURCE, turnId: hook.turnId,
-        status: outcome.status, endedAt: ts, detail: { outcome: outcome.label }
-      }));
-      this.openPermission = null;
+    if (asksQuestion && status === "waiting_permission") status = "waiting_input";
+    const opensPrompt = status === "waiting_permission" || (asksQuestion && status === "waiting_input");
+    const open = this.openPermission;
+    if (open && !opensPrompt) {
+      // Grok's SubagentStop is that session's own turn end (see above).
+      const outcome = provider === "grok" && hook.event === "SubagentStop"
+        ? { status: "cancelled", label: "cancelled" }
+        : permissionOutcome(hook.event);
+      if (outcome && answersPrompt(open, provider, hook)) {
+        events.push(monitorEvent({
+          key: open.key, kind: "permission_request", ts, source: SOURCE, turnId: hook.turnId,
+          status: outcome.status, endedAt: ts, detail: { outcome: outcome.label }
+        }));
+        this.openPermission = null;
+      } else if (status) {
+        // Still waiting on the person, whatever else moved meanwhile.
+        status = open.status;
+      }
     }
-    if (waitsForPermission && !this.openPermission) {
-      this.openPermission = `perm:hook:${hook.toolUseId ?? ts}`;
+    // A second notice about the prompt already open (Claude's permission_prompt
+    // Notification after its PermissionRequest) keeps that prompt's kind.
+    if (opensPrompt && this.openPermission) status = this.openPermission.status;
+    if (opensPrompt && !this.openPermission) {
+      this.openPermission = { key: `perm:hook:${hook.toolUseId ?? ts}`, agentId: hook.agentId ?? null, toolName: hook.toolName ?? null, status };
       events.push(monitorEvent({
-        key: this.openPermission,
+        key: this.openPermission.key,
         kind: "permission_request",
         ts,
         source: SOURCE,

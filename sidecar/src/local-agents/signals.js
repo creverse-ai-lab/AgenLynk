@@ -12,6 +12,8 @@ export function signalFor(record) {
   if (record?.type === "event_msg") {
     if (kind === "task_started" || kind === "user_message") return ["running", kind];
     if (kind === "task_complete") return ["ready", kind];
+    // An interrupted turn is over too, prompts and all.
+    if (kind === "turn_aborted") return ["ready", kind];
   }
   if (record?.type === "response_item" && (kind === "custom_tool_call" || kind === "function_call")) {
     const name = payload?.name;
@@ -25,10 +27,21 @@ export function signalFor(record) {
 }
 
 /**
- * Updates the set of unresolved approval ids and reports whether one changed.
- * `pending` is a Set of `codex:<callId>` / `acp:<requestId>` keys.
+ * Whether a turn_context's settings decide approvals without the user: an
+ * approval policy of "never", or an automatic reviewer (the Codex app's
+ * "Auto review"), which Codex consults instead of asking.
  */
-export function updatePendingApprovals(record, pending) {
+export function approvesAutomatically(turnContext) {
+  const reviewer = turnContext?.approvals_reviewer;
+  return turnContext?.approval_policy === "never" || (typeof reviewer === "string" && reviewer !== "user");
+}
+
+/**
+ * Updates the set of unresolved approval ids and reports whether one changed.
+ * `pending` is a Set of `codex:<callId>` / `acp:<requestId>` keys. Under
+ * `automaticApproval` an escalated exec asks nobody, so it is not pending.
+ */
+export function updatePendingApprovals(record, pending, automaticApproval = false) {
   const payload = record?.payload ?? {};
   const kind = payload?.type;
   let changed = false;
@@ -39,7 +52,7 @@ export function updatePendingApprovals(record, pending) {
       const toolInput = payload?.input ?? payload?.arguments ?? "";
       const text = typeof toolInput === "string" ? toolInput : JSON.stringify(toolInput);
       // Only an escalated-sandbox exec actually blocks on the human.
-      if (callId && text.includes("sandbox_permissions") && text.includes("require_escalated")) {
+      if (!automaticApproval && callId && text.includes("sandbox_permissions") && text.includes("require_escalated")) {
         const before = pending.size;
         pending.add(`codex:${callId}`);
         changed = pending.size !== before;
@@ -79,9 +92,9 @@ export function updatePendingApprovals(record, pending) {
 }
 
 /** The state signal with unresolved approvals taken into account. */
-export function signalWithApprovals(record, pending) {
+export function signalWithApprovals(record, pending, automaticApproval = false) {
   const normal = signalFor(record);
-  const approvalChanged = updatePendingApprovals(record, pending);
+  const approvalChanged = updatePendingApprovals(record, pending, automaticApproval);
   // A finished turn clears anything still outstanding.
   if (normal && normal[0] === "ready") pending.clear();
   // An approval is a permission wait, not a question for the user: the app

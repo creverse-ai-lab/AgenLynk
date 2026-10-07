@@ -77,7 +77,10 @@ export function gatewayResponseLinks(payload) {
     const ok = confirmed || node.ok === true;
     if (ok && typeof node.acpSessionId === "string" && node.acpSessionId
       && typeof node.provider === "string" && PROVIDER_ID.test(node.provider)) {
-      links.push([node.provider, node.acpSessionId]);
+      // The Main that opened it, when the response says (a session list
+      // shows other Mains' workers too).
+      const opener = typeof node.openedBy?.sessionId === "string" && node.openedBy.sessionId ? node.openedBy.sessionId : null;
+      links.push(opener ? [node.provider, node.acpSessionId, opener] : [node.provider, node.acpSessionId]);
     }
     for (const child of Object.values(node)) walk(child, ok, depth + 1);
   };
@@ -112,11 +115,20 @@ export function recordExternalParent(record, parent, parents, now) {
   if (!call) return false;
   let changed = false;
   const server = String(call.server ?? "").toLowerCase();
+  // Ids that belong to another Main: its own session id, and the workers it
+  // opened. The id scan below must not pick them back up.
+  const foreign = new Set();
 
   // Gateway responses (server named e.g. "agent-acp") carry the worker provider
   // inline, so the provider comes from the response body, not the server name.
   if (server.includes("acp")) {
-    for (const [provider, session] of gatewayResponseLinks(call.result ?? {})) {
+    for (const [provider, session, opener] of gatewayResponseLinks(call.result ?? {})) {
+      // Listing a worker another Main opened does not make it ours.
+      if (opener && opener !== parent) {
+        foreign.add(session);
+        foreign.add(opener);
+        continue;
+      }
       const key = linkKey(provider, session);
       if (parents.get(key)?.[0] !== parent) {
         parents.set(key, [parent, now]);
@@ -130,6 +142,7 @@ export function recordExternalParent(record, parent, parents, now) {
   // Serialized only for a server whose result is read.
   const resultText = JSON.stringify(call.result ?? {});
   for (const match of resultText.matchAll(/"(?:sessionId|acpSessionId)"\s*:\s*"([^"]+)"/g)) {
+    if (foreign.has(match[1])) continue;
     const key = linkKey(provider, match[1]);
     if (parents.get(key)?.[0] !== parent) {
       parents.set(key, [parent, now]);

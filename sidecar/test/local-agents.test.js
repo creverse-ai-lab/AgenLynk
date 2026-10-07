@@ -22,7 +22,7 @@ import {
   pruneExternalParents,
   recordExternalParent
 } from "../src/local-agents/parent-links.js";
-import { signalFor, signalWithApprovals } from "../src/local-agents/signals.js";
+import { approvesAutomatically, signalFor, signalWithApprovals } from "../src/local-agents/signals.js";
 import { snapshotSessions, stateRecord } from "../src/local-agents/snapshot.js";
 import { withReadOnlyDatabase } from "../src/local-agents/sqlite.js";
 import { subagentLabel } from "../src/local-agents/thread-db.js";
@@ -69,6 +69,25 @@ test("codex transcript records classify into running/ready/needs_input states", 
     ["needs_input", "function_call/request_user_input"]
   );
   assert.equal(signalFor({ type: "event_msg", payload: { type: "unknown" } }), null);
+});
+
+test("under Codex's automatic review an escalated exec is not a wait, and an aborted turn clears one", () => {
+  const escalated = {
+    type: "response_item",
+    payload: { type: "custom_tool_call", name: "exec", call_id: "esc", input: 'sandbox_permissions: "require_escalated"' }
+  };
+  const automatic = new Set();
+  assert.deepEqual(signalWithApprovals(escalated, automatic, true), ["running", "custom_tool_call/exec"]);
+  assert.equal(automatic.size, 0);
+  assert.equal(approvesAutomatically({ approval_policy: "on-request", approvals_reviewer: "auto_review" }), true);
+  assert.equal(approvesAutomatically({ approval_policy: "never", approvals_reviewer: "user" }), true);
+  assert.equal(approvesAutomatically({ approval_policy: "on-request", approvals_reviewer: "user" }), false);
+
+  const asked = new Set();
+  assert.deepEqual(signalWithApprovals(escalated, asked), ["needs_permission", "approval/pending"]);
+  assert.deepEqual(signalWithApprovals({ type: "event_msg", payload: { type: "turn_aborted", reason: "interrupted" } }, asked),
+    ["ready", "turn_aborted"]);
+  assert.equal(asked.size, 0, "an interrupted turn answers nothing, but waits for nothing either");
 });
 
 test("an unresolved approval overrides the transcript state until it is answered", () => {
@@ -129,7 +148,9 @@ test("a listed worker keeps its own provider, not a neighbour's", () => {
     { sessionId: "acp-1", title: "a {brace} \"quoted\" title", provider: "claude", acpSessionId: "claude-worker" },
     { sessionId: "acp-0", title: "} before the id", acpSessionId: "codex-worker", provider: "codex" },
     { sessionId: "acp-2", acpSessionId: "grok-worker",
-      openedBy: { provider: "codex", sessionId: "codex-main" }, provider: "grok" }
+      openedBy: { provider: "codex", sessionId: "main" }, provider: "grok" },
+    { sessionId: "acp-3", acpSessionId: "other-worker",
+      openedBy: { provider: "codex", sessionId: "another-main" }, provider: "claude" }
   ] });
   recordExternalParent({
     type: "event_msg",
@@ -144,6 +165,19 @@ test("a listed worker keeps its own provider, not a neighbour's", () => {
   assert.equal(externalParent(parents, "claude", "grok-worker"), null);
   assert.equal(externalParent(parents, "codex", "grok-worker"), null);
   assert.equal(externalParent(parents, "codex", "codex-worker"), "main", "a brace in an earlier string is only text");
+  assert.equal(externalParent(parents, "claude", "other-worker"), null, "listing another Main's worker does not claim it");
+
+  const viaGrokServer = new Map();
+  recordExternalParent({
+    type: "event_msg",
+    payload: {
+      type: "mcp_tool_call_end",
+      invocation: { server: "grok-acp" },
+      result: { ok: true, sessions: [{ acpSessionId: "theirs", provider: "grok", openedBy: { provider: "codex", sessionId: "another-main" } }] }
+    }
+  }, "main", viaGrokServer, 1);
+  assert.equal(externalParent(viaGrokServer, "grok", "theirs"), null, "the id scan does not pick it back up");
+  assert.equal(externalParent(viaGrokServer, "grok", "another-main"), null, "nor the other Main's own id");
 });
 
 test("gateway parenthood is claimed only from proven tool responses", () => {
