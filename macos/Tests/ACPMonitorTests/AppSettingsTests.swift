@@ -4,11 +4,11 @@ import Foundation
 enum AppSettingsChecks {
     @MainActor
     static func main() throws {
-        let suite = "ACPMonitor.AppSettingsTests.\(UUID().uuidString)"
+        let suite = scratchSuite("Settings")
         guard let defaults = UserDefaults(suiteName: suite) else {
             throw SettingsCheckError.failed("could not create isolated defaults")
         }
-        defer { defaults.removePersistentDomain(forName: suite) }
+        defer { discardSuite(suite, defaults) }
         defaults.set(true, forKey: "monitor.petEnabled")
         defaults.set("/tmp/custom-pet", forKey: "monitor.petExecutablePath")
         defaults.set(true, forKey: "monitor.followLatestEvent")
@@ -49,11 +49,11 @@ enum AppSettingsChecks {
             throw SettingsCheckError.failed("an enabled Pet without an executable path must migrate to disabled")
         }
 
-        let bundledSuite = "ACPMonitor.AppSettingsTests.Bundled.\(UUID().uuidString)"
+        let bundledSuite = scratchSuite("Bundled")
         guard let bundledDefaults = UserDefaults(suiteName: bundledSuite) else {
             throw SettingsCheckError.failed("could not create bundled Pet defaults")
         }
-        defer { bundledDefaults.removePersistentDomain(forName: bundledSuite) }
+        defer { discardSuite(bundledSuite, bundledDefaults) }
         let bundledPath = "/Applications/Lynk.app/Contents/Helpers/LynkPet.app/Contents/MacOS/LynkPet"
         let bundledSettings = AppSettings(defaults: bundledDefaults, bundledPetExecutablePath: bundledPath)
         guard bundledSettings.petEnabled,
@@ -68,11 +68,11 @@ enum AppSettingsChecks {
             throw SettingsCheckError.failed("an explicit Pet Off choice must survive relaunch after the default migration")
         }
         // Frontdoor rename: auto by default, override persists, empty reverts.
-        let nickSuite = "ACPMonitor.AppSettingsTests.Nick.\(UUID().uuidString)"
+        let nickSuite = scratchSuite("Nick")
         guard let nickDefaults = UserDefaults(suiteName: nickSuite) else {
             throw SettingsCheckError.failed("could not create nickname defaults")
         }
-        defer { nickDefaults.removePersistentDomain(forName: nickSuite) }
+        defer { discardSuite(nickSuite, nickDefaults) }
         let nick = AppSettings(defaults: nickDefaults)
         guard nick.frontdoorName(id: "main-1", auto: "proj") == "proj", !nick.hasFrontdoorNickname(id: "main-1") else {
             throw SettingsCheckError.failed("an un-renamed Frontdoor must show its auto name")
@@ -102,11 +102,11 @@ enum AppSettingsChecks {
 /// turns everything back on.
 @MainActor
 private func surfaceChecks() throws {
-    let suite = "ACPMonitor.AppSettingsTests.surfaces.\(UUID().uuidString)"
+    let suite = scratchSuite("surfaces")
     guard let defaults = UserDefaults(suiteName: suite) else {
         throw SettingsCheckError.failed("could not create isolated defaults")
     }
-    defer { defaults.removePersistentDomain(forName: suite) }
+    defer { discardSuite(suite, defaults) }
     let fresh = AppSettings(defaults: defaults, bundledPetExecutablePath: nil)
     guard fresh.menuBarEnabled, fresh.notchEnabled, fresh.notchAlertsEnabled, fresh.notchSoundsEnabled, fresh.notchRepliesEnabled else {
         throw SettingsCheckError.failed("every surface starts on")
@@ -126,7 +126,7 @@ private func surfaceChecks() throws {
     guard let legacy = UserDefaults(suiteName: legacySuite) else {
         throw SettingsCheckError.failed("could not create isolated defaults")
     }
-    defer { legacy.removePersistentDomain(forName: legacySuite) }
+    defer { discardSuite(legacySuite, legacy) }
     legacy.set(false, forKey: "notchRepliesEnabled")
     guard !AppSettings(defaults: legacy, bundledPetExecutablePath: nil).notchRepliesEnabled else {
         throw SettingsCheckError.failed("the notch's earlier reply switch is kept")
@@ -137,11 +137,11 @@ private func surfaceChecks() throws {
 /// one, and the choice survives relaunch while the last-picked view does not.
 @MainActor
 private func dashboardModeChecks() throws {
-    let suite = "ACPMonitor.AppSettingsTests.Dashboard.\(UUID().uuidString)"
+    let suite = scratchSuite("Dashboard")
     guard let defaults = UserDefaults(suiteName: suite) else {
         throw SettingsCheckError.failed("could not create dashboard defaults")
     }
-    defer { defaults.removePersistentDomain(forName: suite) }
+    defer { discardSuite(suite, defaults) }
     let settings = AppSettings(defaults: defaults)
     guard settings.enabledDashboardModes == DashboardMode.allCases,
           settings.defaultDashboardMode == .sequence,
@@ -202,11 +202,11 @@ private func dashboardModeChecks() throws {
 /// The old bundle identifier's settings come over once, never over a value
 /// the new identifier already has.
 private func legacyDefaultsImportChecks() throws {
-    let suite = "ACPMonitor.AppSettingsTests.Legacy.\(UUID().uuidString)"
+    let suite = scratchSuite("Legacy")
     guard let defaults = UserDefaults(suiteName: suite) else {
         throw SettingsCheckError.failed("could not create legacy import defaults")
     }
-    defer { defaults.removePersistentDomain(forName: suite) }
+    defer { discardSuite(suite, defaults) }
     defaults.set(false, forKey: "monitor.showThoughts")
     LegacyDefaultsImport.run(into: defaults, from: [
         "monitor.showThoughts": true,
@@ -229,4 +229,19 @@ private func legacyDefaultsImportChecks() throws {
 
 private enum SettingsCheckError: Error {
     case failed(String)
+}
+
+/// A defaults suite for one test, kept out of ~/Library/Preferences: a suite
+/// named by an absolute path lives in that file, so every run's scratch
+/// settings go to the temporary folder instead of piling up (cfprefsd writes
+/// an empty plist back for a removed domain, after any attempt to delete it).
+func scratchSuite(_ label: String) -> String {
+    FileManager.default.temporaryDirectory
+        .appendingPathComponent("ACPMonitor.AppSettingsTests.\(label).\(UUID().uuidString)").path
+}
+
+/// Drops a scratch defaults suite and its file.
+func discardSuite(_ name: String, _ defaults: UserDefaults) {
+    defaults.removePersistentDomain(forName: name)
+    try? FileManager.default.removeItem(atPath: name + ".plist")
 }
