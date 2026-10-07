@@ -59,12 +59,19 @@ public struct AgentMascot: View {
     public var body: some View {
         Group {
             switch kind {
-            case .devil: DevilMascot(provider: provider, size: size, mood: mood, holdsStaff: holdsStaff, still: still)
-            case .mermaid: MermaidMascot(provider: provider, size: size, mood: mood, holdsStaff: holdsStaff, still: still)
+            case .devil: DevilMascot(provider: provider, size: size, mood: mood, holdsStaff: holdsStaff)
+            case .mermaid: MermaidMascot(provider: provider, size: size, mood: mood, holdsStaff: holdsStaff)
             }
         }
-
+        // Outside a turn nothing inside moves: the whole mascot is one image
+        // and the resting motion moves just that. In a turn its parts are
+        // flattened one by one instead, so they can move on their own.
+        .moving(!AgentMascot.moves(mood), WholeFlattened())
+        .modifier(RestingMotion(mood: still ? .working : mood))
     }
+
+    /// Whether this mood moves the mascot's parts (bob, hop, sway, bubbles).
+    static func moves(_ mood: Mood) -> Bool { mood == .working || mood == .waiting }
 
     static func label(_ provider: String) -> String {
         switch provider.lowercased() {
@@ -84,7 +91,6 @@ struct MermaidMascot: View {
     var size: CGFloat
     var mood: AgentMascot.Mood = .idle
     var holdsStaff = true
-    var still = false
 
     var body: some View {
         let style = MascotStyle(provider: provider)
@@ -96,27 +102,24 @@ struct MermaidMascot: View {
                 .frame(width: bodyWidth * 0.8, height: size * 0.07)
                 .blur(radius: size * 0.025)
                 .offset(y: size * 0.4)
-                .modifier(Flattened(margin: size * 0.05))
+                .moving(animates, Flattened(margin: size * 0.05))
             if size >= 26 {
                 tail(style)
-                    .modifier(BobMotion(mood: mood, size: size))
+                    .moving(animates, BobMotion(mood: mood, size: size))
             }
             if holdsStaff && size >= 30 {
                 spear(style)
-                    .modifier(Flattened(margin: size * 0.1))
+                    .moving(animates, Flattened(margin: size * 0.1))
             }
-            // The body alone breathes, sways or sags outside a turn: one layer
-            // to move, while the tail and trident stay put.
             character(style, phase: 0)
-                .modifier(Flattened(margin: size * 0.3))
-                .modifier(RestingMotion(mood: still ? .working : mood))
-                .modifier(BobMotion(mood: mood, size: size))
+                .moving(animates, Flattened(margin: size * 0.3))
+                .moving(animates, BobMotion(mood: mood, size: size))
             bubbles()
-                .modifier(Flattened(margin: size * 0.05))
-                .modifier(RiseMotion(active: animates, distance: size * 0.06))
+                .moving(animates, Flattened(margin: size * 0.05))
+                .moving(animates, RiseMotion(active: true, distance: size * 0.06))
         }
         .frame(width: size, height: size)
-        .task(id: blinks) { if blinks { await Blink.run($eyesShut) } }
+        .moving(blinks, Blinking(shut: $eyesShut))
         .accessibilityLabel("\(AgentMascot.label(provider)) 봇")
     }
 
@@ -132,7 +135,8 @@ struct MermaidMascot: View {
     private var bodyWidth: CGFloat { size * 0.72 }
     private var bodyHeight: CGFloat { size * 0.58 }
     private var animates: Bool { mood == .working || mood == .waiting }
-    private var blinks: Bool { mood == .working || mood == .idle }
+    // In a turn only, as before: a resting mascot is one still image.
+    private var blinks: Bool { mood == .working }
     @State private var eyesShut = false
 
     // MARK: Character
@@ -357,8 +361,8 @@ struct MermaidMascot: View {
             .offset(x: -size * 0.1, y: -size * 0.13)
         }
         .shadow(color: .black.opacity(0.22), radius: size * 0.012, y: size * 0.008)
-        .modifier(Flattened(margin: size * 0.12))
-        .modifier(SwayMotion(active: animates, degrees: 7, anchor: .bottomTrailing))
+        .moving(animates, Flattened(margin: size * 0.12))
+        .moving(animates, SwayMotion(active: true, degrees: 7, anchor: .bottomTrailing))
         .offset(x: -size * 0.43, y: size * 0.2)
     }
 
@@ -426,6 +430,43 @@ struct Flattened: ViewModifier {
     let margin: CGFloat
     func body(content: Content) -> some View {
         content.padding(margin).drawingGroup().padding(-margin)
+    }
+}
+
+/// Flattened only while `active`: a part is flattened on its own while the
+/// mascot moves, and the mascot as a whole while it rests.
+struct FlattenedIf: ViewModifier {
+    let active: Bool
+    let margin: CGFloat
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if active { content.modifier(Flattened(margin: margin)) } else { content }
+    }
+}
+
+/// The whole mascot as one image, as it rests. A plain drawingGroup: its own
+/// frame already holds every part, and the padded variant (Flattened) under a
+/// repeating transform made SwiftUI re-render it every frame.
+struct WholeFlattened: ViewModifier {
+    func body(content: Content) -> some View { content.drawingGroup() }
+}
+
+extension View {
+    /// Applies a motion only while it runs. An idle motion modifier left in
+    /// the tree (its state, its animation, its task) made SwiftUI redraw a
+    /// resting mascot every frame under the resting motion: 20-33% CPU for
+    /// one to five resting mascots instead of 3-5%.
+    @ViewBuilder
+    func moving<M: ViewModifier>(_ active: Bool, _ motion: M) -> some View {
+        if active { modifier(motion) } else { self }
+    }
+}
+
+/// The working blink, as a modifier so a resting mascot carries no task.
+struct Blinking: ViewModifier {
+    @Binding var shut: Bool
+    func body(content: Content) -> some View {
+        content.task { await Blink.run($shut) }
     }
 }
 

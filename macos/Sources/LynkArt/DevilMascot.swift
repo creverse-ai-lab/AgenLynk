@@ -12,7 +12,6 @@ struct DevilMascot: View {
     var mood: AgentMascot.Mood = .idle
     /// The AgenLynk spear in its hand; dropped at small sizes either way.
     var holdsStaff = true
-    var still = false
 
     var body: some View {
         let style = MascotStyle(provider: provider)
@@ -24,24 +23,21 @@ struct DevilMascot: View {
                 .frame(width: bodyWidth * 0.8, height: size * 0.07)
                 .blur(radius: size * 0.025)
                 .offset(y: size * 0.4)
-                .modifier(Flattened(margin: size * 0.05))
+                .moving(animates, Flattened(margin: size * 0.05))
             if size >= 26 {
                 tail(style)
-                    .modifier(BobMotion(mood: mood, size: size))
+                    .moving(animates, BobMotion(mood: mood, size: size))
             }
             if holdsStaff && size >= 30 {
                 spear(style)
-                    .modifier(Flattened(margin: size * 0.1))
+                    .moving(animates, Flattened(margin: size * 0.1))
             }
-            // The body alone breathes, sways or sags outside a turn: one layer
-            // to move, while the tail and trident stay put.
             character(style, phase: 0)
-                .modifier(Flattened(margin: size * 0.3))
-                .modifier(RestingMotion(mood: still ? .working : mood))
-                .modifier(BobMotion(mood: mood, size: size))
+                .moving(animates, Flattened(margin: size * 0.3))
+                .moving(animates, BobMotion(mood: mood, size: size))
         }
         .frame(width: size, height: size)
-        .task(id: blinks) { if blinks { await Blink.run($eyesShut) } }
+        .moving(blinks, Blinking(shut: $eyesShut))
         .accessibilityLabel("\(AgentMascot.label(provider)) 봇")
     }
 
@@ -57,7 +53,8 @@ struct DevilMascot: View {
     private var bodyWidth: CGFloat { size * 0.72 }
     private var bodyHeight: CGFloat { size * 0.56 }
     private var animates: Bool { mood == .working || mood == .waiting }
-    private var blinks: Bool { mood == .working || mood == .idle }
+    // In a turn only, as before: a resting mascot is one still image.
+    private var blinks: Bool { mood == .working }
     @State private var eyesShut = false
 
     // MARK: Character
@@ -271,8 +268,8 @@ struct DevilMascot: View {
                 .rotationEffect(.degrees(-40))
                 .offset(x: -size * 0.15, y: -size * 0.14)
         }
-        .modifier(Flattened(margin: size * 0.12))
-        .modifier(SwayMotion(active: animates, degrees: 8, anchor: .bottomTrailing))
+        .moving(animates, Flattened(margin: size * 0.12))
+        .moving(animates, SwayMotion(active: true, degrees: 8, anchor: .bottomTrailing))
         .offset(x: -size * 0.35, y: size * 0.14)
     }
 }
