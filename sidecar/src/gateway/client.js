@@ -26,7 +26,7 @@ export const GATEWAY_CLIENT_SPECIFIER = await clientSpecifier(dirname(dirname(en
 
 const client = await import(pathToFileURL(entrypoint).href);
 if (client.GATEWAY_API_VERSION !== 1 || typeof client.GatewayRpcClient !== "function") {
-  throw new Error("Gateway public client is incompatible with AgenLynk 0.6.0");
+  throw new Error("Gateway public client is incompatible with this AgenLynk");
 }
 
 export const {

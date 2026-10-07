@@ -79,7 +79,7 @@ try {
   });
   const ready = await waitForReady(monitor);
   assert.equal(ready.kind, "monitor_ready");
-  assert.equal(ready.sidecarVersion, "0.6.0");
+  assert.equal(ready.sidecarVersion, "0.6.1");
   const headers = { authorization: `Bearer ${ready.apiToken}` };
   const meta = await waitFor(async () => {
     const response = await fetch(`${ready.url}/api/meta`, { headers });
