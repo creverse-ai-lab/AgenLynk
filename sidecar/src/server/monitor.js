@@ -846,6 +846,7 @@ async function main() {
         sessions: [...state.sessions.values()],
         tasks: state.tasks,
         inbox: state.inbox,
+        revision: state.revision,
         schemaVersion: MONITOR_SCHEMA_VERSION,
         monitorApiVersion: MONITOR_API_VERSION
       })}\n\n`);

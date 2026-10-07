@@ -40,6 +40,7 @@ enum Phase6ArchitectureChecks {
         try reducerCapsPagedEventsAndPrunesUnknownSessions()
         try reducerReportsNoChangeForARepeatedStateFrame()
         try reducerMergesTruncatedSnapshotsWithoutShrinking()
+        try storeKeepsSnapshotsOlderThanTheStreamOut()
         print("Swift Phase 6 architecture checks passed")
     }
 
@@ -297,6 +298,29 @@ enum Phase6ArchitectureChecks {
         try check(state.pagedEventsBySession["s"]?.count == limit, "a known session keeps its paged events")
         try check(effect.logChanged && effect.stateChanged && state.logEventsBySession["gone"] == nil,
                   "pruning rebuilds the log")
+    }
+
+    /// A reconciliation snapshot built before a frame the stream already
+    /// applied must not roll it back; one built after it applies, however
+    /// busy the stream is. A new sidecar counts from zero again.
+    @MainActor
+    private static func storeKeepsSnapshotsOlderThanTheStreamOut() throws {
+        let store = MonitorStore()
+        let snapshot = { (revision: Int?) in
+            MonitorSnapshot(
+                schemaVersion: MonitorCompatibility.supportedSchemaVersion, monitorApiVersion: "2.0", revision: revision,
+                connected: true, streaming: true, error: nil, gateway: nil, sessions: [], eventsBySession: [:],
+                historySessions: [], historyEventsBySession: [:], eventLimit: 2000, tasks: [], inbox: []
+            )
+        }
+        store.noteStreamRevision(12)
+        try check(!store.isCurrent(snapshot(11)), "a snapshot older than an applied frame is stale")
+        try check(store.isCurrent(snapshot(12)) && store.isCurrent(snapshot(30)), "one as new or newer applies")
+        try check(store.isCurrent(snapshot(nil)), "a sidecar without revisions keeps the old behaviour")
+        store.noteStreamRevision(5)
+        try check(!store.isCurrent(snapshot(11)), "the newest revision seen is kept")
+        store.resetForNewSidecar()
+        try check(store.isCurrent(snapshot(1)), "a new sidecar counts from zero")
     }
 
     /// The sidecar's snapshot holds only each session's newest events; a poll

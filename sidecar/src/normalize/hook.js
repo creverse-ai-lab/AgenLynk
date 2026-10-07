@@ -97,10 +97,6 @@ const TOOL_EVENTS = new Set(["PreToolUse", "PostToolUse", "PostToolUseFailure", 
  * differently in its permission and tool hooks (code mode wraps MCP calls in
  * `exec`), so there any tool event still counts.
  */
-// Claude's tools that run a sub-agent: their result in the main line means
-// that sub-agent is done, prompts and all.
-const SUBAGENT_TOOLS = new Set(["Task", "Agent"]);
-
 function answersPrompt(open, provider, hook) {
   if (provider !== "claude") return true;
   const agentId = hook.agentId ?? null;
@@ -109,8 +105,6 @@ function answersPrompt(open, provider, hook) {
     // ends only its own.
     return agentId === null || agentId === open.agentId;
   }
-  if (open.agentId !== null && agentId === null && SUBAGENT_TOOLS.has(hook.toolName)
-    && hook.event !== "PreToolUse") return true;
   if (agentId !== open.agentId) return false;
   return !hook.toolName || !open.toolName || hook.toolName === open.toolName;
 }

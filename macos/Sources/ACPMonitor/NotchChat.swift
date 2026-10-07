@@ -691,7 +691,9 @@ final class NotchChatController: NSObject, ObservableObject {
 
     func hide() {
         // What was showing or waiting is not news once the notch comes back:
-        // the tracker re-baselines then, and an open reply lets its agent go.
+        // the tracker re-baselines then, and every reply box, shown or
+        // queued, lets its agent go.
+        for slot in queued.compactMap(\.reply) { release(slot) }
         queued.removeAll()
         dismissAlert(release: true)
         collapse()

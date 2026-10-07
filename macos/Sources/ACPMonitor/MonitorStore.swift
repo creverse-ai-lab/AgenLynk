@@ -413,9 +413,25 @@ final class MonitorStore: ObservableObject {
     private(set) var revision = 0
     let heartbeat = MonitorHeartbeat()
 
+    /// The newest sidecar revision a stream frame carried. A snapshot older
+    /// than it predates state already applied, and must not replace it.
+    private(set) var streamRevision = 0
+
     func resetForNewSidecar() {
         // Not observable: only the next snapshot's comparison reads it.
         state.appliedSnapshotRevision = nil
+        // A fresh sidecar counts from zero.
+        streamRevision = 0
+    }
+
+    func noteStreamRevision(_ revision: Int) {
+        if revision > streamRevision { streamRevision = revision }
+    }
+
+    /// Whether `snapshot` is at least as new as everything the stream applied.
+    func isCurrent(_ snapshot: MonitorSnapshot) -> Bool {
+        guard let revision = snapshot.revision else { return true }
+        return revision >= streamRevision
     }
 
     func stop() {

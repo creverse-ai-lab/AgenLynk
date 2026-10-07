@@ -1781,10 +1781,9 @@ final class AppModel: ObservableObject {
             // newer than the snapshot: try again rather than roll it back.
             for _ in 0..<3 {
                 guard let self, self.connectionIsCurrent(generation) else { return }
-                let before = self.monitorStore.revision
                 guard let snapshot = try? await self.client.fetchSnapshot(endpoint: endpoint) else { return }
                 guard self.connectionIsCurrent(generation) else { return }
-                if self.monitorStore.revision == before {
+                if self.monitorStore.isCurrent(snapshot) {
                     self.apply(snapshot)
                     return
                 }
@@ -1796,7 +1795,6 @@ final class AppModel: ObservableObject {
     private func startReconciliation(endpoint: MonitorEndpoint, generation: Int) {
         reconciliationTask?.cancel()
         reconciliationTask = Task { [weak self] in
-            var skipped = 0
             while !Task.isCancelled {
                 // A live stream already carries every change (and a reconnect
                 // fetches a snapshot): this is only a safety net and the
@@ -1809,21 +1807,18 @@ final class AppModel: ObservableObject {
                       self.connectionIsCurrent(generation),
                       self.endpoint?.baseURL == endpoint.baseURL else { return }
                 do {
-                    let before = self.monitorStore.revision
                     guard let snapshot = try await self.client.fetchSnapshot(
                         endpoint: endpoint,
                         ifRevision: self.monitorStore.state.appliedSnapshotRevision
                     ) else { continue }
                     guard self.connectionIsCurrent(generation) else { return }
-                    // The stream moved on while this was fetched: the snapshot
-                    // is older than what is on screen. The next round catches
-                    // up; a stream that never pauses gets it on the third.
-                    if self.monitorStore.revision != before, skipped < 2 {
-                        skipped += 1
+                    // Built before a frame the stream already applied: older
+                    // than what is on screen. One built after it is applied
+                    // however busy the stream is.
+                    if !self.monitorStore.isCurrent(snapshot) {
                         self.sidecarRestartAttempts = 0
                         continue
                     }
-                    skipped = 0
                     self.apply(snapshot)
                     self.sidecarRestartAttempts = 0
                     self.updateConnectionPhase()
@@ -1872,6 +1867,7 @@ final class AppModel: ObservableObject {
     private func apply(streamMessage value: JSONValue) {
         guard let message = value.objectValue, let kind = message.string("kind") else { return }
         monitorStore.markStreamMessage()
+        if let revision = message.int("revision") { monitorStore.noteStreamRevision(revision) }
         switch kind {
         case "reply_slot", "reply_slot_closed":
             // A Frontdoor's Stop the notch may answer; not monitor state.

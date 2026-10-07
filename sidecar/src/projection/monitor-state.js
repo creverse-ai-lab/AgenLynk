@@ -579,7 +579,9 @@ export class MonitorState {
   broadcast(message) {
     // Nobody listening: nothing to serialize (broadcasts keep no state).
     if (!this.sseClients.size) return;
-    const envelope = { ...message, schemaVersion: MONITOR_SCHEMA_VERSION, monitorApiVersion: MONITOR_API_VERSION };
+    // Every frame says how far the state had come, so the app can tell a
+    // snapshot fetched meanwhile that is older than what it already applied.
+    const envelope = { revision: this.revision, ...message, schemaVersion: MONITOR_SCHEMA_VERSION, monitorApiVersion: MONITOR_API_VERSION };
     const frame = `data: ${JSON.stringify(envelope)}\n\n`;
     const supersedable = envelope.kind === "state" && !carriesData(envelope);
     for (const client of this.sseClients) {
