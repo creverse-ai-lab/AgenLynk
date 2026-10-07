@@ -1277,9 +1277,12 @@ struct ProviderOrb: View {
     var size: CGFloat
     var active = false
     var mood: AgentMascot.Mood?
+    /// The look chosen for the pet (devil or mermaid) is the notch's too.
+    @AppStorage("monitor.petStyle") private var petStyle = PetStyle.orbit.rawValue
 
     var body: some View {
-        AgentMascot(provider: provider, size: size, mood: mood ?? (active ? .working : .idle))
+        AgentMascot(provider: provider, size: size, mood: mood ?? (active ? .working : .idle),
+                    kind: (PetStyle(stored: petStyle) ?? .orbit).mascotKind)
     }
 }
 

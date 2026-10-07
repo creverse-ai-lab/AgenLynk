@@ -244,7 +244,7 @@ final class AppSettings: ObservableObject {
         self.bundledPetExecutablePath = bundledPetExecutablePath
         activeOnly = defaults.object(forKey: Key.activeOnly) as? Bool ?? false
         menuBarEnabled = defaults.object(forKey: Key.menuBarEnabled) as? Bool ?? true
-        petStyle = defaults.string(forKey: Key.petStyle).flatMap(PetStyle.init(rawValue:)) ?? .orbit
+        petStyle = defaults.string(forKey: Key.petStyle).flatMap(PetStyle.init(stored:)) ?? .orbit
         notchEnabled = defaults.object(forKey: Key.notchEnabled) as? Bool ?? true
         notchAlertsEnabled = defaults.object(forKey: Key.notchAlertsEnabled) as? Bool ?? true
         notchSoundsEnabled = defaults.object(forKey: Key.notchSoundsEnabled) as? Bool ?? true

@@ -15,6 +15,12 @@ extension AgentMascot.Mood {
     }
 }
 
+extension PetStyle {
+    /// The mascot the notch and cards show: the chosen one, or the mermaid
+    /// while the pet itself is the logo orbit.
+    var mascotKind: AgentMascot.Kind { self == .devil ? .devil : .mermaid }
+}
+
 #if DEBUG
 /// Debug-only sheet of every agent and mood, rendered to a PNG for review.
 struct AgentMascotSheet: View {

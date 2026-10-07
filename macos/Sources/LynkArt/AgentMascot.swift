@@ -24,15 +24,17 @@ public final class AgentMarks: @unchecked Sendable {
     }
 }
 
-/// AgenLynk's mascot: a little mermaid shaped like a steamed bun (a domed
-/// top on a flat base), with axolotl gills and a fish tail, holding a trident whose
-/// head is the AgenLynk mark. Each agent has its own: body colors, gills and
-/// tail in the agent's color, and its mark on the forehead. Drawn in code so
-/// it scales from the notch pill to a card and changes expression with the
-/// session.
+/// AgenLynk's mascot, in one of two looks: a little devil (DevilMascot) or
+/// a little mermaid (MermaidMascot). Both hold the AgenLynk trident and wear
+/// the agent's mark and colors. Drawn in code so it scales from the notch
+/// pill to a card and changes expression with the session.
 public struct AgentMascot: View {
     public enum Mood: Equatable, Sendable {
         case idle, working, waiting, happy, failed
+    }
+
+    public enum Kind: String, Equatable, Sendable {
+        case devil, mermaid
     }
 
     public let provider: String
@@ -40,15 +42,43 @@ public struct AgentMascot: View {
     public var mood: Mood = .idle
     /// The AgenLynk spear in its hand; dropped at small sizes either way.
     public var holdsStaff = true
+    public var kind: Kind = .mermaid
 
-    public init(provider: String, size: CGFloat, mood: Mood = .idle, holdsStaff: Bool = true) {
+    public init(provider: String, size: CGFloat, mood: Mood = .idle, holdsStaff: Bool = true, kind: Kind = .mermaid) {
         self.provider = provider
         self.size = size
         self.mood = mood
         self.holdsStaff = holdsStaff
+        self.kind = kind
     }
 
     public var body: some View {
+        switch kind {
+        case .devil: DevilMascot(provider: provider, size: size, mood: mood, holdsStaff: holdsStaff)
+        case .mermaid: MermaidMascot(provider: provider, size: size, mood: mood, holdsStaff: holdsStaff)
+        }
+    }
+
+    static func label(_ provider: String) -> String {
+        switch provider.lowercased() {
+        case "claude": "Claude"
+        case "codex": "Codex"
+        case "grok": "Grok"
+        default: "AgenLynk"
+        }
+    }
+}
+
+/// The little-mermaid look: a steamed bun (a domed top on a flat base) with
+/// axolotl gills and a fish tail. Each agent has its own body colors, gills
+/// and tail in its color, and its mark on the forehead.
+struct MermaidMascot: View {
+    let provider: String
+    var size: CGFloat
+    var mood: AgentMascot.Mood = .idle
+    var holdsStaff = true
+
+    var body: some View {
         let style = MascotStyle(provider: provider)
         TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !animates)) { context in
             let phase = context.date.timeIntervalSinceReferenceDate
@@ -69,7 +99,7 @@ public struct AgentMascot: View {
             }
             .frame(width: size, height: size)
         }
-        .accessibilityLabel("\(Self.label(provider)) 봇")
+        .accessibilityLabel("\(AgentMascot.label(provider)) 봇")
     }
 
     static func label(_ provider: String) -> String {
@@ -368,7 +398,7 @@ struct Bun: Shape {
 }
 
 /// The two curved eyes of a happy face.
-private struct HappyEye: Shape {
+struct HappyEye: Shape {
     func path(in rect: CGRect) -> Path {
         var path = Path()
         path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
@@ -488,7 +518,7 @@ private struct FlukeRibs: Shape {
 /// bar 48 long, the stem 68). The stem runs on as the rod, ends cut square
 /// as in the mark. A collar binds the head to the rod, and every part has a
 /// dark outline and is shaded as a metal bar lit from the top left.
-private struct SpearDrawing: View {
+struct SpearDrawing: View {
     let lineWidth: CGFloat
 
     private typealias Metal = (base: Color, light: Color, dark: Color)
@@ -572,7 +602,7 @@ private struct SpearDrawing: View {
 }
 
 /// A small open smile: a gently curved top lip over a rounder bottom.
-private struct OpenSmile: Shape {
+struct OpenSmile: Shape {
     func path(in rect: CGRect) -> Path {
         var path = Path()
         path.move(to: CGPoint(x: rect.minX, y: rect.minY))

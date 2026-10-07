@@ -30,6 +30,17 @@ enum AppSettingsChecks {
             throw SettingsCheckError.failed("reset must disable Pet and clear its executable path, with no hard-coded default")
         }
 
+        // "mochi" named the devil before the mermaid joined it.
+        defaults.set("mochi", forKey: "monitor.petStyle")
+        guard AppSettings(defaults: defaults).petStyle == .devil else {
+            throw SettingsCheckError.failed("a stored mochi pet style must load as the devil")
+        }
+        defaults.set("mermaid", forKey: "monitor.petStyle")
+        guard AppSettings(defaults: defaults).petStyle == .mermaid, PetStyle.allCases == [.orbit, .devil, .mermaid] else {
+            throw SettingsCheckError.failed("the pet has three looks: orbit, devil and mermaid")
+        }
+        defaults.removeObject(forKey: "monitor.petStyle")
+
         defaults.set(true, forKey: "monitor.petEnabled")
         defaults.set("   ", forKey: "monitor.petExecutablePath")
         let migratedSettings = AppSettings(defaults: defaults)

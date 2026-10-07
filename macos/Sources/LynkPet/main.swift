@@ -481,6 +481,8 @@ private struct RenderNode: Identifiable {
     let labelOpacity: CGFloat
     let warm: Bool
     let depth: Int
+    /// A companion moving left is drawn mirrored, so it faces where it goes.
+    var facingLeft = false
     var id: String { agent.id }
 }
 
@@ -658,7 +660,15 @@ private final class MotionController: ObservableObject {
         }
         let anchor = CGPoint(x: hub.x - origin.x, y: windowSize.height - (hub.y - origin.y))
 
+        let mascotKind = PetStyle.current.mascotKind
+        // With a mascot, sub-agents are companions around their parent rather
+        // than nodes on the rings; below the second level they are not drawn.
         let targets = layoutTargets(sessions, now: now, span: span)
+            .filter { mascotKind == nil || $0.depth <= 2 }
+        var siblings: [String: [String]] = [:]
+        for target in targets {
+            if let parentID = target.parentID { siblings[parentID, default: []].append(target.agent.id) }
+        }
         var ids = Set<String>()
         var points: [String: CGPoint] = [:]
         var sizes: [String: CGFloat] = [:]
@@ -668,7 +678,16 @@ private final class MotionController: ObservableObject {
             ids.insert(target.agent.id)
             let angle = openAngle + target.angle
             let dist = target.distance * spread
-            let goal = CGPoint(x: anchor.x + cos(angle) * dist, y: anchor.y + sin(angle) * dist)
+            var goal = CGPoint(x: anchor.x + cos(angle) * dist, y: anchor.y + sin(angle) * dist)
+            let companion = mascotKind != nil && target.depth >= 1
+            if companion, let parentID = target.parentID, let parentPoint = points[parentID], let parentSize = sizes[parentID] {
+                let family = siblings[parentID] ?? [target.agent.id]
+                goal = familiarGoal(
+                    parent: parentPoint, parentSize: parentSize, depth: target.depth,
+                    index: family.firstIndex(of: target.agent.id) ?? 0, count: family.count,
+                    moving: !target.warm && target.agent.state == "running", time: clock
+                )
+            }
             var motion = motions[target.agent.id] ?? Motion(x: anchor.x, y: anchor.y, vx: 0, vy: 0)
             motion.vx += (170 * (goal.x - motion.x) - 13 * motion.vx) * dt
             motion.vy += (170 * (goal.y - motion.y) - 13 * motion.vy) * dt
@@ -681,7 +700,12 @@ private final class MotionController: ObservableObject {
             let baseSize: CGFloat = isFrontdoor(target.agent)
                 ? (target.warm ? 20 : 30)
                 : target.warm ? 14 : max(16, 26 - CGFloat(target.depth) * 4)
-            let size = baseSize * (0.55 + 0.45 * spread)
+            var size = baseSize * (0.55 + 0.45 * spread)
+            if companion, let parentID = target.parentID, let parentSize = sizes[parentID] {
+                // A companion is sized from its parent: a bat or fish beside the
+                // mascot (drawn at 1.8× its node), a fireball or bubble beside it.
+                size = target.depth == 1 ? parentSize * 1.8 * 0.3 : parentSize * 0.55
+            }
             points[target.agent.id] = point
             sizes[target.agent.id] = size
             let fade = fadeFactor(target.agent, now: now)
@@ -690,15 +714,16 @@ private final class MotionController: ObservableObject {
                 point: point,
                 size: size,
                 opacity: (0.25 + 0.75 * spreadOp) * (target.warm ? 0.5 : 1) * fade,
-                labelOpacity: (target.warm ? (target.parentID != nil ? spreadOp * 0.45 : 0) : spreadOp) * fade,
+                labelOpacity: companion ? 0 : (target.warm ? (target.parentID != nil ? spreadOp * 0.45 : 0) : spreadOp) * fade,
                 warm: target.warm,
-                depth: target.depth
+                depth: target.depth,
+                facingLeft: companion && motion.vx < -1
             ))
         }
         motions = motions.filter { ids.contains($0.key) }
 
         var edges: [RenderEdge] = []
-        for target in targets {
+        for target in targets where mascotKind == nil || target.depth == 0 {
             guard let parentID = target.parentID,
                   let from = points[parentID],
                   let to = points[target.agent.id] else { continue }
@@ -857,11 +882,24 @@ private func logoForProvider(_ provider: String) -> NSImage? {
 }
 
 /// The built-in looks (PET_STYLE, set by the app at launch): logo discs
-/// orbiting the cursor like planets, or the AgenLynk mascot doing the same.
+/// orbiting the cursor like planets, or the AgenLynk mascot as a little devil
+/// or a little mermaid doing the same.
 private enum PetStyle: String {
-    case orbit, mochi
+    case orbit, devil, mermaid
 
-    static let current = PetStyle(rawValue: ProcessInfo.processInfo.environment["PET_STYLE"] ?? "") ?? .orbit
+    static let current: PetStyle = {
+        let raw = ProcessInfo.processInfo.environment["PET_STYLE"] ?? ""
+        // "mochi" was the devil before the mermaid joined it.
+        return raw == "mochi" ? .devil : PetStyle(rawValue: raw) ?? .orbit
+    }()
+
+    var mascotKind: AgentMascot.Kind? {
+        switch self {
+        case .orbit: nil
+        case .devil: .devil
+        case .mermaid: .mermaid
+        }
+    }
 }
 
 /// The mascot's expression for a pet state.
@@ -882,16 +920,54 @@ private func mascotMood(_ agent: AgentSession, warm: Bool) -> AgentMascot.Mood {
 /// (bob, hop) is added when drawing.
 @MainActor private var mascotImages: [String: Image] = [:]
 
-@MainActor private func mascotImage(provider: String, mood: AgentMascot.Mood, size: CGFloat) -> Image? {
+@MainActor private func mascotImage(provider: String, mood: AgentMascot.Mood, size: CGFloat, kind: AgentMascot.Kind) -> Image? {
     let side = (size / 4).rounded() * 4
-    let key = "\(provider.lowercased())|\(mood)|\(Int(side))"
+    let key = "\(kind)|\(provider.lowercased())|\(mood)|\(Int(side))"
     if let image = mascotImages[key] { return image }
-    let renderer = ImageRenderer(content: AgentMascot(provider: provider, size: side, mood: mood))
+    let renderer = ImageRenderer(content: AgentMascot(provider: provider, size: side, mood: mood, kind: kind))
     renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
     guard let cgImage = renderer.cgImage else { return nil }
     let image = Image(decorative: cgImage, scale: renderer.scale)
     mascotImages[key] = image
     return image
+}
+
+/// A sub-agent's companion (bat, fireball, fish, bubble) in both poses,
+/// rendered once per kind, provider, size and pose like the mascots.
+@MainActor private var familiarImages: [String: Image] = [:]
+
+@MainActor private func familiarImage(kind: AgentFamiliar.Kind, provider: String, size: CGFloat, beat: Bool) -> Image? {
+    let side = max(8, (size / 2).rounded() * 2)
+    let key = "\(kind)|\(provider.lowercased())|\(Int(side))|\(beat)"
+    if let image = familiarImages[key] { return image }
+    let renderer = ImageRenderer(content: AgentFamiliar(kind: kind, provider: provider, size: side, beat: beat))
+    renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
+    guard let cgImage = renderer.cgImage else { return nil }
+    let image = Image(decorative: cgImage, scale: renderer.scale)
+    familiarImages[key] = image
+    return image
+}
+
+/// Where a mascot's sub-agent companion flies (or swims) relative to its
+/// parent: depth 1 circles above the parent's trident head, depth 2 hovers
+/// just above its depth-1 parent. `parentSize` is the parent node's size.
+/// Moving companions circle; idle ones rest at their place on the circle.
+func familiarGoal(parent: CGPoint, parentSize: CGFloat, depth: Int, index: Int, count: Int,
+                  moving: Bool, time: TimeInterval) -> CGPoint {
+    let spread = 2 * Double.pi / Double(max(count, 1))
+    let base = Double(index) * spread
+    if depth == 1 {
+        // The mascot is drawn at 1.8× its node size; its trident head sits up
+        // and to the right of the body.
+        let side = parentSize * 1.8
+        let tip = CGPoint(x: parent.x + side * 0.37, y: parent.y - side * 0.52)
+        let angle = (moving ? time * 1.3 : 0) + base - .pi / 2
+        return CGPoint(x: tip.x + CGFloat(cos(angle)) * side * 0.3,
+                       y: tip.y + CGFloat(sin(angle)) * side * 0.1)
+    }
+    let wobble = moving ? CGFloat(sin(time * 3 + base)) * parentSize * 0.08 : 0
+    let across = (CGFloat(index) - CGFloat(count - 1) / 2) * parentSize * 0.55
+    return CGPoint(x: parent.x + across + wobble, y: parent.y - parentSize * 0.75)
 }
 
 // One line only: the app's name for the session when the producer sends it
@@ -1005,8 +1081,12 @@ private struct TreeFlowScene: View {
             )
         }
 
-        if PetStyle.current == .mochi {
-            drawMascot(node, time: time, pulsing: pulsing, spinning: spinning, hovered: hovered, in: &context)
+        if let kind = PetStyle.current.mascotKind {
+            if node.depth >= 1 {
+                drawFamiliar(node, mascot: kind, time: time, spinning: spinning, hovered: hovered, in: &context)
+            } else {
+                drawMascot(node, kind: kind, time: time, pulsing: pulsing, spinning: spinning, hovered: hovered, in: &context)
+            }
             return
         }
 
@@ -1093,7 +1173,42 @@ private struct TreeFlowScene: View {
     /// The mochi look: the same node, drawn as the mascot. It bobs while
     /// working, hops while it waits on the person, and keeps the Frontdoor
     /// mark, the inbox count, the hover ring and the label.
-    private func drawMascot(_ node: RenderNode, time: TimeInterval, pulsing: Bool, spinning: Bool, hovered: Bool, in context: inout GraphicsContext) {
+    /// A sub-agent drawn as its parent mascot's companion: a bat or fish for a
+    /// direct sub-agent, a fireball or bubble for the next level. It flaps,
+    /// swims or flickers while it runs, and keeps the hover ring and inbox count.
+    private func drawFamiliar(_ node: RenderNode, mascot: AgentMascot.Kind, time: TimeInterval, spinning: Bool, hovered: Bool, in context: inout GraphicsContext) {
+        guard let kind = AgentFamiliar.kind(for: mascot, depth: node.depth) else { return }
+        let center = node.point
+        let side = node.size
+        let rate: Double = switch kind {
+        case .bat: 8
+        case .fish: 5
+        case .fireball: 6
+        case .bubble: 2
+        }
+        let beat = spinning && Int(time * rate).isMultiple(of: 2)
+        func circle(diameter: CGFloat, at point: CGPoint) -> Path {
+            Path(ellipseIn: CGRect(x: point.x - diameter / 2, y: point.y - diameter / 2, width: diameter, height: diameter))
+        }
+        if let image = MainActor.assumeIsolated({ familiarImage(kind: kind, provider: node.agent.provider, size: side, beat: beat) }) {
+            context.drawLayer { layer in
+                layer.opacity = node.opacity
+                layer.translateBy(x: center.x, y: center.y)
+                if node.facingLeft { layer.scaleBy(x: -1, y: 1) }
+                layer.draw(image, in: CGRect(x: -side / 2, y: -side / 2, width: side, height: side))
+            }
+        }
+        if let pending = node.agent.inboxPending, pending > 0, !node.warm {
+            let corner = CGPoint(x: center.x + side * 0.4, y: center.y + side * 0.3)
+            context.fill(circle(diameter: 12, at: corner), with: .color(.purple.opacity(node.opacity)))
+            context.draw(Text(verbatim: "\(pending)").font(.system(size: 8, weight: .bold)).foregroundStyle(.white), at: corner)
+        }
+        if hovered {
+            context.stroke(circle(diameter: side * 1.1, at: center), with: .color(.white.opacity(0.9 * node.opacity)), lineWidth: 1.2)
+        }
+    }
+
+    private func drawMascot(_ node: RenderNode, kind: AgentMascot.Kind, time: TimeInterval, pulsing: Bool, spinning: Bool, hovered: Bool, in context: inout GraphicsContext) {
         let center = node.point
         let side = node.size * 1.8
         let lift: CGFloat = spinning
@@ -1111,7 +1226,7 @@ private struct TreeFlowScene: View {
             )
         }
         let mood = mascotMood(node.agent, warm: node.warm)
-        if let image = MainActor.assumeIsolated({ mascotImage(provider: node.agent.provider, mood: mood, size: side) }) {
+        if let image = MainActor.assumeIsolated({ mascotImage(provider: node.agent.provider, mood: mood, size: side, kind: kind) }) {
             context.drawLayer { layer in
                 layer.opacity = node.opacity
                 layer.draw(image, in: CGRect(x: center.x - side / 2, y: center.y - side / 2 + lift, width: side, height: side))
@@ -1429,6 +1544,23 @@ private func selfTest() {
     require(fadeFactor(recentOffline, now: 101) == 0.5)
     require(fadeFactor(recentOffline, now: 103) == 0)
     require(fadeFactor(root1, now: now) == 1)
+
+    // With a mascot, sub-agents are its companions: a bat or fish, then a
+    // fireball or bubble; nothing below that.
+    require(AgentFamiliar.kind(for: .devil, depth: 1) == .bat && AgentFamiliar.kind(for: .devil, depth: 2) == .fireball)
+    require(AgentFamiliar.kind(for: .mermaid, depth: 1) == .fish && AgentFamiliar.kind(for: .mermaid, depth: 2) == .bubble)
+    require(AgentFamiliar.kind(for: .devil, depth: 3) == nil && AgentFamiliar.kind(for: .mermaid, depth: 0) == nil)
+    let parentPoint = CGPoint(x: 100, y: 100)
+    let flying = familiarGoal(parent: parentPoint, parentSize: 30, depth: 1, index: 0, count: 2, moving: false, time: 0)
+    require(flying.x > parentPoint.x && flying.y < parentPoint.y, "a companion flies above the trident, at the parent's right")
+    let partner = familiarGoal(parent: parentPoint, parentSize: 30, depth: 1, index: 1, count: 2, moving: false, time: 0)
+    require(flying != partner, "siblings take their own places on the circle")
+    require(familiarGoal(parent: parentPoint, parentSize: 30, depth: 1, index: 0, count: 2, moving: false, time: 5) == flying,
+            "an idle companion rests")
+    require(familiarGoal(parent: parentPoint, parentSize: 30, depth: 1, index: 0, count: 2, moving: true, time: 1) != flying,
+            "a running companion circles")
+    let ember = familiarGoal(parent: flying, parentSize: 16, depth: 2, index: 0, count: 1, moving: false, time: 0)
+    require(ember.y < flying.y && abs(ember.x - flying.x) < 1, "the next level hovers just above its parent")
 }
 
 // MARK: - App bootstrap
