@@ -1,4 +1,5 @@
 import AppKit
+import LynkArt
 import SwiftUI
 
 /// The agent's mark (Claude, Codex, Grok) wherever a session or Frontdoor is
@@ -35,6 +36,13 @@ struct ProviderIcon: View {
     static func label(_ provider: String) -> String { providerDisplayLabel(provider) }
 
     @MainActor private static var cache: [String: NSImage] = [:]
+
+    /// Hands the same marks to the mascots, which wear them on the forehead.
+    @MainActor static func registerMascotMarks() {
+        for provider in ["claude", "codex", "grok"] {
+            if let image = image(for: provider) { AgentMarks.shared.register(provider, image: image) }
+        }
+    }
 
     @MainActor static func image(for provider: String) -> NSImage? {
         let key = provider.lowercased()

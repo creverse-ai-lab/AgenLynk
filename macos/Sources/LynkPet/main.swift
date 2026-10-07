@@ -1494,6 +1494,8 @@ if CommandLine.arguments.contains("--self-test") {
 } else if !acquireInstanceLock() {
     fputs("CodexPet is already running for this state file.\n", stderr)
 } else {
+    // The mascots wear the real provider marks the Pet ships.
+    for (provider, image) in providerLogos { AgentMarks.shared.register(provider, image: image) }
     app.delegate = delegate
     app.setActivationPolicy(.accessory)
     app.run()

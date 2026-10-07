@@ -1,4 +1,28 @@
+import AppKit
 import SwiftUI
+
+/// The real provider marks (Claude, Codex, Grok) for the mascot's forehead.
+/// LynkArt ships no artwork of its own: the Monitor and the Pet each bundle
+/// the marks and register them at launch. Without one the mascot draws a
+/// stand-in emblem. Lock-guarded rather than main-actor, so it can be read
+/// from any view helper on every SDK.
+public final class AgentMarks: @unchecked Sendable {
+    public static let shared = AgentMarks()
+    private let lock = NSLock()
+    private var images: [String: NSImage] = [:]
+
+    public func register(_ provider: String, image: NSImage) {
+        lock.lock()
+        defer { lock.unlock() }
+        images[provider.lowercased()] = image
+    }
+
+    public func image(for provider: String) -> NSImage? {
+        lock.lock()
+        defer { lock.unlock() }
+        return images[provider.lowercased()]
+    }
+}
 
 /// AgenLynk's mascot: a cute little devil with Mochi's soft squircle body
 /// (after Coucou), horns and a spade tail, holding a spear whose head is the
@@ -76,27 +100,58 @@ public struct AgentMascot: View {
         return ZStack {
             if size >= 20 {
                 ForEach([-1.0, 1.0], id: \.self) { side in
-                    Horn()
-                        .fill(LinearGradient(colors: [style.hornTip, style.horn], startPoint: .top, endPoint: .bottom))
-                        .frame(width: width * 0.2, height: height * 0.36)
-                        .scaleEffect(x: side, y: 1)
-                        .offset(x: side * width * 0.27, y: -height * 0.56)
+                    ZStack {
+                        LinearGradient(colors: [style.hornTip, style.horn], startPoint: .top, endPoint: .bottom)
+                        // Lit from the top left on both horns: the mask is
+                        // flipped, the light is not.
+                        LinearGradient(colors: [Color.white.opacity(0.5), .clear, Color.black.opacity(0.22)],
+                                       startPoint: .topLeading, endPoint: .bottomTrailing)
+                    }
+                    .mask(Horn().scaleEffect(x: side, y: 1))
+                    .frame(width: width * 0.2, height: height * 0.36)
+                    .shadow(color: .black.opacity(0.28), radius: width * 0.015, x: width * 0.006, y: height * 0.02)
+                    .offset(x: side * width * 0.27, y: -height * 0.56)
                 }
             }
-            // The soft squircle body (Mochi's superellipse), lit from the top.
+            // The soft squircle body (Mochi's superellipse): solid, lit from
+            // the top, its face brightest in the middle and rounding off to a
+            // slightly darker edge, like a soft cushion. No outline or glassy
+            // rim, which read as see-through.
             Squircle()
                 .fill(LinearGradient(colors: [style.top, style.bottom], startPoint: .top, endPoint: .bottom))
             Squircle()
-                .fill(RadialGradient(colors: [Color.white.opacity(0.55), .clear], center: UnitPoint(x: 0.3, y: 0.18), startRadius: 0, endRadius: width * 0.55))
-            Squircle()
-                .strokeBorder(LinearGradient(colors: [Color.white.opacity(0.7), style.bottom.opacity(0.2)], startPoint: .top, endPoint: .bottom), lineWidth: max(0.6, width * 0.012))
+                .fill(RadialGradient(stops: [
+                    .init(color: Color.white.opacity(0.35), location: 0),
+                    .init(color: .clear, location: 0.55),
+                    .init(color: style.ink.opacity(0.16), location: 1)
+                ], center: UnitPoint(x: 0.45, y: 0.38), startRadius: 0, endRadius: width * 0.62))
             face(style, width: width, height: height, phase: phase)
             if size >= 22 {
-                // The agent's mark on the forehead, between the horns.
-                AgentEmblem(provider: provider, color: style.emblem)
-                    .padding(width * 0.03)
+                // The agent's mark on the forehead, between the horns: the
+                // real one when the host registered it.
+                Group {
+                    if let mark = AgentMarks.shared.image(for: provider) {
+                        Image(nsImage: mark)
+                            .resizable()
+                            .interpolation(.high)
+                            .aspectRatio(contentMode: .fill)
+                            // The artwork is a rounded square; trim its rim.
+                            .scaleEffect(1.12)
+                    } else {
+                        AgentEmblem(provider: provider, color: style.emblem)
+                            .padding(width * 0.03)
+                            .background(Circle().fill(style.pin))
+                    }
+                }
                     .frame(width: width * 0.22, height: width * 0.22)
-                    .background(Circle().fill(style.pin))
+                    .clipShape(Circle())
+                    // A glassy cap: light across the top, shade at the bottom.
+                    // Set into the forehead: shade inside its lower rim.
+                    .overlay(Circle()
+                        .stroke(Color.black.opacity(0.35), lineWidth: width * 0.03)
+                        .blur(radius: width * 0.01)
+                        .offset(y: width * 0.008)
+                        .mask(Circle()))
                     .overlay(Circle().strokeBorder(Color.white.opacity(0.75), lineWidth: max(0.5, width * 0.012)))
                     .shadow(color: .black.opacity(0.25), radius: width * 0.02, y: width * 0.012)
                     .offset(y: -height * 0.3)
@@ -131,8 +186,11 @@ public struct AgentMascot: View {
                             .foregroundStyle(style.ink)
                     case .waiting:
                         Capsule().fill(style.ink).frame(width: eyeWidth * 1.15, height: eyeHeight * 1.12)
+                            .overlay(catchlight(eyeWidth: eyeWidth * 1.15, eyeHeight: eyeHeight * 1.12))
                     default:
-                        Capsule().fill(style.ink).frame(width: eyeWidth, height: eyeHeight).scaleEffect(x: 1, y: blink)
+                        Capsule().fill(style.ink).frame(width: eyeWidth, height: eyeHeight)
+                            .overlay(catchlight(eyeWidth: eyeWidth, eyeHeight: eyeHeight).opacity(blink < 1 ? 0 : 1))
+                            .scaleEffect(x: 1, y: blink)
                     }
                 }
                 .offset(x: side * spacing, y: eyeY)
@@ -147,21 +205,35 @@ public struct AgentMascot: View {
         }
     }
 
-    /// A small grin with one fang, the devil's tell; none when it failed.
+    /// The glint in an open eye; too small to read below a mid size.
+    @ViewBuilder
+    private func catchlight(eyeWidth: CGFloat, eyeHeight: CGFloat) -> some View {
+        if size >= 30 {
+            Circle()
+                .fill(Color.white.opacity(0.92))
+                .frame(width: eyeWidth * 0.5, height: eyeWidth * 0.5)
+                .offset(x: -eyeWidth * 0.12, y: -eyeHeight * 0.24)
+        }
+    }
+
+    /// A small open smile with one fang peeking from its top, the devil's
+    /// tell; none when it failed. The fang sits on the dark of the mouth so it
+    /// reads as a tooth, not as a stray mark on the light face.
     @ViewBuilder
     private func mouth(_ style: MascotStyle, width: CGFloat, height: CGFloat) -> some View {
         if size >= 26 && mood != .failed {
+            let mouthWidth = width * 0.17
+            let mouthHeight = height * 0.12
             ZStack(alignment: .top) {
-                Grin()
-                    .stroke(style.ink, style: StrokeStyle(lineWidth: max(1, width * 0.022), lineCap: .round))
-                    .frame(width: width * 0.14, height: height * 0.05)
+                OpenSmile()
+                    .fill(style.ink)
+                    .frame(width: mouthWidth, height: mouthHeight)
                 Fang()
                     .fill(Color.white)
-                    .overlay(Fang().stroke(style.ink.opacity(0.55), lineWidth: max(0.4, width * 0.006)))
-                    .frame(width: width * 0.04, height: height * 0.07)
-                    .offset(x: width * 0.03, y: height * 0.035)
+                    .frame(width: mouthWidth * 0.26, height: mouthHeight * 0.5)
+                    .offset(x: mouthWidth * 0.2)
             }
-            .offset(y: height * 0.24)
+            .offset(y: height * 0.23)
         }
     }
 
@@ -188,29 +260,35 @@ public struct AgentMascot: View {
 
     // MARK: Spear and tail
 
-    /// The spear held at the body's right: a rod whose head is the AgenLynk
-    /// mark itself (its bracket and stem read as a trident's prongs).
+    /// The spear held at the body's right, drawn after the AgenLynk mark
+    /// turned upside down without its outer frame: the inner bracket opens
+    /// upward as the prongs, the blue bar is the point, and the mark's stem
+    /// is the rod. Every part has the rod's thickness so it reads as one piece.
     private func spear(_ style: MascotStyle) -> some View {
-        let rodWidth = max(1.5, size * 0.04)
+        let tilt = 6.0
+        let lean = tan(tilt * .pi / 180)
+        let rodX = size * 0.37
+        // Blue tip to rod end, centred on the body's right side.
+        let top = -size * 0.44
+        let bottom = size * 0.36
+        let centerY = (top + bottom) / 2
+        // The bracket is 56 + 11 of the mark's units across; the rod is 11.
+        let width = size * 0.04 * 70 / 11
         return ZStack {
-            Capsule()
-                .fill(LinearGradient(colors: [Color(white: 0.75), Color(white: 0.32)], startPoint: .leading, endPoint: .trailing))
-                .frame(width: rodWidth, height: size * 0.6)
-                .rotationEffect(.degrees(8))
-                .offset(x: size * 0.41, y: size * 0.04)
-            ACPLogoMark(fitsContentBounds: true)
-                .foregroundStyle(LinearGradient(colors: [Color(white: 0.92), Color(white: 0.5)], startPoint: .top, endPoint: .bottom))
-                .frame(width: size * 0.24, height: size * 0.3)
-                .shadow(color: .black.opacity(0.4), radius: size * 0.012, y: size * 0.008)
-                .rotationEffect(.degrees(8))
-                .offset(x: size * 0.37, y: -size * 0.31)
+            SpearDrawing(lineWidth: max(1.5, size * 0.04))
+                .frame(width: width, height: bottom - top)
+                .shadow(color: .black.opacity(0.35), radius: size * 0.01, y: size * 0.006)
+                .rotationEffect(.degrees(tilt))
+                .offset(x: rodX, y: centerY)
             // A little nub of a hand gripping the rod.
             Ellipse()
                 .fill(LinearGradient(colors: [style.top, style.bottom], startPoint: .top, endPoint: .bottom))
+                .overlay(Ellipse().fill(RadialGradient(colors: [Color.white.opacity(0.6), .clear, Color.black.opacity(0.15)],
+                                                       center: UnitPoint(x: 0.35, y: 0.3), startRadius: 0, endRadius: size * 0.08)))
                 .frame(width: size * 0.12, height: size * 0.1)
                 .overlay(Ellipse().strokeBorder(Color.white.opacity(0.6), lineWidth: max(0.5, size * 0.008)))
                 .shadow(color: .black.opacity(0.2), radius: size * 0.01, y: size * 0.006)
-                .offset(x: size * 0.39, y: size * 0.13)
+                .offset(x: rodX - lean * (size * 0.13 - centerY), y: size * 0.13)
         }
     }
 
@@ -312,21 +390,119 @@ private struct Spade: Shape {
     }
 }
 
-private struct Grin: Shape {
+/// The spear upright in its frame: the AgenLynk mark turned upside down
+/// without its outer frame, in the mark's own proportions (its design units:
+/// strokes 11 wide, the inner bracket 56 across with 36-long arms, the blue
+/// bar 48 long, the stem 68). The stem runs on as the rod, ends cut square
+/// as in the mark. A collar binds the head to the rod, and every part has a
+/// dark outline and is shaded as a metal bar lit from the top left.
+private struct SpearDrawing: View {
+    let lineWidth: CGFloat
+
+    private typealias Metal = (base: Color, light: Color, dark: Color)
+    private static let steel: Metal = (Color(white: 0.66), Color.white, Color(white: 0.24))
+    private static let blue: Metal = (Color(red: 0.08, green: 0.38, blue: 0.98),
+                                      Color(red: 0.62, green: 0.82, blue: 1),
+                                      Color(red: 0.02, green: 0.16, blue: 0.55))
+
+    var body: some View {
+        Canvas { context, size in
+            let unit = lineWidth / 11
+            let midX = size.width / 2
+            // The bracket's bar, measured down from the frame's top: the blue
+            // bar rises 48 above it, the arms 36.
+            let bar = 48 * unit + 9 * unit
+            let halfSpan = 28 * unit
+            let armTop = bar - 36 * unit
+            let pointTop = bar - 48 * unit
+
+            var rod = Path()
+            rod.move(to: CGPoint(x: midX, y: bar))
+            rod.addLine(to: CGPoint(x: midX, y: size.height - lineWidth))
+            var prongs = Path()
+            prongs.move(to: CGPoint(x: midX - halfSpan, y: armTop))
+            prongs.addLine(to: CGPoint(x: midX - halfSpan, y: bar))
+            prongs.addLine(to: CGPoint(x: midX + halfSpan, y: bar))
+            prongs.addLine(to: CGPoint(x: midX + halfSpan, y: armTop))
+            var point = Path()
+            point.move(to: CGPoint(x: midX, y: pointTop))
+            point.addLine(to: CGPoint(x: midX, y: bar))
+            let collar = Path(roundedRect: CGRect(x: midX - lineWidth * 0.9, y: bar + lineWidth * 0.55,
+                                                  width: lineWidth * 1.8, height: lineWidth * 0.9),
+                              cornerRadius: lineWidth * 0.3)
+
+            let outline = Color.black.opacity(0.5)
+            let rim = lineWidth * 0.2
+            // Outlines first, so the parts sit on one dark silhouette.
+            context.stroke(rod, with: .color(outline),
+                           style: StrokeStyle(lineWidth: lineWidth + rim * 2, lineCap: .round, lineJoin: .miter))
+            context.stroke(prongs, with: .color(outline),
+                           style: StrokeStyle(lineWidth: lineWidth + rim * 2, lineCap: .square, lineJoin: .miter))
+            context.stroke(point, with: .color(outline), style: StrokeStyle(lineWidth: 10 * unit + rim * 2, lineCap: .square))
+            context.stroke(collar, with: .color(outline), lineWidth: rim * 2)
+
+            tube(rod, in: context, width: lineWidth, metal: Self.steel, cap: .butt)
+            tube(prongs, in: context, width: lineWidth, metal: Self.steel, cap: .square)
+            tube(point, in: context, width: 10 * unit, metal: Self.blue, cap: .square)
+            solidFill(collar, in: context, metal: Self.steel)
+            // The rod's foot, rounded.
+            let foot = CGRect(x: midX - lineWidth / 2, y: size.height - lineWidth * 1.5, width: lineWidth, height: lineWidth)
+            context.fill(Path(ellipseIn: foot), with: .color(Self.steel.base))
+        }
+    }
+
+    /// A solid part lit like the bars: light on the left, shade on the right.
+    private func solidFill(_ path: Path, in context: GraphicsContext, metal: Metal) {
+        let box = path.boundingRect
+        context.fill(path, with: .linearGradient(
+            Gradient(stops: [
+                .init(color: metal.light, location: 0),
+                .init(color: metal.base, location: 0.45),
+                .init(color: metal.dark, location: 1)
+            ]),
+            startPoint: CGPoint(x: box.minX, y: box.midY), endPoint: CGPoint(x: box.maxX, y: box.midY)
+        ))
+    }
+
+    /// One bar drawn as a lit cylinder: its base color, a shaded band on the
+    /// lower right and a bright band on the upper left, kept inside the bar so
+    /// every part keeps its width.
+    private func tube(_ path: Path, in context: GraphicsContext, width: CGFloat, metal: Metal, cap: CGLineCap) {
+        let style = StrokeStyle(lineWidth: width, lineCap: cap, lineJoin: .miter)
+        context.stroke(path, with: .color(metal.base), style: style)
+        var inside = context
+        inside.clip(to: path.strokedPath(style))
+        inside.stroke(path.offsetBy(dx: width * 0.32, dy: width * 0.32), with: .color(metal.dark.opacity(0.6)),
+                      style: StrokeStyle(lineWidth: width * 0.45, lineCap: .square, lineJoin: .miter))
+        inside.stroke(path.offsetBy(dx: -width * 0.26, dy: -width * 0.26), with: .color(metal.light.opacity(0.85)),
+                      style: StrokeStyle(lineWidth: width * 0.28, lineCap: .square, lineJoin: .miter))
+    }
+}
+
+/// A small open smile: a gently curved top lip over a rounder bottom.
+private struct OpenSmile: Shape {
     func path(in rect: CGRect) -> Path {
         var path = Path()
         path.move(to: CGPoint(x: rect.minX, y: rect.minY))
-        path.addQuadCurve(to: CGPoint(x: rect.maxX, y: rect.minY), control: CGPoint(x: rect.midX, y: rect.maxY * 1.8))
+        path.addQuadCurve(to: CGPoint(x: rect.maxX, y: rect.minY), control: CGPoint(x: rect.midX, y: rect.minY + rect.height * 0.25))
+        path.addQuadCurve(to: CGPoint(x: rect.minX, y: rect.minY), control: CGPoint(x: rect.midX, y: rect.maxY * 1.6))
+        path.closeSubpath()
         return path
     }
 }
 
+/// A rounded little fang: soft shoulders down to a blunt tip.
 private struct Fang: Shape {
     func path(in rect: CGRect) -> Path {
         var path = Path()
         path.move(to: CGPoint(x: rect.minX, y: rect.minY))
         path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
-        path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+        path.addQuadCurve(to: CGPoint(x: rect.midX + rect.width * 0.12, y: rect.maxY * 0.92),
+                          control: CGPoint(x: rect.maxX, y: rect.maxY * 0.55))
+        path.addQuadCurve(to: CGPoint(x: rect.midX - rect.width * 0.12, y: rect.maxY * 0.92),
+                          control: CGPoint(x: rect.midX, y: rect.maxY * 1.08))
+        path.addQuadCurve(to: CGPoint(x: rect.minX, y: rect.minY),
+                          control: CGPoint(x: rect.minX, y: rect.maxY * 0.55))
         path.closeSubpath()
         return path
     }

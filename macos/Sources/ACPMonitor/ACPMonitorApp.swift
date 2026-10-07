@@ -41,6 +41,7 @@ struct ACPMonitorApp: App {
         _model = StateObject(wrappedValue: model)
         _menuBar = StateObject(wrappedValue: MenuBarVisibility(settings: model.settings))
         appDelegate.launchHandler = { [weak model] in
+            ProviderIcon.registerMascotMarks()
             model?.startIfNeeded()
             if model?.settings.notchEnabled == true { model?.notchChat.show() }
         }
