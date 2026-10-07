@@ -58,8 +58,8 @@ try {
     throw new Error("--signing-identity is required for developer-id signing");
   }
   const releaseEvidenceComplete = signingMode === "developer-id" && notarized && stapled;
-  if (!releaseEvidenceComplete && !/^0\.5\.0-beta\.[0-9]+$/.test(appVersion)) {
-    throw new Error("unsigned or incomplete release evidence requires a 0.5.0-beta.x app version");
+  if (!releaseEvidenceComplete && !/^0\.6\.0-beta\.[0-9]+$/.test(appVersion)) {
+    throw new Error("unsigned or incomplete release evidence requires a 0.6.0-beta.x app version");
   }
   if (!Number.isInteger(runtimeManifest.gatewayApiVersion)) {
     throw new Error("runtime manifest is missing an integer gatewayApiVersion");

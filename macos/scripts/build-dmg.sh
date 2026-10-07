@@ -29,7 +29,7 @@ STAGING="$REPO_ROOT/build/dmg-staging"
 # and is rejected unless Developer ID + notarization + stapling all succeeded.
 if [ -z "${ACP_LYNK_APP_VERSION:-}" ]; then
   if [ "${ACP_LYNK_CODESIGN_IDENTITY:--}" = "-" ] || [ "${ACP_LYNK_NOTARIZE:-0}" != "1" ]; then
-    ACP_LYNK_APP_VERSION=${ACP_LYNK_PRERELEASE_VERSION:-0.5.0-beta.4}
+    ACP_LYNK_APP_VERSION=${ACP_LYNK_PRERELEASE_VERSION:-0.6.0-beta.1}
     export ACP_LYNK_APP_VERSION
   fi
 fi
