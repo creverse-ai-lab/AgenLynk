@@ -51,22 +51,31 @@ public struct AgentFamiliar: View {
     // MARK: Bat
 
     private func bat(_ style: MascotStyle) -> some View {
-        let wing = LinearGradient(colors: [style.finTip, style.fin], startPoint: .top, endPoint: .bottom)
+        let wing = LinearGradient(colors: [style.fin, style.finTip], startPoint: .top, endPoint: .bottom)
         return ZStack {
             ForEach([-1.0, 1.0], id: \.self) { side in
-                BatWing()
-                    .fill(wing)
-                    .overlay(BatWing().stroke(style.ink.opacity(0.35), lineWidth: max(0.5, size * 0.015)))
-                    .frame(width: size * 0.48, height: size * 0.4)
-                    .scaleEffect(x: side, y: beat ? -0.7 : 1, anchor: .center)
-                    .offset(x: side * size * 0.27, y: beat ? size * 0.06 : -size * 0.06)
+                ZStack {
+                    BatWing()
+                        .fill(wing)
+                    // Finger bones fanning from the wrist to the scallop points.
+                    BatWingBones()
+                        .stroke(style.ink.opacity(0.45), style: StrokeStyle(lineWidth: max(0.5, size * 0.014), lineCap: .round))
+                    BatWing().stroke(style.ink.opacity(0.4), lineWidth: max(0.5, size * 0.014))
+                }
+                .frame(width: size * 0.46, height: size * 0.4)
+                // Wings beat about their root at the body, up then down.
+                .rotationEffect(.degrees(beat ? 16 : -14), anchor: .leading)
+                .scaleEffect(x: side, y: 1, anchor: .center)
+                .offset(x: side * size * 0.25, y: -size * 0.04)
             }
-            // Ears.
+            // Ears, outlined so they read against a raised wing of the same color.
             ForEach([-1.0, 1.0], id: \.self) { side in
                 Triangle()
-                    .fill(style.fin)
-                    .frame(width: size * 0.1, height: size * 0.13)
-                    .offset(x: side * size * 0.08, y: -size * 0.15)
+                    .fill(style.finTip)
+                    .overlay(Triangle().stroke(style.ink.opacity(0.45), lineWidth: max(0.5, size * 0.012)))
+                    .frame(width: size * 0.11, height: size * 0.15)
+                    .rotationEffect(.degrees(side * 12))
+                    .offset(x: side * size * 0.085, y: -size * 0.155)
             }
             Circle()
                 .fill(RadialGradient(colors: [style.finTip, style.fin], center: UnitPoint(x: 0.4, y: 0.35),
@@ -77,6 +86,12 @@ public struct AgentFamiliar: View {
                     .fill(Color.white)
                     .frame(width: size * 0.06, height: size * 0.06)
                     .offset(x: side * size * 0.055, y: -size * 0.02)
+                // Two small fangs.
+                Triangle()
+                    .fill(Color.white)
+                    .frame(width: size * 0.03, height: size * 0.04)
+                    .rotationEffect(.degrees(180))
+                    .offset(x: side * size * 0.025, y: size * 0.07)
             }
         }
         .shadow(color: .black.opacity(0.3), radius: size * 0.03, y: size * 0.02)
@@ -149,27 +164,42 @@ public struct AgentFamiliar: View {
     }
 }
 
-/// A bat wing drawn for the right side: rooted at its left edge, its lower
-/// edge cut in scallops between the finger tips.
+/// A bat wing drawn for the right side, rooted at its left edge: the top
+/// edge climbs from the body to the wrist and falls to the wing tip, and the
+/// lower edge is cut in scallops between the finger tips.
 private struct BatWing: Shape {
     func path(in rect: CGRect) -> Path {
         let w = rect.width, h = rect.height
+        let point = { (x: CGFloat, y: CGFloat) in CGPoint(x: rect.minX + w * x, y: rect.minY + h * y) }
         var path = Path()
-        path.move(to: CGPoint(x: rect.minX, y: rect.minY + h * 0.35))
-        path.addQuadCurve(to: CGPoint(x: rect.maxX, y: rect.minY), control: CGPoint(x: rect.minX + w * 0.5, y: rect.minY - h * 0.1))
-        let tips = [CGPoint(x: rect.maxX - w * 0.05, y: rect.minY + h * 0.75),
-                    CGPoint(x: rect.minX + w * 0.6, y: rect.minY + h * 0.65),
-                    CGPoint(x: rect.minX + w * 0.3, y: rect.minY + h * 0.75),
-                    CGPoint(x: rect.minX, y: rect.minY + h * 0.65)]
-        var from = CGPoint(x: rect.maxX, y: rect.minY)
-        path.addLine(to: tips[0])
-        from = tips[0]
-        for to in tips.dropFirst() {
+        path.move(to: point(0, 0.42))
+        // Up to the wrist, then out to the tip.
+        path.addQuadCurve(to: point(0.42, 0.04), control: point(0.12, 0.08))
+        path.addQuadCurve(to: point(1, 0.3), control: point(0.74, 0.02))
+        // Scallops back to the body: each dips up between two finger tips.
+        let tips = [point(0.9, 0.86), point(0.6, 0.74), point(0.32, 0.86), point(0, 0.7)]
+        var from = point(1, 0.3)
+        for to in tips {
             let mid = CGPoint(x: (from.x + to.x) / 2, y: (from.y + to.y) / 2)
-            path.addQuadCurve(to: to, control: CGPoint(x: mid.x, y: mid.y - h * 0.22))
+            path.addQuadCurve(to: to, control: CGPoint(x: mid.x - w * 0.02, y: mid.y - h * 0.2))
             from = to
         }
         path.closeSubpath()
+        return path
+    }
+}
+
+/// The finger bones of `BatWing`: from the wrist to each finger tip.
+private struct BatWingBones: Shape {
+    func path(in rect: CGRect) -> Path {
+        let w = rect.width, h = rect.height
+        let point = { (x: CGFloat, y: CGFloat) in CGPoint(x: rect.minX + w * x, y: rect.minY + h * y) }
+        let wrist = point(0.42, 0.06)
+        var path = Path()
+        for tip in [point(0.9, 0.84), point(0.6, 0.72), point(0.32, 0.84)] {
+            path.move(to: wrist)
+            path.addLine(to: tip)
+        }
         return path
     }
 }
