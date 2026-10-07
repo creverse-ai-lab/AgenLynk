@@ -30,18 +30,26 @@ test("an answer resolves the slot with the reply the agent continues with", asyn
 });
 
 test("a dismissal, a timeout or a newer Stop lets the agent stop", async () => {
-  const replies = new StopReplies({ windowMs: 20 });
-  const dismissed = replies.open({ provider: "codex", sessionId: "s1" });
-  replies.dismiss(dismissed.slot.id);
-  assert.equal(await dismissed.reply, null);
-  const timedOut = replies.open({ provider: "codex", sessionId: "s2" });
-  assert.equal(await timedOut.reply, null);
-  const first = replies.open({ provider: "grok", sessionId: "s3" });
-  const second = replies.open({ provider: "grok", sessionId: "s3" });
-  assert.equal(await first.reply, null);
-  assert.deepEqual(replies.list().map((slot) => slot.id), [second.slot.id]);
-  replies.closeAll();
-  assert.equal(await second.reply, null);
+  // The window timer is unref'd (in the sidecar its HTTP server keeps the
+  // process up); here something must, or Node 22 ends the test while the
+  // timeout is still pending.
+  const keepAlive = setInterval(() => {}, 1_000);
+  try {
+    const replies = new StopReplies({ windowMs: 20 });
+    const dismissed = replies.open({ provider: "codex", sessionId: "s1" });
+    replies.dismiss(dismissed.slot.id);
+    assert.equal(await dismissed.reply, null);
+    const timedOut = replies.open({ provider: "codex", sessionId: "s2" });
+    assert.equal(await timedOut.reply, null);
+    const first = replies.open({ provider: "grok", sessionId: "s3" });
+    const second = replies.open({ provider: "grok", sessionId: "s3" });
+    assert.equal(await first.reply, null);
+    assert.deepEqual(replies.list().map((slot) => slot.id), [second.slot.id]);
+    replies.closeAll();
+    assert.equal(await second.reply, null);
+  } finally {
+    clearInterval(keepAlive);
+  }
 });
 
 test("typing extends the window but never past the cap", () => {
