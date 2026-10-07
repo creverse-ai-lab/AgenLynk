@@ -24,11 +24,12 @@ public final class AgentMarks: @unchecked Sendable {
     }
 }
 
-/// AgenLynk's mascot: a cute little devil with Mochi's soft squircle body
-/// (after Coucou), horns and a spade tail, holding a spear whose head is the
-/// AgenLynk mark. Each agent has its own: body colors, horns and tail in the
-/// agent's color, and its mark on the forehead. Drawn in code so it scales
-/// from the notch pill to a card and changes expression with the session.
+/// AgenLynk's mascot: a little mermaid shaped like a steamed bun (a domed
+/// top on a flat base), with axolotl gills and a fish tail, holding a trident whose
+/// head is the AgenLynk mark. Each agent has its own: body colors, gills and
+/// tail in the agent's color, and its mark on the forehead. Drawn in code so
+/// it scales from the notch pill to a card and changes expression with the
+/// session.
 public struct AgentMascot: View {
     public enum Mood: Equatable, Sendable {
         case idle, working, waiting, happy, failed
@@ -64,6 +65,7 @@ public struct AgentMascot: View {
                 if holdsStaff && size >= 30 { spear(style) }
                 character(style, phase: phase)
                     .offset(y: bob(phase))
+                bubbles(phase: phase)
             }
             .frame(width: size, height: size)
         }
@@ -80,7 +82,7 @@ public struct AgentMascot: View {
     }
 
     private var bodyWidth: CGFloat { size * 0.72 }
-    private var bodyHeight: CGFloat { size * 0.56 }
+    private var bodyHeight: CGFloat { size * 0.58 }
     private var animates: Bool { mood == .working || mood == .waiting }
 
     /// A gentle bob while working; little hops while it waits on the person.
@@ -99,35 +101,46 @@ public struct AgentMascot: View {
         let height = bodyHeight
         return ZStack {
             if size >= 20 {
+                // Axolotl gills, one tuft each side of the head: three
+                // feathery fronds fanning up and out from a root tucked behind
+                // the body, lit from the top left.
                 ForEach([-1.0, 1.0], id: \.self) { side in
+                    let length = width * 0.3
+                    let thickness = width * 0.11
                     ZStack {
-                        LinearGradient(colors: [style.hornTip, style.horn], startPoint: .top, endPoint: .bottom)
-                        // Lit from the top left on both horns: the mask is
-                        // flipped, the light is not.
-                        LinearGradient(colors: [Color.white.opacity(0.5), .clear, Color.black.opacity(0.22)],
-                                       startPoint: .topLeading, endPoint: .bottomTrailing)
+                        ForEach(Array([-48.0, -22.0, 4.0].enumerated()), id: \.offset) { index, angle in
+                            ZStack {
+                                LinearGradient(colors: [style.fin, style.finTip], startPoint: .leading, endPoint: .trailing)
+                                LinearGradient(colors: [Color.white.opacity(0.4), .clear, Color.black.opacity(0.18)],
+                                               startPoint: .top, endPoint: .bottom)
+                            }
+                            .mask(GillFrond())
+                            // The middle frond is the longest.
+                            .frame(width: length * (index == 1 ? 1 : 0.86), height: thickness)
+                            .shadow(color: .black.opacity(0.18), radius: width * 0.008, y: height * 0.008)
+                            .offset(x: length * (index == 1 ? 1 : 0.86) / 2)
+                            .rotationEffect(.degrees(angle), anchor: .center)
+                        }
                     }
-                    .mask(Horn().scaleEffect(x: side, y: 1))
-                    .frame(width: width * 0.2, height: height * 0.36)
-                    .shadow(color: .black.opacity(0.28), radius: width * 0.015, x: width * 0.006, y: height * 0.02)
-                    .offset(x: side * width * 0.27, y: -height * 0.56)
+                    .frame(width: 0, height: 0)
+                    .scaleEffect(x: side, y: 1)
+                    .offset(x: side * width * 0.36, y: -height * 0.3)
                 }
             }
-            // The soft squircle body (Mochi's superellipse): solid, lit from
-            // the top, its face brightest in the middle and rounding off to a
-            // slightly darker edge, like a soft cushion. No outline or glassy
-            // rim, which read as see-through.
-            Squircle()
+            // The bun: solid, lit from the top, its face brightest in the
+            // middle and rounding off to a slightly darker edge, like a soft
+            // steamed bun. No outline or glassy rim, which read as see-through.
+            Bun()
                 .fill(LinearGradient(colors: [style.top, style.bottom], startPoint: .top, endPoint: .bottom))
-            Squircle()
+            Bun()
                 .fill(RadialGradient(stops: [
                     .init(color: Color.white.opacity(0.35), location: 0),
                     .init(color: .clear, location: 0.55),
                     .init(color: style.ink.opacity(0.16), location: 1)
-                ], center: UnitPoint(x: 0.45, y: 0.38), startRadius: 0, endRadius: width * 0.62))
+                ], center: UnitPoint(x: 0.45, y: 0.45), startRadius: 0, endRadius: width * 0.62))
             face(style, width: width, height: height, phase: phase)
             if size >= 22 {
-                // The agent's mark on the forehead, between the horns: the
+                // The agent's mark on the forehead: the
                 // real one when the host registered it.
                 Group {
                     if let mark = AgentMarks.shared.image(for: provider) {
@@ -216,28 +229,18 @@ public struct AgentMascot: View {
         }
     }
 
-    /// A small open smile with one fang peeking from its top, the devil's
-    /// tell; none when it failed. The fang sits on the dark of the mouth so it
-    /// reads as a tooth, not as a stray mark on the light face.
+    /// A small open smile; none when it failed.
     @ViewBuilder
     private func mouth(_ style: MascotStyle, width: CGFloat, height: CGFloat) -> some View {
         if size >= 26 && mood != .failed {
-            let mouthWidth = width * 0.17
-            let mouthHeight = height * 0.12
-            ZStack(alignment: .top) {
-                OpenSmile()
-                    .fill(style.ink)
-                    .frame(width: mouthWidth, height: mouthHeight)
-                Fang()
-                    .fill(Color.white)
-                    .frame(width: mouthWidth * 0.26, height: mouthHeight * 0.5)
-                    .offset(x: mouthWidth * 0.2)
-            }
-            .offset(y: height * 0.23)
+            OpenSmile()
+                .fill(style.ink)
+                .frame(width: width * 0.14, height: height * 0.1)
+                .offset(y: height * 0.23)
         }
     }
 
-    /// Mochi's speech-bubble badge: what the devil is up to.
+    /// Mochi's speech-bubble badge: what the mermaid is up to.
     private var statusBadge: AnyView? {
         let (symbol, color): (String, Color)
         switch mood {
@@ -292,52 +295,75 @@ public struct AgentMascot: View {
         }
     }
 
-    /// A thin tail curling out to the left, ending in a spade; it sways while
-    /// the devil works.
+    /// A fish tail curling up behind the bun on the left, scaled, ending in
+    /// a two-lobed fin; it sways while the mermaid works.
     private func tail(_ style: MascotStyle, phase: Double) -> some View {
-        let sway = mood == .working || mood == .waiting ? sin(phase * 4) * 8 : 0
+        let sway = mood == .working || mood == .waiting ? sin(phase * 4) * 7 : 0
         return ZStack {
-            TailCurve()
-                .stroke(style.horn, style: StrokeStyle(lineWidth: max(1.2, size * 0.035), lineCap: .round))
-                .frame(width: size * 0.3, height: size * 0.3)
-            Spade()
-                .fill(LinearGradient(colors: [style.hornTip, style.horn], startPoint: .top, endPoint: .bottom))
-                .frame(width: size * 0.12, height: size * 0.12)
-                .rotationEffect(.degrees(-40))
-                .offset(x: -size * 0.15, y: -size * 0.14)
+            ZStack {
+                LinearGradient(colors: [style.finTip, style.fin], startPoint: .topLeading, endPoint: .bottomTrailing)
+                Scales()
+                    .stroke(Color.white.opacity(0.4), lineWidth: max(0.5, size * 0.006))
+            }
+            .mask(MermaidTail())
+            .frame(width: size * 0.3, height: size * 0.3)
+            ZStack {
+                LinearGradient(colors: [style.finTip, style.fin], startPoint: .top, endPoint: .bottom)
+                LinearGradient(colors: [Color.white.opacity(0.4), .clear], startPoint: .topLeading, endPoint: .bottomTrailing)
+                FlukeRibs()
+                    .stroke(Color.white.opacity(0.5), style: StrokeStyle(lineWidth: max(0.5, size * 0.005), lineCap: .round))
+            }
+            .mask(Fluke())
+            .frame(width: size * 0.22, height: size * 0.18)
+            .rotationEffect(.degrees(-35))
+            .offset(x: -size * 0.1, y: -size * 0.13)
         }
+        .shadow(color: .black.opacity(0.22), radius: size * 0.012, y: size * 0.008)
         .rotationEffect(.degrees(sway), anchor: .bottomTrailing)
-        .offset(x: -size * 0.35, y: size * 0.14)
+        .offset(x: -size * 0.43, y: size * 0.2)
+    }
+
+    /// Bubbles rising by the head, drifting up while the mermaid works.
+    @ViewBuilder
+    private func bubbles(phase: Double) -> some View {
+        if size >= 40 {
+            let rise = animates ? CGFloat((phase * 0.6).truncatingRemainder(dividingBy: 1)) * size * 0.06 : 0
+            ZStack {
+                ForEach(Array([(0.0, 0.0, 0.07), (0.05, -0.1, 0.045), (-0.02, -0.18, 0.03)].enumerated()), id: \.offset) { _, bubble in
+                    Circle()
+                        .fill(RadialGradient(colors: [Color.white.opacity(0.05), Color.white.opacity(0.35)],
+                                             center: .center, startRadius: 0, endRadius: size * bubble.2 * 0.5))
+                        .overlay(Circle().strokeBorder(Color.white.opacity(0.8), lineWidth: max(0.5, size * 0.006)))
+                        .overlay(Circle().fill(Color.white.opacity(0.9))
+                            .frame(width: size * bubble.2 * 0.3, height: size * bubble.2 * 0.3)
+                            .offset(x: -size * bubble.2 * 0.18, y: -size * bubble.2 * 0.18))
+                        .frame(width: size * bubble.2, height: size * bubble.2)
+                        .offset(x: size * bubble.0, y: size * bubble.1)
+                }
+            }
+            .offset(x: -size * 0.4, y: -size * 0.25 - rise)
+        }
     }
 }
 
-/// Mochi's body: a superellipse, wider than tall.
-struct Squircle: InsettableShape {
-    var exponent: CGFloat = 4
-    var inset: CGFloat = 0
-
+/// The body: a steamed bun, a dome on a flat base with softly rounded feet.
+struct Bun: Shape {
     func path(in rect: CGRect) -> Path {
-        let rect = rect.insetBy(dx: inset, dy: inset)
-        let a = rect.width / 2, b = rect.height / 2
-        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let w = rect.width, h = rect.height
+        let foot = h * 0.24
         var path = Path()
-        let steps = 120
-        for step in 0...steps {
-            let t = Double(step) / Double(steps) * 2 * .pi
-            let c = cos(t), s = sin(t)
-            let x = CGFloat(copysign(pow(abs(c), 2 / Double(exponent)), c)) * a
-            let y = CGFloat(copysign(pow(abs(s), 2 / Double(exponent)), s)) * b
-            let point = CGPoint(x: center.x + x, y: center.y + y)
-            step == 0 ? path.move(to: point) : path.addLine(to: point)
-        }
+        path.move(to: CGPoint(x: rect.minX + foot, y: rect.maxY))
+        path.addQuadCurve(to: CGPoint(x: rect.maxX - foot, y: rect.maxY), control: CGPoint(x: rect.midX, y: rect.maxY + h * 0.03))
+        path.addQuadCurve(to: CGPoint(x: rect.maxX, y: rect.maxY - foot), control: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addCurve(to: CGPoint(x: rect.midX, y: rect.minY),
+                      control1: CGPoint(x: rect.maxX + w * 0.02, y: rect.minY + h * 0.2),
+                      control2: CGPoint(x: rect.maxX - w * 0.17, y: rect.minY))
+        path.addCurve(to: CGPoint(x: rect.minX, y: rect.maxY - foot),
+                      control1: CGPoint(x: rect.minX + w * 0.17, y: rect.minY),
+                      control2: CGPoint(x: rect.minX - w * 0.02, y: rect.minY + h * 0.2))
+        path.addQuadCurve(to: CGPoint(x: rect.minX + foot, y: rect.maxY), control: CGPoint(x: rect.minX, y: rect.maxY))
         path.closeSubpath()
         return path
-    }
-
-    func inset(by amount: CGFloat) -> Squircle {
-        var copy = self
-        copy.inset += amount
-        return copy
     }
 }
 
@@ -351,41 +377,107 @@ private struct HappyEye: Shape {
     }
 }
 
-/// A short, slightly curved horn (drawn for the left side; flipped for the right).
-private struct Horn: Shape {
+/// One axolotl gill frond, pointing right from a root at its left: a
+/// tapered stalk with soft feathery bumps along both edges and a round tip.
+private struct GillFrond: Shape {
     func path(in rect: CGRect) -> Path {
+        let w = rect.width, h = rect.height
+        let bumps = 3
         var path = Path()
-        path.move(to: CGPoint(x: rect.minX + rect.width * 0.1, y: rect.maxY))
-        path.addQuadCurve(to: CGPoint(x: rect.minX + rect.width * 0.15, y: rect.minY),
-                          control: CGPoint(x: rect.minX - rect.width * 0.2, y: rect.midY))
-        path.addQuadCurve(to: CGPoint(x: rect.maxX, y: rect.maxY),
-                          control: CGPoint(x: rect.midX + rect.width * 0.25, y: rect.midY))
+        // Upper edge, root to tip, with bumps that shrink toward the tip.
+        path.move(to: CGPoint(x: rect.minX, y: rect.midY - h * 0.22))
+        for index in 0..<bumps {
+            let from = CGFloat(index) / CGFloat(bumps)
+            let to = CGFloat(index + 1) / CGFloat(bumps)
+            let half = h * (0.24 - 0.12 * to)
+            let mid = (from + to) / 2
+            path.addQuadCurve(to: CGPoint(x: rect.minX + w * to * 0.88, y: rect.midY - half),
+                              control: CGPoint(x: rect.minX + w * mid * 0.88, y: rect.midY - half - h * 0.32))
+        }
+        // The round tip.
+        path.addQuadCurve(to: CGPoint(x: rect.minX + w * 0.88, y: rect.midY + h * 0.12),
+                          control: CGPoint(x: rect.maxX + w * 0.04, y: rect.midY))
+        // Lower edge, tip back to the root.
+        for index in (0..<bumps).reversed() {
+            let from = CGFloat(index + 1) / CGFloat(bumps)
+            let to = CGFloat(index) / CGFloat(bumps)
+            let half = h * (0.24 - 0.12 * to)
+            let mid = (from + to) / 2
+            path.addQuadCurve(to: CGPoint(x: rect.minX + w * to * 0.88, y: rect.midY + half),
+                              control: CGPoint(x: rect.minX + w * mid * 0.88, y: rect.midY + half + h * 0.32))
+        }
         path.closeSubpath()
         return path
     }
 }
 
-private struct TailCurve: Shape {
+/// The tail: a band rooted at the bottom right, curling up and left to a
+/// narrow end where the fluke sits.
+private struct MermaidTail: Shape {
     func path(in rect: CGRect) -> Path {
+        let w = rect.width, h = rect.height
         var path = Path()
-        path.move(to: CGPoint(x: rect.maxX, y: rect.maxY))
-        path.addCurve(to: CGPoint(x: rect.minX + rect.width * 0.12, y: rect.minY + rect.height * 0.12),
-                      control1: CGPoint(x: rect.minX, y: rect.maxY),
-                      control2: CGPoint(x: rect.maxX * 0.7, y: rect.minY))
+        path.move(to: CGPoint(x: rect.maxX, y: rect.minY + h * 0.45))
+        path.addCurve(to: CGPoint(x: rect.minX + w * 0.2, y: rect.minY + h * 0.12),
+                      control1: CGPoint(x: rect.minX + w * 0.55, y: rect.minY + h * 0.5),
+                      control2: CGPoint(x: rect.minX + w * 0.28, y: rect.minY + h * 0.36))
+        path.addLine(to: CGPoint(x: rect.minX + w * 0.34, y: rect.minY + h * 0.2))
+        path.addCurve(to: CGPoint(x: rect.maxX, y: rect.maxY),
+                      control1: CGPoint(x: rect.minX + w * 0.4, y: rect.minY + h * 0.7),
+                      control2: CGPoint(x: rect.minX + w * 0.7, y: rect.maxY))
+        path.closeSubpath()
         return path
     }
 }
 
-/// The spade at the tail's tip.
-private struct Spade: Shape {
+/// Rows of scale arcs, masked to the tail.
+private struct Scales: Shape {
     func path(in rect: CGRect) -> Path {
+        let r = rect.width * 0.07
         var path = Path()
-        path.move(to: CGPoint(x: rect.midX, y: rect.minY))
-        path.addQuadCurve(to: CGPoint(x: rect.midX, y: rect.maxY * 0.8), control: CGPoint(x: rect.maxX * 1.2, y: rect.maxY * 0.75))
-        path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
-        path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY * 0.8))
-        path.addQuadCurve(to: CGPoint(x: rect.midX, y: rect.minY), control: CGPoint(x: -rect.width * 0.2, y: rect.maxY * 0.75))
+        var row = 0
+        var y = rect.minY
+        while y < rect.maxY + r {
+            var x = rect.minX + (row.isMultiple(of: 2) ? 0 : r)
+            while x < rect.maxX + r {
+                path.move(to: CGPoint(x: x - r, y: y))
+                path.addQuadCurve(to: CGPoint(x: x + r, y: y), control: CGPoint(x: x, y: y + r * 1.6))
+                x += r * 2
+            }
+            y += r * 1.1
+            row += 1
+        }
+        return path
+    }
+}
+
+/// The fluke: two lobes spreading up from a root at the bottom middle.
+private struct Fluke: Shape {
+    func path(in rect: CGRect) -> Path {
+        let w = rect.width, h = rect.height
+        var path = Path()
+        path.move(to: CGPoint(x: rect.midX, y: rect.maxY))
+        path.addQuadCurve(to: CGPoint(x: rect.minX, y: rect.minY + h * 0.08), control: CGPoint(x: rect.minX, y: rect.minY + h * 0.75))
+        path.addQuadCurve(to: CGPoint(x: rect.midX, y: rect.minY + h * 0.42), control: CGPoint(x: rect.minX + w * 0.32, y: rect.minY + h * 0.1))
+        path.addQuadCurve(to: CGPoint(x: rect.maxX, y: rect.minY + h * 0.08), control: CGPoint(x: rect.minX + w * 0.68, y: rect.minY + h * 0.1))
+        path.addQuadCurve(to: CGPoint(x: rect.midX, y: rect.maxY), control: CGPoint(x: rect.maxX, y: rect.minY + h * 0.75))
         path.closeSubpath()
+        return path
+    }
+}
+
+private struct FlukeRibs: Shape {
+    func path(in rect: CGRect) -> Path {
+        let w = rect.width, h = rect.height
+        let root = CGPoint(x: rect.midX, y: rect.maxY * 0.92)
+        var path = Path()
+        for tip in [CGPoint(x: rect.minX + w * 0.15, y: rect.minY + h * 0.2),
+                    CGPoint(x: rect.minX + w * 0.32, y: rect.minY + h * 0.28),
+                    CGPoint(x: rect.minX + w * 0.68, y: rect.minY + h * 0.28),
+                    CGPoint(x: rect.minX + w * 0.85, y: rect.minY + h * 0.2)] {
+            path.move(to: root)
+            path.addLine(to: tip)
+        }
         return path
     }
 }
@@ -491,33 +583,16 @@ private struct OpenSmile: Shape {
     }
 }
 
-/// A rounded little fang: soft shoulders down to a blunt tip.
-private struct Fang: Shape {
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        path.move(to: CGPoint(x: rect.minX, y: rect.minY))
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
-        path.addQuadCurve(to: CGPoint(x: rect.midX + rect.width * 0.12, y: rect.maxY * 0.92),
-                          control: CGPoint(x: rect.maxX, y: rect.maxY * 0.55))
-        path.addQuadCurve(to: CGPoint(x: rect.midX - rect.width * 0.12, y: rect.maxY * 0.92),
-                          control: CGPoint(x: rect.midX, y: rect.maxY * 1.08))
-        path.addQuadCurve(to: CGPoint(x: rect.minX, y: rect.minY),
-                          control: CGPoint(x: rect.minX, y: rect.maxY * 0.55))
-        path.closeSubpath()
-        return path
-    }
-}
-
 /// Each agent's take on Mochi's palette: a soft body gradient, ink for the
-/// face, the pin its mark sits on, and horns and tail in its own color.
+/// face, the pin its mark sits on, and fins and tail in its own color.
 struct MascotStyle {
     let top: Color
     let bottom: Color
     let ink: Color
     let pin: Color
     let emblem: Color
-    let horn: Color
-    let hornTip: Color
+    let fin: Color
+    let finTip: Color
 
     init(provider: String) {
         switch provider.lowercased() {
@@ -527,8 +602,8 @@ struct MascotStyle {
             ink = Color(red: 0.24, green: 0.11, blue: 0.07)
             pin = Color(red: 0.85, green: 0.46, blue: 0.33)
             emblem = Color(red: 1.0, green: 0.96, blue: 0.92)
-            horn = Color(red: 0.78, green: 0.36, blue: 0.24)
-            hornTip = Color(red: 0.98, green: 0.62, blue: 0.46)
+            fin = Color(red: 0.78, green: 0.36, blue: 0.24)
+            finTip = Color(red: 0.98, green: 0.62, blue: 0.46)
         case "codex":
             // Codex's blues, a little cooler than AgenLynk's own.
             top = Color(red: 0.91, green: 0.95, blue: 1.0)
@@ -536,24 +611,24 @@ struct MascotStyle {
             ink = Color(red: 0.05, green: 0.09, blue: 0.24)
             pin = Color(white: 0.1)
             emblem = .white
-            horn = Color(red: 0.16, green: 0.32, blue: 0.84)
-            hornTip = Color(red: 0.45, green: 0.62, blue: 1.0)
+            fin = Color(red: 0.16, green: 0.32, blue: 0.84)
+            finTip = Color(red: 0.45, green: 0.62, blue: 1.0)
         case "grok":
             top = Color(red: 0.93, green: 0.93, blue: 0.94)
             bottom = Color(red: 0.77, green: 0.77, blue: 0.79)
             ink = Color(red: 0.1, green: 0.08, blue: 0.07)
             pin = Color(white: 0.06)
             emblem = .white
-            horn = Color(white: 0.3)
-            hornTip = Color(white: 0.62)
+            fin = Color(white: 0.3)
+            finTip = Color(white: 0.62)
         default:
             top = Color(red: 0.9, green: 0.95, blue: 1.0)
             bottom = Color(red: 0.6, green: 0.75, blue: 0.98)
             ink = Color(red: 0.06, green: 0.08, blue: 0.2)
             pin = Color(red: 0.08, green: 0.38, blue: 0.98)
             emblem = .white
-            horn = Color(red: 0.06, green: 0.28, blue: 0.8)
-            hornTip = Color(red: 0.4, green: 0.62, blue: 1.0)
+            fin = Color(red: 0.06, green: 0.28, blue: 0.8)
+            finTip = Color(red: 0.4, green: 0.62, blue: 1.0)
         }
     }
 }
