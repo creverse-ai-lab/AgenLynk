@@ -414,3 +414,36 @@ test("a sub-agent of a finished worker takes its topmost ancestor's opener", () 
   const kept = state.snapshot().sessions.find((session) => session.sessionId === "local:claude:sub");
   assert.equal(kept.openerInstanceId, "main");
 });
+
+test("a failed history write is retried, and only repeated failures turn history off", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "agenlynk-monitor-db-retry-"));
+  const quiet = console.error;
+  console.error = () => {};
+  try {
+    const store = await SqliteMonitorStore.open(join(directory, "monitor.db"), { flushMs: 60_000 });
+    const realRun = store.insertEvent.run.bind(store.insertEvent);
+    let failures = 2;
+    store.insertEvent.run = (...args) => {
+      if (failures > 0) { failures -= 1; throw new Error("database is locked"); }
+      return realRun(...args);
+    };
+    const event = { ...monitorEvent({ key: "m1", kind: "agent_message", ts: "2026-08-07T00:00:00Z", source: "gateway", body: "hi" }), sessionId: "s", sequence: 1 };
+    store.writeEvents("s", [event]);
+    store.flush();
+    store.flush();
+    assert.equal(store.failed, false, "a locked moment is not the end of history");
+    store.flush();
+    assert.deepEqual(store.readEvents("s").map((saved) => saved.key), ["m1"], "the batch was kept and written");
+
+    store.insertEvent.run = () => { throw new Error("disk I/O error"); };
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      store.writeEvents("s", [{ ...event, key: `m${attempt + 2}` }]);
+      store.flush();
+    }
+    assert.equal(store.failed, true, "a failure that keeps happening turns history off");
+    store.close();
+  } finally {
+    console.error = quiet;
+    await rm(directory, { recursive: true, force: true });
+  }
+});

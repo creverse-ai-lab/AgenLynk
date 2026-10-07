@@ -351,7 +351,16 @@ async function main() {
     // so nudge a refresh whenever a lifecycle event lands.
     if (!event.type?.endsWith("_chunk")) scheduleRefresh();
   };
-  owner.onEvent = onEvent;
+  // One malformed event must not take the process down: it arrives from the
+  // socket's own handler, and the app would restart a sidecar that a replayed
+  // subscription then feeds the same event again.
+  owner.onEvent = (event) => {
+    try {
+      onEvent(event);
+    } catch (error) {
+      console.error(`Gateway event ${event?.type ?? "?"} for ${event?.sessionId ?? "?"} was skipped: ${error?.stack ?? error}`);
+    }
+  };
 
   // State frames carry the session list only when it changed since the last
   // frame: every second's frame used to resend every session, and the app
@@ -647,7 +656,12 @@ async function main() {
     void ensureSubscription();
     void refresh();
     ticks += 1;
-    if (ticks % 20 === 0) void refreshGatewayInfo();
+    if (ticks % 20 === 0) {
+      void refreshGatewayInfo();
+      // Expired history otherwise leaves memory only when a snapshot is
+      // built, i.e. only while the app keeps asking for one.
+      state.pruneHistory();
+    }
   }, REFRESH_INTERVAL_MS);
   interval.unref();
   async function broadcastLocalChanges() {
@@ -1195,6 +1209,11 @@ async function main() {
     }, 1_000);
     parentWatch.unref();
   }
+  // A promise nothing awaited failing is logged, not fatal: the loops that
+  // fire and forget recover on their next pass.
+  process.on("unhandledRejection", (reason) => {
+    console.error(`Unhandled rejection: ${reason?.stack ?? reason}`);
+  });
   process.on("SIGINT", () => void shutdown().finally(() => process.exit(0)));
   process.on("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
 }

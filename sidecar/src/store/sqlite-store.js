@@ -12,6 +12,8 @@ import { dirname, join } from "node:path";
 
 export const MONITOR_DB_SCHEMA_VERSION = 1;
 const DEFAULT_FLUSH_MS = 250;
+// Consecutive failed flushes before history is turned off for this run.
+const MAX_WRITE_FAILURES = 5;
 const DEFAULT_RETENTION_DAYS = 14;
 // Rows kept per session. Memory holds far fewer (the EventStore cap); this
 // bounds what a session that stays live for weeks can pile up on disk.
@@ -83,12 +85,16 @@ export class SqliteMonitorStore {
     this.pendingSessions = new Map();
     this.timer = null;
     this.failed = false;
+    this.writeFailures = 0;
     this.#migrate();
   }
 
   #migrate() {
     this.database.exec("PRAGMA journal_mode = WAL");
     this.database.exec("PRAGMA synchronous = NORMAL");
+    // A reader (another process, a checkpoint) briefly holding the lock is
+    // waited out instead of failing the write. Short: this blocks the loop.
+    this.database.exec("PRAGMA busy_timeout = 200");
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sessions (
@@ -157,14 +163,33 @@ export class SqliteMonitorStore {
         this.insertSession.run(session.sessionId, session.provider ?? null, updatedAt, JSON.stringify(session));
       }
       this.database.exec("COMMIT");
+      this.writeFailures = 0;
     } catch (error) {
       try {
         this.database.exec("ROLLBACK");
       } catch {
         // No open transaction.
       }
-      this.failed = true;
-      console.error(`Monitor history disabled after a write failure: ${error.message}`);
+      // A busy or briefly full disk passes: the batch goes back in line and
+      // the next flush tries again. Only a failure that keeps happening turns
+      // history off for this run, rather than one bad moment doing it for good.
+      this.writeFailures += 1;
+      if (this.writeFailures >= MAX_WRITE_FAILURES) {
+        this.failed = true;
+        this.pendingEvents.clear();
+        this.pendingSessions.clear();
+        console.error(`Monitor history disabled after ${this.writeFailures} write failures: ${error.message}`);
+        return;
+      }
+      for (const event of events) {
+        const key = `${event.sessionId}\u0000${event.key}`;
+        if (!this.pendingEvents.has(key)) this.pendingEvents.set(key, event);
+      }
+      for (const session of sessions) {
+        if (!this.pendingSessions.has(session.sessionId)) this.pendingSessions.set(session.sessionId, session);
+      }
+      console.error(`Monitor history write failed (${this.writeFailures}/${MAX_WRITE_FAILURES}), retrying: ${error.message}`);
+      this.#schedule();
     }
   }
 

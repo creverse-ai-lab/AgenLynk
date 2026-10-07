@@ -9,7 +9,7 @@ import { GatewayEventNormalizer, grokUsage, normalizeGrokUpdates } from "../src/
 import { ClaudeUsageAccumulator, normalizeClaudeRecords } from "../src/normalize/claude.js";
 import { normalizeCodexRecords } from "../src/normalize/codex.js";
 import { LocalTimeline } from "../src/normalize/local-timeline.js";
-import { EVENT_KINDS, mergeEvent, monitorEvent } from "../src/normalize/model.js";
+import { BODY_LIMIT, EVENT_KINDS, mergeEvent, monitorEvent } from "../src/normalize/model.js";
 import { projectLocalSnapshot } from "../src/local-monitor.js";
 
 // One logical turn — prompt, thought, message, one successful tool call, end —
@@ -425,4 +425,27 @@ test("Claude usage totals survive folding old message ids", () => {
   }
   assert.ok(bounded.byMessage.size <= 2);
   assert.deepEqual(bounded.totals(), unbounded.totals());
+});
+
+test("Gateway chunks build the body in daemon order, appending in the usual case", () => {
+  const normalizer = new GatewayEventNormalizer();
+  const chunk = (sequence, text) => normalizer.ingest({ type: "agent_message_chunk", turnId: "t", sequence, ts: "2026-10-08T00:00:00Z", text });
+  normalizer.ingest({ type: "turn_start", turnId: "t", ts: "2026-10-08T00:00:00Z", text: "go" });
+  assert.equal(chunk(1, "a").at(-1).body, "a");
+  assert.equal(chunk(2, "b").at(-1).body, "ab");
+  assert.equal(chunk(4, "d").at(-1).body, "abd");
+  assert.equal(chunk(3, "c").at(-1).body, "abcd", "a gap filled late lands in its place");
+  assert.deepEqual(chunk(2, "b"), [], "a replay of a chunk already in place changes nothing");
+
+  const long = new GatewayEventNormalizer();
+  const piece = "x".repeat(1_000);
+  let last = null;
+  for (let sequence = 1; sequence <= 100; sequence += 1) {
+    const out = long.ingest({ type: "agent_message_chunk", turnId: "t", sequence, ts: "2026-10-08T00:00:00Z", text: piece });
+    if (out.length) last = { sequence, body: out.at(-1).body };
+  }
+  assert.ok(last.sequence < 100, "past the clip a chunk changes nothing visible, so nothing is re-sent");
+  assert.deepEqual(long.ingest({ type: "agent_message_chunk", turnId: "t", sequence: 90, ts: "2026-10-08T00:00:00Z", text: piece }), [],
+    "nor does a replay of a chunk past the clip");
+  assert.equal(last.body.length, BODY_LIMIT);
 });

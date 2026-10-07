@@ -65,17 +65,36 @@ function mapUpdate(collector, update, context) {
     if (!text) return;
     const key = `${kind === "agent_message" ? "msg" : "thought"}:${turnId ?? "none"}:${context.segment}`;
     if (context.chunks && Number.isFinite(context.chunkSequence)) {
-      // Gateway: a gap replay re-delivers earlier chunks after later ones, so
-      // the body is rebuilt in daemon order instead of arrival order.
-      let parts = context.chunks.get(key);
-      if (!parts) {
-        parts = new Map();
-        context.chunks.set(key, parts);
+      const sequence = context.chunkSequence;
+      let message = context.chunks.get(key);
+      if (!message) {
+        message = { parts: new Map(), body: "", last: -Infinity };
+        context.chunks.set(key, message);
         if (context.chunks.size > MAX_TRACKED_MESSAGES) context.chunks.delete(context.chunks.keys().next().value);
       }
-      parts.set(context.chunkSequence, text);
-      const body = [...parts].sort(([left], [right]) => left - right).map(([, part]) => part).join("");
-      collector.add(monitorEvent({ key, kind, ts, source, turnId, body: body.slice(0, APPEND_BODY_LIMIT) }));
+      if (sequence > message.last) {
+        // In daemon order, the usual case: append. Rebuilding the whole body
+        // per chunk made a long message quadratic (20k chunks took 8 s). Past
+        // the clip the body cannot change, so a later chunk is kept only as
+        // its sequence and nothing is re-sent.
+        const full = message.body.length >= APPEND_BODY_LIMIT;
+        message.parts.set(sequence, full ? "" : text);
+        message.last = sequence;
+        if (full) return;
+        message.body = (message.body + text).slice(0, APPEND_BODY_LIMIT);
+      } else {
+        // Gateway: a gap replay re-delivers earlier chunks after later ones,
+        // so the body is rebuilt in daemon order instead of arrival order. An
+        // earlier chunk only pushes later text further out, so the parts kept
+        // empty past the clip never come back into view.
+        const kept = message.parts.get(sequence);
+        // Already in place, or a part past the clip (kept as ""; chunks are
+        // never empty): either way nothing visible changes.
+        if (kept === text || (kept === "" && message.body.length >= APPEND_BODY_LIMIT)) return;
+        message.parts.set(sequence, text);
+        message.body = [...message.parts].sort(([left], [right]) => left - right).map(([, part]) => part).join("").slice(0, APPEND_BODY_LIMIT);
+      }
+      collector.add(monitorEvent({ key, kind, ts, source, turnId, body: message.body }));
       return;
     }
     collector.add(monitorEvent({ key, kind, ts, source, turnId, body: text, bodyMode: "append" }));

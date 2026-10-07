@@ -56,6 +56,7 @@ export function updatePendingApprovals(record, pending, automaticApproval = fals
         const before = pending.size;
         pending.add(`codex:${callId}`);
         changed = pending.size !== before;
+        capPending(pending);
       }
     } else if ((kind === "custom_tool_call_output" || kind === "function_call_output") && callId) {
       if (pending.delete(`codex:${callId}`)) changed = true;
@@ -80,6 +81,7 @@ export function updatePendingApprovals(record, pending, automaticApproval = fals
       if (!pending.has(key)) {
         pending.add(key);
         changed = true;
+        capPending(pending);
       }
     } else if (requestId != null && (eventType === "permission_response" || eventType === "permission_result")) {
       if (pending.delete(`acp:${requestId}`)) changed = true;
@@ -89,6 +91,14 @@ export function updatePendingApprovals(record, pending, automaticApproval = fals
   visit(payload?.result);
 
   return changed;
+}
+
+// A request whose answer the transcript never shows stays pending until the
+// turn ends; a turn that never ends must not collect them without bound.
+const MAX_PENDING_APPROVALS = 64;
+
+function capPending(pending) {
+  while (pending.size > MAX_PENDING_APPROVALS) pending.delete(pending.values().next().value);
 }
 
 /** The state signal with unresolved approvals taken into account. */
