@@ -275,6 +275,7 @@ enum MonitorModelChecks {
         try check(environment["SOME_RANDOM_VAR"] == nil, "arbitrary app environment must not leak to the renderer")
         try check(environment["PET_STATE_FILE"] == "/tmp/pet-state.json", "the state file path must be provided")
         try check(environment["PET_ACTIONS_FILE"] == "/tmp/pet-actions.json", "the actions file path must be provided")
+        try check(environment["PET_PARENT_PID"] == String(ProcessInfo.processInfo.processIdentifier), "the Pet must know its parent to quit with it")
     }
 
     private static func snapshotDecodesSessionsEventsTasksAndInbox() throws {

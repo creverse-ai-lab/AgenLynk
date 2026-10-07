@@ -197,18 +197,16 @@ struct MenuBarStatusView: View {
                     .buttonStyle(.borderless)
             }
             Spacer()
-            // SettingsLink is the only supported way to open the Settings
-            // scene from a menu-bar popover on macOS 14. Activate too, or the
-            // window opens behind the app.
-            SettingsLink {
+            // The settings window activates the app itself, so it opens in
+            // front of whatever was active.
+            Button {
+                model.openSettings()
+            } label: {
                 Image(systemName: "gearshape")
             }
             .buttonStyle(.bordered)
             .help("설정")
             .accessibilityLabel("설정")
-            .simultaneousGesture(TapGesture().onEnded {
-                NSApp.activate(ignoringOtherApps: true)
-            })
         }
     }
 

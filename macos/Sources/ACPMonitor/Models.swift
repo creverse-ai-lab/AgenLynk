@@ -1133,11 +1133,20 @@ struct PetActionsEnvelope: Encodable, Equatable, Sendable {
 enum PetChildEnvironment {
     static let allowlistedKeys: Set<String> = ["HOME", "PATH", "TMPDIR", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL"]
 
-    static func make(from source: [String: String], stateFilePath: String, actionsFilePath: String, style: String = "orbit") -> [String: String] {
+    static func make(
+        from source: [String: String],
+        stateFilePath: String,
+        actionsFilePath: String,
+        style: String = "orbit",
+        parentPID: Int32 = ProcessInfo.processInfo.processIdentifier
+    ) -> [String: String] {
         var result = source.filter { allowlistedKeys.contains($0.key) }
         result["PET_STATE_FILE"] = stateFilePath
         result["PET_ACTIONS_FILE"] = actionsFilePath
         result["PET_STYLE"] = style
+        // The Pet quits when this app is gone, also after a crash: an orphan
+        // kept its overlay lock and blocked the next launch's Pet.
+        result["PET_PARENT_PID"] = String(parentPID)
         #if DEBUG
         if let snapshot = source["PET_DEBUG_SNAPSHOT"] { result["PET_DEBUG_SNAPSHOT"] = snapshot }
         #endif

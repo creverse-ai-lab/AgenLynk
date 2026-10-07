@@ -55,32 +55,44 @@ struct ACPMonitorApp: App {
         // stacked duplicates instead of focusing the one already open. `Window`
         // makes openWindow(id:) bring the existing window forward.
         Window("AgenLynk", id: "dashboard") {
-            DashboardView()
-                .environmentObject(model)
-                .environmentObject(model.settings)
+            WhileWindowOpen {
+                DashboardView()
+                    .environmentObject(model)
+                    .environmentObject(model.settings)
+            }
         }
         .defaultSize(width: 1420, height: 880)
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("설정…") { model.openSettings() }
+                    .keyboardShortcut(",", modifiers: .command)
+            }
+        }
 
         // Live monitoring is the menu-bar popover now; a separate Monitoring
         // window showed the same projection twice.
         WindowGroup("Session", id: "session-detail", for: String.self) { sessionId in
-            SessionDetailView(sessionId: sessionId.wrappedValue)
-                .environmentObject(model)
-                .environmentObject(model.settings)
+            WhileWindowOpen {
+                SessionDetailView(sessionId: sessionId.wrappedValue)
+                    .environmentObject(model)
+                    .environmentObject(model.settings)
+            }
         }
         .defaultSize(width: 1040, height: 720)
 
-        Settings {
-            SettingsView().environmentObject(model).environmentObject(model.settings)
-        }
+        // No Settings scene: its window stays alive after closing and keeps
+        // re-rendering. 설정… (⌘,) opens the same released-on-close window as
+        // every other entry point.
 
         MenuBarExtra(isInserted: Binding(
             get: { menuBar.isVisible },
             set: { menuBar.set($0) }
         )) {
-            MenuBarStatusView()
-                .environmentObject(model)
-                .environmentObject(model.settings)
+            WhileWindowOpen {
+                MenuBarStatusView()
+                    .environmentObject(model)
+                    .environmentObject(model.settings)
+            }
         } label: {
             MenuBarLabel(model: model)
         }
@@ -131,5 +143,23 @@ final class MenuBarVisibility: ObservableObject {
         guard isVisible != visible else { return }
         isVisible = visible
         if settings.menuBarEnabled != visible { settings.menuBarEnabled = visible }
+    }
+}
+
+/// A scene's content only while its window is open. SwiftUI keeps a closed
+/// Window, WindowGroup or menu bar window alive and goes on re-rendering its
+/// content on every model change for the rest of the app's life: a closed
+/// dashboard redrew ~10 times a second. Measured in a probe app: closed, 105
+/// renders per 10 s without this, none with it; reopened, rendered again.
+struct WhileWindowOpen<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+    @State private var open = true
+
+    var body: some View {
+        ZStack {
+            if open { content() } else { Color.clear }
+        }
+        .onAppear { open = true }
+        .onDisappear { open = false }
     }
 }

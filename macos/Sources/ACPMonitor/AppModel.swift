@@ -634,9 +634,14 @@ final class AppModel: ObservableObject {
                 )
                 if page.events.count < Self.olderPageSize { olderExhaustedSessionIds.insert(sessionId) }
                 if var browsed = browsedEvents[sessionId] {
-                    if upsertMonitorEvents(page.events, into: &browsed, limit: Int.max) {
+                    // Same window as live paging: scrolling one long history to
+                    // its start must not hold every event it ever had.
+                    if upsertMonitorEvents(page.events, into: &browsed, limit: MonitorReducerDefaults.pagedEventLimit) {
                         browsedEvents[sessionId] = browsed
                         arrived = true
+                    } else if !page.events.isEmpty {
+                        olderExhaustedSessionIds.insert(sessionId)
+                        olderCappedSessionIds.insert(sessionId)
                     }
                 } else {
                     let before = logEventsBySession[sessionId]?.count ?? 0
@@ -1108,6 +1113,11 @@ final class AppModel: ObservableObject {
         petStore.stop()
         // Reset turns the pet back on; it should be running, not just ticked.
         if settings.petEnabled { startPet() }
+    }
+
+    /// Opens (or brings forward) the settings window on `tab`.
+    func openSettings(tab: SettingsTab = .display) {
+        settingsWindow.show(model: self, tab: tab)
     }
 
     func loadAgentCatalog(refresh: Bool = false) async {
@@ -1754,15 +1764,32 @@ final class AppModel: ObservableObject {
             monitorStore.setConnection(connected: false, streaming: false)
             sidecarStreamConnected = false
             phase = .disconnected(describeConnectFailure(error))
+            // Nothing else retries a failed start: no stream, no reconciliation.
+            // A sidecar that came up slowly once would otherwise leave the app
+            // disconnected until the person pressed reconnect.
+            if sidecarRestartAttempts < Self.maxAutomaticReconnects {
+                scheduleReconnect(generation: generation)
+            }
         }
     }
 
+    private static let maxAutomaticReconnects = 8
+
     private func reconcileNow(endpoint: MonitorEndpoint, generation: Int) {
         Task { [weak self] in
-            guard let self, self.connectionIsCurrent(generation),
-                  let snapshot = try? await self.client.fetchSnapshot(endpoint: endpoint) else { return }
-            guard self.connectionIsCurrent(generation) else { return }
-            self.apply(snapshot)
+            // A frame the stream applies while the snapshot is on its way is
+            // newer than the snapshot: try again rather than roll it back.
+            for _ in 0..<3 {
+                guard let self, self.connectionIsCurrent(generation) else { return }
+                let before = self.monitorStore.revision
+                guard let snapshot = try? await self.client.fetchSnapshot(endpoint: endpoint) else { return }
+                guard self.connectionIsCurrent(generation) else { return }
+                if self.monitorStore.revision == before {
+                    self.apply(snapshot)
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 300_000_000)
+            }
         }
     }
 
@@ -1781,11 +1808,18 @@ final class AppModel: ObservableObject {
                       self.connectionIsCurrent(generation),
                       self.endpoint?.baseURL == endpoint.baseURL else { return }
                 do {
+                    let before = self.monitorStore.revision
                     guard let snapshot = try await self.client.fetchSnapshot(
                         endpoint: endpoint,
                         ifRevision: self.monitorStore.state.appliedSnapshotRevision
                     ) else { continue }
                     guard self.connectionIsCurrent(generation) else { return }
+                    // The stream moved on while this was fetched: the snapshot
+                    // is older than what is on screen. The next round catches up.
+                    if self.monitorStore.revision != before {
+                        self.sidecarRestartAttempts = 0
+                        continue
+                    }
                     self.apply(snapshot)
                     self.sidecarRestartAttempts = 0
                     self.updateConnectionPhase()
@@ -1802,7 +1836,13 @@ final class AppModel: ObservableObject {
     }
 
     private func restartSidecarIfExited(generation: Int) async {
-        guard connectionIsCurrent(generation), !(await sidecar.isRunning()), sidecarRestartTask == nil else { return }
+        guard connectionIsCurrent(generation), !(await sidecar.isRunning()) else { return }
+        scheduleReconnect(generation: generation)
+    }
+
+    /// Reconnects after a backoff that grows with each attempt (0.5 s .. 8 s).
+    private func scheduleReconnect(generation: Int) {
+        guard connectionIsCurrent(generation), sidecarRestartTask == nil else { return }
         sidecarRestartAttempts += 1
         let exponent = min(sidecarRestartAttempts - 1, 4)
         let delay = UInt64(500_000_000) * UInt64(1 << exponent)

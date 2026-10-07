@@ -438,8 +438,9 @@ private final class StatusStore: ObservableObject {
     private func refresh() {
         let now = Date().timeIntervalSince1970
         let stamp = fileStamp()
-        if stamp != cachedStamp {
-            guard let agents = readFrame() else { return }
+        // A frame caught between its two files' writes keeps the last good
+        // one, and is read again next time; ageing still runs either way.
+        if stamp != cachedStamp, let agents = readFrame() {
             cachedAgents = agents
             cachedStamp = stamp
         }

@@ -1,12 +1,15 @@
 import AppKit
 import SwiftUI
 
-/// Settings in a window of its own, for callers outside the SwiftUI scenes
-/// (the notch panel). macOS 14 dropped `showSettingsWindow:`, and the
-/// Settings scene's opener only exists inside a scene, which the notch is not.
+/// The one settings window, for every entry point (the app menu's 설정…,
+/// the dashboard, the menu bar popover, the notch). Let go when it closes:
+/// a closed window that is kept — ours, or the SwiftUI Settings scene's —
+/// still re-renders SettingsView on every model change, and its TabView
+/// leaves objects behind each time (300MB after a day in the field).
 @MainActor
 final class SettingsWindowPresenter {
     private var window: NSWindow?
+    private var closeObserver: NSObjectProtocol?
 
     func show(model: AppModel, tab: SettingsTab) {
         // A window already open still switches to the tab asked for.
@@ -30,9 +33,22 @@ final class SettingsWindowPresenter {
                 .environmentObject(model.settings))
             window.center()
             self.window = window
+            closeObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification, object: window, queue: .main
+            ) { [weak self] _ in
+                // After the close finishes: this is the window's only owner.
+                DispatchQueue.main.async { self?.release() }
+            }
         }
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    private func release() {
+        if let closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
+        closeObserver = nil
+        window?.contentView = nil
+        window = nil
     }
 }
 

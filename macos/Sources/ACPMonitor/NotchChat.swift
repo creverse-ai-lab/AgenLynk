@@ -146,13 +146,17 @@ final class NotchChatStore: ObservableObject {
         messages.append(NotchChatMessage(role: .user, text: text))
         busy = true
         let started = generation
+        // The session this message is for, fixed now: the chat may be
+        // switched while the connection is awaited.
+        let target = sessionId
         Task {
             defer { if started == generation { busy = false } }
             do {
                 guard let (client, endpoint) = await model?.chatConnection() else {
                     throw NotchChatError("Gateway monitor에 아직 연결되지 않았습니다.")
                 }
-                if sessionId == nil {
+                guard started == generation else { return }
+                if target == nil {
                     let opened = try await client.chatPost(endpoint: endpoint, path: "open", body: [
                         "frontdoor": .string(ownerRoot ?? ""),
                         "provider": .string(openProvider),
@@ -172,7 +176,7 @@ final class NotchChatStore: ObservableObject {
                     sessionId = id
                     sessionProvider = openProvider
                 }
-                guard let sessionId else { return }
+                guard let sessionId = target ?? sessionId else { return }
                 _ = try await client.chatPost(endpoint: endpoint, path: "prompt", body: [
                     "sessionId": .string(sessionId),
                     "text": .string(text)
@@ -223,6 +227,7 @@ final class NotchChatStore: ObservableObject {
     /// permission requests and status changes, not for streamed text.
     private func startPolling() {
         pollTask?.cancel()
+        let started = generation
         pollTask = Task { [weak self] in
             var failures = 0
             while !Task.isCancelled {
@@ -234,6 +239,8 @@ final class NotchChatStore: ObservableObject {
                     // A blip retries with backoff; a lasting failure ends the
                     // turn's view instead of spinning forever.
                     failures += 1
+                    // Left for another chat meanwhile: that chat is not this one's to clear.
+                    guard !Task.isCancelled, started == self.generation else { return }
                     if failures >= 5 {
                         self.status = nil
                         self.activity = nil
@@ -346,10 +353,12 @@ final class NotchChatController: NSObject, ObservableObject {
         self.model = model
         store = NotchChatStore(model: model)
         super.init()
-        // Monitor state arrives in bursts; reading Frontdoors once the burst
-        // settles is enough for an alert and keeps this off the hot path.
+        // Monitor state arrives in bursts; reading Frontdoors at most every
+        // 300 ms keeps this off the hot path. A throttle, not a debounce: a
+        // streaming reply changes the model several times a second, and a
+        // debounce that never settles never showed the alert at all.
         modelSubscription = model.objectWillChange
-            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+            .throttle(for: .milliseconds(300), scheduler: RunLoop.main, latest: true)
             .sink { [weak self] _ in self?.refreshAlerts() }
         // Settings → 표시 요소: the notch itself, and whether a Frontdoor
         // waits for a reply (only while the notch is there to take it).
@@ -554,6 +563,7 @@ final class NotchChatController: NSObject, ObservableObject {
             if replyOpen || waitOpen {
                 queued.removeAll { $0.frontdoorId == next.frontdoorId && $0.reply == nil && next.reply == nil }
                 queued.append(next)
+                pruneQueue()
                 return
             }
         }
@@ -571,6 +581,21 @@ final class NotchChatController: NSObject, ObservableObject {
             }
         }
     }
+
+    /// What waits behind an open alert stays current and bounded: a wait
+    /// nobody answers would otherwise collect every Frontdoor's "done" and
+    /// every expired reply box behind it for as long as it lasts.
+    private func pruneQueue(now: Date = Date()) {
+        queued.removeAll { alert in
+            if let slot = alert.reply { return slot.expiresAt < now }
+            return !alert.isSticky && now.timeIntervalSince(alert.createdAt) > 30
+        }
+        while queued.count > Self.maxQueuedAlerts {
+            queued.remove(at: queued.firstIndex(where: { !$0.isSticky }) ?? 0)
+        }
+    }
+
+    private static let maxQueuedAlerts = 20
 
     /// The app's own deadline, so a lost close message cannot leave a dead
     /// reply box on screen.
@@ -593,8 +618,9 @@ final class NotchChatController: NSObject, ObservableObject {
         guard let current = alert else { return }
         if release, let slot = current.reply { self.release(slot) }
         alert = nil
-        // Waiting ones first; a "done" that sat in the queue too long is old news.
-        queued.removeAll { !$0.isSticky && Date().timeIntervalSince($0.createdAt) > 30 }
+        // Waiting ones first; a "done" that sat in the queue too long is old
+        // news, and so is a reply box whose window closed meanwhile.
+        pruneQueue()
         if let next = queued.firstIndex(where: \.isSticky) ?? queued.indices.last {
             present(queued.remove(at: next))
         } else if !expanded {
@@ -663,6 +689,13 @@ final class NotchChatController: NSObject, ObservableObject {
     func hide() {
         collapse()
         panel?.orderOut(nil)
+        // Let the panel go: hidden, it went on re-rendering its root view on
+        // every model change. show() builds a new one.
+        panel?.contentView = nil
+        panel = nil
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = nil
+        NotificationCenter.default.removeObserver(self, name: NSApplication.didChangeScreenParametersNotification, object: nil)
     }
 
     func toggle() {

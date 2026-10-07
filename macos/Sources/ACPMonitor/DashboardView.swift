@@ -113,7 +113,9 @@ struct DashboardView: View {
                 }
                 .help(panelHelp(sessions: false))
                 .accessibilityLabel(panelHelp(sessions: false))
-                SettingsLink {
+                Button {
+                    model.openSettings()
+                } label: {
                     Label("설정", systemImage: "gearshape")
                 }
                 .help("설정")
