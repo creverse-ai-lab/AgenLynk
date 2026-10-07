@@ -435,6 +435,18 @@ test("a failed history write is retried, and only repeated failures turn history
     store.flush();
     assert.deepEqual(store.readEvents("s").map((saved) => saved.key), ["m1"], "the batch was kept and written");
 
+    // A batch waiting for its retry is history too: clearing removes it.
+    let lockedOnce = true;
+    store.insertEvent.run = (...args) => {
+      if (lockedOnce) { lockedOnce = false; throw new Error("database is locked"); }
+      return realRun(...args);
+    };
+    store.writeEvents("s", [{ ...event, key: "m9" }]);
+    store.flush();
+    store.clear();
+    store.flush();
+    assert.deepEqual(store.readEvents("s"), [], "a cleared history does not come back on the retry");
+
     store.insertEvent.run = () => { throw new Error("disk I/O error"); };
     for (let attempt = 0; attempt < 5; attempt += 1) {
       store.writeEvents("s", [{ ...event, key: `m${attempt + 2}` }]);

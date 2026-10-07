@@ -1796,6 +1796,7 @@ final class AppModel: ObservableObject {
     private func startReconciliation(endpoint: MonitorEndpoint, generation: Int) {
         reconciliationTask?.cancel()
         reconciliationTask = Task { [weak self] in
+            var skipped = 0
             while !Task.isCancelled {
                 // A live stream already carries every change (and a reconnect
                 // fetches a snapshot): this is only a safety net and the
@@ -1815,11 +1816,14 @@ final class AppModel: ObservableObject {
                     ) else { continue }
                     guard self.connectionIsCurrent(generation) else { return }
                     // The stream moved on while this was fetched: the snapshot
-                    // is older than what is on screen. The next round catches up.
-                    if self.monitorStore.revision != before {
+                    // is older than what is on screen. The next round catches
+                    // up; a stream that never pauses gets it on the third.
+                    if self.monitorStore.revision != before, skipped < 2 {
+                        skipped += 1
                         self.sidecarRestartAttempts = 0
                         continue
                     }
+                    skipped = 0
                     self.apply(snapshot)
                     self.sidecarRestartAttempts = 0
                     self.updateConnectionPhase()

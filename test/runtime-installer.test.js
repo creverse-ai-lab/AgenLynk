@@ -252,3 +252,14 @@ test("a packed seed whose archive holds anything else is refused", async () => {
     assert.equal(await readCurrentRuntime(join(workspace, "runtime")), null);
   } finally { await rm(workspace, { recursive: true, force: true }); }
 });
+
+test("the manifest verifier checks a plain seed given only its root", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const workspace = await mkdtemp(join(tmpdir(), "agenlynk-verify-cli-"));
+  try {
+    const source = join(workspace, "gateway-seed");
+    await seed(source);
+    const output = execFileSync(process.execPath, [new URL("../src/verify-runtime-manifest-cli.js", import.meta.url).pathname, source], { encoding: "utf8" });
+    assert.match(output, /runtime manifest verified/);
+  } finally { await rm(workspace, { recursive: true, force: true }); }
+});

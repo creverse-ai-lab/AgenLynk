@@ -285,7 +285,14 @@ async function main() {
   const owner = new GatewaySubscriptionOwner({
     rpc,
     state,
-    applySessionSources: (...args) => applySessionSources(...args),
+    // The owner's pass is the one an overlapping local tick now waits behind
+    // (it is handed the pass after), so what this pass changes is broadcast
+    // here; otherwise it reached no client until something changed again.
+    applySessionSources: async () => {
+      const result = await applySessionSources();
+      if (result.changed) broadcastSessionSources(result);
+      return result;
+    },
     refresh: (...args) => refresh(...args),
     isIgnoredEvent: isIgnoredMonitorEvent
   });
@@ -664,18 +671,20 @@ async function main() {
     }
   }, REFRESH_INTERVAL_MS);
   interval.unref();
+  function broadcastSessionSources({ removedSessionIds, localEvents }) {
+    state.broadcast({
+      kind: "state",
+      connected: state.connected,
+      streaming: state.streaming,
+      ...changedSessions(),
+      removedSessionIds,
+      ...(localEvents ? { events: localEvents } : {})
+    });
+  }
   async function broadcastLocalChanges() {
     try {
-      const { removedSessionIds, changed, localEvents } = await applySessionSources();
-      if (!changed) return;
-      state.broadcast({
-        kind: "state",
-        connected: state.connected,
-        streaming: state.streaming,
-        ...changedSessions(),
-        removedSessionIds,
-        ...(localEvents ? { events: localEvents } : {})
-      });
+      const result = await applySessionSources();
+      if (result.changed) broadcastSessionSources(result);
     } catch (error) {
       // Local scanning is a nicety; a fault here must never take the Gateway
       // view down. Without this catch an unhandled rejection kills the process.
@@ -827,6 +836,19 @@ async function main() {
         connection: "keep-alive"
       });
       response.write("retry: 2000\n\n");
+      // The list as it is now: later state frames carry it only when it
+      // changes, and the snapshot this client fetched may predate this
+      // stream (a change in between would otherwise never reach it).
+      response.write(`data: ${JSON.stringify({
+        kind: "state",
+        connected: state.connected,
+        streaming: state.streaming,
+        sessions: [...state.sessions.values()],
+        tasks: state.tasks,
+        inbox: state.inbox,
+        schemaVersion: MONITOR_SCHEMA_VERSION,
+        monitorApiVersion: MONITOR_API_VERSION
+      })}\n\n`);
       state.addSseClient(response);
       // A reconnecting app still gets the reply windows that are open.
       for (const slot of stopReplies.list()) {

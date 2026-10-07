@@ -232,6 +232,10 @@ export class SqliteMonitorStore {
   clear({ keep = new Set() } = {}) {
     if (this.failed) return 0;
     this.flush();
+    // A batch a failed flush put back in line is history too: written after
+    // this, it would bring back what was just cleared.
+    for (const [key, event] of this.pendingEvents) if (!keep.has(event.sessionId)) this.pendingEvents.delete(key);
+    for (const sessionId of this.pendingSessions.keys()) if (!keep.has(sessionId)) this.pendingSessions.delete(sessionId);
     const ids = this.database.prepare("SELECT session_id FROM sessions").all()
       .map((row) => row.session_id)
       .filter((sessionId) => !keep.has(sessionId));

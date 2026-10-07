@@ -257,10 +257,13 @@ final class NotchChatStore: ObservableObject {
     /// true: keep polling; false: the turn is over; nil: this poll failed.
     private func pollOnce() async -> Bool? {
         guard let sessionId, !Task.isCancelled else { return false }
+        // The same session reattached in a new chat is a new conversation:
+        // a reply to the old one's poll must not land in it.
+        let started = generation
         guard let (client, endpoint) = await model?.chatConnection() else { return nil }
         do {
             let reply = try await client.chatPoll(endpoint: endpoint, sessionId: sessionId, cursor: cursor, waitMs: 0)
-            guard sessionId == self.sessionId, let root = reply.objectValue else { return false }
+            guard !Task.isCancelled, started == generation, sessionId == self.sessionId, let root = reply.objectValue else { return false }
             cursor = root["nextCursor"]?.intValue ?? cursor
             status = root["status"]?.stringValue
             for event in root["events"]?.arrayValue ?? [] {
@@ -687,6 +690,10 @@ final class NotchChatController: NSObject, ObservableObject {
     }
 
     func hide() {
+        // What was showing or waiting is not news once the notch comes back:
+        // the tracker re-baselines then, and an open reply lets its agent go.
+        queued.removeAll()
+        dismissAlert(release: true)
         collapse()
         panel?.orderOut(nil)
         // Let the panel go: hidden, it went on re-rendering its root view on

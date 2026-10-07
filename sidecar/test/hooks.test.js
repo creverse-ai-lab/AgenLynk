@@ -229,6 +229,16 @@ test("another agent's tool does not answer a sub-agent's prompt", () => {
   assert.equal(ending.ingest("claude", { hook_event_name: "Stop", session_id: "s", agent_id: "a2" }).status, "waiting_permission",
     "a sub-agent ending does not end the main line's prompt");
 
+  const subagentEnds = new HookNormalizer();
+  subagentEnds.ingest("claude", { hook_event_name: "PermissionRequest", session_id: "s", agent_id: "a1", tool_name: "Bash" });
+  const stopped = subagentEnds.ingest("claude", { hook_event_name: "SubagentStop", session_id: "s", agent_id: "a1" });
+  assert.equal(stopped.status, "running", "the sub-agent's own end closes its prompt");
+  assert.equal(stopped.events[0]?.detail.outcome, "cancelled");
+  const viaTask = new HookNormalizer();
+  viaTask.ingest("claude", { hook_event_name: "PermissionRequest", session_id: "s", agent_id: "a1", tool_name: "Bash" });
+  assert.equal(viaTask.ingest("claude", { hook_event_name: "PostToolUse", session_id: "s", tool_name: "Task", tool_use_id: "task1" }).status,
+    "running", "the main line's Task result means that sub-agent is done");
+
   const grok = new HookNormalizer();
   grok.ingest("grok", { hook_event_name: "Notification", sessionId: "g", notificationType: "permission_prompt" });
   const ended = grok.ingest("grok", { hook_event_name: "SubagentStop", sessionId: "g" });

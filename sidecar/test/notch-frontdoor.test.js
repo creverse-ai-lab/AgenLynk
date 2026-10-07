@@ -71,6 +71,16 @@ test("a dead session's transcript does not bring it back on the next pass", () =
   assert.deepEqual(registry.merge([scanned], at + 2000), [], "still a prompt nobody will answer");
   const resumed = { ...scanned, state: "running", time: (at + 3000) / 1000 };
   assert.equal(registry.merge([resumed], at + 3000).length, 1, "its transcript moving on is a resume");
+
+  // Resumed in a new process before the old one was found dead, with no
+  // SessionStart: its transcript is newer than the last hook, so it stays.
+  const second = new HookSessions({ claudeRoot: "/nowhere", isAlive: (pid) => alive.has(pid) });
+  alive.add(222);
+  second.record("codex", { hook_event_name: "UserPromptSubmit", session_id: "c2", cwd: "/w" }, at);
+  second.sessions.get("codex:c2").agentPid = 222;
+  alive.delete(222);
+  const elsewhere = { provider: "codex", session: "c2", state: "running", time: (at + 5000) / 1000 };
+  assert.equal(second.merge([elsewhere], at + 6000).length, 1);
 });
 
 test("a replied Stop marks the session running again", () => {

@@ -326,8 +326,12 @@ export class HookSessions {
       // a new process starts over (new lineage, new pid) instead of being
       // judged by the dead one.
       if (entry.agentPid && !this.isAlive(entry.agentPid, entry.agentStart)) {
-        if (raw) merged.splice(merged.indexOf(raw), 1);
         this.sessions.delete(key);
+        // A transcript that moved on after the last hook from that process is
+        // the session resumed elsewhere (a new pid, no SessionStart seen):
+        // it stays listed, as the scanner sees it.
+        if (raw && Number(raw.time || 0) * 1_000 > entry.lastSeen) continue;
+        if (raw) merged.splice(merged.indexOf(raw), 1);
         this.ended.set(key, nowMs);
         if (this.ended.size > MAX_SESSIONS) this.ended.delete(this.ended.keys().next().value);
         continue;

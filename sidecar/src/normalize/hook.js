@@ -97,6 +97,10 @@ const TOOL_EVENTS = new Set(["PreToolUse", "PostToolUse", "PostToolUseFailure", 
  * differently in its permission and tool hooks (code mode wraps MCP calls in
  * `exec`), so there any tool event still counts.
  */
+// Claude's tools that run a sub-agent: their result in the main line means
+// that sub-agent is done, prompts and all.
+const SUBAGENT_TOOLS = new Set(["Task", "Agent"]);
+
 function answersPrompt(open, provider, hook) {
   if (provider !== "claude") return true;
   const agentId = hook.agentId ?? null;
@@ -105,8 +109,16 @@ function answersPrompt(open, provider, hook) {
     // ends only its own.
     return agentId === null || agentId === open.agentId;
   }
+  if (open.agentId !== null && agentId === null && SUBAGENT_TOOLS.has(hook.toolName)
+    && hook.event !== "PreToolUse") return true;
   if (agentId !== open.agentId) return false;
   return !hook.toolName || !open.toolName || hook.toolName === open.toolName;
+}
+
+/** How a sub-agent's own end closes its open prompt (Claude fires SubagentStop in the parent). */
+function subagentOutcome(open, provider, hook) {
+  if (provider !== "claude" || hook.event !== "SubagentStop") return null;
+  return hook.agentId && hook.agentId === open.agentId ? { status: "cancelled", label: "cancelled" } : null;
 }
 
 function notificationStatus(type) {
@@ -165,7 +177,7 @@ export class HookNormalizer {
       // Grok's SubagentStop is that session's own turn end (see above).
       const outcome = provider === "grok" && hook.event === "SubagentStop"
         ? { status: "cancelled", label: "cancelled" }
-        : permissionOutcome(hook.event);
+        : permissionOutcome(hook.event) ?? subagentOutcome(open, provider, hook);
       if (outcome && answersPrompt(open, provider, hook)) {
         events.push(monitorEvent({
           key: open.key, kind: "permission_request", ts, source: SOURCE, turnId: hook.turnId,

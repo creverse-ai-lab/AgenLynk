@@ -16,7 +16,7 @@ import { isPackedSeed, materializeSeed } from "./runtime-staging.js";
 const args = process.argv.slice(2);
 const expandIndex = args.indexOf("--expand-to");
 const expandTo = expandIndex >= 0 ? args[expandIndex + 1] : null;
-const root = args.find((value, index) => !value.startsWith("--") && index !== expandIndex + 1);
+const root = args.find((value, index) => !value.startsWith("--") && (expandIndex < 0 || index !== expandIndex + 1));
 if (!root || (expandIndex >= 0 && !expandTo)) {
   process.stderr.write("usage: verify-runtime-manifest-cli.js <runtime root> [--expand-to <dir>]\n");
   process.exit(1);
