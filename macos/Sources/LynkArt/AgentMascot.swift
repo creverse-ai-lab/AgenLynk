@@ -530,13 +530,14 @@ struct MascotStyle {
             horn = Color(red: 0.78, green: 0.36, blue: 0.24)
             hornTip = Color(red: 0.98, green: 0.62, blue: 0.46)
         case "codex":
-            top = Color(red: 0.9, green: 0.99, blue: 0.96)
-            bottom = Color(red: 0.55, green: 0.85, blue: 0.79)
-            ink = Color(red: 0.03, green: 0.15, blue: 0.13)
+            // Codex's blues, a little cooler than AgenLynk's own.
+            top = Color(red: 0.91, green: 0.95, blue: 1.0)
+            bottom = Color(red: 0.6, green: 0.73, blue: 0.97)
+            ink = Color(red: 0.05, green: 0.09, blue: 0.24)
             pin = Color(white: 0.1)
             emblem = .white
-            horn = Color(red: 0.04, green: 0.42, blue: 0.37)
-            hornTip = Color(red: 0.2, green: 0.75, blue: 0.66)
+            horn = Color(red: 0.16, green: 0.32, blue: 0.84)
+            hornTip = Color(red: 0.45, green: 0.62, blue: 1.0)
         case "grok":
             top = Color(red: 0.93, green: 0.93, blue: 0.94)
             bottom = Color(red: 0.77, green: 0.77, blue: 0.79)
