@@ -186,7 +186,9 @@ final class NotchChatStore: ObservableObject {
         self.permission = nil
         Task {
             do {
-                guard let (client, endpoint) = await model?.chatConnection() else { return }
+                guard let (client, endpoint) = await model?.chatConnection() else {
+                    throw NotchChatError("Gateway monitor에 아직 연결되지 않았습니다.")
+                }
                 _ = try await client.chatPost(endpoint: endpoint, path: "permission", body: [
                     "sessionId": .string(sessionId),
                     "requestId": .number(Double(permission.requestId)),
@@ -194,8 +196,9 @@ final class NotchChatStore: ObservableObject {
                 ])
             } catch {
                 // The poll cursor is past the request; put the card back so
-                // it can still be answered.
-                if self.sessionId == sessionId, self.permission == nil { self.permission = permission }
+                // it can still be answered. A chat left meanwhile gets neither.
+                guard self.sessionId == sessionId else { return }
+                if self.permission == nil { self.permission = permission }
                 messages.append(NotchChatMessage(role: .note, text: error.localizedDescription))
             }
         }
@@ -474,6 +477,12 @@ final class NotchChatController: NSObject, ObservableObject {
         Task { [weak self] in
             let delivered = await self?.replyAction(slot.id, ["action": .string("answer"), "text": .string(trimmed)])
             guard let self, delivered != true else { return }
+            // Not delivered while the Frontdoor still waits: give the box
+            // back instead of leaving it waiting for nothing.
+            if slot.expiresAt > Date() {
+                self.present(current)
+                return
+            }
             self.present(NotchAlert(
                 kind: .failed, frontdoorId: current.frontdoorId, sessionId: current.sessionId,
                 provider: current.provider, title: current.title,
