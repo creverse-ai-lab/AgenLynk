@@ -12,27 +12,36 @@ struct DevilMascot: View {
     var mood: AgentMascot.Mood = .idle
     /// The AgenLynk spear in its hand; dropped at small sizes either way.
     var holdsStaff = true
+    var still = false
 
     var body: some View {
         let style = MascotStyle(provider: provider)
-        TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !animates)) { context in
-            let phase = context.date.timeIntervalSinceReferenceDate
-            ZStack {
-                Ellipse()
-                    .fill(Color.black.opacity(0.3))
-                    .frame(width: bodyWidth * 0.8, height: size * 0.07)
-                    .blur(radius: size * 0.025)
-                    .offset(y: size * 0.4)
-                if size >= 26 {
-                    tail(style, phase: phase)
-                        .offset(y: bob(phase))
-                }
-                if holdsStaff && size >= 30 { spear(style) }
-                character(style, phase: phase)
-                    .offset(y: bob(phase))
+        // Each part is flattened once and moved by a transform animation (see
+        // Motion): nothing here is redrawn frame by frame.
+        ZStack {
+            Ellipse()
+                .fill(Color.black.opacity(0.3))
+                .frame(width: bodyWidth * 0.8, height: size * 0.07)
+                .blur(radius: size * 0.025)
+                .offset(y: size * 0.4)
+                .modifier(Flattened(margin: size * 0.05))
+            if size >= 26 {
+                tail(style)
+                    .modifier(BobMotion(mood: mood, size: size))
             }
-            .frame(width: size, height: size)
+            if holdsStaff && size >= 30 {
+                spear(style)
+                    .modifier(Flattened(margin: size * 0.1))
+            }
+            // The body alone breathes, sways or sags outside a turn: one layer
+            // to move, while the tail and trident stay put.
+            character(style, phase: 0)
+                .modifier(Flattened(margin: size * 0.3))
+                .modifier(RestingMotion(mood: still ? .working : mood))
+                .modifier(BobMotion(mood: mood, size: size))
         }
+        .frame(width: size, height: size)
+        .task(id: blinks) { if blinks { await Blink.run($eyesShut) } }
         .accessibilityLabel("\(AgentMascot.label(provider)) 봇")
     }
 
@@ -48,15 +57,8 @@ struct DevilMascot: View {
     private var bodyWidth: CGFloat { size * 0.72 }
     private var bodyHeight: CGFloat { size * 0.56 }
     private var animates: Bool { mood == .working || mood == .waiting }
-
-    /// A gentle bob while working; little hops while it waits on the person.
-    private func bob(_ phase: Double) -> CGFloat {
-        switch mood {
-        case .working: CGFloat(sin(phase * 3.2)) * size * 0.022
-        case .waiting: CGFloat(abs(sin(phase * 5))) * -size * 0.035
-        default: 0
-        }
-    }
+    private var blinks: Bool { mood == .working || mood == .idle }
+    @State private var eyesShut = false
 
     // MARK: Character
 
@@ -134,9 +136,7 @@ struct DevilMascot: View {
         let eyeWidth = width * 0.085
         let eyeHeight = height * 0.2
         let spacing = width * 0.15
-        let blink = mood == .working || mood == .idle
-            ? (phase.truncatingRemainder(dividingBy: 4.2) < 0.12 ? 0.15 : 1.0)
-            : 1.0
+        let blink = blinks && eyesShut ? 0.15 : 1.0
         let eyeY = height * (mood == .waiting ? 0.0 : 0.05)
         ZStack {
             ForEach([-1.0, 1.0], id: \.self) { side in
@@ -260,9 +260,8 @@ struct DevilMascot: View {
 
     /// A thin tail curling out to the left, ending in a spade; it sways while
     /// the devil works.
-    private func tail(_ style: MascotStyle, phase: Double) -> some View {
-        let sway = mood == .working || mood == .waiting ? sin(phase * 4) * 8 : 0
-        return ZStack {
+    private func tail(_ style: MascotStyle) -> some View {
+        ZStack {
             TailCurve()
                 .stroke(style.fin, style: StrokeStyle(lineWidth: max(1.2, size * 0.035), lineCap: .round))
                 .frame(width: size * 0.3, height: size * 0.3)
@@ -272,7 +271,8 @@ struct DevilMascot: View {
                 .rotationEffect(.degrees(-40))
                 .offset(x: -size * 0.15, y: -size * 0.14)
         }
-        .rotationEffect(.degrees(sway), anchor: .bottomTrailing)
+        .modifier(Flattened(margin: size * 0.12))
+        .modifier(SwayMotion(active: animates, degrees: 8, anchor: .bottomTrailing))
         .offset(x: -size * 0.35, y: size * 0.14)
     }
 }

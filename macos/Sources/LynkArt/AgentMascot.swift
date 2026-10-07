@@ -59,14 +59,11 @@ public struct AgentMascot: View {
     public var body: some View {
         Group {
             switch kind {
-            case .devil: DevilMascot(provider: provider, size: size, mood: mood, holdsStaff: holdsStaff)
-            case .mermaid: MermaidMascot(provider: provider, size: size, mood: mood, holdsStaff: holdsStaff)
+            case .devil: DevilMascot(provider: provider, size: size, mood: mood, holdsStaff: holdsStaff, still: still)
+            case .mermaid: MermaidMascot(provider: provider, size: size, mood: mood, holdsStaff: holdsStaff, still: still)
             }
         }
-        // Flattened once, so the resting motion only moves a finished image
-        // instead of re-compositing every gradient and shadow each frame.
-        .drawingGroup()
-        .modifier(RestingMotion(mood: still ? .working : mood))
+
     }
 
     static func label(_ provider: String) -> String {
@@ -87,28 +84,39 @@ struct MermaidMascot: View {
     var size: CGFloat
     var mood: AgentMascot.Mood = .idle
     var holdsStaff = true
+    var still = false
 
     var body: some View {
         let style = MascotStyle(provider: provider)
-        TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !animates)) { context in
-            let phase = context.date.timeIntervalSinceReferenceDate
-            ZStack {
-                Ellipse()
-                    .fill(Color.black.opacity(0.3))
-                    .frame(width: bodyWidth * 0.8, height: size * 0.07)
-                    .blur(radius: size * 0.025)
-                    .offset(y: size * 0.4)
-                if size >= 26 {
-                    tail(style, phase: phase)
-                        .offset(y: bob(phase))
-                }
-                if holdsStaff && size >= 30 { spear(style) }
-                character(style, phase: phase)
-                    .offset(y: bob(phase))
-                bubbles(phase: phase)
+        // Each part is flattened once and moved by a transform animation (see
+        // Motion): nothing here is redrawn frame by frame.
+        ZStack {
+            Ellipse()
+                .fill(Color.black.opacity(0.3))
+                .frame(width: bodyWidth * 0.8, height: size * 0.07)
+                .blur(radius: size * 0.025)
+                .offset(y: size * 0.4)
+                .modifier(Flattened(margin: size * 0.05))
+            if size >= 26 {
+                tail(style)
+                    .modifier(BobMotion(mood: mood, size: size))
             }
-            .frame(width: size, height: size)
+            if holdsStaff && size >= 30 {
+                spear(style)
+                    .modifier(Flattened(margin: size * 0.1))
+            }
+            // The body alone breathes, sways or sags outside a turn: one layer
+            // to move, while the tail and trident stay put.
+            character(style, phase: 0)
+                .modifier(Flattened(margin: size * 0.3))
+                .modifier(RestingMotion(mood: still ? .working : mood))
+                .modifier(BobMotion(mood: mood, size: size))
+            bubbles()
+                .modifier(Flattened(margin: size * 0.05))
+                .modifier(RiseMotion(active: animates, distance: size * 0.06))
         }
+        .frame(width: size, height: size)
+        .task(id: blinks) { if blinks { await Blink.run($eyesShut) } }
         .accessibilityLabel("\(AgentMascot.label(provider)) 봇")
     }
 
@@ -124,15 +132,8 @@ struct MermaidMascot: View {
     private var bodyWidth: CGFloat { size * 0.72 }
     private var bodyHeight: CGFloat { size * 0.58 }
     private var animates: Bool { mood == .working || mood == .waiting }
-
-    /// A gentle bob while working; little hops while it waits on the person.
-    private func bob(_ phase: Double) -> CGFloat {
-        switch mood {
-        case .working: CGFloat(sin(phase * 3.2)) * size * 0.022
-        case .waiting: CGFloat(abs(sin(phase * 5))) * -size * 0.035
-        default: 0
-        }
-    }
+    private var blinks: Bool { mood == .working || mood == .idle }
+    @State private var eyesShut = false
 
     // MARK: Character
 
@@ -221,9 +222,7 @@ struct MermaidMascot: View {
         let eyeWidth = width * 0.085
         let eyeHeight = height * 0.2
         let spacing = width * 0.15
-        let blink = mood == .working || mood == .idle
-            ? (phase.truncatingRemainder(dividingBy: 4.2) < 0.12 ? 0.15 : 1.0)
-            : 1.0
+        let blink = blinks && eyesShut ? 0.15 : 1.0
         let eyeY = height * (mood == .waiting ? 0.0 : 0.05)
         ZStack {
             ForEach([-1.0, 1.0], id: \.self) { side in
@@ -337,9 +336,8 @@ struct MermaidMascot: View {
 
     /// A fish tail curling up behind the bun on the left, scaled, ending in
     /// a two-lobed fin; it sways while the mermaid works.
-    private func tail(_ style: MascotStyle, phase: Double) -> some View {
-        let sway = mood == .working || mood == .waiting ? sin(phase * 4) * 7 : 0
-        return ZStack {
+    private func tail(_ style: MascotStyle) -> some View {
+        ZStack {
             ZStack {
                 LinearGradient(colors: [style.finTip, style.fin], startPoint: .topLeading, endPoint: .bottomTrailing)
                 Scales()
@@ -359,15 +357,15 @@ struct MermaidMascot: View {
             .offset(x: -size * 0.1, y: -size * 0.13)
         }
         .shadow(color: .black.opacity(0.22), radius: size * 0.012, y: size * 0.008)
-        .rotationEffect(.degrees(sway), anchor: .bottomTrailing)
+        .modifier(Flattened(margin: size * 0.12))
+        .modifier(SwayMotion(active: animates, degrees: 7, anchor: .bottomTrailing))
         .offset(x: -size * 0.43, y: size * 0.2)
     }
 
     /// Bubbles rising by the head, drifting up while the mermaid works.
     @ViewBuilder
-    private func bubbles(phase: Double) -> some View {
+    private func bubbles() -> some View {
         if size >= 40 {
-            let rise = animates ? CGFloat((phase * 0.6).truncatingRemainder(dividingBy: 1)) * size * 0.06 : 0
             ZStack {
                 ForEach(Array([(0.0, 0.0, 0.07), (0.05, -0.1, 0.045), (-0.02, -0.18, 0.03)].enumerated()), id: \.offset) { _, bubble in
                     Circle()
@@ -381,7 +379,7 @@ struct MermaidMascot: View {
                         .offset(x: size * bubble.0, y: size * bubble.1)
                 }
             }
-            .offset(x: -size * 0.4, y: -size * 0.25 - rise)
+            .offset(x: -size * 0.4, y: -size * 0.25)
         }
     }
 }
@@ -412,6 +410,85 @@ struct RestingMotion: ViewModifier {
             .rotationEffect(.degrees(angle), anchor: .bottom)
             .animation(.easeInOut(duration: period).repeatForever(autoreverses: true), value: phase)
             .onAppear { phase = true }
+    }
+}
+
+// MARK: Motion
+
+// The mascots move by animating transforms of finished, flattened layers
+// (offset, rotation), never by redrawing their gradients and shadows each
+// frame. A repeating animation runs only while it shows: switching it off
+// replaces it with a plain one, so an idle mascot costs nothing per frame.
+
+/// Flattens a layer into one image, with room around it so nothing it draws
+/// outside its frame (fins, horns, a fluke) is clipped.
+struct Flattened: ViewModifier {
+    let margin: CGFloat
+    func body(content: Content) -> some View {
+        content.padding(margin).drawingGroup().padding(-margin)
+    }
+}
+
+/// The working bob and the waiting hop, for every layer that moves with the
+/// body.
+struct BobMotion: ViewModifier {
+    let mood: AgentMascot.Mood
+    let size: CGFloat
+    @State private var up = false
+
+    func body(content: Content) -> some View {
+        let (offset, animation): (CGFloat, Animation?) = switch mood {
+        case .working: (up ? -size * 0.022 : size * 0.022, .easeInOut(duration: 0.98).repeatForever(autoreverses: true))
+        case .waiting: (up ? -size * 0.035 : 0, .easeOut(duration: 0.31).repeatForever(autoreverses: true))
+        default: (0, nil)
+        }
+        content
+            .offset(y: offset)
+            .animation(animation ?? .default, value: up)
+            .task(id: mood) { up = animation != nil }
+    }
+}
+
+/// A tail swaying about its root while the mascot works or waits.
+struct SwayMotion: ViewModifier {
+    let active: Bool
+    let degrees: Double
+    let anchor: UnitPoint
+    @State private var right = false
+
+    func body(content: Content) -> some View {
+        content
+            .rotationEffect(.degrees(active ? (right ? degrees : -degrees) : 0), anchor: anchor)
+            .animation(active ? .easeInOut(duration: 0.78).repeatForever(autoreverses: true) : .default, value: right)
+            .task(id: active) { right = active }
+    }
+}
+
+/// Bubbles drifting up and starting over, while the mascot works or waits.
+struct RiseMotion: ViewModifier {
+    let active: Bool
+    let distance: CGFloat
+    @State private var risen = false
+
+    func body(content: Content) -> some View {
+        content
+            .offset(y: active && risen ? -distance : 0)
+            .animation(active ? .linear(duration: 1.67).repeatForever(autoreverses: false) : .default, value: risen)
+            .task(id: active) { risen = active }
+    }
+}
+
+/// Whether the eyes are shut this instant: a short blink every few seconds,
+/// two state changes per blink instead of a clock ticking every frame.
+struct Blink {
+    static func run(_ shut: Binding<Bool>) async {
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 4_080_000_000)
+            guard !Task.isCancelled else { return }
+            shut.wrappedValue = true
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            shut.wrappedValue = false
+        }
     }
 }
 
