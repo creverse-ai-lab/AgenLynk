@@ -25,7 +25,7 @@ import {
   verifyRuntimeManifest
 } from "./runtime-manifest.js";
 import { PREVIOUS_POINTER_FILE, readPointerFile, writePointerFile } from "./runtime-pointer.js";
-import { stageVerifiedRuntime } from "./runtime-staging.js";
+import { isPackedSeed, stageVerifiedRuntime } from "./runtime-staging.js";
 import { directoryBytes, runtimeVersionsInUse } from "./runtime-usage.js";
 
 export { defaultRuntimeRoot };
@@ -259,7 +259,9 @@ export async function stageRuntimeCandidate(options) {
     }
 
     const manifest = await readCandidateManifest(seedRoot);
-    await verifyCandidate(seedRoot, manifest);
+    // A packed seed is verified once unpacked, in staging, before it can
+    // replace anything.
+    if (!(await isPackedSeed(seedRoot))) await verifyCandidate(seedRoot, manifest);
     assertSupportedGatewayApiVersion(manifest);
 
     const versionId = runtimeVersionId(manifest);

@@ -40,6 +40,7 @@ cleanup() {
   "$LSREGISTER" -u "$MOUNT_POINT/AgenLynk.app" >/dev/null 2>&1 || true
   hdiutil detach "$MOUNT_POINT" -quiet -force >/dev/null 2>&1 || true
   rmdir "$MOUNT_POINT" 2>/dev/null || true
+  [ -z "${UNPACKED_SEED:-}" ] || rm -rf "$UNPACKED_SEED"
 }
 trap cleanup EXIT INT TERM
 
@@ -96,8 +97,17 @@ for BINARY in "$APP/Contents/MacOS/ACPMonitor" "$PET_EXECUTABLE"; do
 done
 printf '%s\n' "No shipped binary resolves through a build-machine path"
 
-RUNTIME_DIR="$APP/Contents/Resources/gateway-seed"
+SEED_DIR="$APP/Contents/Resources/gateway-seed"
 SIDECAR_DIR="$APP/Contents/Resources/sidecar"
+# A packed seed (runtime-payload.tar.xz) is checked the way it will be
+# installed: unpacked, then held to its manifest. RUNTIME_DIR is that tree.
+RUNTIME_DIR="$SEED_DIR"
+UNPACKED_SEED=""
+if [ -f "$SEED_DIR/runtime-payload.tar.xz" ]; then
+  UNPACKED_SEED=$(mktemp -d)
+  RUNTIME_DIR="$UNPACKED_SEED/runtime"
+  "$SYSTEM_NODE" "$REPO_ROOT/src/verify-runtime-manifest-cli.js" "$SEED_DIR" --expand-to "$RUNTIME_DIR"
+fi
 if [ ! -f "$RUNTIME_DIR/node_modules/acp-gateway-daemon/src/index.js" ] \
   || [ ! -f "$RUNTIME_DIR/node_modules/acp-gateway-daemon/gateway-client/index.js" ] \
   || [ ! -f "$RUNTIME_DIR/gateway-package.json" ] \
@@ -113,9 +123,9 @@ if [ ! -L "$RUNTIME_DIR/gateway" ] || [ "$(readlink "$RUNTIME_DIR/gateway")" != 
   echo "error: gateway-seed/gateway is not the alias for node_modules/acp-gateway-daemon" >&2
   exit 1
 fi
-"$SYSTEM_NODE" "$REPO_ROOT/src/verify-runtime-manifest-cli.js" "$RUNTIME_DIR"
+[ -n "$UNPACKED_SEED" ] || "$SYSTEM_NODE" "$REPO_ROOT/src/verify-runtime-manifest-cli.js" "$RUNTIME_DIR"
 
-if [ "$RUNTIME_DIR" = "$SIDECAR_DIR" ] || [ -e "$RUNTIME_DIR/sidecar" ] || [ -e "$SIDECAR_DIR/gateway" ]; then
+if [ "$SEED_DIR" = "$SIDECAR_DIR" ] || [ -e "$RUNTIME_DIR/sidecar" ] || [ -e "$SIDECAR_DIR/gateway" ]; then
   echo "error: Gateway and sidecar resource roots are not isolated" >&2
   exit 1
 fi
@@ -124,12 +134,12 @@ printf '%s\n' "Gateway daemon and sidecar resources are isolated"
 codesign --verify --deep --strict "$APP"
 printf '%s\n' "codesign --verify passed"
 
-# Bundled Node must execute entirely from the mounted image, proving it does
-# not depend on a system Node/npm/npx at all. A development build with no
+# Bundled Node must execute from the mounted image (npm/npx from the seed as
+# unpacked above), proving it does not depend on a system Node/npm/npx at all. A development build with no
 # bundled Node distribution skips this (see build-app.sh).
-if [ -x "$RUNTIME_DIR/node/bin/node" ]; then
+if [ -x "$SEED_DIR/node/bin/node" ]; then
   RESTRICTED_PATH="$RUNTIME_DIR/node/bin:/usr/bin:/bin"
-  env -i PATH="$RESTRICTED_PATH" "$RUNTIME_DIR/node/bin/node" --version >/dev/null
+  env -i PATH="$RESTRICTED_PATH" "$SEED_DIR/node/bin/node" --version >/dev/null
   env -i PATH="$RESTRICTED_PATH" "$RUNTIME_DIR/node/bin/npm" --version >/dev/null
   env -i PATH="$RESTRICTED_PATH" "$RUNTIME_DIR/node/bin/npx" --version >/dev/null
   printf '%s\n' "Bundled node/npm/npx executed from the mounted DMG with a Homebrew/system-Node-free PATH"
@@ -141,6 +151,7 @@ fi
 # filesystem — nothing below this line reads from $MOUNT_POINT.
 "$LSREGISTER" -u "$APP/Contents/Helpers/LynkPet.app" >/dev/null 2>&1 || true
 "$LSREGISTER" -u "$APP" >/dev/null 2>&1 || true
+[ -z "$UNPACKED_SEED" ] || rm -rf "$UNPACKED_SEED"
 hdiutil detach "$MOUNT_POINT" -quiet
 trap - EXIT INT TERM
 rmdir "$MOUNT_POINT" 2>/dev/null || true

@@ -253,6 +253,22 @@ if [ -x "$GATEWAY_SEED/node/bin/node" ]; then
     exit 1
   fi
   "$BUILD_NODE" "$GATEWAY_SEED/app-runtime/build-runtime-manifest-cli.js" "$GATEWAY_SEED"
+
+  # Pack the bulk of the seed into one xz archive (see SEED_PAYLOAD_FILE in
+  # runtime-staging.js): the npm package, its gateway/ alias and npm/npx are
+  # ~6,000 small files and ~60MB on disk, a few MB packed. The manifest above
+  # describes the unpacked tree; staging unpacks before it verifies. Nothing
+  # packed is Mach-O (checked above), so no signature is hidden in it, and
+  # bin/node stays a plain signed file because it is what unpacks the rest.
+  # No AppleDouble files or extended attributes: those would be extra files
+  # or metadata the manifest does not list.
+  PACKED="node_modules gateway node/lib node/bin/npm node/bin/npx"
+  # shellcheck disable=SC2086
+  (cd "$GATEWAY_SEED" && COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata \
+    --options xz:compression-level=9,xz:threads=0 -cJf runtime-payload.tar.xz $PACKED)
+  for ENTRY in $PACKED; do
+    rm -rf "${GATEWAY_SEED:?}/$ENTRY"
+  done
 fi
 
 # LynkPet is a nested LSUIElement helper app. Validate its pure contract/layout
@@ -280,11 +296,16 @@ codesign --verify --deep --strict "$APP"
 # no other system Node — node/npm/npx must still execute. npm/npx are
 # `#!/usr/bin/env node` shims, so this also proves the runtime's own PATH
 # ordering (bin first) resolves them to the bundled node, not any other one.
+# The packed seed is unpacked the way staging does it and must match its
+# manifest exactly, so a broken archive fails here rather than on first run.
 if [ -x "$GATEWAY_SEED/node/bin/node" ]; then
-  RESTRICTED_PATH="$GATEWAY_SEED/node/bin:/usr/bin:/bin"
+  UNPACKED_SEED=$(mktemp -d)
+  "$GATEWAY_SEED/node/bin/node" "$GATEWAY_SEED/app-runtime/verify-runtime-manifest-cli.js" "$GATEWAY_SEED" --expand-to "$UNPACKED_SEED/runtime"
+  RESTRICTED_PATH="$UNPACKED_SEED/runtime/node/bin:/usr/bin:/bin"
   env -i PATH="$RESTRICTED_PATH" "$GATEWAY_SEED/node/bin/node" --version >/dev/null
-  env -i PATH="$RESTRICTED_PATH" "$GATEWAY_SEED/node/bin/npm" --version >/dev/null
-  env -i PATH="$RESTRICTED_PATH" "$GATEWAY_SEED/node/bin/npx" --version >/dev/null
+  env -i PATH="$RESTRICTED_PATH" "$UNPACKED_SEED/runtime/node/bin/npm" --version >/dev/null
+  env -i PATH="$RESTRICTED_PATH" "$UNPACKED_SEED/runtime/node/bin/npx" --version >/dev/null
+  rm -rf "$UNPACKED_SEED"
   printf '%s\n' "Bundled node/npm/npx executed with a Homebrew/system-Node-free PATH"
 fi
 printf '%s\n' "Built $APP"

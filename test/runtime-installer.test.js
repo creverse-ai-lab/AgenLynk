@@ -5,6 +5,8 @@ import { join } from "node:path";
 import test from "node:test";
 import { buildRuntimeManifest } from "../src/runtime-manifest.js";
 import { ensureRuntimeInstalled, readCurrentRuntime } from "../src/runtime-installer.js";
+import { isPackedSeed, SEED_PAYLOAD_FILE } from "../src/runtime-staging.js";
+import { stageRuntimeCandidate } from "../src/runtime-updater.js";
 import { writeRuntimeSeed } from "./fixtures/runtime-seed.js";
 
 async function seed(root, options = {}, generatedAt = "2026-01-01T00:00:00.000Z") {
@@ -208,5 +210,43 @@ test("app launch upgrades an installed 1.6 runtime tarball to the npm package se
     assert.equal(JSON.parse(await readFile(join(runtimeRoot, "previous.json"), "utf8")).gatewayVersion, "1.6.0");
     assert.equal(await readlink(join(upgraded.runtimeRoot, "gateway")), "node_modules/acp-gateway-daemon");
     assert.match(await readFile(join(runtimeRoot, "current/gateway/src/index.js"), "utf8"), /"npm"/);
+  } finally { await rm(workspace, { recursive: true, force: true }); }
+});
+
+// The distribution build packs these into runtime-payload.tar.xz (build-app.sh).
+async function pack(root, entries = ["node_modules", "gateway", "node/bin/npm", "node/bin/npx"]) {
+  const { execFileSync } = await import("node:child_process");
+  execFileSync("/usr/bin/tar", ["--no-xattrs", "--no-mac-metadata", "-cJf", SEED_PAYLOAD_FILE, ...entries],
+    { cwd: root, env: { ...process.env, COPYFILE_DISABLE: "1" } });
+  for (const entry of entries) await rm(join(root, entry), { recursive: true, force: true });
+}
+
+test("a packed seed is unpacked, verified and activated like a plain one", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "agenlynk-packed-"));
+  try {
+    const source = join(workspace, "Lynk.app/Contents/Resources/gateway-seed");
+    await seed(source);
+    await pack(source);
+    assert.equal(await isPackedSeed(source), true);
+    const runtimeRoot = join(workspace, "runtime");
+    const installed = await ensureRuntimeInstalled({ seedRoot: source, runtimeRoot, smokeCheck: async () => ({}) });
+    await assert.doesNotReject(readFile(join(installed.runtimeRoot, "gateway/gateway-client/index.js")));
+    assert.equal(await readlink(join(installed.runtimeRoot, "gateway")), "node_modules/acp-gateway-daemon");
+    await assert.rejects(lstat(join(installed.runtimeRoot, SEED_PAYLOAD_FILE)), "the archive itself is not installed");
+
+    const staged = await stageRuntimeCandidate({ runtimeRoot: join(workspace, "update-root"), seedRoot: source });
+    assert.equal(staged.ok, true, JSON.stringify(staged.error));
+  } finally { await rm(workspace, { recursive: true, force: true }); }
+});
+
+test("a packed seed whose archive holds anything else is refused", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "agenlynk-packed-bad-"));
+  try {
+    const source = join(workspace, "gateway-seed");
+    await seed(source);
+    await writeFile(join(source, "node_modules/stowaway.js"), "process.exit(0);\n");
+    await pack(source);
+    await assert.rejects(ensureRuntimeInstalled({ seedRoot: source, runtimeRoot: join(workspace, "runtime"), smokeCheck: async () => ({}) }));
+    assert.equal(await readCurrentRuntime(join(workspace, "runtime")), null);
   } finally { await rm(workspace, { recursive: true, force: true }); }
 });

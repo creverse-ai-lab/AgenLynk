@@ -7,10 +7,18 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { readManifestFile, verifyRuntimeManifest } from "../src/runtime-manifest.js";
+import { isPackedSeed, materializeSeed } from "../src/runtime-staging.js";
 
 const app = resolve(process.argv[2] || "build/AgenLynk.app");
 const resources = join(app, "Contents/Resources");
-const seed = join(resources, "gateway-seed");
+const bundledSeed = join(resources, "gateway-seed");
+// The real path: macOS's tmpdir is under the /var -> /private/var link, and
+// the daemon reports the resolved runtime root the sidecar compares with.
+const temporary = await realpath(await mkdtemp(join(tmpdir(), "agenlynk-package-smoke-")));
+// A packed seed runs the way it is installed: unpacked first (staging does
+// the same), then held to the manifest below.
+const seed = await isPackedSeed(bundledSeed) ? join(temporary, "seed") : bundledSeed;
+if (seed !== bundledSeed) await materializeSeed(bundledSeed, seed);
 // The npm package's real directory: what the daemon reports as its runtimeRoot
 // and what the app hands the sidecar. gateway/ is only the alias MCP configs use.
 const gateway = join(seed, "node_modules/acp-gateway-daemon");
@@ -26,7 +34,6 @@ assert.equal(await realpath(join(seed, "gateway/src/index.js")), await realpath(
 const seedManifest = await readManifestFile(seed);
 await verifyRuntimeManifest(seed, seedManifest);
 
-const temporary = await mkdtemp(join(tmpdir(), "agenlynk-package-smoke-"));
 const socketPath = join(temporary, "gateway.sock");
 const installState = join(temporary, "install.json");
 const token = "package-smoke-control-token-123456789";
@@ -49,7 +56,10 @@ const common = {
   ACP_GATEWAY_DISABLE_DYNAMIC_PROVIDERS: "1",
   // The packaged sidecar must not write the user's monitor history.
   ACP_GATEWAY_MONITOR_DB: join(temporary, "monitor.db"),
-  AGENLYNK_HOME: join(temporary, "agenlynk")
+  AGENLYNK_HOME: join(temporary, "agenlynk"),
+  // Bootstrap installs registry adapters with `npm -g`: into the scratch
+  // directory, never the global prefix of whichever npm is first on PATH.
+  NPM_CONFIG_PREFIX: join(temporary, "npm-global")
 };
 
 let daemon;

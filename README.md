@@ -167,7 +167,7 @@ npm run test:quick    # 일상 개발용
 npm run macos:test    # Swift 모델·설정·Pet·온보딩
 ```
 
-앱 UI는 SwiftUI(`macos/Sources/`), Monitor sidecar는 Node(`sidecar/`)입니다. DMG는 `gateway.lock.json`에 고정된 Gateway 1.7.2 npm 패키지(`acp-gateway-daemon`, sha512와 npm provenance로 검증)와 Node를 `Contents/Resources/gateway-seed/`에, 앱과 함께 움직이는 sidecar를 `Contents/Resources/sidecar/`에 담습니다. 소스 트리에서 Gateway를 쓰려면 `npm run gateway:fetch` 또는 `ACP_LYNK_GATEWAY_DEVELOPMENT_ROOT`를 사용하세요.
+앱 UI는 SwiftUI(`macos/Sources/`), Monitor sidecar는 Node(`sidecar/`)입니다. DMG는 `gateway.lock.json`에 고정된 Gateway 1.7.2 npm 패키지(`acp-gateway-daemon`, sha512와 npm provenance로 검증)와 Node를 `Contents/Resources/gateway-seed/`에, 앱과 함께 움직이는 sidecar를 `Contents/Resources/sidecar/`에 담습니다. Gateway 패키지와 npm은 `runtime-payload.tar.xz` 하나로 압축해 넣고, 첫 실행 때 `~/.acp-gateway/runtime`에 풀어 무결성 목록과 대조한 뒤 씁니다. 소스 트리에서 Gateway를 쓰려면 `npm run gateway:fetch` 또는 `ACP_LYNK_GATEWAY_DEVELOPMENT_ROOT`를 사용하세요.
 
 ## 버전 및 수정 이력
 
