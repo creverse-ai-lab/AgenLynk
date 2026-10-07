@@ -40,6 +40,7 @@ import { MONITOR_API_VERSION, MONITOR_SCHEMA_VERSION, MonitorState, queuedSingle
 import { SIDECAR_BUILD_ID, SIDECAR_VERSION } from "../version.js";
 import { LocalEventDelivery, mergeMonitorSessions, projectLocalSnapshot } from "../local-monitor.js";
 import { LocalAgentScanner } from "../local-agents/index.js";
+import { codexApprovesAutomatically } from "../local-agents/codex.js";
 import { hookLineageHeaders, ProcessLineage } from "../local-agents/lineage.js";
 import { LocalTimeline } from "../normalize/local-timeline.js";
 import {
@@ -78,6 +79,8 @@ const SKILL_SYNC_ENABLED = booleanEnv("ACP_GATEWAY_MONITOR_SKILL_SYNC", false);
 const MAX_HOOK_BODY_BYTES = 1024 * 1024;
 // How long a hook answer may wait for its process tree to be read.
 const HOOK_LINEAGE_BUDGET_MS = 250;
+// How long a Codex PermissionRequest may wait to learn its approval mode.
+const APPROVAL_MODE_BUDGET_MS = 250;
 const HOOK_PROVIDERS = new Set(["claude", "codex", "grok"]);
 const GATEWAY_RUNTIME_ROOT = process.env.ACP_GATEWAY_ACTIVE_ROOT ?? null;
 const EXPECTED_GATEWAY_BUILD_ID = expectedGatewayBuildId(GATEWAY_RUNTIME_ROOT);
@@ -150,6 +153,18 @@ function loadIdentity() {
     throw new Error(`No identity in ${path}; run acp-gateway-bootstrap or set ACP_GATEWAY_CONTROL_TOKEN and ACP_GATEWAY_ROOT_ID.`);
   }
   return { token: envToken ?? identity.token, rootId: envRootId ?? identity.rootId, statePath: path };
+}
+
+/**
+ * Whether a Codex PermissionRequest will be decided without its user (see
+ * codexApprovesAutomatically). Read only for that one hook, and never for
+ * longer than the hook may wait: unknown means "asks", as before.
+ */
+async function hookApprovalIsAutomatic(provider, payload) {
+  if (provider !== "codex" || payload?.hook_event_name !== "PermissionRequest") return false;
+  const answer = codexApprovesAutomatically(payload.transcript_path, payload.turn_id).catch(() => false);
+  const timeout = new Promise((resolve) => setTimeout(() => resolve(false), APPROVAL_MODE_BUDGET_MS).unref?.());
+  return Promise.race([answer, timeout]);
 }
 
 async function main() {
@@ -686,7 +701,8 @@ async function main() {
       response.writeHead(400).end();
       return;
     }
-    const recorded = hookSessions.record(provider, payload, Date.now(), hookLineageHeaders(request.headers));
+    const automaticApproval = await hookApprovalIsAutomatic(provider, payload);
+    const recorded = hookSessions.record(provider, payload, Date.now(), hookLineageHeaders(request.headers), { automaticApproval });
     // Which session launched this one (a shell-launched agent is a worker)
     // is read from the process tree while the hook's shell is still alive,
     // i.e. before answering: a short `claude -p` is often gone by the time

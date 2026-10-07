@@ -11,7 +11,7 @@ import { basename, join } from "node:path";
 import { isWithin } from "../app/fs-paths.js";
 import { isCodexTimelineRecord } from "../normalize/codex.js";
 import { epochMs } from "../normalize/model.js";
-import { readRecord, recordSize, slimRecord } from "./jsonl.js";
+import { readRecord, recordSize, reversedRecords, slimRecord } from "./jsonl.js";
 import { recordExternalParent } from "./parent-links.js";
 import { signalWithApprovals } from "./signals.js";
 import { stateRecord } from "./snapshot.js";
@@ -346,4 +346,32 @@ export function prune({ cursors, states, retired, readyAfter, staleAfter, now })
     if (now - modified > staleAfter) retired.delete(path);
   }
   return changed;
+}
+
+// Transcript path -> { turnId, automatic } for the turn last looked at.
+const approvalModes = new Map();
+const MAX_APPROVAL_MODES = 64;
+
+/**
+ * Whether Codex decides this turn's permission requests without its user:
+ * an approval policy of "never", or an automatic reviewer (Codex app's
+ * "Auto review"). Codex runs PermissionRequest hooks before that reviewer, and
+ * its hook payload names only the policy, so the reviewer is read from the
+ * turn's own turn_context record, once per turn.
+ */
+export async function codexApprovesAutomatically(transcriptPath, turnId) {
+  if (typeof transcriptPath !== "string" || !transcriptPath) return false;
+  const cached = approvalModes.get(transcriptPath);
+  if (cached && turnId && cached.turnId === turnId) return cached.automatic;
+  for await (const record of reversedRecords(transcriptPath)) {
+    if (record?.type !== "turn_context") continue;
+    const policy = record.payload?.approval_policy;
+    const reviewer = record.payload?.approvals_reviewer;
+    const automatic = policy === "never" || (typeof reviewer === "string" && reviewer !== "user");
+    approvalModes.delete(transcriptPath);
+    approvalModes.set(transcriptPath, { turnId: record.payload?.turn_id ?? null, automatic });
+    if (approvalModes.size > MAX_APPROVAL_MODES) approvalModes.delete(approvalModes.keys().next().value);
+    return automatic;
+  }
+  return false;
 }

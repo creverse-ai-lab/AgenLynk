@@ -42,6 +42,7 @@ export function readHookPayload(provider, payload) {
     toolUseId: pick("tool_use_id", "toolUseId"),
     toolResponse: pick("tool_response", "toolResult", "tool_result"),
     notificationType: pick("notification_type", "notificationType"),
+    permissionMode: pick("permission_mode", "permissionMode"),
     message: pick("message"),
     timestamp: pick("timestamp")
   };
@@ -84,6 +85,9 @@ function permissionOutcome(event) {
   return null;
 }
 
+// Modes in which the agent never puts a permission question to its user.
+const UNASKED_PERMISSION_MODES = new Set(["bypassPermissions", "dontAsk"]);
+
 function notificationStatus(type) {
   if (type === "permission_prompt") return "waiting_permission";
   if (type === "idle_prompt") return "idle";
@@ -102,7 +106,12 @@ export class HookNormalizer {
   /**
    * @returns {{ hook: object, status: string|null, statusAt: string, events: object[] }}
    */
-  ingest(provider, payload, receivedAt = Date.now()) {
+  /**
+   * `automaticApproval`: the caller knows this agent decides its permission
+   * requests without its user (Codex's automatic review), so a
+   * PermissionRequest is not a wait.
+   */
+  ingest(provider, payload, receivedAt = Date.now(), { automaticApproval = false } = {}) {
     const hook = readHookPayload(provider, payload);
     const ts = isoTime(hook.timestamp) ?? new Date(receivedAt).toISOString();
     const events = [];
@@ -118,6 +127,13 @@ export class HookNormalizer {
     // always about its own session.
     if (provider !== "grok" && hook.agentId && status === "idle") status = "running";
 
+    // A PermissionRequest hook runs before the agent's own approval rules: in
+    // a mode that never asks, or under an automatic reviewer, nobody is asked
+    // and the tool simply runs.
+    if (hook.event === "PermissionRequest"
+      && (automaticApproval || UNASKED_PERMISSION_MODES.has(hook.permissionMode))) {
+      status = "running";
+    }
     const waitsForPermission = status === "waiting_permission";
     const outcome = this.openPermission && !waitsForPermission ? permissionOutcome(hook.event) : null;
     if (outcome) {

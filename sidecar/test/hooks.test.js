@@ -11,6 +11,7 @@ import { writeHookEndpoint } from "../src/hooks/endpoint.js";
 import { ensureHooks, hookStatus, installHooks, uninstallHooks } from "../src/hooks/installer.js";
 import { HookSessions } from "../src/hooks/registry.js";
 import { HookNormalizer, readHookPayload } from "../src/normalize/hook.js";
+import { codexApprovesAutomatically } from "../src/local-agents/codex.js";
 
 const hookScript = fileURLToPath(new URL("../hooks/agenlynk-hook.sh", import.meta.url));
 
@@ -163,6 +164,40 @@ test("a permission prompt is pending until the next sign of progress, for every 
     const resolved = answered.events.find((event) => event.key === request.key);
     assert.equal(resolved?.status, "completed", `${provider} resolves its prompt`);
     assert.equal(resolved.detail.outcome, "approved");
+  }
+});
+
+test("a permission request nobody is asked about is not a wait", () => {
+  const ask = { hook_event_name: "PermissionRequest", session_id: "s", tool_name: "exec" };
+  assert.equal(new HookNormalizer().ingest("codex", ask).status, "waiting_permission");
+  const bypass = new HookNormalizer().ingest("codex", { ...ask, permission_mode: "bypassPermissions" });
+  assert.deepEqual([bypass.status, bypass.events], ["running", []]);
+  const reviewed = new HookNormalizer().ingest("codex", { ...ask, permission_mode: "default" }, Date.now(), { automaticApproval: true });
+  assert.deepEqual([reviewed.status, reviewed.events], ["running", []]);
+  assert.equal(new HookNormalizer().ingest("claude", { ...ask, permission_mode: "dontAsk" }).status, "running");
+  assert.equal(new HookNormalizer().ingest("claude", { ...ask, permission_mode: "default" }).status, "waiting_permission");
+});
+
+test("Codex's approval mode is read from the turn's turn_context", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "agenlynk-codex-approval-"));
+  try {
+    const rollout = (reviewer, policy = "on-request") => [
+      { type: "session_meta", payload: { id: "t" } },
+      { type: "turn_context", payload: { turn_id: "turn-1", approval_policy: policy, approvals_reviewer: reviewer } },
+      { type: "response_item", payload: { type: "message" } }
+    ].map((record) => JSON.stringify(record)).join("\n") + "\n";
+    const auto = join(directory, "auto.jsonl");
+    const user = join(directory, "user.jsonl");
+    const never = join(directory, "never.jsonl");
+    await writeFile(auto, rollout("auto_review"));
+    await writeFile(user, rollout("user"));
+    await writeFile(never, rollout("user", "never"));
+    assert.equal(await codexApprovesAutomatically(auto, "turn-1"), true, "Auto review decides without the user");
+    assert.equal(await codexApprovesAutomatically(user, "turn-1"), false);
+    assert.equal(await codexApprovesAutomatically(never, "turn-1"), true);
+    assert.equal(await codexApprovesAutomatically(join(directory, "missing.jsonl"), "turn-1"), false, "unknown asks, as before");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

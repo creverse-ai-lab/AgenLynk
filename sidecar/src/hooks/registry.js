@@ -87,7 +87,7 @@ export class HookSessions {
    * the launcher markers and parent pid the hook script forwarded
    * (hookLineageHeaders); `heldBack` says the session is not listed yet.
    */
-  record(provider, payload, receivedAt = Date.now(), lineage = null) {
+  record(provider, payload, receivedAt = Date.now(), lineage = null, { automaticApproval = false } = {}) {
     // Grok runs the hooks in ~/.claude/settings.json too, with its own
     // camelCase payload. The script drops those by environment; this catches
     // the ones that arrive anyway, since Grok also reports them itself.
@@ -108,7 +108,7 @@ export class HookSessions {
       this.sessions.set(key, entry);
       if (this.sessions.size > MAX_SESSIONS) this.sessions.delete(this.sessions.keys().next().value);
     }
-    const { hook, statusAt, events, status: reported } = entry.normalizer.ingest(provider, payload, receivedAt);
+    const { hook, statusAt, events, status: reported } = entry.normalizer.ingest(provider, payload, receivedAt, { automaticApproval });
     let status = reported;
     entry.lastSeen = receivedAt;
     if (isActivity(hook)) entry.active = true;
