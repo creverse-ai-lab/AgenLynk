@@ -151,15 +151,91 @@ final class MenuBarVisibility: ObservableObject {
 /// content on every model change for the rest of the app's life: a closed
 /// dashboard redrew ~10 times a second. Measured in a probe app: closed, 105
 /// renders per 10 s without this, none with it; reopened, rendered again.
+///
+/// A minimized window, one on another Space or one fully covered gets no
+/// onDisappear and re-rendered just as much: a minimized dashboard-sized
+/// window updated 10 times a second cost 24% CPU, the same as on screen
+/// (hiding its content still 19-21%, taking it out 0.4%). So the content also
+/// leaves while the window cannot be seen. What it shows (the selected
+/// Frontdoor, session and event) lives in the model and comes back with it.
+/// The empty stand-in keeps the content's last size: a bare Color.clear let
+/// the window shrink to a strip while minimized.
 struct WhileWindowOpen<Content: View>: View {
     @ViewBuilder let content: () -> Content
     @State private var open = true
+    @State private var seen = true
+    @State private var size: CGSize?
 
     var body: some View {
         ZStack {
-            if open { content() } else { Color.clear }
+            if open && seen {
+                content()
+            } else {
+                Color.clear.frame(width: size?.width, height: size?.height)
+            }
         }
+        .onGeometryChange(for: CGSize.self, of: \.size) { newSize in
+            if open && seen { size = newSize }
+        }
+        .background(WindowVisibilityReader(seen: $seen))
         .onAppear { open = true }
         .onDisappear { open = false }
+    }
+}
+
+/// Whether the hosting window can be seen (occlusionState). Out of sight it
+/// reports false only after a few seconds, so a Space swipe or a window
+/// passing over it does not rebuild the content; back in sight it reports
+/// true at once.
+private struct WindowVisibilityReader: NSViewRepresentable {
+    @Binding var seen: Bool
+
+    func makeNSView(context: Context) -> VisibilityView {
+        let view = VisibilityView()
+        view.report = { seen = $0 }
+        return view
+    }
+
+    func updateNSView(_ view: VisibilityView, context: Context) {
+        view.report = { seen = $0 }
+    }
+
+    final class VisibilityView: NSView {
+        var report: ((Bool) -> Void)?
+        private weak var observed: NSWindow?
+        private static let hideDelay: TimeInterval = 3
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard observed !== window else { return }
+            if let observed {
+                NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeOcclusionStateNotification, object: observed)
+            }
+            observed = window
+            if let window {
+                NotificationCenter.default.addObserver(
+                    self, selector: #selector(occlusionChanged),
+                    name: NSWindow.didChangeOcclusionStateNotification, object: window
+                )
+            }
+            occlusionChanged()
+        }
+
+        @objc private func occlusionChanged() {
+            NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(reportHidden), object: nil)
+            guard let window else { return }
+            if window.occlusionState.contains(.visible) {
+                report?(true)
+            } else {
+                perform(#selector(reportHidden), with: nil, afterDelay: Self.hideDelay)
+            }
+        }
+
+        @objc private func reportHidden() {
+            guard let window, !window.occlusionState.contains(.visible) else { return }
+            report?(false)
+        }
     }
 }
