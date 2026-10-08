@@ -37,7 +37,9 @@ final class SettingsWindowPresenter {
                 forName: NSWindow.willCloseNotification, object: window, queue: .main
             ) { [weak self] _ in
                 // After the close finishes: this is the window's only owner.
-                DispatchQueue.main.async { self?.release() }
+                // A main-actor presenter is Sendable; the weak var is not.
+                let presenter = self
+                Task { @MainActor in presenter?.release() }
             }
         }
         NSApp.activate(ignoringOtherApps: true)
@@ -83,7 +85,8 @@ final class SessionDetailWindowPresenter {
             ) { [weak self] _ in
                 // Let go after the close finishes: this dictionary is the
                 // window's only owner, and AppKit is still closing it here.
-                DispatchQueue.main.async { self?.release(sessionId) }
+                let presenter = self
+                Task { @MainActor in presenter?.release(sessionId) }
             }
             return window
         }()

@@ -197,7 +197,7 @@ private struct NotchSessionCard: View {
         }
     }
 
-    @ViewBuilder
+    @MainActor @ViewBuilder
     private func content(finished: Bool) -> some View {
         let focus = card.focus
         let awaitingReply = FrontdoorPhase.members(card.frontdoor).contains { replying.contains($0.sessionId) }
