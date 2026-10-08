@@ -46,28 +46,33 @@ public struct AgentMascot: View {
     /// Leaves out the resting motion (breathing, swaying, sagging), for a
     /// host that renders the mascot once as a still image.
     public var still = false
+    /// Holds the mood's pose and moves nothing at all, not even in a turn:
+    /// for a mascot that has had its moment (an alert after its first
+    /// seconds). One moving 46pt mascot cost 14% CPU, a frozen one nothing.
+    public var frozen = false
 
-    public init(provider: String, size: CGFloat, mood: Mood = .idle, holdsStaff: Bool = true, kind: Kind = .mermaid, still: Bool = false) {
+    public init(provider: String, size: CGFloat, mood: Mood = .idle, holdsStaff: Bool = true, kind: Kind = .mermaid, still: Bool = false, frozen: Bool = false) {
         self.provider = provider
         self.size = size
         self.mood = mood
         self.holdsStaff = holdsStaff
         self.kind = kind
         self.still = still
+        self.frozen = frozen
     }
 
     public var body: some View {
         Group {
             switch kind {
-            case .devil: DevilMascot(provider: provider, size: size, mood: mood, holdsStaff: holdsStaff)
-            case .mermaid: MermaidMascot(provider: provider, size: size, mood: mood, holdsStaff: holdsStaff)
+            case .devil: DevilMascot(provider: provider, size: size, mood: mood, holdsStaff: holdsStaff, motion: !frozen)
+            case .mermaid: MermaidMascot(provider: provider, size: size, mood: mood, holdsStaff: holdsStaff, motion: !frozen)
             }
         }
         // Outside a turn nothing inside moves: the whole mascot is one image
         // and the resting motion moves just that. In a turn its parts are
         // flattened one by one instead, so they can move on their own.
-        .moving(!AgentMascot.moves(mood), WholeFlattened())
-        .moving(!still, RestingMotion(mood: mood))
+        .moving(frozen || !AgentMascot.moves(mood), WholeFlattened())
+        .moving(!still && !frozen, RestingMotion(mood: mood))
     }
 
     /// Whether this mood moves the mascot's parts (bob, hop, sway, bubbles).
@@ -91,6 +96,8 @@ struct MermaidMascot: View {
     var size: CGFloat
     var mood: AgentMascot.Mood = .idle
     var holdsStaff = true
+    /// False holds the mood's pose without moving (AgentMascot.frozen).
+    var motion = true
 
     var body: some View {
         let style = MascotStyle(provider: provider)
@@ -124,7 +131,7 @@ struct MermaidMascot: View {
                 .moving(animates, RiseMotion(active: true, distance: size * 0.06))
         }
         .frame(width: size, height: size)
-        .moving(mood == .waiting, CallingMotion())
+        .moving(motion && mood == .waiting, CallingMotion())
         .moving(blinks, Blinking(shut: $eyesShut))
         .accessibilityLabel("\(AgentMascot.label(provider)) 봇")
     }
@@ -132,9 +139,9 @@ struct MermaidMascot: View {
 
     private var bodyWidth: CGFloat { size * 0.72 }
     private var bodyHeight: CGFloat { size * 0.58 }
-    private var animates: Bool { mood == .working || mood == .waiting }
+    private var animates: Bool { motion && (mood == .working || mood == .waiting) }
     // In a turn only, as before: a resting mascot is one still image.
-    private var blinks: Bool { mood == .working }
+    private var blinks: Bool { motion && mood == .working }
     @State private var eyesShut = false
 
     // MARK: Character

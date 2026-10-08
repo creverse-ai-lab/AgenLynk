@@ -908,7 +908,17 @@ final class NotchChatController: NSObject, ObservableObject {
             width: size.width,
             height: size.height
         )
-        panel.setFrame(frame, display: true, animate: animated)
+        guard panel.frame != frame else { return }
+        // Through the animator, not setFrame(animate:): that one runs the
+        // resize in a nested loop and held the main thread ~0.2 s per alert.
+        if animated {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.2
+                panel.animator().setFrame(frame, display: true)
+            }
+        } else {
+            panel.setFrame(frame, display: true)
+        }
     }
 
     private static func notchScreen() -> NSScreen? {
@@ -1233,6 +1243,10 @@ struct NotchAlertRow: View {
     let controller: NotchChatController
     @State private var draft = ""
     @State private var lastExtended: Date?
+    /// The mascot calls for attention this long, then holds still: a wait
+    /// nobody answers kept it hopping (30-40% CPU) for as long as it lasted.
+    @State private var settled = false
+    static let mascotMotionSeconds: UInt64 = 5
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1279,7 +1293,12 @@ struct NotchAlertRow: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            ProviderOrb(provider: alert.provider, size: 46, mood: alertMood)
+            ProviderOrb(provider: alert.provider, size: 46, mood: alertMood, frozen: settled)
+                .task(id: alert.id) {
+                    settled = false
+                    try? await Task.sleep(nanoseconds: Self.mascotMotionSeconds * 1_000_000_000)
+                    if !Task.isCancelled { settled = true }
+                }
             VStack(alignment: .leading, spacing: 2) {
                 Text(alert.title).font(.callout.weight(.semibold)).lineLimit(1)
                 Text(alert.message).font(.caption).foregroundStyle(tint).lineLimit(1)
@@ -1344,13 +1363,15 @@ struct ProviderOrb: View {
     /// No resting motion: for the always-visible collapsed pill, where a
     /// breathing 20pt mascot is barely visible but would animate all day.
     var still = false
+    /// Holds the pose, nothing moving (AgentMascot.frozen).
+    var frozen = false
     /// The look chosen for the pet (devil or mermaid) is the notch's too.
     @AppStorage("monitor.petStyle") private var petStyle = PetStyle.orbit.rawValue
 
     var body: some View {
         IsolatedMascot(spec: .init(
             provider: provider, size: size, mood: mood ?? (active ? .working : .idle),
-            kind: (PetStyle(stored: petStyle) ?? .orbit).mascotKind, still: still
+            kind: (PetStyle(stored: petStyle) ?? .orbit).mascotKind, still: still, frozen: frozen
         ))
         .frame(width: size, height: size)
     }
@@ -1374,9 +1395,10 @@ private struct IsolatedMascot: NSViewRepresentable {
         let mood: AgentMascot.Mood
         let kind: AgentMascot.Kind
         let still: Bool
+        let frozen: Bool
 
         var mascot: AgentMascot {
-            AgentMascot(provider: provider, size: size, mood: mood, kind: kind, still: still)
+            AgentMascot(provider: provider, size: size, mood: mood, kind: kind, still: still, frozen: frozen)
         }
     }
 

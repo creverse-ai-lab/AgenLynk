@@ -12,6 +12,8 @@ struct DevilMascot: View {
     var mood: AgentMascot.Mood = .idle
     /// The AgenLynk spear in its hand; dropped at small sizes either way.
     var holdsStaff = true
+    /// False holds the mood's pose without moving (AgentMascot.frozen).
+    var motion = true
 
     var body: some View {
         let style = MascotStyle(provider: provider)
@@ -41,16 +43,16 @@ struct DevilMascot: View {
                 .moving(animates, BobMotion(mood: mood, size: size))
         }
         .frame(width: size, height: size)
-        .moving(mood == .waiting, CallingMotion())
+        .moving(motion && mood == .waiting, CallingMotion())
         .moving(blinks, Blinking(shut: $eyesShut))
         .accessibilityLabel("\(AgentMascot.label(provider)) 봇")
     }
 
     private var bodyWidth: CGFloat { size * 0.72 }
     private var bodyHeight: CGFloat { size * 0.56 }
-    private var animates: Bool { mood == .working || mood == .waiting }
+    private var animates: Bool { motion && (mood == .working || mood == .waiting) }
     // In a turn only, as before: a resting mascot is one still image.
-    private var blinks: Bool { mood == .working }
+    private var blinks: Bool { motion && mood == .working }
     @State private var eyesShut = false
 
     // MARK: Character
