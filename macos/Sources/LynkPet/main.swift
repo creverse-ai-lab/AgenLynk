@@ -360,6 +360,14 @@ private func demandsAttention(_ agent: AgentSession) -> Bool {
     (agent.state == "needs_input" || agent.state == "blocked") && agent.delegated != true
 }
 
+/// The Pet's content view. Its window lets clicks through to the apps below
+/// except while the cursor is on a Frontdoor; a click there arrives here.
+private final class PetHostingView: NSHostingView<TreeFlowScene> {
+    var onClick: (() -> Void)?
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) { onClick?() }
+}
+
 private func isFrontdoor(_ agent: AgentSession) -> Bool {
     agent.role == "frontdoor"
 }
@@ -582,15 +590,25 @@ private final class MotionController: ObservableObject {
         window.ignoresMouseEvents = true
         window.hidesOnDeactivate = false
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        window.contentView = NSHostingView(rootView: TreeFlowScene(controller: self))
+        let content = PetHostingView(rootView: TreeFlowScene(controller: self))
+        window.contentView = content
         window.orderFrontRegardless()
 
         // 30Hz: the physics is dt-based so motion speed is unaffected, and a
         // desktop overlay's springs/pulses read the same at 30 as at 60 —
         // while the whole tick pipeline (layout, springs, Canvas redraw)
         // costs half as much.
+        content.onClick = { [weak self] in self?.openHoveredFrontdoor() }
         timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in self?.tick() }
         RunLoop.main.add(timer!, forMode: .common)
+    }
+
+    /// Asks AgenLynk to bring the clicked Frontdoor's window forward.
+    private func openHoveredFrontdoor() {
+        guard let hoverID else { return }
+        DistributedNotificationCenter.default().postNotificationName(
+            PetRequest.openFrontdoor, object: nil, userInfo: ["id": hoverID], deliverImmediately: true
+        )
     }
 
     private func tick() {
@@ -776,6 +794,10 @@ private final class MotionController: ObservableObject {
                 at: local
             )
             : nil
+        // Clicks pass through to the apps below, except while the cursor is on
+        // a Frontdoor: then the Pet takes the click (openHoveredFrontdoor).
+        let onFrontdoor = hovered.flatMap { id in nodes.first { $0.id == id } }.map { isFrontdoor($0.agent) } ?? false
+        if window.ignoresMouseEvents == onFrontdoor { window.ignoresMouseEvents = !onFrontdoor }
         if hovered != hoverID {
             hoverID = hovered
             // Reduce motion: the bubble appears at once instead of fading in.

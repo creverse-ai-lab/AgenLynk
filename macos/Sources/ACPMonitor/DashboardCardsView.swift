@@ -137,6 +137,13 @@ private struct DashboardCardView: View {
     private var name: String { settings.frontdoorName(id: card.frontdoor.id, auto: card.frontdoor.displayName) }
 
     private var header: some View {
+        HStack(spacing: 6) {
+            headerButton
+            JumpToWindowButton(session: card.frontdoor.root)
+        }
+    }
+
+    private var headerButton: some View {
         Button(action: selectFrontdoor) {
             HStack(spacing: 6) {
                 ProviderIcon(provider: card.frontdoor.provider, size: 18)

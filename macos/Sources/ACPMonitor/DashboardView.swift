@@ -1027,6 +1027,8 @@ struct FrontdoorRow: View {
                     Text(task).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
+            Spacer(minLength: 0)
+            JumpToWindowButton(session: frontdoor.root)
         }
         .padding(.vertical, 3)
     }

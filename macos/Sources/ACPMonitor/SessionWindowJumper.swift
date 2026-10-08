@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import Darwin
+import SwiftUI
 
 /// Brings forward the window a session runs in: from the agent's process up
 /// to the app that hosts it (Warp, VS Code, Terminal, the Claude or Codex
@@ -89,4 +90,23 @@ enum SessionWindowJumper {
     }
 
     private static var askedForAccess = false
+}
+
+/// "창으로 이동": the notch card's jump, for the dashboard's Frontdoor list
+/// and 현황 cards. Shown only when the session's window can be found.
+struct JumpToWindowButton: View {
+    let session: GatewaySession?
+
+    var body: some View {
+        if let session, SessionWindowJumper.canJump(session) {
+            Button {
+                SessionWindowJumper.jump(to: session)
+            } label: {
+                Image(systemName: "macwindow.on.rectangle")
+            }
+            .buttonStyle(.borderless)
+            .help("이 Frontdoor가 실행 중인 창으로 이동")
+            .accessibilityLabel("창으로 이동")
+        }
+    }
 }

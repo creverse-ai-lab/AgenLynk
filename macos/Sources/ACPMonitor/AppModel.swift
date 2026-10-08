@@ -1,3 +1,4 @@
+import ACPShared
 #if DEBUG
 import AppKit
 #endif
@@ -251,6 +252,14 @@ final class AppModel: ObservableObject {
             .sink { [weak self] note in
                 guard let self, let sessionId = note.object as? String else { return }
                 self.sessionWindows.show(model: self, sessionId: sessionId)
+            }
+            .store(in: &storeCancellables)
+        // A Frontdoor clicked on the Pet: its window, as the notch card does.
+        DistributedNotificationCenter.default().publisher(for: PetRequest.openFrontdoor)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in
+                guard let self, self.petRunning, let id = note.userInfo?["id"] as? String else { return }
+                self.openFrontdoorWindow(petId: id)
             }
             .store(in: &storeCancellables)
         NotificationCenter.default.publisher(for: .openSurfacesSettings)
@@ -1113,6 +1122,32 @@ final class AppModel: ObservableObject {
         petStore.stop()
         // Reset turns the pet back on; it should be running, not just ticked.
         if settings.petEnabled { startPet() }
+    }
+
+    /// Brings forward the window of the Frontdoor a Pet node stands for; its
+    /// details when that window cannot be found. The node id is the group id
+    /// the Pet projection gave it, a session id, or (for a group with no
+    /// instance) "frontdoor:" + base64(provider NUL folder).
+    func openFrontdoorWindow(petId id: String) {
+        let session = frontdoorSessions.first { $0.id == id }.flatMap { $0.root ?? $0.preferredSession }
+            ?? sessions.first { $0.sessionId == id }
+            ?? Self.folderKeyedFrontdoor(id, in: sessions)
+        guard let session else { return }
+        if SessionWindowJumper.canJump(session) {
+            SessionWindowJumper.jump(to: session)
+        } else {
+            // The details window activates the app itself.
+            sessionWindows.show(model: self, sessionId: session.sessionId)
+        }
+    }
+
+    static func folderKeyedFrontdoor(_ id: String, in sessions: [GatewaySession]) -> GatewaySession? {
+        guard id.hasPrefix("frontdoor:"), let data = Data(base64Encoded: String(id.dropFirst("frontdoor:".count))),
+              let identity = String(data: data, encoding: .utf8) else { return nil }
+        let parts = identity.split(separator: "\u{0}", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 2 else { return nil }
+        return sessions.filter { $0.isFrontdoorRecord && $0.cwd == parts[1] }
+            .max { ($0.updatedAt ?? "") < ($1.updatedAt ?? "") }
     }
 
     /// Opens (or brings forward) the settings window on `tab`.
