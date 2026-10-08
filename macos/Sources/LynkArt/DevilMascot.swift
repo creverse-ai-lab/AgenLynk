@@ -23,6 +23,7 @@ struct DevilMascot: View {
                 .frame(width: bodyWidth * 0.8, height: size * 0.07)
                 .blur(radius: size * 0.025)
                 .offset(y: size * 0.4)
+                .frame(width: size, height: size)
                 .moving(animates, Flattened(margin: size * 0.05))
             if size >= 26 {
                 tail(style)
@@ -30,6 +31,9 @@ struct DevilMascot: View {
             }
             if holdsStaff && size >= 30 {
                 spear(style)
+                    // Its offsets reach beyond its own small frame: flattened
+                    // in that frame, the spear was cut away while it moved.
+                    .frame(width: size, height: size)
                     .moving(animates, Flattened(margin: size * 0.1))
             }
             character(style, phase: 0)
@@ -37,6 +41,7 @@ struct DevilMascot: View {
                 .moving(animates, BobMotion(mood: mood, size: size))
         }
         .frame(width: size, height: size)
+        .moving(mood == .waiting, CallingMotion())
         .moving(blinks, Blinking(shut: $eyesShut))
         .accessibilityLabel("\(AgentMascot.label(provider)) 봇")
     }

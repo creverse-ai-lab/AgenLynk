@@ -1,3 +1,4 @@
+import ACPShared
 import CoreGraphics
 import Darwin
 import Foundation
@@ -16,6 +17,7 @@ enum PetControllerChecks {
         try scheduledUpdatesLandInOrderOffTheMainActor()
         try oversizedLogIsRotatedToOneBackup()
         try contractCarriesTheAppNameAndWaitingReason()
+        try petStatesFollowTheNotchRules()
         try hoverHitTestPicksTheNearestNodeUnderTheCursor()
         try hoverTextFollowsTheAppWording()
         try hoverBubbleStaysInsideTheWindow()
@@ -190,6 +192,37 @@ enum PetControllerChecks {
         guard !FileManager.default.fileExists(atPath: log.path), backupSize == PetController.logRotationBytes + 1 else {
             throw PetControllerCheckError.failed("an oversized log must become the single .1 backup")
         }
+    }
+
+    /// The Pet reads a session the way the notch does: just finished is
+    /// "completed" for MascotTiming.finishedLinger, then resting; a cancelled
+    /// turn is a failure; a Frontdoor is a wait, then a failure, then work.
+    private static func petStatesFollowTheNotchRules() throws {
+        let ended = "2026-08-07T00:00:00.000Z"
+        func session(_ id: String, status: String, role: String = "worker", group: String) throws -> GatewaySession {
+            let fields: [String: JSONValue] = [
+                "sessionId": .string(id), "provider": .string("claude"), "status": .string(status), "cwd": .string("/tmp/x"),
+                "opener": .string("codex"), "openerInstanceId": .string(group), "role": .string(role), "updatedAt": .string(ended)
+            ]
+            guard let session = GatewaySession(.object(fields)) else { throw PetControllerCheckError.failed("fixture \(id)") }
+            return session
+        }
+        let endedAt = parseTimestamp(ended)!
+        let sessions = [
+            try session("done", status: "idle", role: "frontdoor", group: "g1"),
+            try session("cancelled", status: "cancelled", group: "g2"),
+            try session("busy", status: "running", group: "g3"),
+            try session("broken", status: "error", group: "g3")
+        ]
+        func state(_ id: String, at now: Date) -> PetAgentState? {
+            PetActivityProjection.make(sessions: sessions, inbox: [], now: now).agents.first { $0.id == id }?.state
+        }
+        // A Frontdoor is projected under its group id.
+        try expect(state("g1", at: endedAt.addingTimeInterval(60)) == .completed, "a minute after its turn it is done")
+        try expect(state("g1", at: endedAt.addingTimeInterval(MascotTiming.finishedLinger + 1)) == .idle, "then it rests")
+        try expect(state("cancelled", at: endedAt) == .failed, "a cancelled turn is a failure")
+        try expect(state("g3", at: endedAt) == .failed, "a Frontdoor with a failed and a running Worker reads failed, as the notch card does")
+        try expect(MenuBarPipeline.Urgency(status: "cancelled") == .error, "the notch reads a cancelled turn as a failure too")
     }
 
     /// The producer names agents the way the app does (nickname, else the

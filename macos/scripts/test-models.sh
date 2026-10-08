@@ -22,7 +22,7 @@ env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   -module-name ACPShared \
   -emit-module-path "$SHARED_DIR/ACPShared.swiftmodule" \
   -o "$SHARED_DIR/libACPShared.a" \
-  "$REPO_ROOT/macos/Sources/ACPShared/Timestamp.swift"
+  "$REPO_ROOT"/macos/Sources/ACPShared/*.swift
 SHARED_FLAGS="-I $SHARED_DIR -L $SHARED_DIR -lACPShared"
 
 env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
@@ -119,6 +119,8 @@ env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/SessionTree.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/PetController.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/PetStyle.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/EventTimeline.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/MenuBarPipeline.swift" \
   "$REPO_ROOT/macos/Sources/LynkPet/PetHover.swift" \
   "$REPO_ROOT/macos/Tests/ACPMonitorTests/PetControllerTests.swift" \
   -o "$PET_CONTROLLER_OUT"

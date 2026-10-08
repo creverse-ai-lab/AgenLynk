@@ -16,9 +16,11 @@ struct MenuBarPipeline: Equatable, Sendable {
             switch status {
             case "waiting_permission": self = .permission
             case "waiting_input": self = .input
-            case "error", "failed": self = .error
+            // A cancelled turn and an unavailable agent are failures, as the
+            // alerts (FrontdoorPhase) and the Pet read them.
+            case "error", "failed", "cancelled", "unavailable": self = .error
             case "running", "cancelling", "restoring", "starting": self = .running
-            case "closed", "disconnected", "unavailable": self = .closed
+            case "closed", "disconnected": self = .closed
             default: self = .idle
             }
         }
@@ -77,14 +79,13 @@ struct MenuBarPipeline: Equatable, Sendable {
         var hiddenStageCount: Int { restingStages.count }
 
         /// How long a Frontdoor that finished its turn reads as "완료" before
-        /// it reads as resting ("쉬는 중").
-        static let finishedLinger: TimeInterval = 180
+        /// it reads as resting ("쉬는 중"); the Pet uses the same.
+        static let finishedLinger = MascotTiming.finishedLinger
 
         /// At rest, and its last activity (the turn's end) within
         /// `finishedLinger` of `now`: just finished rather than resting.
         func justFinished(now: Date) -> Bool {
-            guard urgency == .idle, let updated = frontdoor.updatedAt.flatMap(parseTimestamp) else { return false }
-            return now.timeIntervalSince(updated) < Self.finishedLinger
+            urgency == .idle && MascotTiming.justFinished(updated: frontdoor.updatedAt.flatMap(parseTimestamp), now: now)
         }
     }
 

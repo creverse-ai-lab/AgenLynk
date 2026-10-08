@@ -223,8 +223,9 @@ private func isWarm(_ session: AgentSession, now: TimeInterval) -> Bool {
     switch session.state {
     case "idle", "offline":
         return true
+    // Done as long as the notch says "완료", then resting.
     case "ready":
-        return now - (session.time ?? 0) > readyLinger
+        return now - (session.time ?? 0) > MascotTiming.finishedLinger
     default:
         return false
     }
@@ -1503,7 +1504,8 @@ private func selfTest() {
     let frontdoorChild = AgentSession(provider: "claude", session: "frontdoor-child", state: "running", parent: "frontdoor", time: now)
     let grand = AgentSession(provider: "grok", session: "d-grand", state: "running", parent: "c-child", time: now)
     let idle = AgentSession(provider: "claude", session: "e-idle", state: "idle", time: now)
-    let doneOld = AgentSession(provider: "grok", session: "f-done", state: "ready", time: now - 10)
+    // Done reads as done for as long as the notch says "완료", then rests.
+    let doneOld = AgentSession(provider: "grok", session: "f-done", state: "ready", time: now - MascotTiming.finishedLinger - 1)
     let doneNew = AgentSession(provider: "grok", session: "g-done", state: "ready", time: now)
 
     require(!isWarm(root1, now: now))

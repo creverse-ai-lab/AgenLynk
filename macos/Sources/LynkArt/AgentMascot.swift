@@ -102,6 +102,7 @@ struct MermaidMascot: View {
                 .frame(width: bodyWidth * 0.8, height: size * 0.07)
                 .blur(radius: size * 0.025)
                 .offset(y: size * 0.4)
+                .frame(width: size, height: size)
                 .moving(animates, Flattened(margin: size * 0.05))
             if size >= 26 {
                 tail(style)
@@ -109,16 +110,21 @@ struct MermaidMascot: View {
             }
             if holdsStaff && size >= 30 {
                 spear(style)
+                    // Its offsets reach beyond its own small frame: flattened
+                    // in that frame, the spear was cut away while it moved.
+                    .frame(width: size, height: size)
                     .moving(animates, Flattened(margin: size * 0.1))
             }
             character(style, phase: 0)
                 .moving(animates, Flattened(margin: size * 0.3))
                 .moving(animates, BobMotion(mood: mood, size: size))
             bubbles()
+                .frame(width: size, height: size)
                 .moving(animates, Flattened(margin: size * 0.05))
                 .moving(animates, RiseMotion(active: true, distance: size * 0.06))
         }
         .frame(width: size, height: size)
+        .moving(mood == .waiting, CallingMotion())
         .moving(blinks, Blinking(shut: $eyesShut))
         .accessibilityLabel("\(AgentMascot.label(provider)) 봇")
     }
@@ -472,13 +478,26 @@ struct BobMotion: ViewModifier {
     func body(content: Content) -> some View {
         let (offset, animation): (CGFloat, Animation?) = switch mood {
         case .working: (up ? -size * 0.022 : size * 0.022, .easeInOut(duration: 0.98).repeatForever(autoreverses: true))
-        case .waiting: (up ? -size * 0.035 : 0, .easeOut(duration: 0.31).repeatForever(autoreverses: true))
+        case .waiting: (up ? -size * 0.05 : 0, .easeOut(duration: 0.28).repeatForever(autoreverses: true))
         default: (0, nil)
         }
         content
             .offset(y: offset)
             .animation(animation ?? .default, value: up)
             .task(id: mood) { up = animation != nil }
+    }
+}
+
+/// The waiting mascot rocks side to side about its base while it hops,
+/// calling for the person, so a wait never reads as busy work.
+struct CallingMotion: ViewModifier {
+    @State private var left = false
+
+    func body(content: Content) -> some View {
+        content
+            .rotationEffect(.degrees(left ? -5 : 5), anchor: .bottom)
+            .animation(.easeInOut(duration: 0.42).repeatForever(autoreverses: true), value: left)
+            .task { left = true }
     }
 }
 

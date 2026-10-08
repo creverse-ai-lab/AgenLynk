@@ -788,7 +788,8 @@ struct PetActivityProjection: Equatable, Sendable {
             // max() comparison was ~90% of this whole projection's cost.
             let latest = group.max { ($0.updatedAt ?? "") < ($1.updatedAt ?? "") }
             let memberStates = group.map { session in
-                petContractState(for: session.status, hasPendingInbox: (pendingBySession[session.sessionId] ?? 0) > 0)
+                petContractState(for: session.status, hasPendingInbox: (pendingBySession[session.sessionId] ?? 0) > 0,
+                                 updatedAt: session.updatedAt, now: now)
             }
             let frontdoorState = frontdoorContractState(memberStates)
             let frontdoorCwd = root?.cwd ?? key.cwd
@@ -813,7 +814,8 @@ struct PetActivityProjection: Equatable, Sendable {
             ))
             agents.append(contentsOf: workers.map { gatewaySession in
                 let pending = pendingBySession[gatewaySession.sessionId] ?? 0
-                let state = petContractState(for: gatewaySession.status, hasPendingInbox: pending > 0)
+                let state = petContractState(for: gatewaySession.status, hasPendingInbox: pending > 0,
+                                             updatedAt: gatewaySession.updatedAt, now: now)
                 return PetAgentActivity(
                     id: gatewaySession.sessionId,
                     parentId: frontdoorId,
@@ -873,13 +875,15 @@ extension PetAgentState {
 /// classifier both the Pet contract and the legacy `PetSnapshot` derive
 /// their per-agent state from — a cancelled or errored turn is never
 /// reported as `.completed`.
-private func petContractState(for status: String, hasPendingInbox: Bool) -> PetAgentState {
+private func petContractState(for status: String, hasPendingInbox: Bool, updatedAt: String? = nil, now: Date = Date()) -> PetAgentState {
     if hasPendingInbox { return .waiting }
     switch status {
     case "running", "cancelling": return .running
     case "restoring": return .starting
     case "waiting_permission", "waiting_input": return .waiting
-    case "idle": return .idle
+    // At rest: just finished for a while, as the notch shows it, then asleep.
+    case "idle":
+        return MascotTiming.justFinished(updated: updatedAt.flatMap(parseTimestamp), now: now) ? .completed : .idle
     // Pre-v2 local sessions said "ready"; v2 sends the Gateway's "idle".
     case "ready": return .completed
     case "disconnected", "closed": return .offline
@@ -889,9 +893,11 @@ private func petContractState(for status: String, hasPendingInbox: Bool) -> PetA
 }
 
 /// A Frontdoor root is only as settled as its least-settled member; the
-/// first matching state in this priority order wins.
+/// first matching state in this priority order wins. The same order as the
+/// notch card's urgency: a wait, then a failure, then work; a fresh finish
+/// is news over rest.
 private func frontdoorContractState(_ memberStates: [PetAgentState]) -> PetAgentState {
-    let priority: [PetAgentState] = [.waiting, .running, .starting, .failed, .idle, .completed, .offline]
+    let priority: [PetAgentState] = [.waiting, .failed, .running, .starting, .completed, .idle, .offline]
     for state in priority where memberStates.contains(state) { return state }
     return .unknown
 }
