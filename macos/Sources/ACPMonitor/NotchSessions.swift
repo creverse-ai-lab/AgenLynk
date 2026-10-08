@@ -92,7 +92,11 @@ struct NotchSessionsView: View {
                     .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 14))
             }
             ScrollView {
-                LazyVStack(spacing: 8) {
+                // Not lazy: a card moves between the active list and "쉬는 중"
+                // whenever its Frontdoor starts or stops, and a LazyVStack kept
+                // drawing a moved card's old content (a resting card read
+                // "작업 중", a busy one "완료"). A notch lists a few cards.
+                VStack(spacing: 8) {
                     if store.sessionId != nil { chatCard }
                     let pipeline = model.menuBarPipeline.notchCards
                     let replying = controller.replyingSessionIds
