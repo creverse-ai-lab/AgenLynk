@@ -36,24 +36,57 @@ jobs:
         run: node --test sidecar/test/monitor-orchestration.test.js
 
   swift-unit:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+      # Release DMGs are built with Swift 6.2; CI compiles with the same
+      # major toolchain, or a construct one accepts and the other rejects
+      # passes here and breaks there. The newest Xcode on the image is used,
+      # and anything older than Swift 6.2 fails the job.
+      - name: Select Xcode (Swift 6.2+)
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$XCODE"
+          swift --version
+          swift --version 2>&1 | grep -qE "Swift version 6\.([2-9]|[1-9][0-9])" \
+            || { echo "error: $XCODE does not provide Swift 6.2 or newer" >&2; exit 1; }
       - run: sh macos/scripts/test-models.sh
 
   swift-build:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+      # Release DMGs are built with Swift 6.2; CI compiles with the same
+      # major toolchain, or a construct one accepts and the other rejects
+      # passes here and breaks there. The newest Xcode on the image is used,
+      # and anything older than Swift 6.2 fails the job.
+      - name: Select Xcode (Swift 6.2+)
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$XCODE"
+          swift --version
+          swift --version 2>&1 | grep -qE "Swift version 6\.([2-9]|[1-9][0-9])" \
+            || { echo "error: $XCODE does not provide Swift 6.2 or newer" >&2; exit 1; }
       - run: swift build --package-path macos -c debug
 
   package-smoke:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      # Release DMGs are built with Swift 6.2; CI compiles with the same
+      # major toolchain, or a construct one accepts and the other rejects
+      # passes here and breaks there. The newest Xcode on the image is used,
+      # and anything older than Swift 6.2 fails the job.
+      - name: Select Xcode (Swift 6.2+)
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$XCODE"
+          swift --version
+          swift --version 2>&1 | grep -qE "Swift version 6\.([2-9]|[1-9][0-9])" \
+            || { echo "error: $XCODE does not provide Swift 6.2 or newer" >&2; exit 1; }
       - uses: actions/setup-node@v7
         with:
           node-version: 22
