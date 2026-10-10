@@ -167,12 +167,13 @@ npm run test:quick    # 일상 개발용
 npm run macos:test    # Swift 모델·설정·Pet·온보딩
 ```
 
-앱 UI는 SwiftUI(`macos/Sources/`), Monitor sidecar는 Node(`sidecar/`)입니다. DMG는 `gateway.lock.json`에 고정된 Gateway 1.8.0 npm 패키지(`acp-gateway-daemon`, sha512와 npm provenance로 검증)와 Node를 `Contents/Resources/gateway-seed/`에, 앱과 함께 움직이는 sidecar를 `Contents/Resources/sidecar/`에 담습니다. Gateway 패키지와 npm은 `runtime-payload.tar.xz` 하나로 압축해 넣고, 첫 실행 때 `~/.acp-gateway/runtime`에 풀어 무결성 목록과 대조한 뒤 씁니다. 소스 트리에서 Gateway를 쓰려면 `npm run gateway:fetch` 또는 `ACP_LYNK_GATEWAY_DEVELOPMENT_ROOT`를 사용하세요.
+앱 UI는 SwiftUI(`macos/Sources/`), Monitor sidecar는 Node(`sidecar/`)입니다. DMG는 `gateway.lock.json`에 고정된 Gateway 1.9.0 npm 패키지(`acp-gateway-daemon`, sha512와 npm provenance로 검증)와 Node를 `Contents/Resources/gateway-seed/`에, 앱과 함께 움직이는 sidecar를 `Contents/Resources/sidecar/`에 담습니다. Gateway 패키지와 npm은 `runtime-payload.tar.xz` 하나로 압축해 넣고, 첫 실행 때 `~/.acp-gateway/runtime`에 풀어 무결성 목록과 대조한 뒤 씁니다. 소스 트리에서 Gateway를 쓰려면 `npm run gateway:fetch` 또는 `ACP_LYNK_GATEWAY_DEVELOPMENT_ROOT`를 사용하세요.
 
 ## 버전 및 수정 이력
 
 | 버전 | 주요 내용 |
 |---|---|
+| **0.6.1 beta 6** | Gateway 1.9.0 포함 · Worker를 기다리는 Main을 "Worker 대기"로 표시(새 펫 모습) · 위임 스킬이 agent_acp_wait로 대기 · 설치기 경고 한국어 보완 |
 | **0.6.1 beta 5** | Gateway 1.8.0 포함 · 에이전트 설정에 남은 Control 토큰 자동 정리 · 토큰 교체 뒤 자동 재연결 · 노치 채팅의 문자열 요청 id 지원 |
 | **0.6.1 beta 4** | 가려지거나 최소화된 창은 다시 그리지 않음 · 알림 마스코트는 5초만 움직임 · 노치 카드가 옛 상태를 보이던 문제 수정 |
 | **0.6.1 beta 3** | 작업 중·응답 대기에도 삼지창 표시 · 응답 대기는 좌우로 흔들며 뛰기 · 펫과 노치의 상태 규칙 통일 |
@@ -193,6 +194,21 @@ npm run macos:test    # Swift 모델·설정·Pet·온보딩
 | **0.3.4** | Frontdoor 설치 상태를 실제 에이전트 config로 감지 · 온보딩 다중 설치 |
 | **0.3.3** | Frontdoor 이름 지정 · 시퀀스 다이어그램 호출/응답 화살표 · 선택 에이전트 활동 |
 | **0.2.0** | AgenLynk로 리네임 · Pet Canvas 렌더 · DMG 경량화 |
+
+### 0.6.1 beta 6 변경 사항
+
+**Gateway 1.9.0**
+- 포함된 Gateway를 **1.9.0**으로 올렸습니다. Main이 Worker를 기다리는 동안 폴링 대신 `agent_acp_wait`에서 잠들고, Worker가 끝나거나 사용자 응답이 필요하면 바로 깨어납니다.
+- AgenLynk가 배포하는 위임 스킬(agent-delegator)도 이 방식으로 바뀌었습니다. 직접 고치지 않은 스킬 사본은 앱이 자동으로 새 버전으로 바꿉니다.
+
+**새 상태: Worker 대기**
+- Main이 자기 Worker를 기다리며 잠든 동안, 그 Frontdoor를 "Worker 대기"로 보여 줍니다. 사용자를 기다리는 것도, 쉬는 것도 아닌 진행 중 상태입니다.
+- 노치와 대시보드에는 청록 모래시계, 펫에는 새 마스코트 모습(Worker 쪽을 올려다보는 눈, 다문 미소, 모래시계 배지, 느린 흔들림)으로 나옵니다. Main이 몇 분씩 기다릴 수 있어 움직임은 가볍게 했습니다.
+- Worker가 권한이나 입력을 기다리면 그쪽이 먼저 보입니다. 기다리는 동안 "완료" 알림은 뜨지 않습니다.
+- 펫 계약(`pet-state`/`pet-actions`)이 1.1.0으로 올라 `awaiting` 상태와 `waitForTasks` 동작이 추가됐습니다.
+
+**그 밖에**
+- 설치기가 "소유 기록 이전에 등록된 항목"이라고 경고하면 한국어로 보여 줍니다.
 
 ### 0.6.1 beta 5 변경 사항
 
