@@ -167,12 +167,13 @@ npm run test:quick    # 일상 개발용
 npm run macos:test    # Swift 모델·설정·Pet·온보딩
 ```
 
-앱 UI는 SwiftUI(`macos/Sources/`), Monitor sidecar는 Node(`sidecar/`)입니다. DMG는 `gateway.lock.json`에 고정된 Gateway 1.7.2 npm 패키지(`acp-gateway-daemon`, sha512와 npm provenance로 검증)와 Node를 `Contents/Resources/gateway-seed/`에, 앱과 함께 움직이는 sidecar를 `Contents/Resources/sidecar/`에 담습니다. Gateway 패키지와 npm은 `runtime-payload.tar.xz` 하나로 압축해 넣고, 첫 실행 때 `~/.acp-gateway/runtime`에 풀어 무결성 목록과 대조한 뒤 씁니다. 소스 트리에서 Gateway를 쓰려면 `npm run gateway:fetch` 또는 `ACP_LYNK_GATEWAY_DEVELOPMENT_ROOT`를 사용하세요.
+앱 UI는 SwiftUI(`macos/Sources/`), Monitor sidecar는 Node(`sidecar/`)입니다. DMG는 `gateway.lock.json`에 고정된 Gateway 1.8.0 npm 패키지(`acp-gateway-daemon`, sha512와 npm provenance로 검증)와 Node를 `Contents/Resources/gateway-seed/`에, 앱과 함께 움직이는 sidecar를 `Contents/Resources/sidecar/`에 담습니다. Gateway 패키지와 npm은 `runtime-payload.tar.xz` 하나로 압축해 넣고, 첫 실행 때 `~/.acp-gateway/runtime`에 풀어 무결성 목록과 대조한 뒤 씁니다. 소스 트리에서 Gateway를 쓰려면 `npm run gateway:fetch` 또는 `ACP_LYNK_GATEWAY_DEVELOPMENT_ROOT`를 사용하세요.
 
 ## 버전 및 수정 이력
 
 | 버전 | 주요 내용 |
 |---|---|
+| **0.6.1 beta 5** | Gateway 1.8.0 포함 · 에이전트 설정에 남은 Control 토큰 자동 정리 · 토큰 교체 뒤 자동 재연결 · 노치 채팅의 문자열 요청 id 지원 |
 | **0.6.1 beta 4** | 가려지거나 최소화된 창은 다시 그리지 않음 · 알림 마스코트는 5초만 움직임 · 노치 카드가 옛 상태를 보이던 문제 수정 |
 | **0.6.1 beta 3** | 작업 중·응답 대기에도 삼지창 표시 · 응답 대기는 좌우로 흔들며 뛰기 · 펫과 노치의 상태 규칙 통일 |
 | **0.6.1 beta 2** | 쉬는 중은 잠자는 마스코트로 · 턴이 끝나면 3분간 "완료" 뒤 "쉬는 중" · 박쥐 날개 다시 그림 · 펫·대시보드·현황에서 Frontdoor 창으로 이동 |
@@ -192,6 +193,23 @@ npm run macos:test    # Swift 모델·설정·Pet·온보딩
 | **0.3.4** | Frontdoor 설치 상태를 실제 에이전트 config로 감지 · 온보딩 다중 설치 |
 | **0.3.3** | Frontdoor 이름 지정 · 시퀀스 다이어그램 호출/응답 화살표 · 선택 에이전트 활동 |
 | **0.2.0** | AgenLynk로 리네임 · Pet Canvas 렌더 · DMG 경량화 |
+
+### 0.6.1 beta 5 변경 사항
+
+**Gateway 1.8.0**
+- 포함된 Gateway를 **1.8.0**으로 올렸습니다. Worker가 Gateway를 제어하지 못하게 막고, Main마다 자기 세션만 보이며, 승인은 그 승인이 가리킨 작업에만 적용됩니다. 상태 파일 쓰기도 크게 줄었습니다.
+- 1.8.0부터 Control 토큰을 에이전트 CLI 설정 파일에 두지 않습니다. AgenLynk가 토큰이 남은 `agent-acp` 항목을 찾아 한 번 다시 등록합니다. 직접 넣은 env가 있는 항목은 그대로 두고 설정 > 에이전트에서 알려 줍니다.
+- 1.8 아래로 되돌리면, 토큰이 없어 시작하지 못하는 항목을 다시 등록합니다.
+- 설치기 경고(토큰 교체 권장 등)를 설정 > 에이전트에 보여 줍니다.
+
+**토큰 교체**
+- `acp-gateway-bootstrap --rotate-token`으로 토큰을 바꾸면 AgenLynk가 알아채고 새 토큰으로 다시 연결합니다.
+- 토큰을 바꿨는데 Gateway가 이전 토큰으로 실행 중이면, 설정의 Gateway 다시 시작이 그 데몬을 끝내고 새 토큰으로 다시 띄웁니다.
+
+**그 밖에**
+- 노치 채팅이 문자열 요청 id를 쓰는 에이전트의 권한 요청에도 답합니다.
+- 소켓 경로 문제, Worker 안에서의 제어 시도 같은 새 Gateway 오류를 한국어로 안내합니다.
+- MCP 항목을 다시 연결할 때 Gateway 상태 확인을 건너뜁니다. 버전이 다른 데몬을 바로 재시작해 실행 중인 Worker가 끊기던 문제입니다.
 
 ### 0.6.1 beta 4 변경 사항
 
