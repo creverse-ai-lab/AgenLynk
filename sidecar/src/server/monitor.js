@@ -537,7 +537,14 @@ async function main() {
   // and on the setup cadence, so a main_status event lost with a connection
   // is made up for. Another daemon (setup's instanceId) starts the book over;
   // a Gateway without capabilities.mainStatus keeps the plain projection.
-  async function loadMains(gateway) {
+  // One read at a time: replace() tells what an overlapping read's events
+  // touched by its own start, so two lists in flight would keep a gone Main.
+  let mainsLoad = Promise.resolve();
+  function loadMains(gateway) {
+    mainsLoad = mainsLoad.then(() => loadMainsOnce(gateway), () => loadMainsOnce(gateway));
+    return mainsLoad;
+  }
+  async function loadMainsOnce(gateway) {
     let changed = false;
     if (gateway?.capabilities?.mainStatus !== true) {
       changed = mains.waiting().length > 0;
