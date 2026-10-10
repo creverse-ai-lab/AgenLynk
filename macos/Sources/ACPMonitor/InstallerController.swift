@@ -231,6 +231,9 @@ final class InstallerController {
                 // "<agent>:<entry>: its env still holds ..."
                 let key = warning.range(of: ": ").map { String(warning[..<$0.lowerBound]) } ?? warning
                 line = "\(key): 이 항목의 env에 아직 Control 토큰이 있습니다. 직접 넣은 env가 있거나 설치기가 등록한 항목이 아니어서 그대로 두었습니다. 직접 넣은 env가 없다면 설정 > 에이전트에서 다시 연결하세요(이 항목의 env는 설치기 값으로 바뀝니다)."
+            } else if warning.contains("predates this installer's ownership records") {
+                let key = warning.range(of: ": ").map { String(warning[..<$0.lowerBound]) } ?? warning
+                line = "\(key): 설치기가 소유 기록을 남기기 전에 등록된 항목이라 자동으로 바꾸지 않았습니다. 설정 > 에이전트에서 한 번 다시 연결하면 이후로는 자동으로 관리됩니다."
             } else if warning.hasSuffix("is not installed; MCP registration skipped") {
                 let agent = warning.components(separatedBy: " ").first ?? warning
                 line = "\(agent)가 설치되어 있지 않아 MCP 등록을 건너뛰었습니다."

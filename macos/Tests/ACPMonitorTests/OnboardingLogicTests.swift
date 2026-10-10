@@ -121,6 +121,10 @@ enum OnboardingLogicChecks {
         let warned = InstallerController.parseResult("""
         {"ok":true,"health":{"checked":false},"warnings":["The Control token was removed from claude:agent-acp, but copies made before, such as the agent CLIs' config backups (*.bak), may still hold it. To retire it, ... run acp-gateway-bootstrap --rotate-token, ...","The Control token was removed from codex:agent-acp, but ... --rotate-token ...","codex:agent-acp: its env still holds the Control token, and so does codex's MCP configuration; rerun with --force to re-register it without the token","odd new warning"]}
         """)
+        let predates = InstallerController.describe(warnings: ["grok:agent-acp: the entry predates this installer's ownership records, so it cannot tell the entry is still its own and does not update it automatically; rerun with --force once to update it (later updates are automatic)"])
+        guard predates.count == 1, predates[0].hasPrefix("grok:agent-acp: 설치기가 소유 기록") else {
+            throw CheckError.failed("expected the pre-ownership-record warning in Korean")
+        }
         guard let warned, warned.ok, warned.warnings.count == 3,
               warned.warnings[0].contains("--rotate-token"), warned.warnings[1].hasPrefix("codex:agent-acp: "),
               warned.warnings[2] == "odd new warning" else {
