@@ -30,7 +30,7 @@ struct NotchChatPermission: Equatable {
 @MainActor
 final class NotchChatStore: ObservableObject {
     static let providers = ["claude", "codex", "grok"]
-    private static let activeStatuses: Set<String> = ["running", "waiting_permission", "waiting_input", "cancelling", "restoring"]
+    private static let activeStatuses: Set<String> = ["running", "waiting_tasks", "waiting_permission", "waiting_input", "cancelling", "restoring"]
 
     @Published var provider = "claude"
     /// A folder the person picked; otherwise the Worker works where its

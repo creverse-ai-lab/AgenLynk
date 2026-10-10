@@ -1,14 +1,14 @@
 {
   "schemaVersion": 2,
-  "version": "1.8.0",
+  "version": "1.9.0",
   "apiMajor": 1,
-  "tag": "v1.8.0",
-  "sourceCommit": "0757151df8084f0b5c863902f08011583822207e",
+  "tag": "v1.9.0",
+  "sourceCommit": "9669951151ae9650731e2c1d23e94104056f6e2d",
   "package": {
     "name": "acp-gateway-daemon",
     "registry": "https://registry.npmjs.org/",
-    "tarball": "https://registry.npmjs.org/acp-gateway-daemon/-/acp-gateway-daemon-1.8.0.tgz",
-    "integrity": "sha512-ib4pxg+EvllRZVvh2mAlgROdicYAKpx/uds49ZQsoJZXy85mGLU1Apln8fHQC4jM4PHdTk/gbnc9TjGqm2seEg==",
+    "tarball": "https://registry.npmjs.org/acp-gateway-daemon/-/acp-gateway-daemon-1.9.0.tgz",
+    "integrity": "sha512-5sV/ROLKX3RBKOyAY0HU68tI60vwim9FQnMo27/NS9qK+XEIUh9q6ugfSZDOPVyLtvQf7ub5jLXxEj+JIis+KQ==",
     "installPath": "node_modules/acp-gateway-daemon",
     "clientSpecifier": "acp-gateway-daemon/client"
   },
@@ -16,7 +16,7 @@
     "predicateType": "https://slsa.dev/provenance/v1",
     "repository": "https://github.com/creverse-ai-lab/agent_gateway",
     "workflow": ".github/workflows/publish-npm.yml",
-    "ref": "refs/tags/v1.8.0"
+    "ref": "refs/tags/v1.9.0"
   },
   "node": {
     "provider": "app",

@@ -107,14 +107,14 @@ for (const contract of CONTRACTS) {
 test("pet-state enum is exactly the frozen contract vocabulary", async () => {
   const schema = await readJSON("pet-state.schema.json");
   assert.deepEqual(schema.$defs.agent.properties.state.enum, [
-    "offline", "idle", "starting", "running", "waiting", "completed", "failed", "unknown"
+    "offline", "idle", "starting", "running", "waiting", "awaiting", "completed", "failed", "unknown"
   ]);
 });
 
 test("pet-actions enum is exactly the frozen contract vocabulary", async () => {
   const schema = await readJSON("pet-actions.schema.json");
   assert.deepEqual(schema.$defs.action.properties.action.enum, [
-    "sleep", "wake", "think", "useTool", "waitForUser", "celebrate", "error", "disconnect", "unknown"
+    "sleep", "wake", "think", "useTool", "waitForUser", "waitForTasks", "celebrate", "error", "disconnect", "unknown"
   ]);
 });
 

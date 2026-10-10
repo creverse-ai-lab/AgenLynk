@@ -53,7 +53,7 @@
         },
         "action": {
           "type": "string",
-          "enum": ["sleep", "wake", "think", "useTool", "waitForUser", "celebrate", "error", "disconnect", "unknown"]
+          "enum": ["sleep", "wake", "think", "useTool", "waitForUser", "waitForTasks", "celebrate", "error", "disconnect", "unknown"]
         }
       }
     }

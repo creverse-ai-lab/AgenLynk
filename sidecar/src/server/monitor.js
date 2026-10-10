@@ -23,6 +23,7 @@ import {
   unavailableFeatureError
 } from "../gateway/compatibility.js";
 import { GatewaySubscriptionOwner } from "../gateway/subscription-reconciler.js";
+import { MainStatusBook, withMainStatus } from "../gateway/main-status.js";
 import { pathIsMissing } from "../app/fs-paths.js";
 import { gatewaySocketPath } from "../app/config.js";
 import { defaultInstallStatePath } from "../app/install-state.js";
@@ -260,6 +261,9 @@ async function main() {
   });
   state.restoreHistory();
   persistence?.prune();
+  // Gateway 1.9: which Mains sleep on their Workers (see main-status.js).
+  const mains = new MainStatusBook();
+  let mainsInstanceId = null;
   const historyPrune = setInterval(() => {
     // Sessions still in memory are kept too: Gateway events can be persisted
     // before the session list names them.
@@ -353,6 +357,10 @@ async function main() {
         diagnostics: state.diagnostics,
         error: state.lastError
       });
+      return;
+    }
+    if (event?.type === "main_status") {
+      if (mains.apply(event)) void reprojectMains();
       return;
     }
     if (isIgnoredMonitorEvent(event)) return;
@@ -479,10 +487,16 @@ async function main() {
     freshScanWanted = false;
     const local = reuse ? lastLocal : (lastLocal = await readLocalProjection());
     const lineage = localScanner?.lineage ?? hookLineage;
-    const merged = mergeMonitorSessions(
-      state.gatewaySourceSessions, local.sessions, state.workerTopology, state.formerWorkerIds,
-      // The live pid file names the session a Claude Main holds now.
-      (caller) => (caller?.provider === "claude" && caller.pid ? lineage?.claudeRecord(caller.pid)?.sessionId ?? null : null)
+    // The live pid file names the session a Claude Main holds now.
+    const currentCallerSession = (caller) => (caller?.provider === "claude" && caller.pid
+      ? lineage?.claudeRecord(caller.pid)?.sessionId ?? null
+      : null);
+    const merged = withMainStatus(
+      mergeMonitorSessions(
+        state.gatewaySourceSessions, local.sessions, state.workerTopology, state.formerWorkerIds, currentCallerSession
+      ),
+      mains.present(),
+      { workerTopology: state.workerTopology, currentCallerSession }
     );
     const acceptedLocalIds = new Set(merged.filter((session) => session.source === "local").map((session) => session.sessionId));
     // Only timelines that changed since they were last handed over: an idle
@@ -515,7 +529,46 @@ async function main() {
       // setup is best-effort metadata; session/event flow works without it.
       return;
     }
+    await loadMains(gateway);
     await restartSupersededDaemon(gateway);
+  }
+
+  // Where each Main stands, read whenever setup is: after every (re)connect
+  // and on the setup cadence, so a main_status event lost with a connection
+  // is made up for. Another daemon (setup's instanceId) starts the book over;
+  // a Gateway without capabilities.mainStatus keeps the plain projection.
+  async function loadMains(gateway) {
+    let changed = false;
+    if (gateway?.capabilities?.mainStatus !== true) {
+      changed = mains.waiting().length > 0;
+      mains.reset();
+      mainsInstanceId = null;
+    } else {
+      if (gateway.instanceId !== mainsInstanceId) {
+        changed = mains.waiting().length > 0;
+        mains.reset();
+        mainsInstanceId = gateway.instanceId ?? null;
+      }
+      try {
+        const epoch = mains.beginList();
+        const reply = await rpc.call("main_list", {});
+        changed = mains.replace(reply?.mains, epoch) || changed;
+      } catch (error) {
+        console.error(`Gateway main_list failed: ${error.message}`);
+      }
+    }
+    if (changed) await reprojectMains();
+  }
+
+  // A Main's status changes only the Frontdoor it is shown on: the last local
+  // scan is reused.
+  async function reprojectMains() {
+    try {
+      const result = await applySessionSources({ reuseLocal: true });
+      if (result.changed) broadcastSessionSources(result);
+    } catch (error) {
+      console.error(`Main status projection failed: ${error.message}`);
+    }
   }
 
   // A runtime update only moves runtime/current; the daemon already running

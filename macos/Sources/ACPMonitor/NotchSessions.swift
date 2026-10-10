@@ -19,6 +19,8 @@ struct NotchStatusStyle: Equatable {
         case .permission: (icon, color, label, animated) = ("lock.shield.fill", .orange, "권한 대기", true)
         case .input: (icon, color, label, animated) = ("questionmark.bubble.fill", .orange, "입력 대기", true)
         case .error: (icon, color, label, animated) = ("xmark.octagon.fill", .red, "오류", false)
+        // Not animated: a Main may sleep on its Workers for minutes.
+        case .awaiting: (icon, color, label, animated) = ("hourglass", .teal, "Worker 대기", false)
         case .running:
             if currentStep?.isEmpty == false {
                 (icon, color, label, animated) = ("hammer.fill", .blue, "작업 중", true)

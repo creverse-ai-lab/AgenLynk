@@ -34,6 +34,7 @@ func petStatusPhrase(contractState: String?, legacyState: String, waitingReason:
         switch contractState {
         case "running", "starting": return "실행 중"
         case "waiting": return waiting
+        case "awaiting": return "Worker 대기"
         case "failed": return "오류"
         case "idle", "completed": return "대기"
         case "offline": return "종료"
@@ -43,6 +44,7 @@ func petStatusPhrase(contractState: String?, legacyState: String, waitingReason:
     switch legacyState {
     case "running": return "실행 중"
     case "needs_input": return waiting
+    case "awaiting": return "Worker 대기"
     case "blocked": return "오류"
     case "ready", "idle": return "대기"
     case "offline": return "종료"

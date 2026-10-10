@@ -56,7 +56,8 @@ enum FrontdoorPhase: Equatable {
         let statuses = Set(members(frontdoor).map(\.status))
         if statuses.contains("waiting_permission") { return .waitingPermission }
         if statuses.contains("waiting_input") { return .waitingInput }
-        if !statuses.isDisjoint(with: ["running", "cancelling", "restoring"]) { return .running }
+        // Sleeping on its Workers is still the turn in flight: no "done".
+        if !statuses.isDisjoint(with: ["running", "waiting_tasks", "cancelling", "restoring"]) { return .running }
         // How the work ended is the root's to say; a Worker failing alone
         // does not fail the Frontdoor's turn.
         switch frontdoor.root?.status ?? "" {

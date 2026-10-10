@@ -8,6 +8,7 @@ import SwiftUI
 func statusColor(_ status: String) -> Color {
     switch status {
     case "running", "restoring", "approved": .green
+    case "waiting_tasks": .teal
     case "waiting_permission", "waiting_input", "pending", "interrupted": .orange
     case "error", "failed", "denied", "unavailable", "disconnected": .red
     // cancelling is stopping, not waiting on anyone: grey, not orange.
@@ -19,6 +20,7 @@ func statusColor(_ status: String) -> Color {
 func sessionStatusSymbol(_ status: String) -> String {
     switch status {
     case "running", "restoring": "bolt.fill"
+    case "waiting_tasks": "hourglass"
     case "waiting_permission": "hand.raised.fill"
     case "waiting_input": "keyboard"
     case "cancelling": "xmark.circle"

@@ -8,6 +8,7 @@ extension AgentMascot.Mood {
         switch urgency {
         case .permission, .input: self = .waiting
         case .running: self = .working
+        case .awaiting: self = .awaiting
         case .error: self = .failed
         // Resting between turns is asleep, not "done": the done face is the
         // finished-work alert's.

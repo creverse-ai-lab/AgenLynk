@@ -25,6 +25,8 @@ export const EVENT_STATUSES = Object.freeze(["pending", "running", "completed", 
 // The Gateway's own vocabulary; local sources map onto the same words.
 export const SESSION_STATUSES = Object.freeze([
   "running",
+  // A Frontdoor whose Main sleeps on its Workers (Gateway 1.9 Main status).
+  "waiting_tasks",
   "waiting_permission",
   "waiting_input",
   "idle",

@@ -8,7 +8,8 @@ import Foundation
 struct MenuBarPipeline: Equatable, Sendable {
     /// What a step needs from the user, most urgent first.
     enum Urgency: Int, Comparable, Sendable {
-        case permission, input, error, running, idle, closed
+        /// `awaiting`: a Frontdoor sleeping until its Workers need it.
+        case permission, input, error, awaiting, running, idle, closed
 
         static func < (lhs: Urgency, rhs: Urgency) -> Bool { lhs.rawValue < rhs.rawValue }
 
@@ -19,6 +20,7 @@ struct MenuBarPipeline: Equatable, Sendable {
             // A cancelled turn and an unavailable agent are failures, as the
             // alerts (FrontdoorPhase) and the Pet read them.
             case "error", "failed", "cancelled", "unavailable": self = .error
+            case "waiting_tasks": self = .awaiting
             case "running", "cancelling", "restoring", "starting": self = .running
             case "closed", "disconnected": self = .closed
             default: self = .idle
@@ -174,7 +176,9 @@ struct MenuBarPipeline: Equatable, Sendable {
             depth: depth,
             urgency: urgency,
             waitReason: waitReason(urgency, events: events),
-            currentStep: urgency <= .running ? currentStep(turnEvents.isEmpty ? Array(events.suffix(40)) : turnEvents) : nil,
+            // A Main asleep on its Workers has no step of its own to show.
+            currentStep: urgency <= .running && urgency != .awaiting
+                ? currentStep(turnEvents.isEmpty ? Array(events.suffix(40)) : turnEvents) : nil,
             turnStartedAt: urgency <= .running ? turnStart : nil,
             forecast: forecast
         )

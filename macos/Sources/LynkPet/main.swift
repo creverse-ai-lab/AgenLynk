@@ -138,6 +138,10 @@ private struct AgentSession: Decodable, Identifiable, Equatable {
         case "waitForUser":
             state = "needs_input"
             commDirection = nil
+        // A Frontdoor sleeping until its Workers need it (contract 1.1).
+        case "waitForTasks":
+            state = "awaiting"
+            commDirection = nil
         case "error":
             state = "blocked"
             commDirection = nil
@@ -158,6 +162,7 @@ private struct AgentSession: Decodable, Identifiable, Equatable {
             switch agent.state {
             case "starting", "running": state = "running"
             case "waiting": state = "needs_input"
+            case "awaiting": state = "awaiting"
             case "completed": state = "ready"
             case "failed": state = "blocked"
             case "offline": state = "offline"
@@ -886,6 +891,7 @@ private func stateColor(_ state: String) -> Color {
     switch state {
     case "running": return .cyan
     case "needs_input": return .orange
+    case "awaiting": return .teal
     case "blocked": return .red
     case "ready": return .green
     default: return .gray
@@ -954,6 +960,8 @@ private func mascotMood(_ agent: AgentSession, warm: Bool) -> AgentMascot.Mood {
     switch agent.state {
     case "running": return .working
     case "needs_input": return .waiting
+    // Drawn still: a Main may sleep on its Workers for minutes.
+    case "awaiting": return .awaiting
     case "blocked": return .failed
     // Just finished: done for `readyLinger`, then warm, which sleeps.
     case "ready": return .happy
@@ -1484,6 +1492,18 @@ private func selfTest() {
         AgentSession(contractAgent: unknownState.agents[0], action: "unknown").state == "blocked",
         "an unknown contract state must map to blocked"
     )
+
+    // Contract 1.1: a Frontdoor sleeping on its Workers is awake and still,
+    // with the awaiting face, whether the action or only the state says so.
+    let awaitingJSON = #"{"contract":"pet-state","version":"1.1.0","sequence":10,"agents":[{"id":"fd","parentId":null,"role":"frontdoor","provider":"codex","engine":"e","state":"awaiting","task":"Delegate","updatedAt":"2026-08-10T12:34:55.000Z","source":"local"}]}"#
+    let awaitingState = try! JSONDecoder().decode(PetStateEnvelope.self, from: Data(awaitingJSON.utf8))
+    require(awaitingState.isSupported, "a 1.1 contract must be read")
+    let awaiting = AgentSession(contractAgent: awaitingState.agents[0], action: "waitForTasks")
+    require(awaiting.state == "awaiting")
+    require(AgentSession(contractAgent: awaitingState.agents[0], action: nil).state == "awaiting")
+    require(!isWarm(awaiting, now: now) && !demandsAttention(awaiting))
+    require(mascotMood(awaiting, warm: false) == .awaiting)
+    require(petStatusPhrase(contractState: "awaiting", legacyState: "awaiting", waitingReason: nil) == "Worker 대기")
 
     // Hover: an older producer (no name/waitingReason) still labels by task;
     // the optional fields, when present, name the node and split waiting.

@@ -67,7 +67,7 @@
         },
         "state": {
           "type": "string",
-          "enum": ["offline", "idle", "starting", "running", "waiting", "completed", "failed", "unknown"]
+          "enum": ["offline", "idle", "starting", "running", "waiting", "awaiting", "completed", "failed", "unknown"]
         },
         "task": {
           "type": ["string", "null"],

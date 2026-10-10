@@ -20,6 +20,7 @@ struct MenuBarPipelineTests {
         try frontdoorAlertsFollowTransitions()
         try workersOfAnEndedFrontdoorDoNotReadAsOne()
         try aFinishedFrontdoorReadsDoneThenResting()
+        try aFrontdoorSleepingOnItsWorkersReadsAwaiting()
         print("Swift menu bar pipeline checks passed")
     }
 
@@ -48,6 +49,27 @@ struct MenuBarPipelineTests {
         if let status { object["status"] = .string(status) }
         guard let value = MonitorEvent(.object(object)) else { throw CheckError.failed("event \(id) did not decode") }
         return value
+    }
+
+    /// Gateway 1.9: a Main sleeping on its Workers (`waiting_tasks`) is work
+    /// in flight: its card stays listed and reads awaiting, it counts as a
+    /// working Frontdoor, and it is no "done" for the alerts.
+    private static func aFrontdoorSleepingOnItsWorkersReadsAwaiting() throws {
+        let frontdoors = FrontdoorSession.make(sessions: [
+            try session("main", status: "waiting_tasks", opener: "m", role: "frontdoor"),
+            try session("w1", status: "running", opener: "m", parent: "main", created: "2026-09-26T00:01:00.000Z")
+        ])
+        let pipeline = MenuBarPipeline.make(frontdoors: frontdoors, eventsBySession: [:])
+        try check(pipeline.activeCards.map(\.id) == ["m"] && pipeline.idleCards.isEmpty, "it stays among the moving cards")
+        try check(pipeline.activeCards.first?.urgency == .awaiting, "the card reads awaiting, not its Worker's running")
+        let counts = MenuBarCounts(pipeline)
+        try check(counts.main == 1 && counts.sub == 1, "one working Frontdoor, one working Worker: \(counts.main)/\(counts.sub)")
+        guard let frontdoor = frontdoors.first else { throw CheckError.failed("no Frontdoor") }
+        try check(FrontdoorPhase.of(frontdoor) == .running, "sleeping on Workers is the turn in flight")
+        try check(FrontdoorAlertTracker.alertKind(from: .running, to: FrontdoorPhase.of(frontdoor)) == nil, "so no done alert")
+        try check(frontdoor.statusKey == "waiting_tasks", "the pill's color follows it")
+        try check(frontdoor.statusText == "Worker 대기", "the header says what it does: \(frontdoor.statusText)")
+        try check(frontdoor.runningCount == 1, "only its Worker counts as running")
     }
 
     /// A Frontdoor at rest reads "완료" for `finishedLinger` after its last

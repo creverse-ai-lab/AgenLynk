@@ -213,7 +213,7 @@ enum MonitorModelChecks {
         let actions = PetActionsEnvelope.make(projection: projection, sequence: 7, generatedAt: generatedAt)
         try check(state.contract == "pet-state", "the state envelope must declare its contract name")
         try check(actions.contract == "pet-actions", "the actions envelope must declare its contract name")
-        try check(state.version == "1.0.0" && actions.version == "1.0.0", "both envelopes must be versioned")
+        try check(state.version == "1.1.0" && actions.version == "1.1.0", "both envelopes must be versioned")
         try check(state.sequence == actions.sequence, "both envelopes from one update must share the same sequence")
         try check(state.generatedAt == actions.generatedAt, "both envelopes from one update must share the same timestamp")
         try check(state.agents.first?.id == actions.actions.first?.id, "both envelopes must describe the same agent id")

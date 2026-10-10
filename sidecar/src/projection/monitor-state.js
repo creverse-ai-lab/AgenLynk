@@ -12,7 +12,7 @@ import { EventStore } from "../store/event-store.js";
 // shape whether the Gateway, a transcript, or a hook produced them.
 export const MONITOR_SCHEMA_VERSION = 2;
 
-const LOCAL_ACTIVE_STATUSES = new Set(["running", "waiting_permission", "waiting_input"]);
+const LOCAL_ACTIVE_STATUSES = new Set(["running", "waiting_tasks", "waiting_permission", "waiting_input"]);
 
 /**
  * A local session leaves the live list only once it is over: its SessionEnd

@@ -27,7 +27,7 @@ test("stage, validate, activate, and inspect use the pinned public client", asyn
     await smokeSeed(source, "a");
     const staged = await stageRuntimeCandidate({ runtimeRoot, seedRoot: source });
     assert.equal(staged.ok, true);
-    assert.match(staged.versionId, /^1\.8\.0-[a-f0-9]{16}$/);
+    assert.match(staged.versionId, /^1\.9\.0-[a-f0-9]{16}$/);
     const validated = await validateRuntimeCandidate({ runtimeRoot, versionId: staged.versionId });
     assert.equal(validated.ok, true);
     assert.equal(validated.smoke.gatewayApiVersion, 1);
@@ -207,7 +207,7 @@ test("a 1.6 runtime tarball install upgrades to the npm package and rolls back, 
     assert.match(await readFile(controlScript, "utf8"), /"legacy"/);
 
     const next = await stageRuntimeCandidate({ runtimeRoot, seedRoot: npmSeed });
-    assert.match(next.versionId, /^1\.8\.0-/);
+    assert.match(next.versionId, /^1\.9\.0-/);
     // The real smoke check: bundled node resolves acp-gateway-daemon/client from the runtime root.
     const validated = await validateRuntimeCandidate({ runtimeRoot, versionId: next.versionId });
     assert.equal(validated.ok, true, JSON.stringify(validated.error));

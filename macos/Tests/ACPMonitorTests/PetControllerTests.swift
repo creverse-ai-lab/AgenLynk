@@ -223,6 +223,25 @@ enum PetControllerChecks {
         try expect(state("cancelled", at: endedAt) == .failed, "a cancelled turn is a failure")
         try expect(state("g3", at: endedAt) == .failed, "a Frontdoor with a failed and a running Worker reads failed, as the notch card does")
         try expect(MenuBarPipeline.Urgency(status: "cancelled") == .error, "the notch reads a cancelled turn as a failure too")
+
+        // Gateway 1.9: a Frontdoor sleeping on its Workers (waiting_tasks)
+        // is awaiting while they run, and a Worker that needs the person
+        // still comes first.
+        let delegating = [
+            try session("main", status: "waiting_tasks", role: "frontdoor", group: "g4"),
+            try session("worker", status: "running", group: "g4")
+        ]
+        let projection = PetActivityProjection.make(sessions: delegating, inbox: [], now: endedAt)
+        let main = projection.agents.first { $0.id == "g4" }
+        try expect(main?.state == .awaiting && main?.action == .waitForTasks, "a Frontdoor sleeping on its Workers is awaiting")
+        try expect(projection.agents.first { $0.id == "worker" }?.state == .running, "its Worker still reads running")
+        let asking = PetActivityProjection.make(sessions: [
+            try session("main", status: "waiting_tasks", role: "frontdoor", group: "g5"),
+            try session("worker", status: "waiting_permission", group: "g5")
+        ], inbox: [], now: endedAt)
+        try expect(asking.agents.first { $0.id == "g5" }?.state == .waiting, "a Worker waiting on the person outranks awaiting")
+        try expect(MenuBarPipeline.Urgency(status: "waiting_tasks") == .awaiting, "the notch reads it the same way")
+        try expect(MenuBarPipeline.Urgency.awaiting.isMoving, "awaiting is work in flight, not rest")
     }
 
     /// The producer names agents the way the app does (nickname, else the

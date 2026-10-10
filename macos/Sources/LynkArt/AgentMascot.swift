@@ -30,7 +30,9 @@ public final class AgentMarks: @unchecked Sendable {
 /// pill to a card and changes expression with the session.
 public struct AgentMascot: View {
     public enum Mood: Equatable, Sendable {
-        case idle, working, waiting, happy, failed
+        /// `awaiting`: its own turn sleeps until its Workers need it (Gateway
+        /// 1.9 `waiting_tasks`), neither waiting for the person nor at rest.
+        case idle, working, waiting, happy, failed, awaiting
     }
 
     public enum Kind: String, Equatable, Sendable {
@@ -253,6 +255,12 @@ struct MermaidMascot: View {
                     case .waiting:
                         Capsule().fill(style.ink).frame(width: eyeWidth * 1.15, height: eyeHeight * 1.12)
                             .overlay(catchlight(eyeWidth: eyeWidth * 1.15, eyeHeight: eyeHeight * 1.12))
+                    case .awaiting:
+                        // Waiting on its Workers: eyes open, glancing up to
+                        // the side where they work.
+                        Capsule().fill(style.ink).frame(width: eyeWidth, height: eyeHeight * 0.85)
+                            .overlay(catchlight(eyeWidth: eyeWidth, eyeHeight: eyeHeight * 0.85))
+                            .offset(x: eyeWidth * 0.35, y: -eyeHeight * 0.25)
                     default:
                         Capsule().fill(style.ink).frame(width: eyeWidth, height: eyeHeight)
                             .overlay(catchlight(eyeWidth: eyeWidth, eyeHeight: eyeHeight).opacity(blink < 1 ? 0 : 1))
@@ -291,6 +299,12 @@ struct MermaidMascot: View {
                 .fill(style.ink)
                 .frame(width: width * 0.06, height: height * 0.05)
                 .offset(y: height * 0.24)
+        } else if size >= 26 && mood == .awaiting {
+            // Patient: a small closed smile.
+            SleepyEye()
+                .stroke(style.ink, style: StrokeStyle(lineWidth: max(1, width * 0.022), lineCap: .round))
+                .frame(width: width * 0.1, height: height * 0.035)
+                .offset(y: height * 0.24)
         } else if size >= 26 && mood != .failed {
             OpenSmile()
                 .fill(style.ink)
@@ -308,6 +322,7 @@ struct MermaidMascot: View {
         case .happy: (symbol, color) = ("checkmark", .green)
         case .failed: (symbol, color) = ("xmark", .red)
         case .idle: (symbol, color) = ("zzz", Color(red: 0.42, green: 0.45, blue: 0.86))
+        case .awaiting: (symbol, color) = ("hourglass", Color(red: 0.13, green: 0.68, blue: 0.62))
         }
         return AnyView(
             Image(systemName: symbol)
@@ -406,7 +421,8 @@ struct MermaidMascot: View {
 
 /// The slight motion a mascot keeps outside a turn, so it never looks
 /// frozen: resting, it breathes (a slow swell, anchored at its base); done, it
-/// sways a little; failed, it sags slowly. A running or waiting mascot has its
+/// sways a little; waiting on its Workers, it sways slowly; failed, it sags
+/// slowly. A running or waiting mascot has its
 /// own bob and hop instead. A repeating animation of the transform only: the
 /// mascot itself is not redrawn, which keeps a row of resting mascots cheap.
 struct RestingMotion: ViewModifier {
@@ -417,12 +433,15 @@ struct RestingMotion: ViewModifier {
         let (scaleX, scaleY, angle): (CGFloat, CGFloat, Double) = switch mood {
         case .idle: phase ? (0.992, 1.014, 0) : (1.004, 0.994, 0)
         case .happy: (1, 1, phase ? 2.5 : -2.5)
+        // Waiting on its Workers: a slow, patient sway.
+        case .awaiting: (1, 1, phase ? 3.5 : -3.5)
         case .failed: phase ? (1.01, 0.978, 0) : (1, 1, 0)
         case .working, .waiting: (1, 1, 0)
         }
         let period: Double = switch mood {
         case .idle: 1.9
         case .happy: 0.9
+        case .awaiting: 2.4
         default: 2.6
         }
         content

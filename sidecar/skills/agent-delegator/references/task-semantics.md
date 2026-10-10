@@ -18,6 +18,25 @@ Non-terminal returns are **not** errors and have no `result`:
 
 Treating either as a failure and re-sending the prompt is how one unit of work becomes two.
 
+## Sleeping in agent_acp_wait
+
+`agent_acp_wait` (Gateway 1.9, `capabilities.taskWait`) is the waiting half of `agent_acp_run {waitMs: 0}`: one call that blocks until the tasks you started need you, for all of them at once.
+
+```json
+{"ok": true, "reason": "task_finished",
+ "tasks": [{"taskId": "...", "sessionId": "...", "provider": "codex", "status": "completed", "statusMessage": "end_turn", "outcome": {...}},
+           {"taskId": "...", "sessionId": "...", "provider": "claude", "status": "working", "statusMessage": "Prompt running"}],
+ "counts": {"finished": 1, "needsInput": 0, "working": 1},
+ "next": {"wait": {"tool": "agent_acp_wait", "arguments": {}}}}
+```
+
+- `reason` is the first that holds: `needs_input`, `task_finished`, `nothing_pending`; `heartbeat` when the sleep ran out first.
+- `outcome` is the run envelope, and taking it marks the result seen, as `agent_acp_run {taskId}` does. Only a `task_finished` answer carries outcomes, about 64 KB of them; a finished task that did not fit has no `outcome` and is in `next.collect`. Any other answer lists finished tasks without `outcome` and leaves them unseen; the next wait delivers them.
+- Read every row, whatever the `reason`: a `needs_input` answer can list a finished task too. A task waiting on you carries `pending`, and `next.answer` names the tool and its `sessionId` and `requestId`.
+- `taskIds` narrows the wait to those tasks; another Main's tasks are never watched. `gone` lists watched tasks whose TTL ran out.
+- The sleep is as long as your host allows one tool call; leave `timeoutMs` out.
+- While a Main sleeps here, AgenLynk shows its Frontdoor as waiting on its Workers.
+
 ## Handles
 
 - Every handle reports `origin`: `run` or `prompt`. `tasks/list` shows both.

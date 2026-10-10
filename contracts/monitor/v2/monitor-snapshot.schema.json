@@ -41,12 +41,22 @@
         "sessionId": { "type": "string", "minLength": 1 },
         "provider": { "type": ["string", "null"] },
         "status": {
-          "enum": ["running", "waiting_permission", "waiting_input", "idle", "cancelling", "restoring", "closed", "unavailable", "error", "disconnected"]
+          "enum": ["running", "waiting_tasks", "waiting_permission", "waiting_input", "idle", "cancelling", "restoring", "closed", "unavailable", "error", "disconnected"]
         },
         "model": { "type": ["string", "null"], "description": "The real model id, or null. Never a placeholder such as \"claude-cli\"." },
         "title": { "type": ["string", "null"] },
         "cwd": { "type": ["string", "null"] },
         "role": { "enum": ["frontdoor", "worker"] },
+        "mainStatus": {
+          "description": "Gateway 1.9 Main status of a Frontdoor whose status is waiting_tasks: its own turn sleeps until its Workers need it.",
+          "type": "object",
+          "properties": {
+            "status": { "enum": ["waiting_tasks"] },
+            "since": { "type": ["string", "null"] },
+            "taskIds": { "type": "array", "items": { "type": "string" } },
+            "count": { "type": "integer", "minimum": 0 }
+          }
+        },
         "source": { "type": ["string", "null"] },
         "turnId": { "type": ["string", "null"] },
         "parentSessionId": { "type": ["string", "null"] },

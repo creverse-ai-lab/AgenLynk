@@ -10,6 +10,7 @@ extension MenuBarPipeline.Stage {
         switch urgency {
         case .permission, .input: return .orange
         case .error: return .red
+        case .awaiting: return .teal
         case .running: return .green
         case .idle, .closed: return .secondary
         }

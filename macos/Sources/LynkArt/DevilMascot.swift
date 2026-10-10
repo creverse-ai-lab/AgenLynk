@@ -153,6 +153,12 @@ struct DevilMascot: View {
                     case .waiting:
                         Capsule().fill(style.ink).frame(width: eyeWidth * 1.15, height: eyeHeight * 1.12)
                             .overlay(catchlight(eyeWidth: eyeWidth * 1.15, eyeHeight: eyeHeight * 1.12))
+                    case .awaiting:
+                        // Waiting on its Workers: eyes open, glancing up to
+                        // the side where they work.
+                        Capsule().fill(style.ink).frame(width: eyeWidth, height: eyeHeight * 0.85)
+                            .overlay(catchlight(eyeWidth: eyeWidth, eyeHeight: eyeHeight * 0.85))
+                            .offset(x: eyeWidth * 0.35, y: -eyeHeight * 0.25)
                     default:
                         Capsule().fill(style.ink).frame(width: eyeWidth, height: eyeHeight)
                             .overlay(catchlight(eyeWidth: eyeWidth, eyeHeight: eyeHeight).opacity(blink < 1 ? 0 : 1))
@@ -193,6 +199,12 @@ struct DevilMascot: View {
                 .fill(style.ink)
                 .frame(width: width * 0.06, height: height * 0.05)
                 .offset(y: height * 0.24)
+        } else if size >= 26 && mood == .awaiting {
+            // Patient: a small closed smile.
+            SleepyEye()
+                .stroke(style.ink, style: StrokeStyle(lineWidth: max(1, width * 0.022), lineCap: .round))
+                .frame(width: width * 0.1, height: height * 0.035)
+                .offset(y: height * 0.24)
         } else if size >= 26 && mood != .failed {
             let mouthWidth = width * 0.17
             let mouthHeight = height * 0.12
@@ -218,6 +230,7 @@ struct DevilMascot: View {
         case .happy: (symbol, color) = ("checkmark", .green)
         case .failed: (symbol, color) = ("xmark", .red)
         case .idle: (symbol, color) = ("zzz", Color(red: 0.42, green: 0.45, blue: 0.86))
+        case .awaiting: (symbol, color) = ("hourglass", Color(red: 0.13, green: 0.68, blue: 0.62))
         }
         return AnyView(
             Image(systemName: symbol)

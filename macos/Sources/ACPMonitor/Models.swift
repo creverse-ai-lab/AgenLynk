@@ -152,7 +152,7 @@ struct GatewaySession: Identifiable, Hashable, Sendable {
         isFrontdoorRecord && isLocalSource && cwd.contains("/.cache/acp-gateway/workspaces/")
     }
     var isActive: Bool {
-        ["running", "waiting_permission", "waiting_input", "cancelling", "restoring"].contains(status)
+        ["running", "waiting_tasks", "waiting_permission", "waiting_input", "cancelling", "restoring"].contains(status)
     }
     var hasFrontdoorIdentity: Bool {
         openerInstanceId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
@@ -462,8 +462,9 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
     }
     var members: [GatewaySession] { (root.map { [$0] } ?? []) + workers }
     var isActive: Bool { members.contains(where: \.isActive) }
-    /// Members actually running — a session waiting on the person is not.
-    var runningCount: Int { members.filter { $0.isActive && !$0.isWaitingForUser }.count }
+    /// Members actually running — a session waiting on the person is not,
+    /// nor a Main asleep on its Workers.
+    var runningCount: Int { members.filter { $0.isActive && !$0.isWaitingForUser && $0.status != "waiting_tasks" }.count }
     var waitingPermissionCount: Int { members.filter { $0.status == "waiting_permission" }.count }
     var waitingInputCount: Int { members.filter { $0.status == "waiting_input" }.count }
     /// Every member closed: the work is over, not just idle.
@@ -485,6 +486,7 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
         if !waits.isEmpty { return waits.joined(separator: " · ") }
         // Said outright, or the Workers left behind read as a Frontdoor.
         if frontdoorEnded { return isActive ? "Frontdoor 종료 · Worker 실행 중" : "Frontdoor 종료" }
+        if root?.status == "waiting_tasks" { return "Worker 대기" }
         if isActive { return "실행 중" }
         if isClosed { return "종료" }
         return "대기"
@@ -497,6 +499,7 @@ struct FrontdoorSession: Identifiable, Hashable, Sendable {
     var statusKey: String {
         if waitingPermissionCount > 0 { return "waiting_permission" }
         if waitingInputCount > 0 { return "waiting_input" }
+        if root?.status == "waiting_tasks" { return "waiting_tasks" }
         if isActive { return "running" }
         if isClosed { return "closed" }
         return "idle"
@@ -688,13 +691,15 @@ struct HistoryGroups: Sendable {
 /// the contract and is intentionally distinct from `PetSnapshot`'s in-app
 /// graph state strings, which back the existing Agent Map view.
 enum PetAgentState: String, Encodable, Equatable, Sendable {
-    case offline, idle, starting, running, waiting, completed, failed, unknown
+    /// `awaiting` (contract 1.1): a Frontdoor whose own turn sleeps until its
+    /// Workers need it (Gateway 1.9 `waiting_tasks`).
+    case offline, idle, starting, running, waiting, awaiting, completed, failed, unknown
 }
 
 /// Presentation action a Pet/user-renderer is asked to play, per
 /// `contracts/pet/v1/pet-actions.schema.json`.
 enum PetPresentationAction: String, Encodable, Equatable, Sendable {
-    case sleep, wake, think, useTool, waitForUser, celebrate, error, disconnect, unknown
+    case sleep, wake, think, useTool, waitForUser, waitForTasks, celebrate, error, disconnect, unknown
 }
 
 /// One Frontdoor or Worker agent projected for the Pet contract. `cwd`,
@@ -859,12 +864,13 @@ extension PetAgentState {
         switch self {
         case .running: 0
         case .waiting: 1
-        case .starting: 2
-        case .failed: 3
-        case .completed: 4
-        case .idle: 5
-        case .offline: 6
-        case .unknown: 7
+        case .awaiting: 2
+        case .starting: 3
+        case .failed: 4
+        case .completed: 5
+        case .idle: 6
+        case .offline: 7
+        case .unknown: 8
         }
     }
 }
@@ -881,6 +887,8 @@ private func petContractState(for status: String, hasPendingInbox: Bool, updated
     case "running", "cancelling": return .running
     case "restoring": return .starting
     case "waiting_permission", "waiting_input": return .waiting
+    // A Frontdoor sleeping on its Workers (Gateway 1.9 Main status).
+    case "waiting_tasks": return .awaiting
     // At rest: just finished for a while, as the notch shows it, then asleep.
     case "idle":
         return MascotTiming.justFinished(updated: updatedAt.flatMap(parseTimestamp), now: now) ? .completed : .idle
@@ -895,9 +903,10 @@ private func petContractState(for status: String, hasPendingInbox: Bool, updated
 /// A Frontdoor root is only as settled as its least-settled member; the
 /// first matching state in this priority order wins. The same order as the
 /// notch card's urgency: a wait, then a failure, then work; a fresh finish
-/// is news over rest.
+/// is news over rest. A Frontdoor sleeping on its Workers reads as that, not
+/// as their work, while none of them needs the person.
 private func frontdoorContractState(_ memberStates: [PetAgentState]) -> PetAgentState {
-    let priority: [PetAgentState] = [.waiting, .failed, .running, .starting, .completed, .idle, .offline]
+    let priority: [PetAgentState] = [.waiting, .failed, .awaiting, .running, .starting, .completed, .idle, .offline]
     for state in priority where memberStates.contains(state) { return state }
     return .unknown
 }
@@ -913,6 +922,7 @@ private func petContractAction(for state: PetAgentState) -> PetPresentationActio
     case .starting: .wake
     case .running: .think
     case .waiting: .waitForUser
+    case .awaiting: .waitForTasks
     case .completed: .celebrate
     case .failed: .error
     case .unknown: .unknown
@@ -1005,7 +1015,7 @@ struct PetSnapshot: Encodable, Equatable, Sendable {
 /// raw status, so classification stays centralized in `petContractState`.
 private func legacyPetState(_ state: PetAgentState) -> String {
     switch state {
-    case .running, .starting: "running"
+    case .running, .starting, .awaiting: "running"
     case .waiting: "needs_input"
     case .idle: "idle"
     case .completed: "ready"
@@ -1089,7 +1099,7 @@ struct PetStateEnvelope: Encodable, Equatable, Sendable {
     ) -> PetStateEnvelope {
         PetStateEnvelope(
             contract: "pet-state",
-            version: "1.0.0",
+            version: "1.1.0",
             generatedAt: monitorTimestamp(generatedAt),
             producer: producer,
             sequence: sequence,
@@ -1135,7 +1145,7 @@ struct PetActionsEnvelope: Encodable, Equatable, Sendable {
     ) -> PetActionsEnvelope {
         PetActionsEnvelope(
             contract: "pet-actions",
-            version: "1.0.0",
+            version: "1.1.0",
             generatedAt: monitorTimestamp(generatedAt),
             producer: producer,
             sequence: sequence,
@@ -1400,6 +1410,7 @@ func sessionActivityHeadline(status: String, isActive: Bool, latestKind: String?
     switch status {
     case "waiting_permission": return "권한 대기 중"
     case "waiting_input": return "입력 대기 중"
+    case "waiting_tasks": return "Worker 기다리는 중"
     // Stopping, not working: never "실행 중".
     case "cancelling": return "취소 중"
     default: break
@@ -1441,6 +1452,7 @@ func sessionStatusLabel(_ status: String) -> String {
     case "running": "실행 중"
     case "waiting_permission": "권한 대기"
     case "waiting_input": "입력 대기"
+    case "waiting_tasks": "Worker 대기"
     // A finished turn is a resting session, not "완료" (docs/ux-policy.md §3).
     case "idle", "ready", "end_turn", "completed": "대기"
     case "closed": "종료"
