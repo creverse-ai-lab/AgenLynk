@@ -41,6 +41,11 @@ final class AppModel: ObservableObject {
     /// Agent MCP entries still launching an old runtime version, per
     /// `/api/frontdoors`; Settings offers to relink them all at once.
     @Published private(set) var staleFrontdoorEntries: [StaleFrontdoorEntry] = []
+    /// What the last installer run warned about (BootstrapResult.warnings).
+    @Published private(set) var installerWarnings: [String] = []
+    /// Token relinks already tried this launch, so an entry the installer
+    /// keeps as it is does not start one run after another.
+    private var tokenRelinkAttempts: Set<String> = []
     /// The agent-delegator skill in each Main CLI, per `/api/skill`.
     @Published private(set) var delegatorSkill: DelegatorSkillStatus?
     @Published private(set) var delegatorSkillUpdating = false
@@ -1007,6 +1012,7 @@ final class AppModel: ObservableObject {
                 // Steps run strictly sequentially — the installer reuses a
                 // single-shot process, so overlapping runs would collide.
                 let primaryResult = try await self.installer.run(frontDoor: primary, nodeOverride: nodeOverride, onOutputLine: append)
+                self.installerWarnings = primaryResult.warnings
                 guard primaryResult.ok else {
                     self.onboardingRunning = false
                     self.onboardingError = primaryResult.message
@@ -1014,6 +1020,7 @@ final class AppModel: ObservableObject {
                 }
                 for target in extras {
                     let result = try await self.installer.installControl(target: target, nodeOverride: nodeOverride, onOutputLine: append)
+                    self.installerWarnings += result.warnings.filter { !self.installerWarnings.contains($0) }
                     guard result.ok else {
                         self.onboardingRunning = false
                         self.onboardingError = result.message
@@ -1295,6 +1302,7 @@ final class AppModel: ObservableObject {
                     Task { @MainActor [weak self] in self?.appendOnboardingOutput(line) }
                 }
                 self.installingFrontdoor = nil
+                self.installerWarnings = result.warnings
                 if result.ok {
                     self.lastNotice = "\(target.capitalized) Frontdoor MCP를 설치했습니다. 새로 시작하는 세션부터 모니터링됩니다."
                     self.reconnect()
@@ -1347,7 +1355,9 @@ final class AppModel: ObservableObject {
         installingFrontdoor = Self.relinkingFrontdoors
         onboardingError = nil
         lastNotice = nil
+        installerWarnings = []
         onboardingOutput.removeAll()
+        let tokenOnly = staleFrontdoorEntries.allSatisfy(\.isTokenMismatch)
         let nodeOverride = settings.nodePath
         let groups = ["control", "guide"].compactMap { kind -> (String, [String])? in
             let targets = Array(Set(staleFrontdoorEntries.filter { $0.entry == kind }.map(\.agent))).sorted()
@@ -1361,13 +1371,16 @@ final class AppModel: ObservableObject {
                     let result = try await self.installer.relink(kind: kind, targets: targets, nodeOverride: nodeOverride) { line in
                         Task { @MainActor [weak self] in self?.appendOnboardingOutput(line) }
                     }
+                    self.installerWarnings += result.warnings.filter { !self.installerWarnings.contains($0) }
                     guard result.ok else {
                         self.onboardingError = result.message
                         await self.loadInstalledFrontdoors()
                         return
                     }
                 }
-                self.lastNotice = "MCP 항목을 현재 Gateway로 다시 연결했습니다. 각 CLI를 다시 시작하면 적용됩니다."
+                self.lastNotice = tokenOnly
+                    ? "Control MCP 항목을 현재 Gateway 방식으로 다시 등록했습니다(1.8부터 토큰은 설정 파일에 두지 않습니다). 각 CLI를 다시 시작하면 적용됩니다."
+                    : "MCP 항목을 현재 Gateway로 다시 연결했습니다. 각 CLI를 다시 시작하면 적용됩니다."
                 await self.loadInstalledFrontdoors()
             } catch {
                 self.onboardingError = error.localizedDescription
@@ -1396,12 +1409,72 @@ final class AppModel: ObservableObject {
             if guideOnlyFrontdoors != snapshot.guideOnly { guideOnlyFrontdoors = snapshot.guideOnly }
             if primaryFrontdoor != snapshot.primary { primaryFrontdoor = snapshot.primary }
             if staleFrontdoorEntries != snapshot.stale { staleFrontdoorEntries = snapshot.stale }
+            relinkTokenEntriesIfNeeded()
         } catch {
             // Non-fatal: the badges just stay at their last known state rather
             // than surfacing an error into Settings.
             #if DEBUG
             FileHandle.standardError.write(Data("loadInstalledFrontdoors failed: \(error.localizedDescription)\n".utf8))
             #endif
+        }
+    }
+
+    /// A Control entry whose env does not suit the current runtime either
+    /// keeps the token Gateway 1.8 took out of agent configs, or (after a
+    /// rollback below 1.8) lacks the token the older front door needs and
+    /// cannot start. Both are relinked once without asking.
+    private func relinkTokenEntriesIfNeeded() {
+        let entries = staleFrontdoorEntries.filter { $0.isTokenMismatch && !tokenRelinkAttempts.contains(Self.tokenRelinkKey($0)) }
+        guard !entries.isEmpty, installingFrontdoor == nil, !onboardingRunning, onboardingInstallLocationReady else { return }
+        entries.forEach { tokenRelinkAttempts.insert(Self.tokenRelinkKey($0)) }
+        relinkTokenEntries(entries)
+    }
+
+    private static func tokenRelinkKey(_ entry: StaleFrontdoorEntry) -> String { "\(entry.agent)/\(entry.reason)" }
+
+    /// Only the Control entries whose token does not suit the runtime, and
+    /// nothing else stale (the button does the rest, and says what it drops).
+    /// A kept token goes without --force: the installer takes it out of the
+    /// entries it can prove are its own and leaves env the user added. A
+    /// missing one (after a rollback below 1.8) needs --force, which the
+    /// Gateway 1.8 downgrade notes give: the older installer keeps an
+    /// identity-free entry as it is otherwise. One installer run per agent:
+    /// an entry the installer does not manage fails its run, not the others'.
+    private func relinkTokenEntries(_ entries: [StaleFrontdoorEntry]) {
+        guard installingFrontdoor == nil, !onboardingRunning else { return }
+        let runs = Dictionary(grouping: entries, by: \.agent).keys.sorted().map { agent in
+            (agent: agent, force: entries.contains { $0.agent == agent && $0.reason == "needs-token" })
+        }
+        guard !runs.isEmpty else { return }
+        installingFrontdoor = Self.relinkingFrontdoors
+        installerWarnings = []
+        let nodeOverride = settings.nodePath
+        Task { [weak self] in
+            guard let self else { return }
+            var failures: [String] = []
+            for run in runs {
+                do {
+                    let result = try await self.installer.relink(
+                        kind: "control", targets: [run.agent], force: run.force, nodeOverride: nodeOverride
+                    ) { _ in }
+                    self.installerWarnings += result.warnings.filter { !self.installerWarnings.contains($0) }
+                    if !result.ok { failures.append("\(run.agent.capitalized): \(result.message)") }
+                } catch {
+                    failures.append("\(run.agent.capitalized): \(error.localizedDescription)")
+                }
+            }
+            self.installingFrontdoor = nil
+            await self.loadInstalledFrontdoors()
+            // The installer answers ok even for an entry it left as it was
+            // (env the user added): only what is no longer stale was fixed.
+            let attempted = Set(runs.map(\.agent))
+            let left = Set(self.staleFrontdoorEntries.filter { $0.isTokenMismatch && attempted.contains($0.agent) }.map(\.agent))
+            if !failures.isEmpty { self.onboardingError = failures.joined(separator: "\n") }
+            if left.isEmpty, failures.isEmpty {
+                self.lastNotice = "Control MCP 항목을 현재 Gateway 방식에 맞게 다시 등록했습니다. 각 CLI를 다시 시작하면 적용됩니다."
+            } else if !left.isEmpty {
+                self.lastNotice = "\(left.sorted().map(\.capitalized).joined(separator: ", ")) Control MCP 항목은 토큰 설정을 그대로 두었습니다. 설정 > 에이전트에서 확인하세요."
+            }
         }
     }
 
@@ -1558,6 +1631,12 @@ final class AppModel: ObservableObject {
 
     private func finishRuntimeChange(_ change: GatewayRuntimeChange) {
         runtimeInspection = change.inspection ?? runtimeInspection
+        // Another runtime may want the Control entries written another way
+        // (with or without the token).
+        switch change.outcome {
+        case .activated, .rolledBack: Task { await loadInstalledFrontdoors() }
+        default: break
+        }
         switch change.outcome {
         case let .activated(versionId):
             runtimeNotice = "\(versionId)로 전환했습니다. Gateway를 다시 시작하면 적용됩니다."
@@ -1766,6 +1845,9 @@ final class AppModel: ObservableObject {
             await reconcileHookConsent()
             await finishPendingDiskHistoryDeletion()
             guard connectionIsCurrent(generation) else { return }
+            // Control entries that do not suit this runtime are relinked
+            // without Settings being opened; off the start path.
+            Task { [weak self] in await self?.loadInstalledFrontdoors() }
             await client.startStream(endpoint: endpoint, onMessage: { [weak self] value in
                 guard let self, self.connectionIsCurrent(generation) else { return }
                 self.apply(streamMessage: value)

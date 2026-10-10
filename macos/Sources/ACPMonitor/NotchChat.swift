@@ -20,7 +20,9 @@ struct NotchChatPermission: Equatable {
         let name: String
         let kind: String
     }
-    let requestId: Int
+    /// As the Worker gave it, a number or (Gateway 1.8) a string; answered
+    /// with the same value.
+    let requestId: JSONValue
     let title: String
     let options: [Option]
 }
@@ -202,7 +204,7 @@ final class NotchChatStore: ObservableObject {
                 }
                 _ = try await client.chatPost(endpoint: endpoint, path: "permission", body: [
                     "sessionId": .string(sessionId),
-                    "requestId": .number(Double(permission.requestId)),
+                    "requestId": permission.requestId,
                     "optionId": .string(option.id)
                 ])
             } catch {
@@ -290,7 +292,7 @@ final class NotchChatStore: ObservableObject {
     }
 
     private static func permission(from event: [String: JSONValue]) -> NotchChatPermission? {
-        guard let requestId = event["requestId"]?.intValue else { return nil }
+        guard let requestId = event["requestId"], Self.isRequestId(requestId) else { return nil }
         let toolCall = event["toolCall"]?.objectValue
         let title = toolCall?["title"]?.stringValue ?? toolCall?["kind"]?.stringValue ?? "도구 실행"
         let options = (event["options"]?.arrayValue ?? []).compactMap { value -> NotchChatPermission.Option? in
@@ -298,6 +300,15 @@ final class NotchChatStore: ObservableObject {
             return .init(id: id, name: option["name"]?.stringValue ?? id, kind: option["kind"]?.stringValue ?? "")
         }
         return NotchChatPermission(requestId: requestId, title: title, options: options)
+    }
+
+    static func isRequestId(_ value: JSONValue) -> Bool {
+        switch value {
+        case let .number(number): number == number.rounded() && abs(number) <= 9_007_199_254_740_991
+        // The sidecar takes at most 256 characters.
+        case let .string(text): !text.isEmpty && text.count <= 256
+        default: false
+        }
     }
 }
 

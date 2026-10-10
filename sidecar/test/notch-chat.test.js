@@ -37,10 +37,17 @@ test("a poll always asks for the running text and caps its wait", () => {
   assert.equal(chatPollArgs(new URLSearchParams({ sessionId: "s1", cursor: "-3" })).cursor, 0);
 });
 
-test("a permission answer carries a numeric request id", () => {
+test("a permission answer carries the request id as the Worker gave it", () => {
   assert.deepEqual(
-    chatPermissionArgs({ sessionId: "s1", requestId: "4", optionId: "allow_once" }),
+    chatPermissionArgs({ sessionId: "s1", requestId: 4, optionId: "allow_once" }),
     { sessionId: "s1", requestId: 4, optionId: "allow_once" }
   );
+  // Gateway 1.8 hands a Worker's string id back as a string, never coerced.
+  assert.deepEqual(
+    chatPermissionArgs({ sessionId: "s1", requestId: "req-7", optionId: "allow_once" }),
+    { sessionId: "s1", requestId: "req-7", optionId: "allow_once" }
+  );
   assert.throws(() => chatPermissionArgs({ sessionId: "s1" }), /requestId is required/);
+  assert.throws(() => chatPermissionArgs({ sessionId: "s1", requestId: "" }), /requestId is required/);
+  assert.throws(() => chatPermissionArgs({ sessionId: "s1", requestId: 1.5 }), /requestId is required/);
 });

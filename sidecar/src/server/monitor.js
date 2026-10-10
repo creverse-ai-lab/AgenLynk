@@ -27,6 +27,9 @@ import { pathIsMissing } from "../app/fs-paths.js";
 import { gatewaySocketPath } from "../app/config.js";
 import { defaultInstallStatePath } from "../app/install-state.js";
 import { readInstalledFrontdoors } from "../app/frontdoor-configs.js";
+import { identityFrom, watchIdentity } from "../app/identity-watch.js";
+import { terminateLockedDaemon } from "../app/daemon-lock.js";
+import { describeGatewayError } from "../app/gateway-errors.js";
 import { delegatorSkillStatus, SKILL_AGENTS, syncDelegatorSkill } from "../app/delegator-skill.js";
 import {
   GATEWAY_SETTING_DEFINITIONS,
@@ -141,7 +144,7 @@ function loadIdentity() {
   const envToken = process.env.ACP_GATEWAY_CONTROL_TOKEN;
   const envRootId = process.env.ACP_GATEWAY_ROOT_ID;
   const path = defaultInstallStatePath();
-  if (envToken && envRootId) return { token: envToken, rootId: envRootId, statePath: path };
+  if (envToken && envRootId) return { token: envToken, rootId: envRootId, statePath: path, fromEnv: true };
   let state;
   try {
     state = JSON.parse(readFileSync(path, "utf8"));
@@ -152,8 +155,18 @@ function loadIdentity() {
   if (!identity?.token || !identity?.rootId) {
     throw new Error(`No identity in ${path}; run acp-gateway-bootstrap or set ACP_GATEWAY_CONTROL_TOKEN and ACP_GATEWAY_ROOT_ID.`);
   }
-  return { token: envToken ?? identity.token, rootId: envRootId ?? identity.rootId, statePath: path };
+  return {
+    token: envToken ?? identity.token,
+    rootId: envRootId ?? identity.rootId,
+    statePath: path,
+    // Only a token from the environment makes install.json's irrelevant.
+    fromEnv: Boolean(envToken)
+  };
 }
+
+// The app starts a new monitor when this one exits; the new one reads the
+// identity install.json holds then.
+const IDENTITY_CHANGED_EXIT = 75;
 
 /**
  * Whether a Codex PermissionRequest will be decided without its user (see
@@ -432,7 +445,9 @@ async function main() {
         // rejection and terminate the sidecar.
         console.error(`Session projection recovery failed: ${projectionError.message}`);
       }
-      state.setConnection({ connected: false, streaming: state.streaming, error: error?.message ?? String(error) });
+      // A daemon restarted after a token rotation refuses the old token.
+      if (isGatewayError(error, "CONTROL_ACCESS_DENIED")) identityWatch.check();
+      state.setConnection({ connected: false, streaming: state.streaming, error: describeGatewayError(error) });
       state.broadcast({
         kind: "state",
         connected: false,
@@ -536,10 +551,11 @@ async function main() {
         });
       }
     } catch (error) {
+      if (isGatewayError(error, "CONTROL_ACCESS_DENIED")) identityWatch.check();
       state.setConnection({
         connected: state.connected,
         streaming: false,
-        error: error?.message ?? String(error),
+        error: describeGatewayError(error),
         health: "degraded"
       });
       console.error(`Gateway connection failed: ${state.lastError}`);
@@ -570,10 +586,11 @@ async function main() {
         inbox: snapshot.inbox
       });
     } catch (error) {
+      if (isGatewayError(error, "CONTROL_ACCESS_DENIED")) identityWatch.check();
       state.setConnection({
         connected: state.connected,
         streaming: false,
-        error: error?.message ?? String(error),
+        error: describeGatewayError(error),
         health: "degraded"
       });
       if (!reconcileRetry) {
@@ -598,7 +615,7 @@ async function main() {
       const statusCode = error?.statusCode ?? 500;
       const code = error?.code ?? (statusCode === 500 ? "monitor_internal" : undefined);
       response.writeHead(statusCode, { "content-type": "application/json; charset=utf-8" });
-      response.end(JSON.stringify({ error: error?.message ?? String(error), ...(code ? { code } : {}) }));
+      response.end(JSON.stringify({ error: describeGatewayError(error), ...(code ? { code } : {}) }));
     });
   });
   await new Promise((resolve, reject) => {
@@ -1162,6 +1179,10 @@ async function main() {
     });
     try {
       return await control.call(method, args, timeoutMs);
+    } catch (error) {
+      // Refused because the token was rotated under this monitor.
+      if (isGatewayError(error, "CONTROL_ACCESS_DENIED")) identityWatch.check();
+      throw error;
     } finally {
       control.close();
     }
@@ -1176,7 +1197,15 @@ async function main() {
   }
 
   async function restartGatewayOnce(method) {
-    await controlCall(method, {});
+    try {
+      await controlCall(method, {});
+    } catch (error) {
+      // The person's restart of a daemon that still runs with the token from
+      // before a rotation: it refuses this monitor's, so it is ended by its
+      // lock pid. The automatic idle restart never goes this far.
+      if (method !== "daemon_shutdown" || !isGatewayError(error, "CONTROL_ACCESS_DENIED")
+        || !await terminateLockedDaemon(gatewaySocketPath())) throw error;
+    }
     const socketPath = gatewaySocketPath();
     for (let attempt = 0; attempt < 100; attempt += 1) {
       const socketGone = await pathIsMissing(socketPath);
@@ -1207,9 +1236,11 @@ async function main() {
 
   let shuttingDown = false;
   let parentWatch = null;
+  let identityWatch = { stop() {}, check() {} };
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    identityWatch.stop();
     clearInterval(interval);
     clearInterval(localInterval);
     clearInterval(historyPrune);
@@ -1231,6 +1262,15 @@ async function main() {
       void shutdown().finally(() => process.exit(0));
     }, 1_000);
     parentWatch.unref();
+  }
+  function restartForIdentity() {
+    if (shuttingDown) return;
+    console.error("Gateway identity in install.json changed (token rotated); restarting the monitor with the new one");
+    void shutdown().finally(() => process.exit(IDENTITY_CHANGED_EXIT));
+  }
+  // Compared file to file: a root id given in the environment is not a change.
+  if (!identity.fromEnv) {
+    identityWatch = watchIdentity(identity.statePath, identityFrom(identity.statePath) ?? identity, restartForIdentity);
   }
   // A promise nothing awaited failing is logged, not fatal: the loops that
   // fire and forget recover on their next pass.

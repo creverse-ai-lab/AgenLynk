@@ -53,7 +53,7 @@ export async function writeRuntimeSeed(root, options = {}) {
 async function writeNpmRuntimeSeed(
   root,
   {
-    gatewayVersion = "1.7.2",
+    gatewayVersion = "1.8.0",
     gatewayBuildId = "fixture-gateway",
     gatewayApiVersion = 1,
     nodeVersion = "22.14.0",

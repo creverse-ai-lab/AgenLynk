@@ -8,6 +8,9 @@ import Foundation
 struct BootstrapResult: Equatable {
     let ok: Bool
     let message: String
+    /// The installer's own warnings (an entry it kept with the token, a
+    /// token rotation it recommends), in Korean where the app knows them.
+    var warnings: [String] = []
 }
 
 enum InstallerControllerError: LocalizedError {
@@ -62,27 +65,36 @@ final class InstallerController {
     }
 
     /// Re-registers entries that launch an old runtime version (or a missing
-    /// script) so they go through runtime/current again. `--force` because the
-    /// Gateway installer leaves an entry it has no ownership record for as it
-    /// is. That also drops any env a user added to those entries; only the
-    /// stale targets of one kind are passed, so no other entry's env is reset.
+    /// script) so they go through runtime/current again, and Control entries
+    /// whose env does not suit the current runtime (the token kept on Gateway
+    /// 1.8+, or missing below it). `--force` because the Gateway installer
+    /// leaves an entry it has no ownership record for as it is. That also
+    /// drops any env a user added to those entries; only the stale targets of
+    /// one kind are passed, so no other entry's env is reset.
+    /// `--skip-health-check`: the check restarts a daemon whose version
+    /// differs from the installer's, which ended running Workers right after
+    /// a runtime update; the monitor restarts that daemon once it is idle.
     func relink(
         kind: String,
         targets: [String],
+        force: Bool = true,
         nodeOverride: String = "",
         onOutputLine: @escaping (String) -> Void
     ) async throws -> BootstrapResult {
         try await run(
-            arguments: Self.relinkArguments(kind: kind, targets: targets),
+            arguments: Self.relinkArguments(kind: kind, targets: targets, force: force),
             nodeOverride: nodeOverride,
             onOutputLine: onOutputLine
         )
     }
 
-    static func relinkArguments(kind: String, targets: [String]) -> [String] {
+    /// `force: false` re-registers only entries the installer can prove it
+    /// registered, and leaves one with env the user added as it is.
+    static func relinkArguments(kind: String, targets: [String], force: Bool = true) -> [String] {
         [kind == "guide" ? "--install-guide" : "--install-control"]
             + targets.flatMap { ["--target", $0] }
-            + ["--force"]
+            + (force ? ["--force"] : [])
+            + ["--skip-health-check"]
     }
 
     func run(
@@ -203,6 +215,30 @@ final class InstallerController {
         let message = succeeded
             ? "설치가 완료되었습니다."
             : "설치는 완료되었지만 Gateway 상태 확인에 실패했습니다."
-        return BootstrapResult(ok: succeeded, message: message)
+        let warnings = (object["warnings"] as? [Any] ?? []).compactMap { $0 as? String }
+        return BootstrapResult(ok: succeeded, message: message, warnings: Self.describe(warnings: warnings))
+    }
+
+    /// The installer's warnings, the ones the app knows in Korean. Several
+    /// token-removal warnings say the same thing, so they become one line.
+    static func describe(warnings: [String]) -> [String] {
+        var lines: [String] = []
+        for warning in warnings {
+            let line: String
+            if warning.contains("--rotate-token") && warning.contains("was removed from") {
+                line = "Control 토큰을 에이전트 설정에서 뺐습니다. 이전 백업(*.bak)에는 남아 있을 수 있으니, Gateway가 쉬고 있을 때 터미널에서 `acp-gateway-admin shutdown_if_idle` 후 `acp-gateway-bootstrap --rotate-token`으로 토큰을 교체하세요. AgenLynk는 교체를 알아채고 다시 연결합니다."
+            } else if warning.contains("still holds") && warning.contains("--force") {
+                // "<agent>:<entry>: its env still holds ..."
+                let key = warning.range(of: ": ").map { String(warning[..<$0.lowerBound]) } ?? warning
+                line = "\(key): 이 항목의 env에 아직 Control 토큰이 있습니다. 직접 넣은 env가 있거나 설치기가 등록한 항목이 아니어서 그대로 두었습니다. 직접 넣은 env가 없다면 설정 > 에이전트에서 다시 연결하세요(이 항목의 env는 설치기 값으로 바뀝니다)."
+            } else if warning.hasSuffix("is not installed; MCP registration skipped") {
+                let agent = warning.components(separatedBy: " ").first ?? warning
+                line = "\(agent)가 설치되어 있지 않아 MCP 등록을 건너뛰었습니다."
+            } else {
+                line = warning
+            }
+            if !lines.contains(line) { lines.append(line) }
+        }
+        return lines
     }
 }

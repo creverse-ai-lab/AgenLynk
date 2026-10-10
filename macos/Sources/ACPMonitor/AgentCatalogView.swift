@@ -105,6 +105,16 @@ struct AgentCatalogView: View {
             if !model.staleFrontdoorEntries.isEmpty {
                 staleEntriesNotice
             }
+            if !model.installerWarnings.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(model.installerWarnings, id: \.self) { warning in
+                        Label(warning, systemImage: "info.circle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
             if let skill = model.delegatorSkill, !skill.pending.isEmpty {
                 skillNotice(skill)
             }
@@ -154,17 +164,26 @@ struct AgentCatalogView: View {
     }
 
     /// Entries pinned to an old runtime keep launching that Gateway after every
-    /// update; one button relinks all of them.
+    /// update, and a Control entry's token may not suit the runtime; one
+    /// button relinks all of them (the token ones are also relinked on their
+    /// own, once).
     private var staleEntriesNotice: some View {
         let entries = model.staleFrontdoorEntries
         let relinking = model.installingFrontdoor == AppModel.relinkingFrontdoors
         return HStack(alignment: .top, spacing: 8) {
             Label {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("옛 Gateway에 고정된 MCP 항목이 \(entries.count)개 있습니다.")
+                    Text(entries.allSatisfy(\.isTokenMismatch)
+                         ? "현재 Gateway와 토큰 설정이 맞지 않는 MCP 항목이 \(entries.count)개 있습니다."
+                         : "다시 연결해야 하는 MCP 항목이 \(entries.count)개 있습니다.")
                     Text(entries.map { entry in
                         let name = entry.entry == "guide" ? "가이드" : "Control"
-                        let detail = entry.reason == "missing" ? "파일 없음" : (entry.version ?? "옛 버전")
+                        let detail = switch entry.reason {
+                        case "missing": "파일 없음"
+                        case "token": "설정에 토큰 남음"
+                        case "needs-token": "토큰 필요"
+                        default: entry.version ?? "옛 버전"
+                        }
                         return "\(entry.agent.capitalized) \(name) (\(detail))"
                     }.joined(separator: ", "))
                     .foregroundStyle(.secondary)

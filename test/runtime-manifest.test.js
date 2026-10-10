@@ -20,7 +20,7 @@ test("composite manifest pins the npm Gateway package independently from app sid
   const { commit, gatewayBuildId, integrity } = await writeRuntimeSeed(root);
   const manifest = await buildRuntimeManifest(root);
   assert.equal(manifest.formatVersion, RUNTIME_MANIFEST_FORMAT_VERSION);
-  assert.equal(manifest.gatewayVersion, "1.7.2");
+  assert.equal(manifest.gatewayVersion, "1.8.0");
   // The digest the daemon reports as setup.gatewayBuildId, not the commit.
   assert.equal(manifest.gatewayBuildId, gatewayBuildId);
   assert.match(manifest.gatewayBuildId, /^[a-f0-9]{64}$/);

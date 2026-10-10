@@ -11,6 +11,13 @@
 // Presence alone is not enough: an entry pinned to
 // runtime/versions/<old>/ keeps launching that old Gateway after every
 // activation, so it is reported as stale for Settings to relink.
+//
+// So is a Control entry whose env does not match the runtime it launches.
+// Gateway 1.8 takes the Control token out of agent configs (the front door
+// reads it from install.json), so on 1.8+ an entry that still holds it is
+// "token"; a 1.7 front door reads the token only from its env, so after a
+// rollback below 1.8 an entry without it cannot start and is "needs-token".
+// Relinking re-registers either one as that runtime's installer writes it.
 
 import { readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -19,6 +26,9 @@ import { join, sep } from "node:path";
 const FRONT_DOOR_AGENTS = new Set(["codex", "claude", "grok"]);
 const CONTROL = "agent-acp";
 const GUIDE = "agent-acp-guide";
+const TOKEN_ENV = "ACP_GATEWAY_CONTROL_TOKEN";
+// The first Gateway whose front door takes the token from install.json.
+const TOKENLESS_SINCE = [1, 8, 0];
 
 /** The `[mcp_servers.<name>]` table of a TOML config, or null. */
 export function tomlServer(text, name) {
@@ -33,8 +43,38 @@ export function tomlServer(text, name) {
   const args = /^\s*args\s*=\s*\[([\s\S]*?)\]/m.exec(body);
   return {
     command: command ? command[1] ?? command[2] : null,
-    args: args ? [...args[1].matchAll(/"((?:[^"\\]|\\.)*)"|'([^']*)'/g)].map((match) => match[1] ?? match[2]) : []
+    args: args ? [...args[1].matchAll(/"((?:[^"\\]|\\.)*)"|'([^']*)'/g)].map((match) => match[1] ?? match[2]) : [],
+    envNames: tomlEnvNames(lines, name, body)
   };
+}
+
+const TOML_KEY = /^\s*(?:"((?:[^"\\]|\\.)*)"|([A-Za-z0-9_-]+))\s*=/;
+
+/**
+ * The variable names (never the values) in a server's env: an
+ * `[mcp_servers.<name>.env]` table, an inline `env = { ... }`, or dotted
+ * `env.NAME = ...` keys.
+ */
+function tomlEnvNames(lines, name, body) {
+  const names = new Set();
+  const header = new RegExp(`^\\s*\\[mcp_servers\\.(?:"${name}"|${name})\\.env\\]\\s*(?:#.*)?$`);
+  const start = lines.findIndex((line) => header.test(line));
+  if (start >= 0) {
+    for (const line of lines.slice(start + 1)) {
+      if (/^\s*\[/.test(line)) break;
+      const key = TOML_KEY.exec(line);
+      if (key) names.add(key[1] ?? key[2]);
+    }
+  }
+  const inline = /^\s*env\s*=\s*\{([^}]*)\}/m.exec(body);
+  if (inline) {
+    for (const part of inline[1].split(",")) {
+      const key = TOML_KEY.exec(part);
+      if (key) names.add(key[1] ?? key[2]);
+    }
+  }
+  for (const match of body.matchAll(/^\s*env\.(?:"((?:[^"\\]|\\.)*)"|([A-Za-z0-9_-]+))\s*=/gm)) names.add(match[1] ?? match[2]);
+  return [...names];
 }
 
 async function tomlServers(path) {
@@ -50,7 +90,11 @@ async function jsonServers(path) {
   try {
     const servers = JSON.parse(await readFile(path, "utf8"))?.mcpServers ?? {};
     const entry = (value) => (value && typeof value === "object"
-      ? { command: typeof value.command === "string" ? value.command : null, args: Array.isArray(value.args) ? value.args.map(String) : [] }
+      ? {
+          command: typeof value.command === "string" ? value.command : null,
+          args: Array.isArray(value.args) ? value.args.map(String) : [],
+          envNames: value.env && typeof value.env === "object" && !Array.isArray(value.env) ? Object.keys(value.env) : []
+        }
       : null);
     return { control: entry(servers[CONTROL]), guide: entry(servers[GUIDE]) };
   } catch {
@@ -58,15 +102,43 @@ async function jsonServers(path) {
   }
 }
 
-/** The version directory `runtime/current` points at now, or null. */
-async function currentRuntimeId(gatewayHome) {
+/** The version directory `runtime/current` points at now, and its Gateway version. */
+async function currentRuntime(gatewayHome) {
   try {
     const pointer = JSON.parse(await readFile(join(gatewayHome, "runtime", "current.json"), "utf8"));
     const root = typeof pointer?.runtimeRoot === "string" ? pointer.runtimeRoot : "";
-    return root.split(sep).filter(Boolean).at(-1) ?? null;
+    const id = root.split(sep).filter(Boolean).at(-1) ?? null;
+    const version = typeof pointer?.gatewayVersion === "string" ? pointer.gatewayVersion : id?.split("-")[0] ?? null;
+    return { id, version };
   } catch {
-    return null;
+    return { id: null, version: null };
   }
+}
+
+/** Whether a Gateway release takes the Control token from install.json; null when unknown. */
+export function frontDoorReadsInstallState(version) {
+  const parts = /^(\d+)\.(\d+)\.(\d+)/.exec(String(version ?? ""))?.slice(1).map(Number);
+  if (!parts) return null;
+  for (let index = 0; index < 3; index += 1) {
+    if (parts[index] !== TOKENLESS_SINCE[index]) return parts[index] > TOKENLESS_SINCE[index];
+  }
+  return true;
+}
+
+/**
+ * Why a Control entry's env does not suit the current runtime, or null. Only
+ * entries that launch this app's runtime are judged: one the user pointed at
+ * another Gateway keeps whatever env that Gateway needs.
+ */
+export function tokenReason(entry, gatewayHome, version) {
+  const script = entry?.args?.find((arg) => /\.(?:m?js)$/.test(arg));
+  if (!script || !script.startsWith(join(gatewayHome, "runtime") + sep)) return null;
+  const tokenless = frontDoorReadsInstallState(version);
+  if (tokenless == null) return null;
+  const holdsToken = (entry.envNames ?? []).includes(TOKEN_ENV);
+  if (tokenless && holdsToken) return { reason: "token", path: script };
+  if (!tokenless && !holdsToken) return { reason: "needs-token", path: script };
+  return null;
 }
 
 /**
@@ -107,14 +179,15 @@ export async function readInstalledFrontdoors({
   augmentHome = process.env.AUGMENT_HOME || join(home, ".augment"),
   installStatePath = join(gatewayHome, "install.json")
 } = {}) {
-  const [codex, claude, grok, auggie, currentId] = await Promise.all([
+  const [codex, claude, grok, auggie, current] = await Promise.all([
     tomlServers(join(codexHome, "config.toml")),
     jsonServers(join(home, ".claude.json")),
     tomlServers(join(grokHome, "config.toml")),
     // Auggie takes the guide from the Gateway installer like the others.
     jsonServers(join(augmentHome, "settings.json")),
-    currentRuntimeId(gatewayHome)
+    currentRuntime(gatewayHome)
   ]);
+  const currentId = current.id;
   const agents = { codex, claude, grok, auggie };
   const frontdoors = Object.keys(agents).filter((agent) => FRONT_DOOR_AGENTS.has(agent));
   const installed = frontdoors.filter((agent) => agents[agent].control);
@@ -124,7 +197,10 @@ export async function readInstalledFrontdoors({
   const stale = [];
   for (const [agent, servers] of Object.entries(agents)) {
     for (const [kind, entry] of [["control", servers.control], ["guide", servers.guide]]) {
-      const found = entry ? await staleReason(entry, gatewayHome, currentId) : null;
+      const found = entry
+        ? await staleReason(entry, gatewayHome, currentId)
+          ?? (kind === "control" ? tokenReason(entry, gatewayHome, current.version) : null)
+        : null;
       if (found) stale.push({ agent, entry: kind, ...found });
     }
   }

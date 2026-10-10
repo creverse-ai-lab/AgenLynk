@@ -17,7 +17,7 @@ import {
 } from "../scripts/fetch-gateway-runtime.js";
 
 const execFileAsync = promisify(execFile);
-const auditEntry = JSON.parse(await readFile(new URL("./fixtures/npm-audit-acp-gateway-daemon-1.7.2.json", import.meta.url), "utf8"));
+const auditEntry = JSON.parse(await readFile(new URL("./fixtures/npm-audit-acp-gateway-daemon-1.8.0.json", import.meta.url), "utf8"));
 
 function integrity(bytes) {
   return `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
@@ -55,12 +55,12 @@ test("a verified download becomes the cache only after the sha512 integrity matc
   const tarball = await ensureCachedGatewayTarball({ lock: await lockFor(payload), cacheRoot, fetchImpl: fetchBytes(payload) });
   assert.equal(await integrityOfFile(tarball), integrity(payload));
   assert.equal(await readFile(tarball, "utf8"), "good-gateway-tarball\n");
-  assert.deepEqual(await visibleCacheNames(cacheRoot), ["acp-gateway-daemon-1.7.2.tgz"]);
+  assert.deepEqual(await visibleCacheNames(cacheRoot), ["acp-gateway-daemon-1.8.0.tgz"]);
 }));
 
 test("a valid cache is reused without downloading", () => withTemp("agenlynk-fetch-cache-", async (cacheRoot) => {
   const payload = Buffer.from("good-gateway-tarball\n");
-  await writeFile(join(cacheRoot, "acp-gateway-daemon-1.7.2.tgz"), payload);
+  await writeFile(join(cacheRoot, "acp-gateway-daemon-1.8.0.tgz"), payload);
   const calls = { count: 0 };
   const tarball = await ensureCachedGatewayTarball({
     lock: await lockFor(payload),
@@ -77,19 +77,19 @@ test("a download with the wrong integrity never becomes the cache", () => withTe
     () => ensureCachedGatewayTarball({ lock, cacheRoot, fetchImpl: fetchBytes(Buffer.from("partial-or-corrupt\n")) }),
     /integrity mismatch/
   );
-  await assert.rejects(access(join(cacheRoot, "acp-gateway-daemon-1.7.2.tgz")), { code: "ENOENT" });
+  await assert.rejects(access(join(cacheRoot, "acp-gateway-daemon-1.8.0.tgz")), { code: "ENOENT" });
   assert.deepEqual(await visibleCacheNames(cacheRoot), []);
 }));
 
 test("a failed download leaves a previous cache file untouched", () => withTemp("agenlynk-fetch-cache-", async (cacheRoot) => {
   const lock = await lockFor(Buffer.from("good-gateway-tarball\n"));
-  await writeFile(join(cacheRoot, "acp-gateway-daemon-1.7.2.tgz"), "stale-corrupt-cache\n");
+  await writeFile(join(cacheRoot, "acp-gateway-daemon-1.8.0.tgz"), "stale-corrupt-cache\n");
   await assert.rejects(
     () => ensureCachedGatewayTarball({ lock, cacheRoot, fetchImpl: fetchBytes(Buffer.from("also-bad\n")) }),
     /integrity mismatch/
   );
-  assert.equal(await readFile(join(cacheRoot, "acp-gateway-daemon-1.7.2.tgz"), "utf8"), "stale-corrupt-cache\n");
-  assert.deepEqual(await visibleCacheNames(cacheRoot), ["acp-gateway-daemon-1.7.2.tgz"]);
+  assert.equal(await readFile(join(cacheRoot, "acp-gateway-daemon-1.8.0.tgz"), "utf8"), "stale-corrupt-cache\n");
+  assert.deepEqual(await visibleCacheNames(cacheRoot), ["acp-gateway-daemon-1.8.0.tgz"]);
 }));
 
 test("an interrupted download never creates the cache file", () => withTemp("agenlynk-fetch-cache-", async (cacheRoot) => {
@@ -114,15 +114,15 @@ test("tarball listings admit only regular files and directories under package/",
   assert.throws(() => assertTarballListingSafe("", []), /unreadable/);
 });
 
-test("the published 1.7.2 provenance matches the lock's repository, workflow, tag, commit, and integrity", async () => {
+test("the published 1.8.0 provenance matches the lock's repository, workflow, tag, commit, and integrity", async () => {
   const lock = await readGatewayLock();
   assert.deepEqual(evaluateProvenance(auditEntry, lock), {
     verified: true,
     predicateType: "https://slsa.dev/provenance/v1",
     repository: "https://github.com/creverse-ai-lab/agent_gateway",
     workflow: ".github/workflows/publish-npm.yml",
-    ref: "refs/tags/v1.7.2",
-    sourceCommit: "009a5174657d09e471101a5fdc217aa6a2a8698a"
+    ref: "refs/tags/v1.8.0",
+    sourceCommit: "0757151df8084f0b5c863902f08011583822207e"
   });
 });
 
@@ -163,13 +163,13 @@ test("npm provenance verification installs the pinned version and reads npm's ve
   const runNpm = (installed, report) => async (args, { cwd }) => {
     calls.push(args.slice(0, 2).join(" "));
     if (args[0] === "install") {
-      assert.deepEqual(JSON.parse(await readFile(join(cwd, "package.json"), "utf8")).dependencies, { "acp-gateway-daemon": "1.7.2" });
+      assert.deepEqual(JSON.parse(await readFile(join(cwd, "package.json"), "utf8")).dependencies, { "acp-gateway-daemon": "1.8.0" });
       await writeFile(join(cwd, "package-lock.json"), JSON.stringify({ packages: { "node_modules/acp-gateway-daemon": installed } }));
       return "";
     }
     return JSON.stringify(report);
   };
-  const installed = { version: "1.7.2", resolved: lock.package.tarball, integrity: lock.package.integrity };
+  const installed = { version: "1.8.0", resolved: lock.package.tarball, integrity: lock.package.integrity };
   const verified = await verifyGatewayProvenance({ lock, runNpm: runNpm(installed, { invalid: [], missing: [], verified: [auditEntry] }) });
   assert.equal(verified.verified, true);
   assert.deepEqual(calls, ["install --ignore-scripts", "audit signatures"]);
@@ -195,14 +195,14 @@ async function packFixture(workspace, { extra } = {}) {
   await mkdir(join(packageDir, "src"), { recursive: true });
   await writeFile(join(packageDir, "package.json"), JSON.stringify({
     name: "acp-gateway-daemon",
-    version: "1.7.2",
+    version: "1.8.0",
     type: "module",
     exports: { ".": "./gateway-client/index.js", "./client": "./gateway-client/index.js" }
   }));
   await writeFile(join(packageDir, "gateway-client/index.js"), "export const GATEWAY_API_VERSION = 1;\n");
   await writeFile(join(packageDir, "src/index.js"), "export {};\n");
   if (extra) await extra(packageDir);
-  const tarball = join(workspace, "acp-gateway-daemon-1.7.2.tgz");
+  const tarball = join(workspace, "acp-gateway-daemon-1.8.0.tgz");
   await execFileAsync("tar", ["-czf", tarball, "-C", join(workspace, "src-tree"), "package"]);
   const lock = await readGatewayLock();
   const lockPath = join(workspace, "gateway.lock.json");

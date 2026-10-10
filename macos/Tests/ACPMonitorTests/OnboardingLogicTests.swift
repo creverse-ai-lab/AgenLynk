@@ -106,11 +106,25 @@ enum OnboardingLogicChecks {
         // Relinking forces only the stale targets of one kind, so no other
         // entry's env is re-registered.
         guard InstallerController.relinkArguments(kind: "guide", targets: ["claude", "grok"])
-            == ["--install-guide", "--target", "claude", "--target", "grok", "--force"] else {
+            == ["--install-guide", "--target", "claude", "--target", "grok", "--force", "--skip-health-check"] else {
             throw CheckError.failed("expected relink to register only the named guide targets")
+        }
+        // A kept token is relinked without --force, so env the user added stays.
+        guard InstallerController.relinkArguments(kind: "control", targets: ["codex"], force: false)
+            == ["--install-control", "--target", "codex", "--skip-health-check"] else {
+            throw CheckError.failed("expected an unforced token relink to keep user env")
         }
         guard InstallerController.relinkArguments(kind: "control", targets: ["codex"]).first == "--install-control" else {
             throw CheckError.failed("expected a control relink to use --install-control")
+        }
+
+        let warned = InstallerController.parseResult("""
+        {"ok":true,"health":{"checked":false},"warnings":["The Control token was removed from claude:agent-acp, but copies made before, such as the agent CLIs' config backups (*.bak), may still hold it. To retire it, ... run acp-gateway-bootstrap --rotate-token, ...","The Control token was removed from codex:agent-acp, but ... --rotate-token ...","codex:agent-acp: its env still holds the Control token, and so does codex's MCP configuration; rerun with --force to re-register it without the token","odd new warning"]}
+        """)
+        guard let warned, warned.ok, warned.warnings.count == 3,
+              warned.warnings[0].contains("--rotate-token"), warned.warnings[1].hasPrefix("codex:agent-acp: "),
+              warned.warnings[2] == "odd new warning" else {
+            throw CheckError.failed("expected installer warnings in Korean, the repeated token notice once, unknown ones as given")
         }
 
         let healthyOutput = """

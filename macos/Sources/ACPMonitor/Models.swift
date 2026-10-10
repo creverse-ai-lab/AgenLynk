@@ -1678,9 +1678,14 @@ struct StaleFrontdoorEntry: Equatable, Sendable, Hashable {
     let agent: String
     /// "control" (agent-acp) or "guide" (agent-acp-guide).
     let entry: String
+    /// "pinned", "missing", or for a Control entry "token" (it keeps the
+    /// token Gateway 1.8+ reads from install.json) and "needs-token" (below
+    /// 1.8 the front door reads it only from the entry's env).
     let reason: String
     let path: String?
     let version: String?
+
+    var isTokenMismatch: Bool { reason == "token" || reason == "needs-token" }
 }
 
 enum MonitorReducerDefaults {

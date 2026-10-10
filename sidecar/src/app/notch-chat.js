@@ -68,8 +68,12 @@ export function chatPollArgs(searchParams) {
 
 export function chatPermissionArgs(body = {}) {
   const sessionId = requireText(body.sessionId, "sessionId");
-  const requestId = Number(body.requestId);
-  if (!Number.isSafeInteger(requestId)) throw new Error("requestId is required");
+  // Passed back as the Worker gave it: Gateway 1.8 carries a string id as a
+  // string, and a string sent for an integer id (or the reverse) names
+  // another request.
+  const requestId = body.requestId;
+  const valid = Number.isSafeInteger(requestId) || (typeof requestId === "string" && requestId.length > 0 && requestId.length <= 256);
+  if (!valid) throw new Error("requestId is required");
   return { sessionId, requestId, optionId: typeof body.optionId === "string" ? body.optionId : null };
 }
 
