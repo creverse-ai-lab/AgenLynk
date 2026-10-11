@@ -2716,23 +2716,27 @@ private func semanticVersionComponents(_ value: String) -> (core: [Int], prerele
     return (core, prerelease)
 }
 
-/// Parses the GitHub `GET /releases` array. The newest entry is `releases[0]`
-/// (pre-releases included — the repo may be pre-release-only, for which
-/// `/releases/latest` 404s), whose `tag_name` gives the version and whose
-/// `.dmg` asset gives the download url; the release `html_url` is the fallback
-/// when no DMG asset is attached. nil for an empty/malformed feed.
+/// Parses the GitHub `GET /releases` array (pre-releases included — the repo
+/// may be pre-release-only, for which `/releases/latest` 404s) and returns
+/// the highest version in it. Not `releases[0]`: GitHub orders the list by
+/// tag name as text, so `v0.6.1-beta.9` came before `v0.6.1-beta.10` and
+/// beta 9 read as the newest release for every install. Drafts are skipped.
+/// The `.dmg` asset gives the download url; the release `html_url` is the
+/// fallback when no DMG asset is attached. nil for an empty/malformed feed.
 func parseGitHubReleases(_ data: Data) -> AppReleaseInfo? {
-    guard let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-          let first = array.first,
-          let tag = first["tag_name"] as? String else { return nil }
-    let version = parseReleaseVersion(tag)
-    guard !version.isEmpty else { return nil }
-    let htmlURL = (first["html_url"] as? String).flatMap(URL.init(string:))
-    let assets = first["assets"] as? [[String: Any]] ?? []
-    let dmg = assets.first { ($0["name"] as? String)?.lowercased().hasSuffix(".dmg") == true }
-    let dmgURL = (dmg?["browser_download_url"] as? String).flatMap(URL.init(string:))
-    guard let downloadURL = dmgURL ?? htmlURL else { return nil }
-    return AppReleaseInfo(version: version, downloadURL: downloadURL, htmlURL: htmlURL)
+    guard let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return nil }
+    let releases = array.compactMap { release -> AppReleaseInfo? in
+        guard release["draft"] as? Bool != true, let tag = release["tag_name"] as? String else { return nil }
+        let version = parseReleaseVersion(tag)
+        guard !version.isEmpty else { return nil }
+        let htmlURL = (release["html_url"] as? String).flatMap(URL.init(string:))
+        let assets = release["assets"] as? [[String: Any]] ?? []
+        let dmg = assets.first { ($0["name"] as? String)?.lowercased().hasSuffix(".dmg") == true }
+        let dmgURL = (dmg?["browser_download_url"] as? String).flatMap(URL.init(string:))
+        guard let downloadURL = dmgURL ?? htmlURL else { return nil }
+        return AppReleaseInfo(version: version, downloadURL: downloadURL, htmlURL: htmlURL)
+    }
+    return releases.max { compareSemanticVersions($0.version, $1.version) == .orderedAscending }
 }
 
 /// Parses a bundled `runtime-manifest.json` for the seed's Gateway identity.

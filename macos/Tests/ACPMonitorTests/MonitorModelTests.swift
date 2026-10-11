@@ -63,6 +63,17 @@ enum MonitorModelChecks {
         try check(compareSemanticVersions("0.4.0-beta.1", "0.4.0") == .orderedAscending, "beta.1 must update to the matching stable release")
         try check(compareSemanticVersions("0.4.0", "0.4.0-beta.1") == .orderedDescending, "stable must sort after its prerelease")
         try check(compareSemanticVersions("0.4.0-beta.2", "0.4.0-beta.10") == .orderedAscending, "numeric prerelease identifiers compare numerically")
+        // GitHub lists releases by tag name as text: beta.9 before beta.10.
+        let feed = Data("""
+        [{"tag_name":"v0.6.1-beta.9","html_url":"https://x/9","assets":[{"name":"AgenLynk.dmg","browser_download_url":"https://x/9.dmg"}]},
+         {"tag_name":"v0.6.1-beta.10","html_url":"https://x/10","assets":[{"name":"AgenLynk.dmg","browser_download_url":"https://x/10.dmg"}]},
+         {"tag_name":"v0.6.2-beta.1","draft":true,"html_url":"https://x/d"},
+         {"tag_name":"v0.6.1-beta.8","html_url":"https://x/8"}]
+        """.utf8)
+        let newest = parseGitHubReleases(feed)
+        try check(newest?.version == "0.6.1-beta.10" && newest?.downloadURL.absoluteString == "https://x/10.dmg",
+                  "the highest version wins, not the first listed, and a draft is skipped: \(newest?.version ?? "nil")")
+        try check(parseGitHubReleases(Data("[]".utf8)) == nil, "an empty feed has no release")
         try check(compareSemanticVersions("0.4.0-beta", "0.4.0-beta.1") == .orderedAscending, "a shorter equal prerelease sorts first")
         try check(compareSemanticVersions("0.4.0+build.2", "0.4.0+build.1") == .orderedSame, "build metadata must not change precedence")
         try check(compareSemanticVersions("0.3.10", "0.4.0-beta.1") == .orderedAscending, "numeric core ordering must remain semantic")

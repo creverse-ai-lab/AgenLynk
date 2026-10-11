@@ -15,7 +15,7 @@ actor AppUpdateService {
 
     init(
         session: URLSession = .shared,
-        releasesURL: URL = URL(string: "https://api.github.com/repos/creverse-ai-lab/agenlynk/releases")!
+        releasesURL: URL = URL(string: "https://api.github.com/repos/creverse-ai-lab/agenlynk/releases?per_page=100")!
     ) {
         self.session = session
         self.releasesURL = releasesURL
