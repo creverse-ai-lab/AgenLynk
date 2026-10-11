@@ -79,7 +79,7 @@ test("release manifest CLI rejects ambiguous boolean, checksum, and Developer ID
     await assert.rejects(execFileAsync(process.execPath, developerIdArgs), /signing-identity is required/);
 
     const stableUnsignedArgs = [...base];
-    stableUnsignedArgs[stableUnsignedArgs.indexOf("--app-version") + 1] = "0.6.1";
+    stableUnsignedArgs[stableUnsignedArgs.indexOf("--app-version") + 1] = "0.6.2";
     await assert.rejects(execFileAsync(process.execPath, stableUnsignedArgs), /0\.6\.x-beta\.y/);
   } finally {
     await rm(root, { recursive: true, force: true });
