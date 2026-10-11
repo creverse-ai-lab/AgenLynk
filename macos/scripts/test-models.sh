@@ -32,6 +32,7 @@ env SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/SessionTree.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/EventTimeline.swift" \
   "$REPO_ROOT/macos/Sources/ACPMonitor/MenuBarPipeline.swift" \
+  "$REPO_ROOT/macos/Sources/ACPMonitor/UpdateMaintenance.swift" \
   "$REPO_ROOT/macos/Tests/ACPMonitorTests/MonitorModelTests.swift" \
   -o "$OUT"
 

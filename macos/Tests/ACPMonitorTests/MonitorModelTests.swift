@@ -3,6 +3,7 @@ import Foundation
 @main
 enum MonitorModelChecks {
     static func main() throws {
+        try updateMaintenanceCleansWhatAnOlderBuildLeft()
         try snapshotDecodesSessionsEventsTasksAndInbox()
         try dashboardPanelsFoldByWidthAndOpenOnDemand()
         try usageForecastUsesCompletedTurnsAndContextGrowth()
@@ -1873,6 +1874,27 @@ enum MonitorModelChecks {
         try check(pinned.pinnedNotice != nil, "a pinned runtime must explain why updates stopped")
         try check(!unpinned.currentPinned, "an unpinned runtime must not claim to be pinned")
         try check(unpinned.pinnedNotice == nil, "an unpinned runtime must show no pin notice")
+    }
+
+    /// After an update installed over an older build: only a newer Gateway
+    /// replaces the current runtime (never a pinned rollback), only orphaned
+    /// AgenLynk sidecars are ended, and the notice says what was done.
+    private static func updateMaintenanceCleansWhatAnOlderBuildLeft() throws {
+        try check(UpdateMaintenance.shouldActivateSeed(current: "1.8.0", seed: "1.9.0", pinned: false), "a newer Gateway is applied")
+        try check(!UpdateMaintenance.shouldActivateSeed(current: "1.9.0", seed: "1.9.0", pinned: false), "the same one is left")
+        try check(!UpdateMaintenance.shouldActivateSeed(current: "1.10.0", seed: "1.9.0", pinned: false), "an older seed never rolls a machine back")
+        try check(!UpdateMaintenance.shouldActivateSeed(current: "1.8.0", seed: "1.9.0", pinned: true), "a pinned rollback is the person's choice")
+        try check(!UpdateMaintenance.shouldActivateSeed(current: "1.8.0", seed: nil, pinned: false), "a build without a seed changes nothing")
+        let table = """
+          101     1 /rt/node/bin/node --disable-warning=ExperimentalWarning /Applications/AgenLynk.app/Contents/Resources/sidecar/src/server/monitor.js
+          102   500 /rt/node/bin/node /Applications/AgenLynk.app/Contents/Resources/sidecar/src/server/monitor.js
+          103     1 /usr/local/bin/node /Users/me/project/server/monitor.js
+          104     1 /bin/zsh
+        """
+        try check(UpdateMaintenance.orphanedSidecars(psOutput: table, own: nil) == [101], "only an AgenLynk sidecar whose app is gone")
+        try check(UpdateMaintenance.summary(endedProcesses: 0, activated: nil, relinked: false, freed: nil) == nil, "nothing done, nothing said")
+        let line = UpdateMaintenance.summary(endedProcesses: 1, activated: "1.9.0-abc", relinked: true, freed: "290 MB") ?? ""
+        try check(line.hasPrefix("업데이트 정리: ") && line.contains("1.9.0-abc") && line.contains("CLI를 다시 시작"), "the notice: \(line)")
     }
 
     private static func check(_ condition: @autoclosure () -> Bool, _ message: String) throws {

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { buildRuntimeManifest } from "../src/runtime-manifest.js";
 import { readCurrentRuntime } from "../src/runtime-installer.js";
 import { activateRuntimeCandidate, inspectRuntime, pruneRuntimeVersions, readPreviousRuntime, rollbackRuntime, stageRuntimeCandidate, validateRuntimeCandidate } from "../src/runtime-updater.js";
-import { runtimeVersionsInUse } from "../src/runtime-usage.js";
+import { elapsedSeconds, runtimeVersionsInUse } from "../src/runtime-usage.js";
 import { writeRuntimeSeed } from "./fixtures/runtime-seed.js";
 
 async function smokeSeed(root, marker, options = {}) {
@@ -223,5 +223,40 @@ test("a 1.6 runtime tarball install upgrades to the npm package and rolls back, 
     assert.equal((await rollbackRuntime({ runtimeRoot })).ok, true);
     assert.equal((await readCurrentRuntime(runtimeRoot)).gatewayVersion, "1.6.0");
     assert.match(await readFile(controlScript, "utf8"), /"legacy"/);
+  } finally { await rm(workspace, { recursive: true, force: true }); }
+});
+
+// An agent CLI's front door runs through runtime/current and names no
+// version: it runs on from whatever current was when the CLI started, and
+// removing that version under it breaks the CLI's Gateway tools.
+test("a process started through current keeps the version it really runs", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "agenlynk-usage-"));
+  try {
+    const runtimeRoot = join(workspace, "runtime");
+    const versionsRoot = join(runtimeRoot, "versions");
+    for (const id of ["1.7.2-old", "1.8.0-prev", "1.9.0-now"]) await mkdir(join(versionsRoot, id), { recursive: true });
+    // Installed (just now), then the CLI started, then current was activated.
+    const now = Date.now();
+    const activatedAt = now + 60_000;
+    await writeFile(join(runtimeRoot, "current.json"), JSON.stringify({ activatedAt: new Date(activatedAt).toISOString() }));
+    const frontDoor = (pid, startedAtMs, executable) => ({
+      pid, startedAtMs, executable,
+      command: `${executable ?? "/opt/homebrew/bin/node"} ${join(runtimeRoot, "current", "gateway", "src", "index.js")}`
+    });
+    const usage = (processes) => runtimeVersionsInUse(versionsRoot, { configPaths: [], processes, now });
+
+    // The runtime's own Node: its real path names the version exactly.
+    const exact = await usage([frontDoor(11, now + 1_000, join(versionsRoot, "1.7.2-old", "node", "bin", "node"))]);
+    assert.deepEqual([...exact.keys()], ["1.7.2-old"]);
+    // Another Node, started after the current runtime was activated: current.
+    assert.equal((await usage([frontDoor(12, activatedAt + 1_000, null)])).size, 0);
+    // Started before: every version installed by then may be its.
+    const unknown = await usage([frontDoor(13, now + 1_000, null)]);
+    assert.deepEqual([...unknown.keys()].sort(), ["1.7.2-old", "1.8.0-prev", "1.9.0-now"]);
+    // A process with no known start keeps everything too.
+    assert.equal((await usage([frontDoor(14, null, null)])).size, 3);
+    assert.equal(elapsedSeconds("2-03:04:05"), ((2 * 24 + 3) * 60 + 4) * 60 + 5);
+    assert.equal(elapsedSeconds("04:05"), 245);
+    assert.equal(elapsedSeconds("junk"), null);
   } finally { await rm(workspace, { recursive: true, force: true }); }
 });

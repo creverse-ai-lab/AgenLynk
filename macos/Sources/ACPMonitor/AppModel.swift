@@ -46,6 +46,9 @@ final class AppModel: ObservableObject {
     /// Token relinks already tried this launch, so an entry the installer
     /// keeps as it is does not start one run after another.
     private var tokenRelinkAttempts: Set<String> = []
+    /// The update maintenance waiting for the Gateway to be idle (UpdateMaintenance).
+    private var maintenanceTask: Task<Void, Never>?
+    private var maintenanceAttempts = 0
     /// The agent-delegator skill in each Main CLI, per `/api/skill`.
     @Published private(set) var delegatorSkill: DelegatorSkillStatus?
     @Published private(set) var delegatorSkillUpdating = false
@@ -1424,13 +1427,13 @@ final class AppModel: ObservableObject {
     /// rollback below 1.8) lacks the token the older front door needs and
     /// cannot start. Both are relinked once without asking.
     private func relinkTokenEntriesIfNeeded() {
-        let entries = staleFrontdoorEntries.filter { $0.isTokenMismatch && !tokenRelinkAttempts.contains(Self.tokenRelinkKey($0)) }
+        let entries = staleFrontdoorEntries.filter { $0.relinksOnItsOwn && !tokenRelinkAttempts.contains(Self.tokenRelinkKey($0)) }
         guard !entries.isEmpty, installingFrontdoor == nil, !onboardingRunning, onboardingInstallLocationReady else { return }
         entries.forEach { tokenRelinkAttempts.insert(Self.tokenRelinkKey($0)) }
         relinkTokenEntries(entries)
     }
 
-    private static func tokenRelinkKey(_ entry: StaleFrontdoorEntry) -> String { "\(entry.agent)/\(entry.reason)" }
+    private static func tokenRelinkKey(_ entry: StaleFrontdoorEntry) -> String { "\(entry.entry)/\(entry.agent)/\(entry.reason)" }
 
     /// Only the Control entries whose token does not suit the runtime, and
     /// nothing else stale (the button does the rest, and says what it drops).
@@ -1442,9 +1445,14 @@ final class AppModel: ObservableObject {
     /// an entry the installer does not manage fails its run, not the others'.
     private func relinkTokenEntries(_ entries: [StaleFrontdoorEntry]) {
         guard installingFrontdoor == nil, !onboardingRunning else { return }
-        let runs = Dictionary(grouping: entries, by: \.agent).keys.sorted().map { agent in
-            (agent: agent, force: entries.contains { $0.agent == agent && $0.reason == "needs-token" })
-        }
+        // A gone script, like a missing token, needs --force: the installer
+        // leaves an entry it cannot prove is its own as it is.
+        let runs = Dictionary(grouping: entries) { "\($0.entry)/\($0.agent)" }.values
+            .compactMap { group -> (kind: String, agent: String, force: Bool)? in
+                guard let first = group.first else { return nil }
+                return (first.entry, first.agent, group.contains { $0.reason == "needs-token" || $0.reason == "missing" })
+            }
+            .sorted { ($0.kind, $0.agent) < ($1.kind, $1.agent) }
         guard !runs.isEmpty else { return }
         installingFrontdoor = Self.relinkingFrontdoors
         installerWarnings = []
@@ -1455,7 +1463,7 @@ final class AppModel: ObservableObject {
             for run in runs {
                 do {
                     let result = try await self.installer.relink(
-                        kind: "control", targets: [run.agent], force: run.force, nodeOverride: nodeOverride
+                        kind: run.kind, targets: [run.agent], force: run.force, nodeOverride: nodeOverride
                     ) { _ in }
                     self.installerWarnings += result.warnings.filter { !self.installerWarnings.contains($0) }
                     if !result.ok { failures.append("\(run.agent.capitalized): \(result.message)") }
@@ -1476,6 +1484,77 @@ final class AppModel: ObservableObject {
                 self.lastNotice = "\(left.sorted().map(\.capitalized).joined(separator: ", ")) Control MCP 항목은 토큰 설정을 그대로 두었습니다. 설정 > 에이전트에서 확인하세요."
             }
         }
+    }
+
+    /// Once per build, what the build installed over this one left behind is
+    /// cleaned (UpdateMaintenance): tried once the connection has settled,
+    /// and every ten minutes while the Gateway's work holds it back.
+    private func scheduleUpdateMaintenance() {
+        guard UserDefaults.standard.string(forKey: UpdateMaintenance.markerKey) != UpdateMaintenance.build(),
+              maintenanceTask == nil else { return }
+        maintenanceTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            while !Task.isCancelled {
+                guard let self else { return }
+                if await self.runUpdateMaintenance() { break }
+                try? await Task.sleep(nanoseconds: UpdateMaintenance.retryInterval)
+            }
+            self?.maintenanceTask = nil
+        }
+    }
+
+    /// True once done; false when the Gateway is busy or not known to be idle.
+    private func runUpdateMaintenance() async -> Bool {
+        guard case .connected = phase, !runtimeBusy, installingFrontdoor == nil, !onboardingRunning else { return false }
+        maintenanceAttempts += 1
+        // 1. Helpers whose app is gone: they hold the Pet's lock or the hook endpoint.
+        var ended = 0
+        for pid in PetController.orphanedBundledPets() where kill(pid, SIGTERM) == 0 { ended += 1 }
+        let table = await Task.detached(priority: .utility) { UpdateMaintenance.processTable() }.value
+        for pid in UpdateMaintenance.orphanedSidecars(psOutput: table, own: nil) where kill(pid, SIGTERM) == 0 { ended += 1 }
+
+        // 2. The runtime this build ships, once nothing runs on the Gateway.
+        var activated: String?
+        if runtimeManager.isAvailable, let inspection = try? await runtimeManager.inspect() {
+            runtimeInspection = inspection
+            if UpdateMaintenance.shouldActivateSeed(
+                current: inspection.currentGatewayVersion,
+                seed: seedGatewayVersion?.gatewayVersion,
+                pinned: inspection.currentPinned
+            ) {
+                let blockers = runtimeActivationBlockers
+                // Held back: tried again later, up to an hour of attempts.
+                guard blockers.isEmpty else { return maintenanceAttempts > 6 }
+                runtimeBusy = true
+                let change = try? await runtimeManager.activateBundledSeed(
+                    currentVersionId: inspection.currentVersionId, blockers: blockers
+                )
+                runtimeBusy = false
+                guard let change else { return maintenanceAttempts > 6 }
+                finishRuntimeChange(change)
+                guard case let .activated(versionId) = change.outcome else { return maintenanceAttempts > 6 }
+                activated = versionId
+            }
+        }
+
+        // 3. MCP entries the runtime change or an earlier removal left broken
+        // (relinkTokenEntriesIfNeeded runs on the fresh snapshot).
+        await loadInstalledFrontdoors()
+        let relinked = staleFrontdoorEntries.contains(where: \.relinksOnItsOwn)
+
+        // 4. Runtime versions nobody uses: not current, not the rollback
+        // target, and nothing still launches from them.
+        var freed: String?
+        if runtimeManager.isAvailable, let plan = try? await runtimeManager.prune(dryRun: false), !plan.removed.isEmpty {
+            freed = plan.freedText
+            runtimePrunePreview = try? await runtimeManager.prune(dryRun: true)
+        }
+
+        UserDefaults.standard.set(UpdateMaintenance.build(), forKey: UpdateMaintenance.markerKey)
+        if let line = UpdateMaintenance.summary(endedProcesses: ended, activated: activated, relinked: relinked, freed: freed) {
+            lastNotice = line
+        }
+        return true
     }
 
     func loadGatewayConfig() async {
@@ -1848,6 +1927,7 @@ final class AppModel: ObservableObject {
             // Control entries that do not suit this runtime are relinked
             // without Settings being opened; off the start path.
             Task { [weak self] in await self?.loadInstalledFrontdoors() }
+            scheduleUpdateMaintenance()
             await client.startStream(endpoint: endpoint, onMessage: { [weak self] value in
                 guard let self, self.connectionIsCurrent(generation) else { return }
                 self.apply(streamMessage: value)

@@ -1698,6 +1698,11 @@ struct StaleFrontdoorEntry: Equatable, Sendable, Hashable {
     let version: String?
 
     var isTokenMismatch: Bool { reason == "token" || reason == "needs-token" }
+    /// Relinked by the app without asking: a token that does not suit the
+    /// runtime, or a script that is gone (a runtime that was removed), which
+    /// leaves the CLI unable to start the MCP at all. An entry pinned to an
+    /// older runtime still works, so that one waits for the button.
+    var relinksOnItsOwn: Bool { isTokenMismatch || reason == "missing" }
 }
 
 enum MonitorReducerDefaults {
