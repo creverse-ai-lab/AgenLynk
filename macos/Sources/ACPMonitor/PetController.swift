@@ -181,13 +181,30 @@ final class PetController {
     }
 
     /// A process's executable path and parent, nil when it cannot be read.
+    /// The kernel has no path for an executable that was deleted under it,
+    /// which is just what an update that replaced the app does to the old
+    /// Pet, so the path it was started from stands in.
     nonisolated static func processInfo(_ pid: pid_t) -> (path: String, parent: pid_t)? {
-        var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
-        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
         var info = proc_bsdinfo()
         let size = Int32(MemoryLayout<proc_bsdinfo>.size)
         guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
-        return (String(cString: buffer), pid_t(info.pbi_ppid))
+        var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        let path = proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 ? String(cString: buffer) : launchPath(pid)
+        guard let path, !path.isEmpty else { return nil }
+        return (path, pid_t(info.pbi_ppid))
+    }
+
+    /// The executable path a process was started with (KERN_PROCARGS2: argc,
+    /// then that path), nil when it cannot be read.
+    nonisolated static func launchPath(_ pid: pid_t) -> String? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
+        var bytes = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 3, &bytes, &size, nil, 0) == 0 else { return nil }
+        let start = MemoryLayout<Int32>.size
+        guard start < size, let end = bytes[start..<size].firstIndex(of: 0), end > start else { return nil }
+        return String(decoding: bytes[start..<end], as: UTF8.self)
     }
 
     /// The Pet executable any AgenLynk build ships.

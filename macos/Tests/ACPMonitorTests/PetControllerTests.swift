@@ -63,6 +63,9 @@ enum PetControllerChecks {
         // The real process table is readable: this process's own entry.
         let own = PetController.processInfo(getpid())
         try expect(own?.path.isEmpty == false && own?.parent == getppid(), "the process table reads path and parent")
+        // An updated app deletes the old Pet's executable, and the kernel then
+        // has no path for it; the path it was started with stands in.
+        try expect(PetController.launchPath(getpid()).map { !$0.isEmpty } == true, "the launch path is readable")
         _ = PetController.orphanedBundledPets()
     }
 
