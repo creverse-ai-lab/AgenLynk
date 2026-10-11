@@ -15,6 +15,18 @@ enum PetControllerError: LocalizedError {
     }
 }
 
+/// How a renderer run ended, as Settings reports it.
+enum PetExit: Equatable {
+    /// Another renderer held the state file's lock, so this one quit at once.
+    case lockHeld
+    /// Ended by a signal it did not handle (a crash).
+    case crashed(Int32)
+    case exited(Int32)
+
+    /// The renderer's own line when another instance holds the lock.
+    static let lockHeldLine = "is already running for this state file"
+}
+
 /// Launches and feeds a user-selected Pet/user-renderer executable. The
 /// renderer is output-only: it is given an explicit executable path (no
 /// project-directory or `.build` assumptions), a benign environment
@@ -55,9 +67,13 @@ final class PetController {
         executablePath: String,
         projection: PetActivityProjection,
         style: PetStyle = .orbit,
-        onTermination: @escaping @MainActor (Int32) -> Void
+        onTermination: @escaping @MainActor (PetExit) -> Void
     ) throws {
         stop()
+        // A Pet whose app is gone keeps the lock and shows a stale scene; the
+        // new one would wait 2.5 s for the lock, then quit. Seen after an app
+        // update replaced the bundle under a running Pet.
+        for pid in Self.orphanedBundledPets() { kill(pid, SIGTERM) }
         let trimmedPath = executablePath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPath.isEmpty else {
             throw PetControllerError.executablePathRequired
@@ -93,12 +109,20 @@ final class PetController {
         )
         process.terminationHandler = { [weak self] finished in
             guard let controller = self else { return }
+            let status = finished.terminationStatus
+            let crashed = finished.terminationReason == .uncaughtSignal
             Task { @MainActor in
                 guard controller.process === finished else { return }
                 controller.process = nil
                 try? controller.logHandle?.close()
                 controller.logHandle = nil
-                onTermination(finished.terminationStatus)
+                if crashed {
+                    onTermination(.crashed(status))
+                } else if status == 0, Self.logTail(logURL).contains(PetExit.lockHeldLine) {
+                    onTermination(.lockHeld)
+                } else {
+                    onTermination(.exited(status))
+                }
             }
         }
         do {
@@ -135,6 +159,49 @@ final class PetController {
     /// Waits until every scheduled write has landed (tests, shutdown).
     func waitForPendingWrites() {
         writeQueue.sync {}
+    }
+
+    /// The bundled Pets (any version, any copy of the app) whose app is gone:
+    /// their parent is launchd. A Pet another running AgenLynk owns is left
+    /// alone.
+    nonisolated static func orphanedBundledPets() -> [pid_t] {
+        let capacity = Int(proc_listallpids(nil, 0)) + 64
+        guard capacity > 64 else { return [] }
+        var pids = [pid_t](repeating: 0, count: capacity)
+        let count = Int(proc_listallpids(&pids, Int32(capacity * MemoryLayout<pid_t>.size)))
+        let processes = pids.prefix(max(0, count)).compactMap { pid in
+            processInfo(pid).map { (pid: pid, path: $0.path, parent: $0.parent) }
+        }
+        return orphanedPets(among: processes, own: getpid())
+    }
+
+    /// The pure rule behind `orphanedBundledPets`.
+    nonisolated static func orphanedPets(among processes: [(pid: pid_t, path: String, parent: pid_t)], own: pid_t) -> [pid_t] {
+        processes.filter { $0.pid > 1 && $0.pid != own && $0.parent == 1 && isBundledPetPath($0.path) }.map(\.pid)
+    }
+
+    /// A process's executable path and parent, nil when it cannot be read.
+    nonisolated static func processInfo(_ pid: pid_t) -> (path: String, parent: pid_t)? {
+        var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+        return (String(cString: buffer), pid_t(info.pbi_ppid))
+    }
+
+    /// The Pet executable any AgenLynk build ships.
+    nonisolated static func isBundledPetPath(_ path: String) -> Bool {
+        path.hasSuffix("/Contents/Helpers/LynkPet.app/Contents/MacOS/LynkPet")
+    }
+
+    /// The last bytes of the renderer's log, where its exit reason is.
+    nonisolated static func logTail(_ url: URL, bytes: Int = 512) -> String {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return "" }
+        defer { try? handle.close() }
+        let end = (try? handle.seekToEnd()) ?? 0
+        try? handle.seek(toOffset: end > UInt64(bytes) ? end - UInt64(bytes) : 0)
+        return String(decoding: handle.readDataToEndOfFile(), as: UTF8.self)
     }
 
     /// Keeps the renderer's log bounded: past `logRotationBytes` the current

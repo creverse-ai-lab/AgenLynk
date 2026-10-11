@@ -16,12 +16,54 @@ enum PetControllerChecks {
         try rendererEnvironmentCarriesContractFilesButNoSecrets()
         try scheduledUpdatesLandInOrderOffTheMainActor()
         try oversizedLogIsRotatedToOneBackup()
+        try rendererExitsAreToldApart()
         try contractCarriesTheAppNameAndWaitingReason()
         try petStatesFollowTheNotchRules()
         try hoverHitTestPicksTheNearestNodeUnderTheCursor()
         try hoverTextFollowsTheAppWording()
         try hoverBubbleStaysInsideTheWindow()
         print("Swift Pet controller checks passed")
+    }
+
+    /// A Pet that quit because another held the lock, one that crashed and
+    /// one that exited read differently in Settings (all three used to read
+    /// "Pet이 종료되었습니다").
+    @MainActor
+    private static func rendererExitsAreToldApart() throws {
+        let workspace = FileManager.default.temporaryDirectory.appendingPathComponent("pet-exit-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        func run(_ body: String) throws -> PetExit? {
+            let controller = PetController(stateDirectory: workspace)
+            let renderer = workspace.appendingPathComponent("renderer-\(UUID().uuidString).sh")
+            try "#!/bin/sh\n\(body)\n".write(to: renderer, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: renderer.path)
+            var result: PetExit?
+            try controller.start(executablePath: renderer.path, projection: sampleProjection(), onTermination: { result = $0 })
+            let deadline = Date().addingTimeInterval(5)
+            while result == nil && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+            return result
+        }
+        try expect(try run("echo 'CodexPet is already running for this state file.' >&2; exit 0") == .lockHeld, "a held lock is told")
+        try expect(try run("kill -SEGV $$") == .crashed(SIGSEGV), "a crash is told")
+        try expect(try run("exit 3") == .exited(3), "a plain exit keeps its code")
+        try expect(PetController.isBundledPetPath("/Applications/AgenLynk.app/Contents/Helpers/LynkPet.app/Contents/MacOS/LynkPet"), "the bundled Pet is recognised")
+        try expect(!PetController.isBundledPetPath("/usr/local/bin/LynkPet"), "a user renderer is never ended")
+
+        // Only a bundled Pet whose parent is launchd is ended: not one a
+        // running AgenLynk owns, not a user renderer, never this app.
+        let bundled = "/Applications/Old AgenLynk.app/Contents/Helpers/LynkPet.app/Contents/MacOS/LynkPet"
+        let orphans = PetController.orphanedPets(among: [
+            (pid: 400, path: bundled, parent: 1),
+            (pid: 401, path: bundled, parent: 900),
+            (pid: 402, path: "/usr/local/bin/my-pet", parent: 1),
+            (pid: 403, path: bundled, parent: 1)
+        ], own: 403)
+        try expect(orphans == [400], "only the orphaned bundled Pet: \(orphans)")
+        // The real process table is readable: this process's own entry.
+        let own = PetController.processInfo(getpid())
+        try expect(own?.path.isEmpty == false && own?.parent == getppid(), "the process table reads path and parent")
+        _ = PetController.orphanedBundledPets()
     }
 
     @MainActor
