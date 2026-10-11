@@ -144,6 +144,7 @@ struct NotchSessionsView: View {
                 .help("새 채팅")
             Menu {
                 Button("표시 요소 설정…") { NotchChatController.openSettings() }
+                Button("AgenLynk 종료") { NSApp.terminate(nil) }
                 Toggle("끝난 Frontdoor에 노치에서 답장", isOn: Binding(
                     get: { controller.repliesEnabled },
                     set: { controller.setRepliesEnabled($0) }

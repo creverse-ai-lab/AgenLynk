@@ -131,6 +131,18 @@ enum OnboardingLogicChecks {
             throw CheckError.failed("expected installer warnings in Korean, the repeated token notice once, unknown ones as given")
         }
 
+        // One AgenLynk at a time: the installed copy replaces another copy
+        // (a DMG or Downloads one); any other copy hands over and quits.
+        let installed = "/Applications/AgenLynk.app"
+        guard SingleInstance.decide(ownPath: installed, others: []) == .proceed,
+              SingleInstance.decide(ownPath: installed, others: [(pid: 9, path: "/Volumes/AgenLynk/AgenLynk.app")]) == .replace([9]),
+              SingleInstance.decide(ownPath: installed, others: [(pid: 9, path: installed)]) == .yield(to: 9),
+              SingleInstance.decide(ownPath: "/Volumes/AgenLynk/AgenLynk.app", others: [(pid: 9, path: installed)]) == .yield(to: 9),
+              SingleInstance.decide(ownPath: "/Users/me/Downloads/AgenLynk.app", others: [(pid: 9, path: "/Volumes/X/AgenLynk.app")]) == .yield(to: 9)
+        else {
+            throw CheckError.failed("expected the installed copy to win and any other copy to hand over")
+        }
+
         let healthyOutput = """
         {"ok":true,"health":{"checked":true,"ok":true}}
         """

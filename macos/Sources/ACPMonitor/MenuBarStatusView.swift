@@ -207,6 +207,14 @@ struct MenuBarStatusView: View {
             .buttonStyle(.bordered)
             .help("설정")
             .accessibilityLabel("설정")
+            Button {
+                NSApp.terminate(nil)
+            } label: {
+                Image(systemName: "power")
+            }
+            .buttonStyle(.bordered)
+            .help("AgenLynk 종료 — 노치, 메뉴 막대, 펫, 모니터를 모두 끕니다. Gateway와 에이전트는 계속 실행됩니다.")
+            .accessibilityLabel("AgenLynk 종료")
         }
     }
 

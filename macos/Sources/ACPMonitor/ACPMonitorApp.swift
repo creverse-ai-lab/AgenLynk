@@ -18,11 +18,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let terminationHandler, !terminating else { return terminating ? .terminateLater : .terminateNow }
         terminating = true
+        // The shutdown is bounded (the sidecar is killed after 1.5 s), but a
+        // quit must never hang on it: after 5 s the app quits regardless,
+        // or the notch and the menu bar item would stay with nothing behind.
+        let replied = ReplyOnce(sender)
         Task {
             await terminationHandler()
-            sender.reply(toApplicationShouldTerminate: true)
+            replied.reply()
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { replied.reply() }
         return .terminateLater
+    }
+}
+
+/// Answers a pending terminate request exactly once.
+private final class ReplyOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+    private let application: NSApplication
+
+    init(_ application: NSApplication) { self.application = application }
+
+    func reply() {
+        lock.lock()
+        let first = !done
+        done = true
+        lock.unlock()
+        guard first else { return }
+        DispatchQueue.main.async { self.application.reply(toApplicationShouldTerminate: true) }
     }
 }
 
@@ -34,6 +57,8 @@ struct ACPMonitorApp: App {
     @StateObject private var menuBar: MenuBarVisibility
 
     init() {
+        // A second copy hands over to the one already running (SingleInstance).
+        if !SingleInstance.claim() { exit(0) }
         // Before AppModel reads any setting.
         LegacyDefaultsImport.run()
         LaunchServicesHygiene.runOncePerBuild()
