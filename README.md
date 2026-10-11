@@ -5,7 +5,7 @@
 <h1 align="center">AgenLynk</h1>
 
 <p align="center">
-  <b>0.6.1 beta 7</b> · Apache-2.0 · macOS 14+ · Apple Silicon
+  <b>0.6.1 beta 8</b> · Apache-2.0 · macOS 14+ · Apple Silicon
 </p>
 
 <p align="center">
@@ -16,7 +16,7 @@
 <p align="center">
   <img alt="platform" src="https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white">
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-1461FA">
-  <img alt="app" src="https://img.shields.io/badge/AgenLynk-0.6.1--beta.7-1461FA">
+  <img alt="app" src="https://img.shields.io/badge/AgenLynk-0.6.1--beta.8-1461FA">
 </p>
 
 <p align="center">
@@ -203,6 +203,7 @@ npm run macos:test    # Swift 모델·설정·Pet·온보딩
 
 | 버전 | 주요 내용 |
 |---|---|
+| **0.6.1 beta 8** | 덮어쓰기 업데이트 뒤 이전 버전이 남긴 것 자동 정리(펫·사이드카, 런타임 적용, 깨진 MCP 항목, 옛 런타임) · 펫이 꺼지는 문제 수정 · 실행 중인 CLI가 쓰는 런타임을 지우지 않음 |
 | **0.6.1 beta 7** | Gateway 구성에서 기본값으로 되돌린 뒤 Frontdoor 설치가 모두 실패하던 문제 수정(기존 파일 자동 복구) · 사용 가이드 추가 |
 | **0.6.1 beta 6** | Gateway 1.9.0 포함 · Worker를 기다리는 Main을 "Worker 대기"로 표시(새 펫 모습) · 위임 스킬이 agent_acp_wait로 대기 · 설치기 경고 한국어 보완 |
 | **0.6.1 beta 5** | Gateway 1.8.0 포함 · 에이전트 설정에 남은 Control 토큰 자동 정리 · 토큰 교체 뒤 자동 재연결 · 노치 채팅의 문자열 요청 id 지원 |
@@ -225,6 +226,20 @@ npm run macos:test    # Swift 모델·설정·Pet·온보딩
 | **0.3.4** | Frontdoor 설치 상태를 실제 에이전트 config로 감지 · 온보딩 다중 설치 |
 | **0.3.3** | Frontdoor 이름 지정 · 시퀀스 다이어그램 호출/응답 화살표 · 선택 에이전트 활동 |
 | **0.2.0** | AgenLynk로 리네임 · Pet Canvas 렌더 · DMG 경량화 |
+
+### 0.6.1 beta 8 변경 사항
+
+**업데이트 뒤 자동 정리**
+- 새 버전을 덮어써 설치하면, 앱이 빌드마다 한 번 이전 버전이 남긴 것을 정리합니다. Gateway가 쉬고 있는지 확인한 뒤 실행하고, 한 일은 알림 한 줄로 남깁니다.
+  - 주인 앱이 사라진 펫과 모니터 사이드카를 종료합니다.
+  - 앱에 든 Gateway 런타임이 더 새것이면, 진행 중인 세션·태스크·요청이 없을 때 적용합니다. 롤백해 고정한 런타임은 그대로 둡니다. 작업 중이면 10분마다(최대 1시간) 다시 시도합니다.
+  - 지워진 런타임을 가리켜 시작하지 못하는 MCP 항목을 다시 등록합니다.
+  - 지금 런타임, 롤백 대상, 사용 중인 런타임을 뺀 옛 버전을 지웁니다.
+- 런타임 정리(자동과 설정의 버튼 모두)가 실행 중인 CLI의 front door가 쓰는 버전을 지우지 않습니다. 전에는 `runtime/current`로 뜬 프로세스를 어떤 버전도 쓰지 않는 것으로 보았습니다.
+
+**펫**
+- 이전 버전의 펫이 남아 잠금을 쥐고 있으면 새 펫이 바로 꺼지고 "Pet이 종료되었습니다"만 보이던 문제를 고쳤습니다. 남은 펫을 정리하고 다시 띄웁니다.
+- 펫이 꺼지면 이유를 나눠 보여 줍니다: 다른 펫이 실행 중, 비정상 종료(signal과 로그 위치), 일반 종료(종료 코드).
 
 ### 0.6.1 beta 7 변경 사항
 
