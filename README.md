@@ -5,7 +5,7 @@
 <h1 align="center">AgenLynk</h1>
 
 <p align="center">
-  <b>0.6.1 beta 6</b> · Apache-2.0 · macOS 14+ · Apple Silicon
+  <b>0.6.1 beta 7</b> · Apache-2.0 · macOS 14+ · Apple Silicon
 </p>
 
 <p align="center">
@@ -16,7 +16,7 @@
 <p align="center">
   <img alt="platform" src="https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white">
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-1461FA">
-  <img alt="app" src="https://img.shields.io/badge/AgenLynk-0.6.1--beta.6-1461FA">
+  <img alt="app" src="https://img.shields.io/badge/AgenLynk-0.6.1--beta.7-1461FA">
 </p>
 
 <p align="center">
@@ -203,6 +203,7 @@ npm run macos:test    # Swift 모델·설정·Pet·온보딩
 
 | 버전 | 주요 내용 |
 |---|---|
+| **0.6.1 beta 7** | Gateway 구성에서 기본값으로 되돌린 뒤 Frontdoor 설치가 모두 실패하던 문제 수정(기존 파일 자동 복구) · 사용 가이드 추가 |
 | **0.6.1 beta 6** | Gateway 1.9.0 포함 · Worker를 기다리는 Main을 "Worker 대기"로 표시(새 펫 모습) · 위임 스킬이 agent_acp_wait로 대기 · 설치기 경고 한국어 보완 |
 | **0.6.1 beta 5** | Gateway 1.8.0 포함 · 에이전트 설정에 남은 Control 토큰 자동 정리 · 토큰 교체 뒤 자동 재연결 · 노치 채팅의 문자열 요청 id 지원 |
 | **0.6.1 beta 4** | 가려지거나 최소화된 창은 다시 그리지 않음 · 알림 마스코트는 5초만 움직임 · 노치 카드가 옛 상태를 보이던 문제 수정 |
@@ -224,6 +225,16 @@ npm run macos:test    # Swift 모델·설정·Pet·온보딩
 | **0.3.4** | Frontdoor 설치 상태를 실제 에이전트 config로 감지 · 온보딩 다중 설치 |
 | **0.3.3** | Frontdoor 이름 지정 · 시퀀스 다이어그램 호출/응답 화살표 · 선택 에이전트 활동 |
 | **0.2.0** | AgenLynk로 리네임 · Pet Canvas 렌더 · DMG 경량화 |
+
+### 0.6.1 beta 7 변경 사항
+
+**설치 오류 수정**
+- 설정 > Gateway 구성에서 "어댑터 자동 업데이트"나 "업데이트 알림"을 기본값으로 되돌리면, 그 뒤 Frontdoor MCP 설치와 다시 연결이 모두 `invalid stored agent update policy`로 실패하던 문제를 고쳤습니다. 기본값으로 되돌려도 Gateway 설치기가 읽을 수 있는 형식을 유지합니다.
+- 이미 이 상태가 된 `~/.acp-gateway/install.json`은 앱이 시작할 때 자동으로 바로잡습니다. 다른 설정과 토큰은 그대로 둡니다.
+
+**문서**
+- [사용 가이드](docs/user-guide.md)를 추가하고, README의 사용 방법을 0.6.1 기준으로 고쳤습니다(노치, 펫, 상태 읽는 법, 업그레이드).
+- 설정 화면의 토큰 교체 안내가 사용 가이드의 명령(앱이 설치한 런타임으로 실행)을 가리킵니다.
 
 ### 0.6.1 beta 6 변경 사항
 
