@@ -126,7 +126,7 @@ enum OnboardingLogicChecks {
             throw CheckError.failed("expected the pre-ownership-record warning in Korean")
         }
         guard let warned, warned.ok, warned.warnings.count == 3,
-              warned.warnings[0].contains("--rotate-token"), warned.warnings[1].hasPrefix("codex:agent-acp: "),
+              warned.warnings[0].contains("토큰을 교체"), warned.warnings[1].hasPrefix("codex:agent-acp: "),
               warned.warnings[2] == "odd new warning" else {
             throw CheckError.failed("expected installer warnings in Korean, the repeated token notice once, unknown ones as given")
         }

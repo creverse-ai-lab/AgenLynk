@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   GATEWAY_SETTING_DEFINITIONS,
   gatewaySettingsSnapshot,
+  repairInstallState,
   resolveGatewaySettings,
   updateGatewaySettings
 } from "../sidecar/src/app/gateway-settings.js";
@@ -195,6 +196,49 @@ test("a monitor setting is not pending when the running sidecar booted with it",
     const option = snapshot.options.find((item) => item.id === "localSessionRetentionMs");
     assert.equal(option.pending, false);
     assert.equal(option.currentValue, 5 * 60_000);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// The Gateway installer refuses an install.json whose agentUpdates lacks
+// either boolean ("invalid stored agent update policy"), and with it every
+// Frontdoor install. A reset used to delete the key.
+test("resetting an update switch keeps the installer's agentUpdates whole", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-gateway-settings-"));
+  const statePath = join(directory, "install.json");
+  try {
+    await writeFile(statePath, JSON.stringify({
+      version: 1, managedMcp: {}, identity: { token: "test-control-token-at-least-24-characters", rootId: "main-test" },
+      agentUpdates: { autoUpdate: false, notifications: false, intervalMs: 3_600_000 }
+    }));
+    await updateGatewaySettings({ statePath, env: {}, resetIds: ["agentAutoUpdate", "agentUpdateNotifications", "agentUpdateIntervalMs"] });
+    const { agentUpdates } = JSON.parse(await readFile(statePath, "utf8"));
+    assert.deepEqual(agentUpdates, { autoUpdate: true, notifications: true }, "defaults stored, the optional interval dropped");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("an install.json an earlier reset broke is repaired, and a sound one left alone", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "acp-gateway-settings-"));
+  const statePath = join(directory, "install.json");
+  const base = { version: 1, managedMcp: { "codex:agent-acp": { kind: "control" } }, identity: { token: "test-control-token-at-least-24-characters", rootId: "main-test" } };
+  try {
+    await writeFile(statePath, JSON.stringify({ ...base, agentUpdates: { notifications: false, intervalMs: 600_000 } }));
+    assert.equal(await repairInstallState(statePath), true);
+    const repaired = JSON.parse(await readFile(statePath, "utf8"));
+    assert.deepEqual(repaired.agentUpdates, { notifications: false, intervalMs: 600_000, autoUpdate: true }, "what was set is kept");
+    assert.deepEqual(repaired.managedMcp, base.managedMcp);
+    assert.equal(repaired.identity.token, base.identity.token);
+    assert.equal((await stat(statePath)).mode & 0o777, 0o600);
+    assert.equal(await repairInstallState(statePath), false, "a sound file is not rewritten");
+    await writeFile(statePath, JSON.stringify({ ...base, agentUpdates: "on" }));
+    assert.equal(await repairInstallState(statePath), true);
+    assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")).agentUpdates, { autoUpdate: true, notifications: true });
+    await writeFile(statePath, JSON.stringify(base));
+    assert.equal(await repairInstallState(statePath), false, "no agentUpdates is valid to the installer");
+    assert.equal(await repairInstallState(join(directory, "missing.json")), false);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

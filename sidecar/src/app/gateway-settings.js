@@ -330,10 +330,48 @@ function setStoredValue(state, definition, value) {
 
 function deleteStoredValue(state, definition) {
   if (definition.group === "agentUpdates") {
-    delete state.agentUpdates[agentUpdateStorageKey(definition.id)];
+    const key = agentUpdateStorageKey(definition.id);
+    // The Gateway installer refuses an install.json whose agentUpdates lacks
+    // either boolean ("invalid stored agent update policy"), and with it every
+    // Frontdoor install: a reset stores the default instead of leaving a gap.
+    if (REQUIRED_AGENT_UPDATE_KEYS.includes(key)) state.agentUpdates[key] = definition.defaultValue;
+    else delete state.agentUpdates[key];
     return;
   }
   delete state.gatewayConfig?.[definition.group]?.[definition.id];
+}
+
+const REQUIRED_AGENT_UPDATE_KEYS = ["autoUpdate", "notifications"];
+
+/**
+ * Brings an install.json whose agentUpdates the Gateway installer would
+ * refuse back to a valid one: a reset in an earlier AgenLynk deleted
+ * `autoUpdate` or `notifications`, and from then on every installer run
+ * (Frontdoor install, relink) failed with "invalid stored agent update
+ * policy". Each missing or malformed boolean gets its default (true); other
+ * fields are kept. Returns whether the file was rewritten.
+ */
+export async function repairInstallState(statePath = defaultInstallStatePath()) {
+  let state;
+  try {
+    state = JSON.parse(await readFile(statePath, "utf8"));
+  } catch {
+    return false;
+  }
+  if (!state || typeof state !== "object" || Array.isArray(state) || state.agentUpdates == null) return false;
+  let changed = false;
+  if (typeof state.agentUpdates !== "object" || Array.isArray(state.agentUpdates)) {
+    state.agentUpdates = {};
+    changed = true;
+  }
+  for (const key of REQUIRED_AGENT_UPDATE_KEYS) {
+    if (typeof state.agentUpdates[key] !== "boolean") {
+      state.agentUpdates[key] = true;
+      changed = true;
+    }
+  }
+  if (changed) await writeState(statePath, state);
+  return changed;
 }
 
 function agentUpdateStorageKey(id) {

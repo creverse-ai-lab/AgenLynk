@@ -226,7 +226,7 @@ final class InstallerController {
         for warning in warnings {
             let line: String
             if warning.contains("--rotate-token") && warning.contains("was removed from") {
-                line = "Control 토큰을 에이전트 설정에서 뺐습니다. 이전 백업(*.bak)에는 남아 있을 수 있으니, Gateway가 쉬고 있을 때 터미널에서 `acp-gateway-admin shutdown_if_idle` 후 `acp-gateway-bootstrap --rotate-token`으로 토큰을 교체하세요. AgenLynk는 교체를 알아채고 다시 연결합니다."
+                line = "Control 토큰을 에이전트 설정에서 뺐습니다. 이전 백업(*.bak)에는 남아 있을 수 있으니, Gateway가 쉬고 있을 때 토큰을 교체하세요(사용 가이드 8장의 명령, 앱의 런타임으로 실행). AgenLynk는 교체를 알아채고 다시 연결합니다."
             } else if warning.contains("still holds") && warning.contains("--force") {
                 // "<agent>:<entry>: its env still holds ..."
                 let key = warning.range(of: ": ").map { String(warning[..<$0.lowerBound]) } ?? warning

@@ -33,6 +33,7 @@ import { terminateLockedDaemon } from "../app/daemon-lock.js";
 import { describeGatewayError } from "../app/gateway-errors.js";
 import { delegatorSkillStatus, SKILL_AGENTS, syncDelegatorSkill } from "../app/delegator-skill.js";
 import {
+  repairInstallState,
   GATEWAY_SETTING_DEFINITIONS,
   defaultGatewaySettings,
   gatewaySettingsSnapshot,
@@ -183,6 +184,14 @@ async function hookApprovalIsAutomatic(provider, payload) {
 
 async function main() {
   const identity = loadIdentity();
+  // An earlier AgenLynk could leave install.json in a shape the Gateway
+  // installer refuses (see repairInstallState); every Frontdoor install
+  // failed until it was fixed by hand.
+  try {
+    if (await repairInstallState(identity.statePath)) console.error("Repaired agentUpdates in install.json");
+  } catch (error) {
+    console.error(`install.json repair skipped: ${error.message}`);
+  }
   // Keep the scanner's cost policy with the rest of the user-editable Gateway
   // settings. The sidecar is restarted after changing these options, so one
   // immutable scanner instance owns its cursors and watcher for its lifetime.
