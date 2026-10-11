@@ -231,4 +231,6 @@ RT=~/.acp-gateway/runtime/current
 | `~/.acp-gateway/agenlynk/backups/` | hook을 바꾸기 전에 만든 설정 백업 |
 | `~/Library/Application Support/ACPMonitor/` | 펫 상태 파일(`pet-state.json`, `pet-actions.json`) |
 
+AgenLynk를 끄려면 메뉴바 팝오버의 전원 버튼이나 노치의 `…` 메뉴에서 **AgenLynk 종료**를 누르세요. 노치, 메뉴바, 펫, 모니터가 함께 꺼지고 Gateway와 에이전트는 계속 실행됩니다. AgenLynk는 한 번에 하나만 실행되며, 다른 위치의 사본(DMG나 다운로드 폴더)을 열면 이미 떠 있는 쪽으로 넘어갑니다.
+
 AgenLynk를 지우려면 앱을 종료하고 Applications에서 `AgenLynk.app`을 삭제합니다. Gateway와 기록까지 지우려면 위 폴더도 삭제하세요. 다른 도구가 Gateway를 쓰고 있다면 `~/.acp-gateway`는 남겨 두세요.
