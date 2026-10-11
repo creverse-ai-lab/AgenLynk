@@ -5,7 +5,7 @@
 <h1 align="center">AgenLynk</h1>
 
 <p align="center">
-  <b>0.6.1 beta 8</b> · Apache-2.0 · macOS 14+ · Apple Silicon
+  <b>0.6.1 beta 9</b> · Apache-2.0 · macOS 14+ · Apple Silicon
 </p>
 
 <p align="center">
@@ -16,7 +16,7 @@
 <p align="center">
   <img alt="platform" src="https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white">
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-1461FA">
-  <img alt="app" src="https://img.shields.io/badge/AgenLynk-0.6.1--beta.8-1461FA">
+  <img alt="app" src="https://img.shields.io/badge/AgenLynk-0.6.1--beta.9-1461FA">
 </p>
 
 <p align="center">
@@ -203,6 +203,7 @@ npm run macos:test    # Swift 모델·설정·Pet·온보딩
 
 | 버전 | 주요 내용 |
 |---|---|
+| **0.6.1 beta 9** | 업데이트로 실행 파일이 지워진 이전 펫도 찾아 정리(beta 8에서 남던 경우) |
 | **0.6.1 beta 8** | 덮어쓰기 업데이트 뒤 이전 버전이 남긴 것 자동 정리(펫·사이드카, 런타임 적용, 깨진 MCP 항목, 옛 런타임) · 펫이 꺼지는 문제 수정 · 실행 중인 CLI가 쓰는 런타임을 지우지 않음 |
 | **0.6.1 beta 7** | Gateway 구성에서 기본값으로 되돌린 뒤 Frontdoor 설치가 모두 실패하던 문제 수정(기존 파일 자동 복구) · 사용 가이드 추가 |
 | **0.6.1 beta 6** | Gateway 1.9.0 포함 · Worker를 기다리는 Main을 "Worker 대기"로 표시(새 펫 모습) · 위임 스킬이 agent_acp_wait로 대기 · 설치기 경고 한국어 보완 |
@@ -226,6 +227,11 @@ npm run macos:test    # Swift 모델·설정·Pet·온보딩
 | **0.3.4** | Frontdoor 설치 상태를 실제 에이전트 config로 감지 · 온보딩 다중 설치 |
 | **0.3.3** | Frontdoor 이름 지정 · 시퀀스 다이어그램 호출/응답 화살표 · 선택 에이전트 활동 |
 | **0.2.0** | AgenLynk로 리네임 · Pet Canvas 렌더 · DMG 경량화 |
+
+### 0.6.1 beta 9 변경 사항
+
+**펫**
+- beta 8을 이전 버전 위에 덮어써 검증하다 찾은 문제를 고쳤습니다. 업데이트가 옛 앱을 지우면 남은 펫의 실행 파일 경로를 시스템이 알려 주지 않아, 그 펫을 정리하지 못하고 새 펫이 뜨지 않았습니다. 이제 실행 당시 경로로 찾아 정리합니다.
 
 ### 0.6.1 beta 8 변경 사항
 
