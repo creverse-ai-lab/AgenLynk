@@ -5,7 +5,7 @@
 <h1 align="center">AgenLynk</h1>
 
 <p align="center">
-  <b>0.6.2 beta 1</b> · Apache-2.0 · macOS 14+ · Apple Silicon
+  <b>0.6.2 beta 2</b> · Apache-2.0 · macOS 14+ · Apple Silicon
 </p>
 
 <p align="center">
@@ -16,7 +16,7 @@
 <p align="center">
   <img alt="platform" src="https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white">
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-1461FA">
-  <img alt="app" src="https://img.shields.io/badge/AgenLynk-0.6.2--beta.1-1461FA">
+  <img alt="app" src="https://img.shields.io/badge/AgenLynk-0.6.2--beta.2-1461FA">
 </p>
 
 <p align="center">
@@ -203,6 +203,7 @@ npm run macos:test    # Swift 모델·설정·Pet·온보딩
 
 | 버전 | 주요 내용 |
 |---|---|
+| **0.6.2 beta 2** | 다른 에이전트가 다시 띄운 앱(ChatGPT 등)의 세션이 그 에이전트의 Worker로 보이던 문제 수정 |
 | **0.6.2 beta 1** | 설정 > 버전·업데이트가 beta 10 이후 새 버전을 찾지 못하던 문제 수정 |
 | **0.6.1 beta 10** | AgenLynk는 한 번에 하나만 실행(다른 사본 정리) · 메뉴바와 노치에 종료 버튼 · 종료가 멈추지 않음 |
 | **0.6.1 beta 9** | 업데이트로 실행 파일이 지워진 이전 펫도 찾아 정리(beta 8에서 남던 경우) |
@@ -229,6 +230,13 @@ npm run macos:test    # Swift 모델·설정·Pet·온보딩
 | **0.3.4** | Frontdoor 설치 상태를 실제 에이전트 config로 감지 · 온보딩 다중 설치 |
 | **0.3.3** | Frontdoor 이름 지정 · 시퀀스 다이어그램 호출/응답 화살표 · 선택 에이전트 활동 |
 | **0.2.0** | AgenLynk로 리네임 · Pet Canvas 렌더 · DMG 경량화 |
+
+### 0.6.2 beta 2 변경 사항
+
+**세션 연결**
+- ChatGPT 앱에서 실행한 Codex 작업이 Grok Worker처럼 보이던 문제를 고쳤습니다. 이전에 Grok에게 ChatGPT 앱을 다시 띄워 달라고 한 적이 있었습니다. 그때 앱이 Grok 세션 ID를 환경변수로 물려받았고, AgenLynk는 이 값을 보고 앱 안의 Codex 스레드를 그 Grok 세션의 Worker로 묶었습니다. 그룹 이름도 Grok 세션의 폴더로 나왔습니다.
+  - 부모 프로세스를 거슬러 올라가다 에이전트가 아닌 macOS 앱(ChatGPT, IDE, 터미널 앱)을 만나면 그 앱을 호스트로 봅니다. 앱이 물려받은 세션 ID는 부모로 쓰지 않습니다.
+  - 앱 아래에서 실행 중인 세션은 예전에 잘못 저장된 부모도 버립니다. 이미 Worker로 저장된 세션은 다음 턴부터 Frontdoor로 돌아옵니다.
 
 ### 0.6.2 beta 1 변경 사항
 
