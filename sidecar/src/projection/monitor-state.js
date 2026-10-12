@@ -206,9 +206,11 @@ export class MonitorState {
    * A local session's parent, once seen, is never dropped: the proof comes
    * and goes with processes and hook sessions (a finished `grok -p` parent
    * leaves the scan), and losing it turned a Worker back into a Frontdoor.
+   * Unless its process is now seen under an app (`hosted`): then the parent
+   * was an id the app inherited, and the stored one is dropped for good.
    */
   #keepKnownParent(session) {
-    if (session.source !== "local" || session.parentSessionId) return session;
+    if (session.source !== "local" || session.parentSessionId || session.hosted) return session;
     const previous = this.sessions.get(session.sessionId) ?? this.historySessions.get(session.sessionId);
     if (!previous?.parentSessionId) return session;
     return {

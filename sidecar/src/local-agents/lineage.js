@@ -117,6 +117,16 @@ function isGatewayProcess(comm) {
   return String(comm ?? "").includes("/.acp-gateway/runtime/");
 }
 
+/**
+ * A macOS app (ChatGPT, an IDE, a terminal) that is not an agent CLI. It is
+ * the host of the agents it runs: an id in its environment only says an
+ * agent once started the app itself (Grok asked to restart ChatGPT), and
+ * every thread the app opened since inherited it.
+ */
+function isAppHost(comm) {
+  return String(comm ?? "").includes(".app/Contents/MacOS/") && !agentKind(comm);
+}
+
 /** `ps -axo pid=,ppid=,lstart=,comm=` -> Map(pid -> { ppid, start, comm }). */
 export function parseProcessTable(stdout) {
   const table = new Map();
@@ -312,9 +322,13 @@ export class ProcessLineage {
     const cached = this.cache.get(key);
     if (cached && cached.self === `${self?.provider}:${self?.session}`) return cached.value;
     const { markers, args } = await this.#markers(pid);
+    const { parent, hosted } = this.#walk(entry.ppid, markers, self);
     const value = {
-      parent: this.#walk(entry.ppid, markers, self),
+      parent,
       headless: headlessArgs(self?.provider, args),
+      // Run by an app, not launched by an agent: a parent remembered from
+      // before (an inherited id taken for one) no longer holds.
+      ...(hosted ? { hosted: true } : {}),
       ...(this.#underGateway(entry.ppid) ? { gatewayWorker: true } : {}),
       ...(interactiveHostArgs(self?.provider, args) ? { interactive: true } : {})
     };
@@ -341,7 +355,8 @@ export class ProcessLineage {
     for (let hop = 0; hop < MAX_HOPS && current > 1; hop += 1) {
       const entry = this.table.get(current);
       if (!entry) break;
-      if (isGatewayProcess(entry.comm)) return null;
+      if (isGatewayProcess(entry.comm)) return { parent: null };
+      if (isAppHost(entry.comm)) return { parent: null, hosted: true };
       const kind = agentKind(entry.comm);
       let candidate = null;
       if (kind === "claude") {
@@ -352,12 +367,12 @@ export class ProcessLineage {
       } else if (kind === "grok" || kind === "codex") {
         candidate = markers[kind] ? { provider: kind, session: markers[kind] } : null;
       }
-      if (kind) return candidate && !isSelf(candidate) ? candidate : null;
+      if (kind) return { parent: candidate && !isSelf(candidate) ? candidate : null };
       current = entry.ppid;
     }
     // The launcher already exited (the chain ends at launchd): its exported
     // id is still proof, as long as it is unambiguous.
-    return markerParent(markers, self);
+    return { parent: markerParent(markers, self) };
   }
 
   async #markers(pid) {
@@ -427,9 +442,10 @@ export async function annotateLineage(items, lineage, now = Date.now() / 1000) {
       if (headlessEntrypoint(record?.entrypoint)) item.headless = true;
     }
     if (item.parent || !pid) continue;
-    const { parent, headless, interactive } = await lineage.resolve(pid, { provider: item.provider, session });
+    const { parent, headless, interactive, hosted } = await lineage.resolve(pid, { provider: item.provider, session });
     if (headless) item.headless = true;
     if (interactive) item.interactive = true;
+    if (hosted) item.hosted = true;
     if (!parent) continue;
     item.parent = parent.session;
     item.parent_provider = parent.provider;

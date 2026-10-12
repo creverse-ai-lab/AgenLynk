@@ -137,6 +137,32 @@ test("a grok run from a Claude Code Bash tool is that Claude session's worker", 
   });
 });
 
+// Grok, asked to restart the ChatGPT app, started it from its shell: the app
+// and every Codex thread it opened since carry Grok's session id, and the
+// chain ends at launchd as if Grok were a launcher that exited.
+test("an app between the agent and launchd is its host: an id the app inherited is no parent", async () => {
+  const { run } = fakePs({
+    1: { ppid: 0, comm: "/sbin/launchd", args: "/sbin/launchd" },
+    11837: { ppid: 1, comm: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT", args: "ChatGPT", env: `GROK_SESSION_ID=${GROK_ID}` },
+    12077: {
+      ppid: 11837,
+      comm: "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+      args: "codex app-server",
+      env: `GROK_SESSION_ID=${GROK_ID}`
+    },
+    // The same id with the chain broken at launchd (Grok's shell outlived
+    // Grok) is still taken as the launcher.
+    200: { ppid: 1, comm: "/bin/zsh", args: "zsh -c codex" },
+    201: { ppid: 200, comm: "codex", args: "codex", env: `GROK_SESSION_ID=${GROK_ID}` }
+  });
+  const lineage = new ProcessLineage({ claudeSessionsDir: "/nonexistent", run });
+  await lineage.refresh(100);
+  assert.equal(lineage.agentPidFromHook(12077, "codex"), 12077);
+  assert.deepEqual(await lineage.resolve(12077, { provider: "codex", session: "thread" }),
+    { parent: null, headless: false, hosted: true });
+  assert.deepEqual((await lineage.resolve(201, { provider: "codex", session: "t2" })).parent, { provider: "grok", session: GROK_ID });
+});
+
 test("a nested claude -p finds its launcher through the pid chain, and the Gateway stops the walk", async () => {
   await withTempDirectory(async (root) => {
     const sessions = join(root, "sessions");

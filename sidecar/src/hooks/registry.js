@@ -123,7 +123,7 @@ export class HookSessions {
     // A SessionStart (a new launch or a `--resume`) may be a new process for
     // the same session id: its lineage is learned again, not inherited.
     if (payload?.hook_event_name === "SessionStart" || payload?.hookEventName === "session_start") {
-      for (const field of ["ppid", "agentPid", "agentStart", "lineageResolved", "lineageAttempts", "parent", "headless", "interactive", "interactiveKind", "gatewayWorker"]) {
+      for (const field of ["ppid", "agentPid", "agentStart", "lineageResolved", "lineageAttempts", "parent", "headless", "interactive", "interactiveKind", "gatewayWorker", "hosted"]) {
         delete entry[field];
       }
     }
@@ -234,6 +234,7 @@ export class HookSessions {
           if (resolved.headless) entry.headless = true;
           if (resolved.interactive) entry.interactive = true;
           if (resolved.gatewayWorker) entry.gatewayWorker = true;
+          if (resolved.hosted) entry.hosted = true;
           entry.lineageResolved = true;
         }
       } catch {
@@ -360,6 +361,7 @@ export class HookSessions {
         }
         if (entry.headless) raw.headless = true;
         if (entry.interactive) raw.interactive = true;
+        if (entry.hosted && !raw.parent) raw.hosted = true;
         if (entry.agentPid && !raw.pid) raw.pid = entry.agentPid;
         if (state && entry.statusAt / 1000 >= Number(raw.time || 0)) {
           raw.state = state;
@@ -391,7 +393,8 @@ export class HookSessions {
         hooked: true,
         ...(entry.parent ? { parent: entry.parent.session, parent_provider: entry.parent.provider, parent_source: "lineage" } : {}),
         ...(entry.headless ? { headless: true } : {}),
-        ...(entry.interactive ? { interactive: true } : {})
+        ...(entry.interactive ? { interactive: true } : {}),
+        ...(entry.hosted && !entry.parent ? { hosted: true } : {})
       });
     }
     // A dead session stays gone until its transcript moves on (a resume

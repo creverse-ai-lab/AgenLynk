@@ -202,7 +202,9 @@ export function projectLocalSnapshot(snapshot, timelines = new Map()) {
         : {}),
       // A one-shot run (`claude -p`, `grok -p`, `codex exec`), so the app can
       // tell it from an interactive session.
-      ...(headless ? { headless: true } : {})
+      ...(headless ? { headless: true } : {}),
+      // Its process runs under an app, not an agent: proof it has no launcher.
+      ...(raw.hosted && !raw.parent ? { hosted: true } : {})
     });
     if (timeline?.events?.length) events[sessionId] = timeline.events;
   }
